@@ -1,0 +1,12 @@
+[theme]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+cursor = "#f5e0dc"
+selection = "#313244"
+line_numbers = "#45475a"
+
+[editor]
+tab_width = 4
+line_numbers = true
+relative_line_numbers = false
+scroll_off = 5
