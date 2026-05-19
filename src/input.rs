@@ -8,6 +8,7 @@ use crate::{
     mode::{FindDir, Mode},
     motion,
     notebook_state::NotebookEditMode,
+    popup::{PopupAction, PopupTarget},
     selection::Selection,
 };
 
@@ -15,14 +16,47 @@ use crate::{
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     app.message = None;
 
+    // Popup takes priority over all other input.
+    if app.popup.is_some() {
+        let action = crate::popup_input::handle_key(app, key);
+        match action {
+            PopupAction::Dismiss => {
+                app.popup = None;
+                return;
+            }
+            PopupAction::DismissPassthrough => {
+                app.popup = None;
+                // fall through to normal handling below
+            }
+            PopupAction::Confirm(text) => {
+                let target = app.popup.as_ref().map(|p| p.on_confirm.clone());
+                app.popup = None;
+                if let Some(target) = target {
+                    handle_popup_confirm(app, target, text);
+                }
+                return;
+            }
+            PopupAction::Continue => return,
+        }
+    }
+
     // Ctrl+C is a global hint in all modes.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.message = Some("use :q to quit, :q! to force quit".into());
         return;
     }
 
-    // Notebook mode takes priority over the normal mode dispatch.
-    if app.notebook.is_some() {
+    // Ctrl+Enter: save cell and close overlay from any mode.
+    if app.notebook_cell_edit.is_some()
+        && key.code == KeyCode::Enter
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        exec::execute(app, &Command::NotebookCloseCellEdit);
+        return;
+    }
+
+    // Notebook navigation mode — only when NOT in the cell-edit overlay.
+    if app.notebook.is_some() && app.notebook_cell_edit.is_none() {
         handle_notebook_key(app, key);
         return;
     }
@@ -336,6 +370,29 @@ fn handle_notebook_edit_key(app: &mut App, key: KeyEvent) {
             }
         }
         _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Popup confirm handler
+// ---------------------------------------------------------------------------
+
+fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
+    match target {
+        PopupTarget::ExecuteCommand => {
+            if let Some(cmd) = Command::parse(&text) {
+                exec::execute(app, &cmd);
+            } else {
+                app.message = Some(format!("Unknown command: {text}"));
+            }
+        }
+        PopupTarget::InsertText => {
+            let pos = app.selection.head;
+            app.buffer.insert(pos, &text);
+            app.selection = Selection::point(pos + text.chars().count());
+            exec::recompute_highlights(app);
+        }
+        PopupTarget::Dismiss => {}
     }
 }
 

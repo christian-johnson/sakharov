@@ -50,6 +50,10 @@ pub enum Command {
     EnterSelect,
     EnterCommandMode,
 
+    // Popup / UI
+    /// Open the command palette popup.
+    OpenCommandPalette,
+
     // File / application
     Save,
     SaveAs(String),
@@ -80,6 +84,14 @@ pub enum Command {
     // Kernel lifecycle
     NotebookRestartKernel,
     NotebookInterruptKernel,
+
+    // Cell edit overlay
+    /// Open focused cell in a full-screen Helix edit overlay.
+    NotebookOpenCellEdit,
+    /// Save cell content back to notebook and close the overlay.
+    NotebookCloseCellEdit,
+    /// Abandon edits and close the overlay without writing back.
+    NotebookDiscardCellEdit,
 }
 
 impl Command {
@@ -126,6 +138,7 @@ impl Command {
             Command::EnterNormal => "enter-normal",
             Command::EnterSelect => "enter-select",
             Command::EnterCommandMode => "enter-command-mode",
+            Command::OpenCommandPalette => "open-command-palette",
             Command::Save => "save",
             Command::SaveAs(_) => "save-as",
             Command::Quit => "quit",
@@ -147,6 +160,9 @@ impl Command {
             Command::NotebookClearOutputs => "notebook-clear-outputs",
             Command::NotebookRestartKernel => "notebook-restart-kernel",
             Command::NotebookInterruptKernel => "notebook-interrupt-kernel",
+            Command::NotebookOpenCellEdit => "notebook-open-cell-edit",
+            Command::NotebookCloseCellEdit => "notebook-close-cell-edit",
+            Command::NotebookDiscardCellEdit => "notebook-discard-cell-edit",
         }
     }
 
@@ -204,6 +220,9 @@ impl Command {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;
                 Some(Command::GotoLine(n))
             }
+
+            // Popup / UI
+            "open-command-palette" | "palette" | "commands" => Some(Command::OpenCommandPalette),
 
             // Canonical no-arg commands
             "move-left"               => Some(Command::MoveLeft),
@@ -267,6 +286,15 @@ impl Command {
             }
             "notebook-interrupt-kernel" | "interrupt-kernel" | "kernel-interrupt" => {
                 Some(Command::NotebookInterruptKernel)
+            }
+            "notebook-open-cell-edit" | "open-cell" | "edit-cell" => {
+                Some(Command::NotebookOpenCellEdit)
+            }
+            "notebook-close-cell-edit" | "close-cell" => {
+                Some(Command::NotebookCloseCellEdit)
+            }
+            "notebook-discard-cell-edit" | "discard-cell" => {
+                Some(Command::NotebookDiscardCellEdit)
             }
 
             _ => None,

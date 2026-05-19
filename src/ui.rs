@@ -200,7 +200,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Compute the terminal (col, row) of the cursor for `frame.set_cursor_position`.
 /// Returns None if the cursor is scrolled off screen.
-fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
+pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
     let rope = &app.buffer.rope;
     if rope.len_chars() == 0 {
         let gutter_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
@@ -279,8 +279,26 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Goto | Mode::FindChar { .. } => Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD),
     };
 
-    let filename = app.buffer.display_name();
-    let modified = if app.buffer.modified { " [+]" } else { "" };
+    // When in a cell-edit overlay, show the notebook + cell context instead of
+    // the virtual buffer path. Ctrl+Enter hint keeps the affordance visible.
+    let (filename, modified) = if let Some(ref session) = app.notebook_cell_edit {
+        let nb_name = session.notebook_path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("notebook");
+        let ext = match session.language.as_str() {
+            "python" | "python3" => "py",
+            "javascript" | "js" => "js",
+            "rust" => "rs",
+            _ => "txt",
+        };
+        let m = if app.buffer.modified { " [+]" } else { "" };
+        (
+            format!("{nb_name}  ·  cell [{}].{ext}", session.cell_index + 1),
+            m.to_string(),
+        )
+    } else {
+        (app.buffer.display_name(), if app.buffer.modified { " [+]".into() } else { String::new() })
+    };
 
     let rope = &app.buffer.rope;
     let cursor_pos = app.selection.head.min(rope.len_chars().saturating_sub(1));
@@ -303,9 +321,9 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let right = format!("{}:{}  {}%", line_num, col, scroll_pct);
 
     let status_widget = StatusWidget {
-        mode_label: format!(" {} ", mode_label),
+        mode_label: format!(" {mode_label} "),
         mode_style,
-        filename: format!("  {}{}  ", filename, modified),
+        filename: format!("  {filename}{modified}  "),
         right,
         width: area.width as usize,
     };

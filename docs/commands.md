@@ -86,3 +86,9 @@ These commands enter a sub-mode that awaits a second key.
 |---------|-------------|
 | `shell <cmd>` | Run a shell command via `sh -c`; first 200 chars of stdout (or stderr) shown in the status bar |
 | `sequence` | (programmatic only) Run a sequence of commands in order |
+
+## Popup / UI
+
+| Command | Default Key | Description |
+|---------|-------------|-------------|
+| `open-command-palette` | `Space`, `:palette` | Open fuzzy-searchable command palette |

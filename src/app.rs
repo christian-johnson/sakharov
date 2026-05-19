@@ -23,6 +23,29 @@ use crate::{
     ui,
 };
 
+/// Tracks an active full-screen cell-edit overlay session.
+///
+/// Carries everything needed for future LSP `notebookDocument` integration:
+/// - `notebook_path` → the `notebookDocument` URI (`file:///…/notebook.ipynb`)
+/// - `cell_index` + `cell_id` → stable cell identity; cell URI = `{notebook_path}#{cell_id}`
+/// - `language` → LSP `languageId` for the cell's virtual `textDocument`
+///
+/// When the overlay is active, `app.buffer` holds the cell source and
+/// `app.buffer.path` is a virtual path with the correct extension for syntax
+/// highlighting (e.g. `notebook__cell2.py`). That path becomes the
+/// `textDocument` URI when LSP is wired up.
+pub struct CellEditSession {
+    pub cell_index: usize,
+    /// Stable cell id from the `.ipynb` — becomes the fragment of the LSP cell URI
+    /// (`notebookDocument` cell `document` field). Unused until Phase 3 LSP.
+    #[allow(dead_code)]
+    pub cell_id: String,
+    /// Kernel language, e.g. `"python"` — becomes the LSP `languageId`.
+    pub language: String,
+    /// Path of the parent notebook — becomes the `notebookDocument` URI.
+    pub notebook_path: std::path::PathBuf,
+}
+
 /// Central application state.
 pub struct App {
     pub buffer: Buffer,
@@ -45,6 +68,11 @@ pub struct App {
     pub notebook: Option<(Notebook, NotebookState)>,
     /// Image draw requests collected by the last notebook render pass.
     pub pending_images: Vec<ImageRequest>,
+    /// When Some, the plain-text editor renders over the notebook view,
+    /// allowing full Helix-style editing of the focused cell.
+    pub notebook_cell_edit: Option<CellEditSession>,
+    /// Active floating popup overlay, if any.
+    pub popup: Option<crate::popup::Popup>,
 }
 
 impl App {
@@ -100,6 +128,8 @@ impl App {
             keymap: Keymap::default_bindings(),
             notebook,
             pending_images: Vec::new(),
+            notebook_cell_edit: None,
+            popup: None,
         })
     }
 }
@@ -140,22 +170,19 @@ fn run_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        if app.notebook.is_none() {
-            // Update scroll to keep cursor in view (text editor only).
-            update_scroll_to_fit(terminal, app);
-        }
+        // Cell-edit overlay: notebook is loaded but we render the plain text
+        // editor over it so the user gets full Helix motions inside the cell.
+        let in_cell_edit = app.notebook_cell_edit.is_some();
 
-        if app.notebook.is_some() {
-            // Notebook rendering path.
+        if app.notebook.is_some() && !in_cell_edit {
+            // Notebook navigation view.
             terminal.draw(|f| {
                 let size = f.area();
                 if size.height >= 3 {
-                    // Content area.
                     if let Some((ref nb, ref state)) = app.notebook {
                         let images = crate::notebook_ui::render(f, state, nb, &app.config);
                         app.pending_images = images;
 
-                        // Status bar and command line.
                         let status_area = ratatui::layout::Rect {
                             x: size.x,
                             y: size.y + size.height.saturating_sub(2),
@@ -173,9 +200,12 @@ fn run_loop(
                         ui::render_command_nb(f, app, cmd_area);
                     }
                 }
+                if let Some(ref popup) = app.popup {
+                    let cursor_pos = ui::cursor_screen_pos(app, f.area());
+                    crate::popup_ui::render(f, popup, cursor_pos);
+                }
             })?;
 
-            // Flush Kitty images after ratatui draw.
             if !app.pending_images.is_empty() {
                 let _ = kitty::clear_images();
                 let images = std::mem::take(&mut app.pending_images);
@@ -184,7 +214,15 @@ fn run_loop(
                 }
             }
         } else {
-            terminal.draw(|f| ui::render(f, app))?;
+            // Plain text editor: either a regular file, or cell-edit overlay.
+            update_scroll_to_fit(terminal, app);
+            terminal.draw(|f| {
+                ui::render(f, app);
+                if let Some(ref popup) = app.popup {
+                    let cursor_pos = ui::cursor_screen_pos(app, f.area());
+                    crate::popup_ui::render(f, popup, cursor_pos);
+                }
+            })?;
         }
 
         match event::read()? {

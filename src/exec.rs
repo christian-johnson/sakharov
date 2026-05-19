@@ -99,9 +99,21 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.selection = motion::select_all(rope);
         }
 
+        // --- Popup / UI ---
+        Command::OpenCommandPalette => {
+            app.popup = Some(crate::popup::Popup::command_palette(
+                crate::popup::command_palette_items(),
+            ));
+            return;
+        }
+
         // --- Sub-mode entries (return early — no scroll update) ---
         Command::EnterGotoMode => {
             app.mode = Mode::Goto;
+            app.popup = Some(crate::popup::Popup::which_key(
+                "g",
+                vec![("g".into(), "go to file start".into())],
+            ));
             return;
         }
         Command::FindCharForward => {
@@ -109,6 +121,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 dir: FindDir::Forward,
                 till: false,
             };
+            app.popup = Some(crate::popup::Popup::which_key(
+                "f",
+                vec![("any char".into(), "move cursor to next occurrence".into())],
+            ));
             return;
         }
         Command::TillCharForward => {
@@ -116,6 +132,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 dir: FindDir::Forward,
                 till: true,
             };
+            app.popup = Some(crate::popup::Popup::which_key(
+                "t",
+                vec![("any char".into(), "move cursor till next occurrence".into())],
+            ));
             return;
         }
         Command::FindCharBackward => {
@@ -123,6 +143,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 dir: FindDir::Backward,
                 till: false,
             };
+            app.popup = Some(crate::popup::Popup::which_key(
+                "F",
+                vec![("any char".into(), "move cursor to previous occurrence".into())],
+            ));
             return;
         }
         Command::TillCharBackward => {
@@ -130,6 +154,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 dir: FindDir::Backward,
                 till: true,
             };
+            app.popup = Some(crate::popup::Popup::which_key(
+                "T",
+                vec![("any char".into(), "move cursor till previous occurrence".into())],
+            ));
             return;
         }
 
@@ -280,6 +308,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::Quit => {
+            // Guard: quitting while in a cell edit overlay would lose work.
+            if app.notebook_cell_edit.is_some() {
+                app.message = Some(
+                    "Editing a cell — Ctrl+Enter or :close-cell to return, :discard-cell to abandon"
+                        .into(),
+                );
+                return;
+            }
             let modified = if let Some((ref nb, _)) = app.notebook {
                 nb.modified
             } else {
@@ -511,9 +547,102 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
+
+        // ── Cell edit overlay ────────────────────────────────────────────────
+
+        Command::NotebookOpenCellEdit => {
+            if let Some((ref nb, ref state)) = app.notebook {
+                let idx = state.focused_cell;
+                if idx >= nb.cells.len() { return; }
+
+                let cell = &nb.cells[idx];
+                let language = nb.metadata.kernel_language.clone();
+                let cell_id  = cell.id.clone();
+                let notebook_path = nb.path.clone();
+
+                // Virtual path gives tree-sitter the right extension without
+                // touching the filesystem. This path also becomes the LSP
+                // textDocument URI when LSP is wired up.
+                let ext = lang_ext(&language);
+                let stem = notebook_path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "notebook".into());
+                let dir = notebook_path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    });
+                let virtual_path = dir.join(format!("{stem}__cell{idx}.{ext}"));
+
+                // Check out cell source into app.buffer.
+                app.buffer = crate::buffer::Buffer::new_empty();
+                app.buffer.rope = cell.source.clone();
+                app.buffer.path = Some(virtual_path.clone());
+                app.selection = crate::selection::Selection::point(0);
+                app.mode = crate::mode::Mode::Normal;
+                app.insert_session_active = false;
+                app.scroll_row = 0;
+                app.scroll_col = 0;
+
+                app.notebook_cell_edit = Some(crate::app::CellEditSession {
+                    cell_index: idx,
+                    cell_id,
+                    language,
+                    notebook_path,
+                });
+
+                // Update highlighter for the cell's language.
+                app.highlighter = crate::highlight::Highlighter::new(Some(&virtual_path));
+                recompute_highlights(app);
+            }
+            return;
+        }
+
+        Command::NotebookCloseCellEdit => {
+            if let Some(session) = app.notebook_cell_edit.take() {
+                // Write buffer back to the notebook cell.
+                if let Some((ref mut nb, _)) = app.notebook {
+                    let idx = session.cell_index;
+                    if idx < nb.cells.len() {
+                        nb.cells[idx].source = app.buffer.rope.clone();
+                        nb.modified = true;
+                    }
+                }
+                reset_after_cell_edit(app);
+            }
+            return;
+        }
+
+        Command::NotebookDiscardCellEdit => {
+            app.notebook_cell_edit = None;
+            reset_after_cell_edit(app);
+            return;
+        }
     }
 
     update_scroll(app);
+}
+
+/// Clear buffer and restore editor state after closing a cell-edit overlay.
+fn reset_after_cell_edit(app: &mut App) {
+    app.buffer = crate::buffer::Buffer::new_empty();
+    app.selection = crate::selection::Selection::point(0);
+    app.mode = crate::mode::Mode::Normal;
+    app.insert_session_active = false;
+    app.scroll_row = 0;
+    app.scroll_col = 0;
+    app.highlighter = crate::highlight::Highlighter::new(None);
+    app.highlight_spans = Vec::new();
+}
+
+fn lang_ext(lang: &str) -> &str {
+    match lang {
+        "python" | "python3" => "py",
+        "javascript" | "js" => "js",
+        "rust" => "rs",
+        _ => "txt",
+    }
 }
 
 /// Generate a simple unique cell ID without an external crate.

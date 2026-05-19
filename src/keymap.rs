@@ -164,6 +164,15 @@ impl Keymap {
 
         // --- Normal-mode-only bindings ---
 
+        // Space opens command palette
+        normal.insert(
+            KeyBinding {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::NONE,
+            },
+            vec![Command::OpenCommandPalette],
+        );
+
         normal.insert(KeyBinding::char('i'), vec![Command::EnterInsert]);
         normal.insert(KeyBinding::char('a'), vec![Command::EnterInsertAfter]);
         normal.insert(
@@ -195,11 +204,12 @@ impl Keymap {
             KeyBinding::key(KeyCode::Up),
             vec![Command::NotebookPrevCell],
         );
+        // Enter / i → open cell in full-screen edit overlay
         notebook_navigate.insert(
             KeyBinding::key(KeyCode::Enter),
-            vec![Command::NotebookEnterEdit],
+            vec![Command::NotebookOpenCellEdit],
         );
-        notebook_navigate.insert(KeyBinding::char('i'), vec![Command::NotebookEnterEdit]);
+        notebook_navigate.insert(KeyBinding::char('i'), vec![Command::NotebookOpenCellEdit]);
         notebook_navigate.insert(KeyBinding::char('e'), vec![Command::NotebookExecuteCell]);
         notebook_navigate.insert(KeyBinding::char('E'), vec![Command::NotebookExecuteAndAdvance]);
         notebook_navigate.insert(KeyBinding::char('o'), vec![Command::NotebookNewCellBelow]);
