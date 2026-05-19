@@ -118,6 +118,12 @@ impl Keymap {
         // G → GotoFileEnd
         both!(KeyBinding::char('G'), Command::GotoFileEnd);
 
+        // PageUp / PageDown — half-page scroll
+        both!(KeyBinding::key(KeyCode::PageUp), Command::PageUp);
+        both!(KeyBinding::key(KeyCode::PageDown), Command::PageDown);
+        both!(KeyBinding::ctrl('u'), Command::PageUp);
+        both!(KeyBinding::ctrl('d'), Command::PageDown);
+
         // g → EnterGotoMode
         both!(KeyBinding::char('g'), Command::EnterGotoMode);
 
@@ -164,6 +170,12 @@ impl Keymap {
 
         // --- Normal-mode-only bindings ---
 
+        // / → search forward, ? → search backward, n/N → next/prev
+        normal.insert(KeyBinding::char('/'), vec![Command::SearchForward]);
+        normal.insert(KeyBinding::char('?'), vec![Command::SearchBackward]);
+        normal.insert(KeyBinding::char('n'), vec![Command::SearchNext]);
+        normal.insert(KeyBinding::char('N'), vec![Command::SearchPrev]);
+
         // Space opens command palette
         normal.insert(
             KeyBinding {
@@ -172,6 +184,9 @@ impl Keymap {
             },
             vec![Command::OpenCommandPalette],
         );
+
+        // K → LspHover
+        normal.insert(KeyBinding::char('K'), vec![Command::LspHover]);
 
         normal.insert(KeyBinding::char('i'), vec![Command::EnterInsert]);
         normal.insert(KeyBinding::char('a'), vec![Command::EnterInsertAfter]);

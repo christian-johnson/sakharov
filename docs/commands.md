@@ -87,6 +87,24 @@ These commands enter a sub-mode that awaits a second key.
 | `shell <cmd>` | Run a shell command via `sh -c`; first 200 chars of stdout (or stderr) shown in the status bar |
 | `sequence` | (programmatic only) Run a sequence of commands in order |
 
+## Search
+
+| Command | Default Key | Description |
+|---------|-------------|-------------|
+| `search-forward` | `/` | Enter forward search — type a pattern, Enter jumps to the first match below the cursor |
+| `search-backward` | `?` | Enter backward search — same but jumps to the first match above the cursor |
+| `search-next` | `n` | Jump to the next match (wraps around) |
+| `search-prev` | `N` | Jump to the previous match (wraps around) |
+
+Search is live: the cursor moves to the nearest match as you type. Press `Esc` to cancel and return the cursor to its original position.
+
+## Scrolling
+
+| Command | Default Key | Description |
+|---------|-------------|-------------|
+| `page-down` | `ctrl+d`, `PgDn` | Scroll half a page down (cursor moves with viewport) |
+| `page-up` | `ctrl+u`, `PgUp` | Scroll half a page up (cursor moves with viewport) |
+
 ## Popup / UI
 
 | Command | Default Key | Description |

@@ -8,15 +8,23 @@ use crate::{
     mode::{FindDir, Mode},
     motion,
     notebook_state::NotebookEditMode,
-    popup::{PopupAction, PopupTarget},
+    popup::{PopupAction, PopupContent, PopupTarget},
     selection::Selection,
 };
+
+
 
 /// Dispatch a key event to the appropriate handler based on the current mode.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     app.message = None;
 
     // Popup takes priority over all other input.
+    // For completion (InsertText) popups we keep the popup alive when the user
+    // types printable chars or backspaces — the filter is updated afterwards.
+    let had_completion_popup = app.popup.as_ref()
+        .map(|p| p.on_confirm == PopupTarget::InsertText)
+        .unwrap_or(false);
+
     if app.popup.is_some() {
         let action = crate::popup_input::handle_key(app, key);
         match action {
@@ -25,7 +33,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 return;
             }
             PopupAction::DismissPassthrough => {
-                app.popup = None;
+                if had_completion_popup {
+                    // Keep the popup alive; let the key reach handle_insert
+                    // so the char is inserted, then sync the filter below.
+                } else {
+                    app.popup = None;
+                }
                 // fall through to normal handling below
             }
             PopupAction::Confirm(text) => {
@@ -78,6 +91,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Command => handle_command(app, key),
         Mode::Goto => handle_goto(app, key),
         Mode::FindChar { dir, till } => handle_find_char(app, key, dir, till),
+        Mode::Search { forward } => handle_search(app, key, forward),
+    }
+
+    // After inserting a char (or backspacing) while a completion popup was open,
+    // sync the popup filter to the word prefix now at the cursor so the list
+    // narrows as the user types.
+    if had_completion_popup && app.mode == Mode::Insert {
+        sync_completion_filter(app);
     }
 }
 
@@ -137,8 +158,16 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             app.selection = Selection::point(pos + 1);
             exec::recompute_highlights(app);
         }
+        // Ctrl+Space arrives as NUL (ASCII 0) on most terminals.
+        KeyCode::Null => {
+            exec::execute(app, &Command::LspRequestCompletion);
+        }
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Ctrl+Space fallback for terminals that send it as Char(' ')+CONTROL.
+                if c == ' ' {
+                    exec::execute(app, &Command::LspRequestCompletion);
+                }
                 return;
             }
             begin_insert_edit(app);
@@ -148,6 +177,11 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             app.buffer.insert_raw(pos, s);
             app.selection = Selection::point(pos + 1);
             exec::recompute_highlights(app);
+            exec::lsp_did_change(app);
+            // Auto-trigger completion after `.` or `:`
+            if c == '.' || c == ':' {
+                exec::execute(app, &Command::LspRequestCompletion);
+            }
         }
         _ => {}
     }
@@ -205,6 +239,11 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
         KeyCode::Char('l') => {
             app.selection = motion::move_line_end(&app.buffer.rope, app.selection, extend);
         }
+        // LSP goto bindings
+        KeyCode::Char('d') => exec::execute(app, &Command::LspGotoDefinition),
+        KeyCode::Char('r') => exec::execute(app, &Command::LspGotoReferences),
+        KeyCode::Char('y') => exec::execute(app, &Command::LspGotoTypeDefinition),
+        KeyCode::Char('i') => exec::execute(app, &Command::LspGotoImplementation),
         KeyCode::Esc => {}
         _ => {}
     }
@@ -225,6 +264,82 @@ fn handle_find_char(app: &mut App, key: KeyEvent, dir: FindDir, till: bool) {
             FindDir::Backward => motion::find_char_backward(rope, sel, c, till, false),
         };
         exec::update_scroll(app);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Search mode
+// ---------------------------------------------------------------------------
+
+fn handle_search(app: &mut App, key: KeyEvent, forward: bool) {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.message = None;
+        }
+        KeyCode::Backspace => {
+            app.search_query.pop();
+            exec::search_compute_matches(app);
+        }
+        KeyCode::Enter => {
+            app.mode = Mode::Normal;
+            exec::search_compute_matches(app);
+            exec::search_jump(app, !forward);
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.search_query.push(c);
+            // Live preview: recompute and jump as the user types.
+            exec::search_compute_matches(app);
+            if !app.search_matches.is_empty() {
+                exec::search_jump(app, !forward);
+                app.mode = Mode::Search { forward };
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Completion filter sync
+// ---------------------------------------------------------------------------
+
+/// After a char is inserted (or deleted) in Insert mode, update the completion
+/// popup's filter string to match the word prefix immediately before the cursor.
+/// Dismisses the popup if the current filter has no matches.
+fn sync_completion_filter(app: &mut App) {
+    let pos = app.selection.head;
+    let prefix: String = {
+        let rope = &app.buffer.rope;
+        let mut i = pos;
+        while i > 0 {
+            let c = rope.char(i - 1);
+            if c.is_alphanumeric() || c == '_' {
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+        rope.slice(i..pos).to_string()
+    };
+
+    let dismiss = {
+        let mut should_dismiss = false;
+        if let Some(ref mut popup) = app.popup {
+            if popup.on_confirm == PopupTarget::InsertText {
+                if let PopupContent::List(ref mut list) = popup.content {
+                    list.filter = prefix.clone();
+                    list.selected = 0;
+                    // Dismiss when something is typed but nothing matches.
+                    should_dismiss =
+                        !prefix.is_empty() && list.filtered_indices().is_empty();
+                }
+            }
+        }
+        should_dismiss
+    };
+
+    if dismiss {
+        app.popup = None;
     }
 }
 
@@ -397,9 +512,28 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
         }
         PopupTarget::InsertText => {
             let pos = app.selection.head;
-            app.buffer.insert(pos, &text);
-            app.selection = Selection::point(pos + text.chars().count());
+            // Delete the word prefix the user has already typed so the
+            // completion replaces it rather than appending after it.
+            let word_start = {
+                let rope = &app.buffer.rope;
+                let mut i = pos;
+                while i > 0 {
+                    let c = rope.char(i - 1);
+                    if c.is_alphanumeric() || c == '_' {
+                        i -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                i
+            };
+            if word_start < pos {
+                app.buffer.remove(word_start, pos);
+            }
+            app.buffer.insert(word_start, &text);
+            app.selection = Selection::point(word_start + text.chars().count());
             exec::recompute_highlights(app);
+            exec::lsp_did_change(app);
         }
         PopupTarget::Dismiss => {}
     }

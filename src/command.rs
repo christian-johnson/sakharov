@@ -92,6 +92,36 @@ pub enum Command {
     NotebookCloseCellEdit,
     /// Abandon edits and close the overlay without writing back.
     NotebookDiscardCellEdit,
+
+    // Search
+    /// Enter forward search mode (builds query; Enter jumps to first match).
+    SearchForward,
+    /// Enter backward search mode.
+    SearchBackward,
+    /// Jump to the next search match.
+    SearchNext,
+    /// Jump to the previous search match.
+    SearchPrev,
+
+    // Scroll
+    /// Scroll half a page up (cursor moves with viewport).
+    PageUp,
+    /// Scroll half a page down (cursor moves with viewport).
+    PageDown,
+
+    // LSP
+    /// Show hover documentation for the symbol under the cursor.
+    LspHover,
+    /// Jump to the definition of the symbol under the cursor.
+    LspGotoDefinition,
+    /// List all references to the symbol under the cursor.
+    LspGotoReferences,
+    /// Jump to the type definition of the symbol under the cursor.
+    LspGotoTypeDefinition,
+    /// Jump to the implementation of the symbol under the cursor.
+    LspGotoImplementation,
+    /// Explicitly request completions at the cursor position.
+    LspRequestCompletion,
 }
 
 impl Command {
@@ -163,6 +193,18 @@ impl Command {
             Command::NotebookOpenCellEdit => "notebook-open-cell-edit",
             Command::NotebookCloseCellEdit => "notebook-close-cell-edit",
             Command::NotebookDiscardCellEdit => "notebook-discard-cell-edit",
+            Command::SearchForward => "search-forward",
+            Command::SearchBackward => "search-backward",
+            Command::SearchNext => "search-next",
+            Command::SearchPrev => "search-prev",
+            Command::PageUp => "page-up",
+            Command::PageDown => "page-down",
+            Command::LspHover => "lsp-hover",
+            Command::LspGotoDefinition => "lsp-goto-definition",
+            Command::LspGotoReferences => "lsp-goto-references",
+            Command::LspGotoTypeDefinition => "lsp-goto-type-definition",
+            Command::LspGotoImplementation => "lsp-goto-implementation",
+            Command::LspRequestCompletion => "lsp-request-completion",
         }
     }
 
@@ -296,6 +338,28 @@ impl Command {
             "notebook-discard-cell-edit" | "discard-cell" => {
                 Some(Command::NotebookDiscardCellEdit)
             }
+
+            // Search
+            "search-forward" | "search" | "/" => Some(Command::SearchForward),
+            "search-backward" | "?" => Some(Command::SearchBackward),
+            "search-next" | "n" => Some(Command::SearchNext),
+            "search-prev" | "N" => Some(Command::SearchPrev),
+
+            // Scroll
+            "page-up" => Some(Command::PageUp),
+            "page-down" => Some(Command::PageDown),
+
+            // LSP commands
+            "lsp-hover" | "hover" | "K" => Some(Command::LspHover),
+            "lsp-goto-definition" | "goto-definition" | "gd" => Some(Command::LspGotoDefinition),
+            "lsp-goto-references" | "goto-references" | "gr" => Some(Command::LspGotoReferences),
+            "lsp-goto-type-definition" | "goto-type-definition" | "gy" => {
+                Some(Command::LspGotoTypeDefinition)
+            }
+            "lsp-goto-implementation" | "goto-implementation" | "gi" => {
+                Some(Command::LspGotoImplementation)
+            }
+            "lsp-request-completion" | "completion" => Some(Command::LspRequestCompletion),
 
             _ => None,
         }

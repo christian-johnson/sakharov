@@ -20,6 +20,8 @@ pub enum Mode {
     Goto,
     /// Waiting for target char after f/t/F/T.
     FindChar { dir: FindDir, till: bool },
+    /// Buffer search — typing builds the query; Enter confirms, Esc cancels.
+    Search { forward: bool },
 }
 
 impl Mode {
@@ -32,6 +34,8 @@ impl Mode {
             Mode::Command => "CMD",
             Mode::Goto => "GTO",
             Mode::FindChar { .. } => "FND",
+            Mode::Search { forward: true } => "SRC",
+            Mode::Search { forward: false } => "SRC",
         }
     }
 }

@@ -44,12 +44,13 @@ pub enum PopupSize {
 }
 
 /// What happens when the user confirms (presses Enter).
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 #[allow(dead_code)]
 pub enum PopupTarget {
     /// Parse the confirmed text as a Command name and execute it.
     ExecuteCommand,
-    /// Insert the confirmed text at the cursor position.
+    /// Insert the confirmed text at the cursor position (completion popup).
+    /// Non-navigation keys dismiss with passthrough so typing continues normally.
     InsertText,
     /// Just close the popup (for Text / informational List).
     Dismiss,
@@ -308,8 +309,23 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("notebook-open-cell-edit", "Open cell in editor  [Enter, i]"),
         ("notebook-close-cell-edit", "Save cell and return  [ctrl+enter]"),
         ("notebook-discard-cell-edit", "Discard cell edits  [:discard-cell]"),
+        // Search
+        ("search-forward", "Search forward  [/]"),
+        ("search-backward", "Search backward  [?]"),
+        ("search-next", "Next match  [n]"),
+        ("search-prev", "Previous match  [N]"),
+        // Scroll
+        ("page-down", "Scroll half page down  [ctrl+d, PgDn]"),
+        ("page-up", "Scroll half page up  [ctrl+u, PgUp]"),
         // Shell
         ("shell", "Run a shell command  [:shell <cmd>]"),
+        // LSP
+        ("lsp-hover", "Show hover documentation  [K]"),
+        ("lsp-goto-definition", "Go to definition  [gd]"),
+        ("lsp-goto-references", "Go to references  [gr]"),
+        ("lsp-goto-type-definition", "Go to type definition  [gy]"),
+        ("lsp-goto-implementation", "Go to implementation  [gi]"),
+        ("lsp-request-completion", "Request completions  [ctrl+space]"),
         // UI
         ("open-command-palette", "Open fuzzy-searchable command palette  [Space]"),
     ];

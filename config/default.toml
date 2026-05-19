@@ -10,3 +10,27 @@ tab_width = 4
 line_numbers = true
 relative_line_numbers = false
 scroll_off = 5
+
+# Language servers — uncomment and adjust to match servers installed on your system.
+# ki always uses the directory it is launched from as the workspace root, so run
+# it from your project root (where pyproject.toml / .venv / Cargo.toml live).
+#
+# For Python, ki auto-detects a virtualenv (.venv, venv, .env, env) in the
+# workspace root and passes it to pylsp/Jedi automatically.  You can override
+# with an explicit init_options block if needed.
+#
+# [language_servers.python]
+# command = "pylsp"
+# args = []
+#
+# # Optional: override the Python environment pylsp uses (auto-detected if absent)
+# # [language_servers.python.init_options.pylsp.plugins.jedi]
+# # environment = "/path/to/.venv/bin/python"
+#
+# [language_servers.rust]
+# command = "rust-analyzer"
+# args = []
+#
+# [language_servers.javascript]
+# command = "typescript-language-server"
+# args = ["--stdio"]

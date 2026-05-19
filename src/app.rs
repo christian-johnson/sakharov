@@ -15,6 +15,7 @@ use crate::{
     input,
     keymap::Keymap,
     kitty,
+    lsp_manager::LspManager,
     mode::Mode,
     notebook::Notebook,
     notebook_state::NotebookState,
@@ -73,6 +74,19 @@ pub struct App {
     pub notebook_cell_edit: Option<CellEditSession>,
     /// Active floating popup overlay, if any.
     pub popup: Option<crate::popup::Popup>,
+    /// LSP client manager — one server per language.
+    pub lsp: LspManager,
+    /// Language id of the currently edited document (e.g. "python", "rust").
+    /// Updated when opening a cell edit overlay so LSP routes to the right server.
+    pub lsp_language: Option<String>,
+    /// Current search query (set when entering Search mode).
+    pub search_query: String,
+    /// Char indices of the start of each match for the last search.
+    pub search_matches: Vec<usize>,
+    /// Index into search_matches pointing at the current match.
+    pub search_current: usize,
+    /// Visible text rows in the editor area — updated each render frame.
+    pub viewport_height: usize,
 }
 
 impl App {
@@ -106,6 +120,8 @@ impl App {
             _ => Buffer::new_empty(),
         };
 
+        let lsp_language = language_for_path(buffer.path.as_deref()).map(str::to_owned);
+
         let highlighter = Highlighter::new(buffer.path.as_deref());
         let highlight_spans = highlighter
             .highlight(&buffer.rope)
@@ -130,18 +146,64 @@ impl App {
             pending_images: Vec::new(),
             notebook_cell_edit: None,
             popup: None,
+            lsp: LspManager::new(),
+            lsp_language,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_current: 0,
+            viewport_height: 24,
         })
+    }
+
+    /// The language id for the document currently in the editor buffer.
+    /// In cell-edit mode this reflects the cell's language.
+    pub fn current_language(&self) -> Option<&str> {
+        if let Some(ref session) = self.notebook_cell_edit {
+            return Some(&session.language);
+        }
+        self.lsp_language.as_deref()
+    }
+}
+
+/// Map a file extension to an LSP language id.
+pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str> {
+    let ext = path?.extension()?.to_str()?;
+    match ext {
+        "py" => Some("python"),
+        "rs" => Some("rust"),
+        "js" | "ts" | "jsx" | "tsx" => Some("javascript"),
+        _ => None,
     }
 }
 
 /// Set up terminal, run the event loop, then restore terminal.
 pub fn run(path: Option<&str>) -> Result<()> {
-    let config = Config::load().unwrap_or_else(|_| {
+    let config = Config::load().unwrap_or_else(|e| {
+        eprintln!("ki: config error: {e} — using built-in defaults");
         toml::from_str(include_str!("../config/default.toml"))
             .expect("default config must parse")
     });
 
     let mut app = App::new(path, config)?;
+
+    // Start LSP server for the opened file if configured.
+    // rootUri is always current_dir() (handled inside ensure_server); we pass
+    // the file's directory only as a last-resort fallback.
+    if let Some(ref lang) = app.lsp_language.clone() {
+        if let Some(server_config) = app.config.language_servers.get(lang).cloned() {
+            let fallback_root = app.buffer.path.as_ref().and_then(|p| p.parent()).and_then(
+                |p| {
+                    if p.as_os_str().is_empty() {
+                        None
+                    } else {
+                        Some(p.to_path_buf())
+                    }
+                },
+            );
+            app.lsp
+                .ensure_server(lang, &server_config, fallback_root.as_deref());
+        }
+    }
 
     // Install panic hook to restore terminal on panic
     let original_hook = panic::take_hook();
@@ -216,6 +278,10 @@ fn run_loop(
         } else {
             // Plain text editor: either a regular file, or cell-edit overlay.
             update_scroll_to_fit(terminal, app);
+            // Keep viewport_height in sync for page-up/down commands.
+            if let Ok(size) = terminal.size() {
+                app.viewport_height = size.height.saturating_sub(2) as usize;
+            }
             terminal.draw(|f| {
                 ui::render(f, app);
                 if let Some(ref popup) = app.popup {
@@ -228,15 +294,23 @@ fn run_loop(
         // Update terminal cursor shape to reflect the current mode.
         set_cursor_shape(app.mode.clone());
 
-        match event::read()? {
-            Event::Key(key) => {
-                input::handle_key(app, key);
+        // Poll with a short timeout so LSP responses are processed promptly
+        // without requiring a keypress to trigger the next iteration.
+        if event::poll(std::time::Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    input::handle_key(app, key);
+                }
+                Event::Resize(_, _) => {
+                    // Terminal will redraw on next iteration.
+                }
+                _ => {}
             }
-            Event::Resize(_, _) => {
-                // Terminal will redraw on next iteration.
-            }
-            _ => {}
         }
+
+        // Process any pending LSP responses from background threads.
+        // Runs every ~50 ms regardless of whether a key was pressed.
+        crate::exec::process_lsp_events(app);
 
         if app.should_quit {
             break;

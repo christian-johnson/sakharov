@@ -276,7 +276,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Insert => Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
         Mode::Select => Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
         Mode::Command => Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
-        Mode::Goto | Mode::FindChar { .. } => Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD),
+        Mode::Goto | Mode::FindChar { .. } | Mode::Search { .. } => Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD),
     };
 
     // When in a cell-edit overlay, show the notebook + cell context instead of
@@ -318,7 +318,38 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let total_lines = rope.len_lines().max(1);
     let scroll_pct = (line_idx * 100) / total_lines;
 
-    let right = format!("{}:{}  {}%", line_num, col, scroll_pct);
+    // Diagnostic count for the current file.
+    let diag_suffix = if let Some(ref path) = app.buffer.path {
+        let path_str = path.to_string_lossy().to_string();
+        let diags = app.lsp.diagnostics.get(&path_str);
+        if let Some(diags) = diags {
+            let errors = diags
+                .iter()
+                .filter(|d| d.severity == crate::lsp_manager::DiagnosticSeverity::Error)
+                .count();
+            let warnings = diags
+                .iter()
+                .filter(|d| d.severity == crate::lsp_manager::DiagnosticSeverity::Warning)
+                .count();
+            match (errors, warnings) {
+                (0, 0) => String::new(),
+                (1, 0) => "  1 error".to_string(),
+                (e, 0) => format!("  {e} errors"),
+                (0, 1) => "  1 warning".to_string(),
+                (0, w) => format!("  {w} warnings"),
+                (1, 1) => "  1 error  1 warning".to_string(),
+                (1, w) => format!("  1 error  {w} warnings"),
+                (e, 1) => format!("  {e} errors  1 warning"),
+                (e, w) => format!("  {e} errors  {w} warnings"),
+            }
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let right = format!("{}  {}:{}  {}%", diag_suffix, line_num, col, scroll_pct);
 
     let status_widget = StatusWidget {
         mode_label: format!(" {mode_label} "),
@@ -346,6 +377,8 @@ pub fn render_command_nb(frame: &mut Frame, app: &App, area: Rect) {
 fn render_command(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
         Mode::Command => format!(":{}", app.command_buf),
+        Mode::Search { forward: true } => format!("/{}", app.search_query),
+        Mode::Search { forward: false } => format!("?{}", app.search_query),
         _ => app.message.clone().unwrap_or_default(),
     };
     let cmd_widget = SingleLineWidget {

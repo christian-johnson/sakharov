@@ -7,6 +7,8 @@ mod highlight;
 mod input;
 mod keymap;
 mod kitty;
+mod lsp;
+mod lsp_manager;
 mod mode;
 mod motion;
 mod notebook;

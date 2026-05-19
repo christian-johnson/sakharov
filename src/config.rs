@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level configuration structure.
@@ -8,6 +9,9 @@ use std::path::PathBuf;
 pub struct Config {
     pub theme: ThemeConfig,
     pub editor: EditorConfig,
+    /// Language server definitions, keyed by language id (e.g. "python", "rust").
+    #[serde(default)]
+    pub language_servers: HashMap<String, LanguageServerConfig>,
 }
 
 /// Theme color configuration (hex strings).
@@ -31,27 +35,83 @@ pub struct EditorConfig {
     pub scroll_off: usize,
 }
 
+/// Configuration for a single language server.
+#[derive(Debug, Deserialize, Clone)]
+pub struct LanguageServerConfig {
+    /// The executable to run (must be on $PATH or an absolute path).
+    pub command: String,
+    /// Additional command-line arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Server-specific `initializationOptions` (arbitrary JSON).
+    /// If absent, ki auto-detects sensible defaults (e.g. venv for Python).
+    #[serde(default)]
+    pub init_options: Option<serde_json::Value>,
+}
+
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 impl Config {
-    /// Load config from `~/.config/ki/config.toml` (or `$XDG_CONFIG_HOME/ki/config.toml`).
-    /// Falls back to compiled-in defaults when the file is absent or unreadable.
+    /// Load config from `~/.config/ki/config.toml`.
+    ///
+    /// The user file is deep-merged on top of the compiled-in defaults, so a
+    /// partial config (e.g. only `[language_servers]`) works without repeating
+    /// all theme/editor values.
     pub fn load() -> Result<Self> {
-        let path = config_path();
-        if let Some(p) = path {
+        let mut base: toml::Value = toml::from_str(DEFAULT_CONFIG)?;
+
+        if let Some(p) = config_path() {
             if p.exists() {
                 let text = std::fs::read_to_string(&p)?;
-                return Ok(toml::from_str(&text)?);
+                let user: toml::Value = toml::from_str(&text)?;
+                base = deep_merge(base, user);
             }
         }
-        Ok(toml::from_str(DEFAULT_CONFIG)?)
+
+        // Serialize back to string then re-parse; this lets serde drive the
+        // final struct construction cleanly without a custom Deserializer impl.
+        let merged = toml::to_string(&base)?;
+        Ok(toml::from_str(&merged)?)
     }
 }
 
-/// Return the path to the user config file, if determinable.
+/// Deep-merge `over` into `base`.  Tables are merged recursively;
+/// any other type is replaced by `over`.
+fn deep_merge(base: toml::Value, over: toml::Value) -> toml::Value {
+    use toml::Value::Table;
+    match (base, over) {
+        (Table(mut b), Table(o)) => {
+            for (k, v) in o {
+                let existing = b
+                    .remove(&k)
+                    .unwrap_or_else(|| Table(toml::map::Map::new()));
+                b.insert(k, deep_merge(existing, v));
+            }
+            Table(b)
+        }
+        // Non-table values: the override wins outright.
+        (_, o) => o,
+    }
+}
+
+/// Return the path to the user config file.
+///
+/// Search order:
+/// 1. `$XDG_CONFIG_HOME/ki/config.toml`
+/// 2. `~/.config/ki/config.toml`  (preferred on all platforms)
+/// 3. `dirs::config_dir()/ki/config.toml`  (macOS: ~/Library/Application Support)
 fn config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::config_dir())?;
-    Some(base.join("ki").join("config.toml"))
+    // Explicit XDG override wins.
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg).join("ki").join("config.toml"));
+    }
+    // ~/.config is the standard location for CLI tools on all platforms.
+    if let Some(home) = dirs::home_dir() {
+        let xdg_default = home.join(".config").join("ki").join("config.toml");
+        if xdg_default.exists() {
+            return Some(xdg_default);
+        }
+    }
+    // Fallback to the platform-native location (~/Library/Application Support on macOS).
+    dirs::config_dir().map(|d| d.join("ki").join("config.toml"))
 }

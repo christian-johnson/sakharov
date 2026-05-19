@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     app::App,
-    popup::{PopupAction, PopupContent},
+    popup::{PopupAction, PopupContent, PopupTarget},
 };
 
 /// Handle a key event when a popup is open.
@@ -17,6 +17,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
     if matches!(popup.content, PopupContent::KeyHints(_)) {
         return PopupAction::DismissPassthrough;
     }
+
+    // Completion popups (InsertText) are "soft": only navigation keys are
+    // captured.  Any other key dismisses the popup and falls through to normal
+    // handling so that typing into the buffer continues uninterrupted.
+    let is_completion = popup.on_confirm == PopupTarget::InsertText;
 
     match key.code {
         KeyCode::Esc => PopupAction::Dismiss,
@@ -66,22 +71,38 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         }
 
         KeyCode::Backspace => {
-            if let PopupContent::List(ref mut s) = popup.content {
-                s.pop_filter_char();
+            if is_completion {
+                // Let the backspace reach handle_insert to delete the character.
+                PopupAction::DismissPassthrough
+            } else {
+                if let PopupContent::List(ref mut s) = popup.content {
+                    s.pop_filter_char();
+                }
+                PopupAction::Continue
             }
-            PopupAction::Continue
         }
 
         KeyCode::Char(c)
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
-            if let PopupContent::List(ref mut s) = popup.content {
-                s.push_filter_char(c);
+            if is_completion {
+                // Let the character reach handle_insert so the buffer updates.
+                PopupAction::DismissPassthrough
+            } else {
+                if let PopupContent::List(ref mut s) = popup.content {
+                    s.push_filter_char(c);
+                }
+                PopupAction::Continue
             }
-            PopupAction::Continue
         }
 
-        _ => PopupAction::Continue,
+        _ => {
+            if is_completion {
+                PopupAction::DismissPassthrough
+            } else {
+                PopupAction::Continue
+            }
+        }
     }
 }

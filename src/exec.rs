@@ -1,8 +1,12 @@
 use ropey::Rope;
 
 use crate::{
-    app::App,
+    app::{language_for_path, App},
+    buffer::Buffer,
     command::Command,
+    highlight::Highlighter,
+    lsp::{lsp_pos_to_char},
+    lsp_manager::LspEvent,
     mode::{FindDir, Mode},
     motion,
     notebook::{Cell, CellType},
@@ -110,20 +114,23 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- Sub-mode entries (return early — no scroll update) ---
         Command::EnterGotoMode => {
             app.mode = Mode::Goto;
-            app.popup = Some(crate::popup::Popup::which_key(
-                "g",
-                vec![
-                    ("g".into(), "go to file start".into()),
-                    ("e".into(), "go to file end".into()),
-                    ("h/s".into(), "go to line first non-whitespace".into()),
-                    ("l".into(), "go to line end".into()),
-                    // Phase 3 LSP additions will go here:
-                    // ("d".into(), "go to definition".into()),
-                    // ("r".into(), "go to references".into()),
-                    // ("y".into(), "go to type definition".into()),
-                    // ("i".into(), "go to implementation".into()),
-                ],
-            ));
+            let lsp_active = app
+                .current_language()
+                .map(|l| app.lsp.is_ready(l))
+                .unwrap_or(false);
+            let mut hints = vec![
+                ("g".into(), "go to file start".into()),
+                ("e".into(), "go to file end".into()),
+                ("h/s".into(), "go to line first non-whitespace".into()),
+                ("l".into(), "go to line end".into()),
+            ];
+            if lsp_active {
+                hints.push(("d".into(), "go to definition  [LSP]".into()));
+                hints.push(("r".into(), "go to references  [LSP]".into()));
+                hints.push(("y".into(), "go to type definition  [LSP]".into()));
+                hints.push(("i".into(), "go to implementation  [LSP]".into()));
+            }
+            app.popup = Some(crate::popup::Popup::which_key("g", hints));
             return;
         }
         Command::FindCharForward => {
@@ -598,19 +605,34 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.notebook_cell_edit = Some(crate::app::CellEditSession {
                     cell_index: idx,
                     cell_id,
-                    language,
+                    language: language.clone(),
                     notebook_path,
                 });
 
                 // Update highlighter for the cell's language.
                 app.highlighter = crate::highlight::Highlighter::new(Some(&virtual_path));
                 recompute_highlights(app);
+
+                // Start LSP server for the cell's language if configured, then
+                // open the virtual document so the server knows about it.
+                if let Some(server_config) =
+                    app.config.language_servers.get(&language).cloned()
+                {
+                    // ensure_server uses current_dir() as workspace root internally.
+                    app.lsp.ensure_server(&language, &server_config, None);
+                    let text = app.buffer.rope.to_string();
+                    app.lsp.did_open(&language, &virtual_path, &text);
+                }
             }
             return;
         }
 
         Command::NotebookCloseCellEdit => {
             if let Some(session) = app.notebook_cell_edit.take() {
+                // Close the virtual document in the LSP server.
+                if let Some(path) = app.buffer.path.clone() {
+                    app.lsp.did_close(&session.language, &path);
+                }
                 // Write buffer back to the notebook cell.
                 if let Some((ref mut nb, _)) = app.notebook {
                     let idx = session.cell_index;
@@ -625,8 +647,77 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         Command::NotebookDiscardCellEdit => {
+            // Close the virtual document before discarding.
+            if let Some(ref session) = app.notebook_cell_edit {
+                if let Some(path) = app.buffer.path.clone() {
+                    app.lsp.did_close(&session.language, &path);
+                }
+            }
             app.notebook_cell_edit = None;
             reset_after_cell_edit(app);
+            return;
+        }
+
+        // --- Search ---
+        Command::SearchForward => {
+            app.mode = Mode::Search { forward: true };
+            app.search_query.clear();
+            return;
+        }
+        Command::SearchBackward => {
+            app.mode = Mode::Search { forward: false };
+            app.search_query.clear();
+            return;
+        }
+        Command::SearchNext => {
+            search_jump(app, false);
+            return;
+        }
+        Command::SearchPrev => {
+            search_jump(app, true);
+            return;
+        }
+
+        // --- Page scroll ---
+        Command::PageDown => {
+            let half = (app.viewport_height / 2).max(1);
+            for _ in 0..half {
+                let rope = &app.buffer.rope;
+                app.selection = motion::move_down(rope, app.selection, false);
+            }
+        }
+        Command::PageUp => {
+            let half = (app.viewport_height / 2).max(1);
+            for _ in 0..half {
+                let rope = &app.buffer.rope;
+                app.selection = motion::move_up(rope, app.selection, false);
+            }
+        }
+
+        // --- LSP ---
+
+        Command::LspHover => {
+            lsp_request(app, LspAction::Hover);
+            return;
+        }
+        Command::LspGotoDefinition => {
+            lsp_request(app, LspAction::Definition);
+            return;
+        }
+        Command::LspGotoReferences => {
+            lsp_request(app, LspAction::References);
+            return;
+        }
+        Command::LspGotoTypeDefinition => {
+            lsp_request(app, LspAction::TypeDefinition);
+            return;
+        }
+        Command::LspGotoImplementation => {
+            lsp_request(app, LspAction::Implementation);
+            return;
+        }
+        Command::LspRequestCompletion => {
+            lsp_request(app, LspAction::Completion);
             return;
         }
     }
@@ -800,9 +891,285 @@ fn open_line_above(app: &mut App) {
     update_scroll(app);
 }
 
+// ---------------------------------------------------------------------------
+// Search helpers
+// ---------------------------------------------------------------------------
+
+/// Recompute search_matches for the current query across the whole buffer.
+pub fn search_compute_matches(app: &mut App) {
+    app.search_matches.clear();
+    app.search_current = 0;
+    if app.search_query.is_empty() {
+        return;
+    }
+    let text = app.buffer.rope.to_string();
+    let query = &app.search_query;
+    let mut start = 0;
+    while start < text.len() {
+        if let Some(rel) = text[start..].find(query.as_str()) {
+            let byte_pos = start + rel;
+            // Convert byte index to char index.
+            let char_idx = text[..byte_pos].chars().count();
+            app.search_matches.push(char_idx);
+            // Advance past this match (at least 1 byte to avoid infinite loop).
+            start = byte_pos + query.len().max(1);
+        } else {
+            break;
+        }
+    }
+}
+
+/// Jump to the next (or previous if `reverse`) search match relative to cursor.
+pub fn search_jump(app: &mut App, reverse: bool) {
+    if app.search_matches.is_empty() {
+        if !app.search_query.is_empty() {
+            app.message = Some(format!("No matches for \"{}\"", app.search_query));
+        }
+        return;
+    }
+    let cursor = app.selection.head;
+    let count = app.search_matches.len();
+    if reverse {
+        // Find the last match strictly before the cursor, wrap around.
+        let idx = app.search_matches.iter().rposition(|&m| m < cursor)
+            .unwrap_or(count - 1);
+        app.search_current = idx;
+    } else {
+        // Find the first match strictly after the cursor, wrap around.
+        let idx = app.search_matches.iter().position(|&m| m > cursor)
+            .unwrap_or(0);
+        app.search_current = idx;
+    }
+    app.selection = Selection::point(app.search_matches[app.search_current]);
+    update_scroll(app);
+    app.message = Some(format!(
+        "Match {}/{} for \"{}\"",
+        app.search_current + 1,
+        count,
+        app.search_query
+    ));
+}
+
 fn clamp_selection(app: &mut App) {
     let len = app.buffer.rope.len_chars();
     let head = app.selection.head.min(len.saturating_sub(1));
     let anchor = app.selection.anchor.min(len.saturating_sub(1));
     app.selection = Selection::new(anchor, head);
+}
+
+// ---------------------------------------------------------------------------
+// LSP helpers
+// ---------------------------------------------------------------------------
+
+enum LspAction {
+    Hover,
+    Completion,
+    Definition,
+    References,
+    TypeDefinition,
+    Implementation,
+}
+
+fn lsp_request(app: &mut App, action: LspAction) {
+    let lang = match app.current_language() {
+        Some(l) => l.to_owned(),
+        None => {
+            app.message = Some("No language server configured for this file".into());
+            return;
+        }
+    };
+    let path = match app.buffer.path.clone() {
+        Some(p) => p,
+        None => {
+            app.message = Some("Save the file before using LSP features".into());
+            return;
+        }
+    };
+    let char_idx = app.selection.head;
+    let rope = app.buffer.rope.clone();
+
+    let sent = match action {
+        LspAction::Hover => app.lsp.request_hover(&lang, &path, &rope, char_idx),
+        LspAction::Completion => app.lsp.request_completion(&lang, &path, &rope, char_idx),
+        LspAction::Definition => app.lsp.request_definition(&lang, &path, &rope, char_idx),
+        LspAction::References => app.lsp.request_references(&lang, &path, &rope, char_idx),
+        LspAction::TypeDefinition => {
+            app.lsp.request_type_definition(&lang, &path, &rope, char_idx)
+        }
+        LspAction::Implementation => {
+            app.lsp.request_implementation(&lang, &path, &rope, char_idx)
+        }
+    };
+    if !sent {
+        app.message = Some("LSP server initializing — try again in a moment".into());
+    }
+}
+
+/// Notify the LSP server of a buffer change (called after each Insert-mode edit).
+pub fn lsp_did_change(app: &mut App) {
+    let lang = match app.current_language() {
+        Some(l) => l.to_owned(),
+        None => return,
+    };
+    let path = match app.buffer.path.clone() {
+        Some(p) => p,
+        None => return,
+    };
+    let text = app.buffer.rope.to_string();
+    app.lsp.did_change(&lang, &path, &text);
+}
+
+/// Drain LSP events and apply them to the editor state.
+pub fn process_lsp_events(app: &mut App) {
+    let events = app.lsp.poll();
+    for event in events {
+        handle_lsp_event(app, event);
+    }
+}
+
+fn handle_lsp_event(app: &mut App, event: LspEvent) {
+    match event {
+        LspEvent::Initialized { language } => {
+            // Re-open the current document now that the server is ready.
+            // (did_open was skipped earlier because initialized was false.)
+            if app.current_language() == Some(&language) {
+                if let Some(path) = app.buffer.path.clone() {
+                    let text = app.buffer.rope.to_string();
+                    app.lsp.did_open(&language, &path, &text);
+                }
+            }
+        }
+        LspEvent::Diagnostics { path: _, ref items } => {
+            // Diagnostic counts are shown permanently in the status bar; no flash needed.
+            let _ = items;
+        }
+        LspEvent::CompletionResult { items } => {
+            // Only show if still in Insert mode.
+            if app.mode == Mode::Insert && !items.is_empty() {
+                let popup_items: Vec<crate::popup::ListItem> = items
+                    .iter()
+                    .map(|item| crate::popup::ListItem {
+                        label: item
+                            .insert_text
+                            .clone()
+                            .unwrap_or_else(|| item.label.clone()),
+                        detail: item.detail.clone(),
+                        kind: item.kind.clone(),
+                    })
+                    .collect();
+                app.popup = Some(crate::popup::Popup::completion(popup_items));
+            }
+        }
+        LspEvent::HoverResult { content } => {
+            app.popup = Some(crate::popup::Popup::documentation("hover", &content));
+        }
+        LspEvent::DefinitionResult { location } => {
+            if let Some(loc) = location {
+                jump_to_location(app, &loc);
+            } else {
+                app.message = Some("No definition found".into());
+            }
+        }
+        LspEvent::ReferencesResult { locations } => {
+            if locations.is_empty() {
+                app.message = Some("No references found".into());
+            } else if locations.len() == 1 {
+                jump_to_location(app, &locations[0]);
+            } else {
+                // Show a filterable list of all reference locations.
+                let items: Vec<crate::popup::ListItem> = locations
+                    .iter()
+                    .map(|loc| {
+                        let file = loc
+                            .path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?");
+                        crate::popup::ListItem {
+                            label: format!("{}:{}", file, loc.line + 1),
+                            detail: Some(loc.path.to_string_lossy().to_string()),
+                            kind: None,
+                        }
+                    })
+                    .collect();
+                // Jump to first; a full location-list popup is Phase 4.
+                jump_to_location(app, &locations[0]);
+                let _ = items;
+            }
+        }
+    }
+}
+
+fn jump_to_location(app: &mut App, loc: &crate::lsp_manager::LspLocation) {
+    let current = app
+        .buffer
+        .path
+        .as_ref()
+        .and_then(|p| p.canonicalize().ok());
+    let target = loc.path.canonicalize().ok().unwrap_or_else(|| loc.path.clone());
+
+    let same_file = current.map(|c| c == target).unwrap_or(false);
+
+    if same_file {
+        let char_idx = lsp_pos_to_char(&app.buffer.rope, loc.line, loc.character);
+        app.selection = Selection::point(char_idx);
+        update_scroll(app);
+    } else {
+        open_file_at(app, &target, loc.line, loc.character);
+    }
+}
+
+/// Load `path` into the editor buffer and place the cursor at (line, character).
+fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, character: usize) {
+    // Close the old virtual document in LSP if applicable.
+    if let (Some(ref lang), Some(ref old_path)) = (
+        app.lsp_language.clone(),
+        app.buffer.path.clone(),
+    ) {
+        app.lsp.did_close(lang, old_path);
+    }
+
+    let new_buffer = match path.to_str() {
+        Some(s) => Buffer::from_path(s).unwrap_or_else(|_| {
+            let mut b = Buffer::new_empty();
+            b.path = Some(path.to_path_buf());
+            b
+        }),
+        None => {
+            app.message = Some(format!("Cannot open: {}", path.display()));
+            return;
+        }
+    };
+
+    app.buffer = new_buffer;
+    app.selection = Selection::point(0);
+    app.scroll_row = 0;
+    app.scroll_col = 0;
+    app.insert_session_active = false;
+
+    let new_lang = language_for_path(Some(path)).map(str::to_owned);
+    app.lsp_language = new_lang.clone();
+    app.highlighter = Highlighter::new(Some(path));
+    recompute_highlights(app);
+
+    // Ensure LSP server for the new file's language.
+    let file_dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(ref lang) = new_lang {
+        if let Some(server_config) = app.config.language_servers.get(lang).cloned() {
+            app.lsp.ensure_server(lang, &server_config, file_dir);
+        }
+        if app.lsp.is_ready(lang) {
+            let text = app.buffer.rope.to_string();
+            app.lsp.did_open(lang, path, &text);
+        }
+        // If not yet ready, the Initialized event handler will send did_open.
+    }
+
+    // Jump to the target position.
+    let char_idx = lsp_pos_to_char(&app.buffer.rope, line, character);
+    app.selection = Selection::point(char_idx);
+    update_scroll(app);
+
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+    app.message = Some(format!("Opened {} (line {})", name, line + 1));
 }
