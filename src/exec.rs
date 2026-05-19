@@ -1,10 +1,24 @@
+use ropey::Rope;
+
 use crate::{
     app::App,
     command::Command,
     mode::{FindDir, Mode},
     motion,
+    notebook::{Cell, CellType},
+    notebook_state::NotebookEditMode,
     selection::Selection,
 };
+
+// Helper: resolve the notebook's parent directory, falling back to cwd.
+fn notebook_dir(path: &std::path::Path) -> std::path::PathBuf {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        })
+}
 
 /// Execute a single command against the application state.
 pub fn execute(app: &mut App, cmd: &Command) {
@@ -228,12 +242,27 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         // --- File / application ---
         Command::Save => {
-            match app.buffer.save(None) {
-                Ok(()) => {
-                    app.message = Some(format!("Saved {}", app.buffer.display_name()));
+            if let Some((ref mut nb, _)) = app.notebook {
+                match nb.save() {
+                    Ok(()) => {
+                        let name = nb.path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("notebook.ipynb")
+                            .to_string();
+                        app.message = Some(format!("Saved {name}"));
+                    }
+                    Err(e) => {
+                        app.message = Some(format!("Error: {e}"));
+                    }
                 }
-                Err(e) => {
-                    app.message = Some(format!("Error: {e}"));
+            } else {
+                match app.buffer.save(None) {
+                    Ok(()) => {
+                        app.message = Some(format!("Saved {}", app.buffer.display_name()));
+                    }
+                    Err(e) => {
+                        app.message = Some(format!("Error: {e}"));
+                    }
                 }
             }
             return;
@@ -251,7 +280,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::Quit => {
-            if app.buffer.modified {
+            let modified = if let Some((ref nb, _)) = app.notebook {
+                nb.modified
+            } else {
+                app.buffer.modified
+            };
+            if modified {
                 app.message =
                     Some("Unsaved changes — use :q! to force quit".to_string());
             } else {
@@ -307,9 +341,191 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
+
+        // --- Notebook commands ---
+        Command::NotebookNextCell => {
+            if let Some((ref nb, ref mut state)) = app.notebook {
+                let last = nb.cells.len().saturating_sub(1);
+                state.focused_cell = (state.focused_cell + 1).min(last);
+                state.cursor_pos = 0;
+                state.ensure_focused_visible();
+            }
+            return;
+        }
+        Command::NotebookPrevCell => {
+            if let Some((_, ref mut state)) = app.notebook {
+                state.focused_cell = state.focused_cell.saturating_sub(1);
+                state.cursor_pos = 0;
+                state.ensure_focused_visible();
+            }
+            return;
+        }
+        Command::NotebookScrollDown => {
+            if let Some((ref nb, ref mut state)) = app.notebook {
+                let last = nb.cells.len().saturating_sub(1);
+                state.scroll_cell = (state.scroll_cell + 1).min(last);
+            }
+            return;
+        }
+        Command::NotebookScrollUp => {
+            if let Some((_, ref mut state)) = app.notebook {
+                state.scroll_cell = state.scroll_cell.saturating_sub(1);
+            }
+            return;
+        }
+        Command::NotebookEnterEdit => {
+            if let Some((_, ref mut state)) = app.notebook {
+                state.mode = NotebookEditMode::Edit;
+                state.insert_session_active = false;
+            }
+            return;
+        }
+        Command::NotebookExitEdit => {
+            if let Some((_, ref mut state)) = app.notebook {
+                state.mode = NotebookEditMode::Navigate;
+                state.insert_session_active = false;
+            }
+            return;
+        }
+        Command::NotebookExecuteCell => {
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                let nb_dir = notebook_dir(&nb.path.clone());
+
+                // Lazily start the kernel on first execution, or restart if dead.
+                if nb.kernel.is_none() || !nb.kernel.as_mut().map(|k| k.is_alive()).unwrap_or(false) {
+                    match nb.start_kernel(&nb_dir) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            app.message = Some(format!("Kernel start failed: {e}"));
+                            return;
+                        }
+                    }
+                }
+
+                let idx = state.focused_cell;
+                state.executing_cell = Some(idx);
+
+                if let Some(ref mut session) = nb.kernel {
+                    if idx < nb.cells.len() {
+                        match nb.cells[idx].execute(session) {
+                            Ok(()) => {
+                                let count = nb.cells[idx].execution_count.unwrap_or(0);
+                                app.message = Some(format!(
+                                    "Cell [{}] done  In [{}]",
+                                    idx + 1,
+                                    count
+                                ));
+                            }
+                            Err(e) => {
+                                app.message = Some(format!("Kernel error: {e}"));
+                                nb.kernel = None; // session died; restart on next execute
+                            }
+                        }
+                        nb.modified = true;
+                    }
+                }
+
+                state.executing_cell = None;
+            }
+            return;
+        }
+        Command::NotebookRestartKernel => {
+            if let Some((ref mut nb, _)) = app.notebook {
+                nb.kernel = None; // Drop kills the old process
+                let nb_dir = notebook_dir(&nb.path.clone());
+                match nb.start_kernel(&nb_dir) {
+                    Ok(()) => app.message = Some("Kernel restarted".into()),
+                    Err(e) => app.message = Some(format!("Kernel restart failed: {e}")),
+                }
+            }
+            return;
+        }
+        Command::NotebookInterruptKernel => {
+            if let Some((ref nb, _)) = app.notebook {
+                if let Some(ref session) = nb.kernel {
+                    session.interrupt();
+                    app.message = Some("Kernel interrupted".into());
+                } else {
+                    app.message = Some("No kernel running".into());
+                }
+            }
+            return;
+        }
+        Command::NotebookExecuteAndAdvance => {
+            execute(app, &Command::NotebookExecuteCell);
+            execute(app, &Command::NotebookNextCell);
+            return;
+        }
+        Command::NotebookNewCellBelow => {
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                let new_idx = state.focused_cell + 1;
+                nb.cells.insert(new_idx, Cell {
+                    id: new_cell_id(),
+                    cell_type: CellType::Code,
+                    source: Rope::new(),
+                    outputs: vec![],
+                    execution_count: None,
+                });
+                state.focused_cell = new_idx;
+                state.cursor_pos = 0;
+                nb.modified = true;
+                state.ensure_focused_visible();
+            }
+            return;
+        }
+        Command::NotebookNewCellAbove => {
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                let new_idx = state.focused_cell;
+                nb.cells.insert(new_idx, Cell {
+                    id: new_cell_id(),
+                    cell_type: CellType::Code,
+                    source: Rope::new(),
+                    outputs: vec![],
+                    execution_count: None,
+                });
+                state.cursor_pos = 0;
+                nb.modified = true;
+                state.ensure_focused_visible();
+            }
+            return;
+        }
+        Command::NotebookDeleteCell => {
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                if !nb.cells.is_empty() {
+                    nb.cells.remove(state.focused_cell);
+                    nb.modified = true;
+                    let last = nb.cells.len().saturating_sub(1);
+                    state.focused_cell = state.focused_cell.min(last);
+                    state.cursor_pos = 0;
+                }
+            }
+            return;
+        }
+        Command::NotebookClearOutputs => {
+            if let Some((ref mut nb, ref state)) = app.notebook {
+                let idx = state.focused_cell;
+                if idx < nb.cells.len() {
+                    nb.cells[idx].outputs.clear();
+                    nb.modified = true;
+                }
+            }
+            return;
+        }
     }
 
     update_scroll(app);
+}
+
+/// Generate a simple unique cell ID without an external crate.
+fn new_cell_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{t:016x}{n:016x}")
 }
 
 /// Execute a slice of commands in order.

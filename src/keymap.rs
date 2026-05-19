@@ -51,6 +51,9 @@ impl From<KeyEvent> for KeyBinding {
 pub struct Keymap {
     normal: HashMap<KeyBinding, Vec<Command>>,
     select: HashMap<KeyBinding, Vec<Command>>,
+    notebook_navigate: HashMap<KeyBinding, Vec<Command>>,
+    #[allow(dead_code)]
+    notebook_edit: HashMap<KeyBinding, Vec<Command>>,
 }
 
 impl Keymap {
@@ -179,7 +182,60 @@ impl Keymap {
 
         select.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
 
-        Self { normal, select }
+        // --- Notebook Navigate bindings ---
+        let mut notebook_navigate: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+
+        notebook_navigate.insert(KeyBinding::char('j'), vec![Command::NotebookNextCell]);
+        notebook_navigate.insert(
+            KeyBinding::key(KeyCode::Down),
+            vec![Command::NotebookNextCell],
+        );
+        notebook_navigate.insert(KeyBinding::char('k'), vec![Command::NotebookPrevCell]);
+        notebook_navigate.insert(
+            KeyBinding::key(KeyCode::Up),
+            vec![Command::NotebookPrevCell],
+        );
+        notebook_navigate.insert(
+            KeyBinding::key(KeyCode::Enter),
+            vec![Command::NotebookEnterEdit],
+        );
+        notebook_navigate.insert(KeyBinding::char('i'), vec![Command::NotebookEnterEdit]);
+        notebook_navigate.insert(KeyBinding::char('e'), vec![Command::NotebookExecuteCell]);
+        notebook_navigate.insert(KeyBinding::char('E'), vec![Command::NotebookExecuteAndAdvance]);
+        notebook_navigate.insert(KeyBinding::char('o'), vec![Command::NotebookNewCellBelow]);
+        notebook_navigate.insert(KeyBinding::char('O'), vec![Command::NotebookNewCellAbove]);
+        notebook_navigate.insert(KeyBinding::char('d'), vec![Command::NotebookDeleteCell]);
+        notebook_navigate.insert(KeyBinding::char('x'), vec![Command::NotebookClearOutputs]);
+        notebook_navigate.insert(KeyBinding::char(':'), vec![Command::EnterCommandMode]);
+        notebook_navigate.insert(
+            KeyBinding::key(KeyCode::Esc),
+            vec![Command::EnterNormal],
+        );
+        notebook_navigate.insert(KeyBinding::ctrl('s'), vec![Command::Save]);
+        notebook_navigate.insert(KeyBinding::ctrl('r'), vec![Command::NotebookRestartKernel]);
+
+        // Ctrl+Enter — execute cell
+        notebook_navigate.insert(
+            KeyBinding {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::CONTROL,
+            },
+            vec![Command::NotebookExecuteCell],
+        );
+
+        // --- Notebook Edit bindings (minimal — most editing is handled directly in input.rs) ---
+        let mut notebook_edit: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        notebook_edit.insert(
+            KeyBinding::key(KeyCode::Esc),
+            vec![Command::NotebookExitEdit],
+        );
+
+        Self {
+            normal,
+            select,
+            notebook_navigate,
+            notebook_edit,
+        }
     }
 
     /// Look up a key binding in Normal mode.
@@ -202,5 +258,16 @@ impl Keymap {
     #[allow(dead_code)]
     pub fn set_select(&mut self, kb: KeyBinding, cmds: Vec<Command>) {
         self.select.insert(kb, cmds);
+    }
+
+    /// Look up a key binding in Notebook Navigate mode.
+    pub fn lookup_notebook_navigate(&self, kb: &KeyBinding) -> Option<&[Command]> {
+        self.notebook_navigate.get(kb).map(Vec::as_slice)
+    }
+
+    /// Look up a key binding in Notebook Edit mode.
+    #[allow(dead_code)]
+    pub fn lookup_notebook_edit(&self, kb: &KeyBinding) -> Option<&[Command]> {
+        self.notebook_edit.get(kb).map(Vec::as_slice)
     }
 }

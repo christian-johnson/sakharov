@@ -14,7 +14,11 @@ use crate::{
     highlight::{Highlighter, Span},
     input,
     keymap::Keymap,
+    kitty,
     mode::Mode,
+    notebook::Notebook,
+    notebook_state::NotebookState,
+    notebook_ui::ImageRequest,
     selection::Selection,
     ui,
 };
@@ -37,19 +41,41 @@ pub struct App {
     pub highlight_spans: Vec<Span>,
     pub config: Config,
     pub keymap: Keymap,
+    /// Loaded notebook + UI state, present when a `.ipynb` file is opened.
+    pub notebook: Option<(Notebook, NotebookState)>,
+    /// Image draw requests collected by the last notebook render pass.
+    pub pending_images: Vec<ImageRequest>,
 }
 
 impl App {
     /// Create a new App, loading `path` if provided.
     pub fn new(path: Option<&str>, config: Config) -> Result<Self> {
+        // Detect .ipynb and load as a notebook.
+        let is_notebook = path
+            .map(|p| p.ends_with(".ipynb"))
+            .unwrap_or(false);
+
+        let notebook = if is_notebook {
+            let p = path.expect("checked above");
+            match Notebook::from_path(std::path::Path::new(p)) {
+                Ok(nb) => Some((nb, NotebookState::new())),
+                Err(e) => {
+                    // Fall through to regular buffer with an error message.
+                    eprintln!("ki: failed to load notebook: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let buffer = match path {
-            Some(p) => Buffer::from_path(p).unwrap_or_else(|_| {
-                // If the file doesn't exist, start with empty buffer at that path
+            Some(p) if !is_notebook => Buffer::from_path(p).unwrap_or_else(|_| {
                 let mut b = Buffer::new_empty();
                 b.path = Some(std::path::PathBuf::from(p));
                 b
             }),
-            None => Buffer::new_empty(),
+            _ => Buffer::new_empty(),
         };
 
         let highlighter = Highlighter::new(buffer.path.as_deref());
@@ -72,6 +98,8 @@ impl App {
             highlight_spans,
             config,
             keymap: Keymap::default_bindings(),
+            notebook,
+            pending_images: Vec::new(),
         })
     }
 }
@@ -112,17 +140,59 @@ fn run_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        // Update scroll to keep cursor in view
-        update_scroll_to_fit(terminal, app);
+        if app.notebook.is_none() {
+            // Update scroll to keep cursor in view (text editor only).
+            update_scroll_to_fit(terminal, app);
+        }
 
-        terminal.draw(|f| ui::render(f, app))?;
+        if app.notebook.is_some() {
+            // Notebook rendering path.
+            terminal.draw(|f| {
+                let size = f.area();
+                if size.height >= 3 {
+                    // Content area.
+                    if let Some((ref nb, ref state)) = app.notebook {
+                        let images = crate::notebook_ui::render(f, state, nb, &app.config);
+                        app.pending_images = images;
+
+                        // Status bar and command line.
+                        let status_area = ratatui::layout::Rect {
+                            x: size.x,
+                            y: size.y + size.height.saturating_sub(2),
+                            width: size.width,
+                            height: 1,
+                        };
+                        let cmd_area = ratatui::layout::Rect {
+                            x: size.x,
+                            y: size.y + size.height.saturating_sub(1),
+                            width: size.width,
+                            height: 1,
+                        };
+                        let ks = nb.kernel.as_ref().map(|k| &k.status);
+                        crate::notebook_ui::render_notebook_status(f, nb, state, ks, status_area);
+                        ui::render_command_nb(f, app, cmd_area);
+                    }
+                }
+            })?;
+
+            // Flush Kitty images after ratatui draw.
+            if !app.pending_images.is_empty() {
+                let _ = kitty::clear_images();
+                let images = std::mem::take(&mut app.pending_images);
+                for req in &images {
+                    let _ = kitty::render_image(req.col, req.row, req.rows, &req.png_data);
+                }
+            }
+        } else {
+            terminal.draw(|f| ui::render(f, app))?;
+        }
 
         match event::read()? {
             Event::Key(key) => {
                 input::handle_key(app, key);
             }
             Event::Resize(_, _) => {
-                // Terminal will redraw on next iteration
+                // Terminal will redraw on next iteration.
             }
             _ => {}
         }

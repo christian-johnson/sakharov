@@ -7,6 +7,7 @@ use crate::{
     keymap::KeyBinding,
     mode::{FindDir, Mode},
     motion,
+    notebook_state::NotebookEditMode,
     selection::Selection,
 };
 
@@ -17,6 +18,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     // Ctrl+C is a global hint in all modes.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.message = Some("use :q to quit, :q! to force quit".into());
+        return;
+    }
+
+    // Notebook mode takes priority over the normal mode dispatch.
+    if app.notebook.is_some() {
+        handle_notebook_key(app, key);
         return;
     }
 
@@ -190,3 +197,157 @@ fn begin_insert_edit(app: &mut App) {
         app.insert_session_active = true;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Notebook key handling
+// ---------------------------------------------------------------------------
+
+fn handle_notebook_key(app: &mut App, key: KeyEvent) {
+    // Determine the current notebook edit mode (avoid borrowing app twice).
+    let nb_mode = app
+        .notebook
+        .as_ref()
+        .map(|(_, s)| s.mode.clone())
+        .unwrap_or(NotebookEditMode::Navigate);
+
+    match nb_mode {
+        NotebookEditMode::Navigate => {
+            // Command mode is handled separately.
+            if app.mode == crate::mode::Mode::Command {
+                handle_command(app, key);
+                return;
+            }
+            let kb = KeyBinding::from(key);
+            if let Some(cmds) = app.keymap.lookup_notebook_navigate(&kb).map(|v| v.to_vec()) {
+                exec::run_many(app, &cmds);
+            }
+        }
+        NotebookEditMode::Edit => {
+            handle_notebook_edit_key(app, key);
+        }
+    }
+}
+
+fn handle_notebook_edit_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            exec::execute(app, &Command::NotebookExitEdit);
+        }
+        KeyCode::Backspace => {
+            begin_notebook_edit(app);
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                let rope = &mut nb.cells[state.focused_cell].source;
+                if state.cursor_pos > 0 {
+                    state.cursor_pos -= 1;
+                    rope.remove(state.cursor_pos..state.cursor_pos + 1);
+                    nb.modified = true;
+                }
+            }
+        }
+        KeyCode::Delete => {
+            begin_notebook_edit(app);
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                let rope = &mut nb.cells[state.focused_cell].source;
+                let len = rope.len_chars();
+                if state.cursor_pos < len {
+                    rope.remove(state.cursor_pos..state.cursor_pos + 1);
+                    nb.modified = true;
+                }
+            }
+        }
+        KeyCode::Enter => {
+            begin_notebook_edit(app);
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                let pos = state.cursor_pos;
+                nb.cells[state.focused_cell].source.insert(pos, "\n");
+                state.cursor_pos = pos + 1;
+                nb.modified = true;
+            }
+        }
+        KeyCode::Left => {
+            if let Some((_, ref mut state)) = app.notebook {
+                state.cursor_pos = state.cursor_pos.saturating_sub(1);
+            }
+        }
+        KeyCode::Right => {
+            if let Some((ref nb, ref mut state)) = app.notebook {
+                let len = nb.cells[state.focused_cell].source.len_chars();
+                state.cursor_pos = (state.cursor_pos + 1).min(len);
+            }
+        }
+        KeyCode::Up => {
+            if let Some((ref nb, ref mut state)) = app.notebook {
+                let rope = &nb.cells[state.focused_cell].source;
+                // Move to same column on previous line.
+                let pos = state.cursor_pos.min(rope.len_chars().saturating_sub(1));
+                if rope.len_chars() == 0 {
+                    return;
+                }
+                let line_idx = rope.char_to_line(pos);
+                if line_idx == 0 {
+                    state.cursor_pos = 0;
+                    return;
+                }
+                let col = pos - rope.line_to_char(line_idx);
+                let prev_line_start = rope.line_to_char(line_idx - 1);
+                let prev_line_len = rope.line(line_idx - 1).len_chars().saturating_sub(1);
+                state.cursor_pos = prev_line_start + col.min(prev_line_len);
+            }
+        }
+        KeyCode::Down => {
+            if let Some((ref nb, ref mut state)) = app.notebook {
+                let rope = &nb.cells[state.focused_cell].source;
+                if rope.len_chars() == 0 {
+                    return;
+                }
+                let pos = state.cursor_pos.min(rope.len_chars().saturating_sub(1));
+                let line_idx = rope.char_to_line(pos);
+                let total_lines = rope.len_lines();
+                if line_idx + 1 >= total_lines {
+                    return;
+                }
+                let col = pos - rope.line_to_char(line_idx);
+                let next_line_start = rope.line_to_char(line_idx + 1);
+                let next_line_len = rope.line(line_idx + 1).len_chars().saturating_sub(1);
+                state.cursor_pos = next_line_start + col.min(next_line_len);
+            }
+        }
+        KeyCode::Tab => {
+            begin_notebook_edit(app);
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                let pos = state.cursor_pos;
+                nb.cells[state.focused_cell].source.insert(pos, "\t");
+                state.cursor_pos = pos + 1;
+                nb.modified = true;
+            }
+        }
+        KeyCode::Char(c) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                return;
+            }
+            begin_notebook_edit(app);
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
+                let pos = state.cursor_pos;
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                nb.cells[state.focused_cell].source.insert(pos, s);
+                state.cursor_pos = pos + 1;
+                nb.modified = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Snapshot the focused cell's rope at the start of each Edit session.
+fn begin_notebook_edit(app: &mut App) {
+    if let Some((ref nb, ref mut state)) = app.notebook {
+        if !state.insert_session_active {
+            let snapshot = nb.cells[state.focused_cell].source.clone();
+            state.undo_stack.push((state.focused_cell, snapshot));
+            state.redo_stack.clear();
+            state.insert_session_active = true;
+        }
+    }
+}
+

@@ -5,11 +5,9 @@
 A from-scratch TUI text editor written in Rust, built for personal use.
 Invoked as `ki [file]`. Binary at `target/debug/ki` (or `target/release/ki`).
 
-## Current status — Phase 1 complete
+## Current status — Phase 2 complete
 
-Core editor is functional and daily-driveable for plain text and code files.
-
-### What works
+### Phase 1 (plain text editor) — complete
 - Helix-style (selection-first) modal editing: Normal, Insert, Select modes
 - Full motion set: `h/j/k/l`, `w/b/e`, `W/B/E`, `0/^/$`, `gg/G`, `f/t/F/T`
 - Edit operations: `d/c/y/p/P`, `u` undo (session-coalesced), `U` redo
@@ -22,37 +20,67 @@ Core editor is functional and daily-driveable for plain text and code files.
 - Ctrl+S saves; Ctrl+C shows quit hint
 - Config at `~/.config/ki/config.toml` (theme colours, tab width, line numbers, scroll_off)
 
+### Phase 2 (Jupyter notebooks) — complete
+- Opens `.ipynb` files automatically in notebook mode
+- Displays cells as a vertical stack: code (syntax-highlighted), markdown, raw
+- Bordered cells: rounded border (unfocused) / thick border (focused); background `Rgb(20,20,30)`
+- Border colour encodes execution state: **blue** = unrun, **green** = success, **red** = error, **yellow** = executing
+- Cell header (`[N] CODE (python)`) lives in the top border line itself
+- **Navigate mode** (`j/k` between cells) and **Edit mode** (`i` or `Enter` to edit a cell)
+- **Persistent kernel session** — one Python subprocess per notebook; namespace shared across all cells
+  - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in notebook dir and cwd before falling back to `python3`
+  - Runner script embedded in binary; communicates over stdin/stdout with `__KI_CODE_END__` / `__KI_OUTPUT_END__` delimiters
+  - `exec(compile(code, '<cell>', 'exec'), shared_ns)` — full statement support, persistent imports/variables
+- `e` / `:run` — execute focused cell; `E` / `:run-next` — execute and advance
+- `Ctrl+R` / `:restart-kernel` — kill and restart kernel (clears all state)
+- `:interrupt-kernel` — send SIGINT to running kernel (stops stuck cells)
+- Kernel status shown in status bar: `[idle]` / `[busy]` / `[dead]` / `[no kernel]`
+- `o/O` new cell below/above, `d` delete cell, `x` clear outputs
+- Saves back to valid nbformat 4 JSON (`:w`)
+- **Kitty graphics protocol** — image outputs reserved as `IMAGE_ROWS=12` row blocks; `r=N` Kitty param prevents overflow into adjacent cells
+- All notebook commands accessible via `:` (e.g. `:run`, `:restart-kernel`, `:notebook-next-cell`)
+
 ### Known rough edges / not yet implemented
 - No search (`/` and `?`)
-- No LSP
+- No LSP (Phase 3)
 - No multiple buffers / split panes
-- No Kitty graphics
-- No Jupyter notebook support
-- Highlight recompute is whole-buffer on every keystroke (fine for now, will need incremental for large files)
+- Kernel interrupt (SIGINT) is best-effort with synchronous execution — for truly stuck cells, `:restart-kernel`
+- No rich output capture from execution (matplotlib figures etc. require kernel-protocol display_data hooks)
+- Highlight recompute is whole-buffer on every keystroke (fine for now)
 - Gutter overflows at >9999 lines (cosmetic)
 
 ## Architecture
 
 ```
 src/
-  main.rs        — entry point, CLI arg parsing
-  app.rs         — App struct + terminal setup/teardown + render loop
-  buffer.rs      — Rope buffer (ropey), undo/redo, file I/O
-  selection.rs   — Selection { anchor, head } (char indices into rope)
-  mode.rs        — Mode enum: Normal, Insert, Select, Command, Goto, FindChar
-  command.rs     — Command enum: every editor action as a named variant
-                   Command::parse() maps `:` input → Command
-                   Command::name() gives the canonical string name
-  exec.rs        — execute(app, cmd): single place that mutates state
-                   also: run_many, recompute_highlights, update_scroll
-  keymap.rs      — KeyBinding type + Keymap (HashMap-based, overrideable)
-  input.rs       — Thin key dispatch: Normal/Select → keymap lookup → exec
-                   Insert/Command/Goto/FindChar handled directly
-  motion.rs      — Pure motion functions: (Rope, Selection, extend) → Selection
-  highlight.rs   — tree-sitter-highlight integration; produces Vec<Span>
-  theme.rs       — highlight index → ratatui Style
-  config.rs      — TOML config load (theme, editor settings)
-  ui.rs          — ratatui rendering: gutter, text, cursor, status bar, command line
+  main.rs             — entry point, CLI arg parsing; detects .ipynb
+  app.rs              — App struct + terminal setup/teardown + render loop
+                        App has both `buffer` (plain text) and `notebook` (Option)
+                        After terminal.draw(), flushes pending Kitty image requests
+  buffer.rs           — Rope buffer (ropey), undo/redo, file I/O
+                        insert_raw/remove_raw for session-coalesced undo
+  selection.rs        — Selection { anchor, head } (char indices into rope)
+  mode.rs             — Mode enum: Normal, Insert, Select, Command, Goto, FindChar
+  command.rs          — Command enum: every editor action as a named variant
+                        Command::parse() maps `:` input → Command
+                        Command::name() gives the canonical string name
+  exec.rs             — execute(app, cmd): single place that mutates state
+                        Notebook commands operate on app.notebook directly
+  keymap.rs           — KeyBinding type + Keymap (HashMap-based, overrideable)
+                        Separate notebook_navigate / notebook_edit maps
+  input.rs            — Thin key dispatch; notebook mode takes priority
+  motion.rs           — Pure motion functions: (Rope, Selection, extend) → Selection
+  highlight.rs        — tree-sitter-highlight integration; produces Vec<Span>
+  theme.rs            — highlight index → ratatui Style
+  config.rs           — TOML config load (theme, editor settings)
+  ui.rs               — ratatui rendering for plain text editor
+  notebook.rs         — Notebook/Cell/Output data model; from_path, save, Cell::execute(session)
+                        KernelSession: persistent Python subprocess with RUNNER_SCRIPT protocol
+                        KernelStatus enum; find_python_executable for venv detection
+  notebook_state.rs   — NotebookState: focused_cell, cursor_pos, scroll_cell, mode, undo
+                        ensure_focused_visible() keeps focused cell in a 15-cell window
+  notebook_ui.rs      — ratatui rendering for notebooks; returns Vec<ImageRequest>
+  kitty.rs            — Kitty terminal graphics protocol: render_image, clear_images
 
 docs/
   commands.md    — full command reference (keep this up to date with command.rs)
@@ -83,17 +111,11 @@ tree-sitter-highlight = "0.22"
 tree-sitter-rust = "0.21"
 tree-sitter-python = "0.21"
 tree-sitter-javascript = "0.21"
+serde_json = "1"
+base64 = "0.22"
 ```
 
 ## Roadmap
-
-### Phase 2 — Jupyter notebook support
-- `.ipynb` document model: heterogeneous cells (code, markdown, raw, output)
-- Cell navigation in Normal mode (jump between cells)
-- Execute code cells (delegate to running kernel via Jupyter messaging protocol, or just shell out)
-- Render output cells: text, stdout/stderr, images
-- **Kitty graphics protocol** for image outputs (base64 PNG via terminal escape sequences)
-- LSP scoped to code cells (language detected per cell)
 
 ### Phase 3 — LSP
 - JSON-RPC client over stdio (`tokio` async)

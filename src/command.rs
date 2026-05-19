@@ -60,6 +60,26 @@ pub enum Command {
     // Scripting / composition
     Shell(String),
     Sequence(Vec<Command>),
+
+    // Notebook navigation
+    NotebookNextCell,
+    NotebookPrevCell,
+    NotebookScrollDown,
+    NotebookScrollUp,
+
+    // Notebook editing
+    NotebookEnterEdit,
+    NotebookExitEdit,
+    NotebookExecuteCell,
+    NotebookExecuteAndAdvance,
+    NotebookNewCellBelow,
+    NotebookNewCellAbove,
+    NotebookDeleteCell,
+    NotebookClearOutputs,
+
+    // Kernel lifecycle
+    NotebookRestartKernel,
+    NotebookInterruptKernel,
 }
 
 impl Command {
@@ -113,6 +133,20 @@ impl Command {
             Command::WriteQuit => "write-quit",
             Command::Shell(_) => "shell",
             Command::Sequence(_) => "sequence",
+            Command::NotebookNextCell => "notebook-next-cell",
+            Command::NotebookPrevCell => "notebook-prev-cell",
+            Command::NotebookScrollDown => "notebook-scroll-down",
+            Command::NotebookScrollUp => "notebook-scroll-up",
+            Command::NotebookEnterEdit => "notebook-enter-edit",
+            Command::NotebookExitEdit => "notebook-exit-edit",
+            Command::NotebookExecuteCell => "notebook-execute-cell",
+            Command::NotebookExecuteAndAdvance => "notebook-execute-and-advance",
+            Command::NotebookNewCellBelow => "notebook-new-cell-below",
+            Command::NotebookNewCellAbove => "notebook-new-cell-above",
+            Command::NotebookDeleteCell => "notebook-delete-cell",
+            Command::NotebookClearOutputs => "notebook-clear-outputs",
+            Command::NotebookRestartKernel => "notebook-restart-kernel",
+            Command::NotebookInterruptKernel => "notebook-interrupt-kernel",
         }
     }
 
@@ -214,6 +248,26 @@ impl Command {
             "quit"                       => Some(Command::Quit),
             "force-quit"                 => Some(Command::ForceQuit),
             "write-quit"                 => Some(Command::WriteQuit),
+
+            // Notebook commands
+            "notebook-next-cell"             => Some(Command::NotebookNextCell),
+            "notebook-prev-cell"             => Some(Command::NotebookPrevCell),
+            "notebook-scroll-down"           => Some(Command::NotebookScrollDown),
+            "notebook-scroll-up"             => Some(Command::NotebookScrollUp),
+            "notebook-enter-edit"            => Some(Command::NotebookEnterEdit),
+            "notebook-exit-edit"             => Some(Command::NotebookExitEdit),
+            "notebook-execute-cell" | "run"  => Some(Command::NotebookExecuteCell),
+            "notebook-execute-and-advance" | "run-next" => Some(Command::NotebookExecuteAndAdvance),
+            "notebook-new-cell-below" | "new-cell" => Some(Command::NotebookNewCellBelow),
+            "notebook-new-cell-above"        => Some(Command::NotebookNewCellAbove),
+            "notebook-delete-cell"           => Some(Command::NotebookDeleteCell),
+            "notebook-clear-outputs"         => Some(Command::NotebookClearOutputs),
+            "notebook-restart-kernel" | "restart-kernel" | "kernel-restart" => {
+                Some(Command::NotebookRestartKernel)
+            }
+            "notebook-interrupt-kernel" | "interrupt-kernel" | "kernel-interrupt" => {
+                Some(Command::NotebookInterruptKernel)
+            }
 
             _ => None,
         }
