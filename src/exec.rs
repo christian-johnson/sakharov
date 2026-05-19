@@ -112,7 +112,17 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.mode = Mode::Goto;
             app.popup = Some(crate::popup::Popup::which_key(
                 "g",
-                vec![("g".into(), "go to file start".into())],
+                vec![
+                    ("g".into(), "go to file start".into()),
+                    ("e".into(), "go to file end".into()),
+                    ("h/s".into(), "go to line first non-whitespace".into()),
+                    ("l".into(), "go to line end".into()),
+                    // Phase 3 LSP additions will go here:
+                    // ("d".into(), "go to definition".into()),
+                    // ("r".into(), "go to references".into()),
+                    // ("y".into(), "go to type definition".into()),
+                    // ("i".into(), "go to implementation".into()),
+                ],
             ));
             return;
         }

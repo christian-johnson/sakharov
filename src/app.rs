@@ -225,6 +225,9 @@ fn run_loop(
             })?;
         }
 
+        // Update terminal cursor shape to reflect the current mode.
+        set_cursor_shape(app.mode.clone());
+
         match event::read()? {
             Event::Key(key) => {
                 input::handle_key(app, key);
@@ -310,6 +313,19 @@ fn unicode_display_width(c: char) -> usize {
 
 fn restore_terminal() -> Result<()> {
     terminal::disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        crossterm::cursor::SetCursorStyle::DefaultUserShape,
+    )?;
     Ok(())
+}
+
+fn set_cursor_shape(mode: Mode) {
+    use crossterm::cursor::SetCursorStyle;
+    let shape = match mode {
+        Mode::Insert => SetCursorStyle::BlinkingBar,
+        _ => SetCursorStyle::SteadyBlock,
+    };
+    let _ = execute!(io::stdout(), shape);
 }

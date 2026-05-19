@@ -191,10 +191,19 @@ fn handle_command(app: &mut App, key: KeyEvent) {
 
 fn handle_goto(app: &mut App, key: KeyEvent) {
     app.mode = Mode::Normal;
+    let extend = false;
     match key.code {
         KeyCode::Char('g') => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::goto_file_start(rope, app.selection, false);
+            app.selection = motion::goto_file_start(&app.buffer.rope, app.selection, extend);
+        }
+        KeyCode::Char('e') => {
+            app.selection = motion::goto_file_end(&app.buffer.rope, app.selection, extend);
+        }
+        KeyCode::Char('h') | KeyCode::Char('s') => {
+            app.selection = motion::move_line_first_non_ws(&app.buffer.rope, app.selection, extend);
+        }
+        KeyCode::Char('l') => {
+            app.selection = motion::move_line_end(&app.buffer.rope, app.selection, extend);
         }
         KeyCode::Esc => {}
         _ => {}

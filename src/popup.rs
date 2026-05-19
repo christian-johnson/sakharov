@@ -27,7 +27,9 @@ pub enum PopupAnchor {
     CursorBelow,
     /// Centered on screen (command palette, buffer picker).
     Center,
-    /// Full-width strip at the bottom (which-key).
+    /// Bordered window in the bottom-right corner (which-key).
+    BottomRight,
+    /// Full-width strip at the bottom (kept for future use).
     BottomStrip,
 }
 
@@ -233,12 +235,13 @@ impl Popup {
     /// Which-key strip shown at the bottom of the screen.
     pub fn which_key(prefix: &str, hints: Vec<(String, String)>) -> Self {
         Self {
-            title: None,
+            // Title shows the prefix key (e.g. " g " in the border)
+            title: Some(format!(" {prefix} ")),
             content: PopupContent::KeyHints(KeyHintsState {
                 prefix: prefix.into(),
                 hints,
             }),
-            anchor: PopupAnchor::BottomStrip,
+            anchor: PopupAnchor::BottomRight,
             width: PopupSize::Auto,
             on_confirm: PopupTarget::Dismiss,
         }

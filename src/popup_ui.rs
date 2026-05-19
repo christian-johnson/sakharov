@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::popup::{Popup, PopupAnchor, PopupContent, PopupSize};
+use crate::popup::{KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize};
 
 /// Render a popup on top of the current frame.
 pub fn render(frame: &mut Frame, popup: &Popup, cursor_screen: Option<(u16, u16)>) {
@@ -85,15 +85,7 @@ fn compute_width(popup: &Popup, term_width: u16) -> u16 {
                 PopupContent::Text(s) => {
                     s.lines.iter().map(|l| l.len()).max().unwrap_or(20) + 4
                 }
-                PopupContent::KeyHints(s) => {
-                    let prefix_w = s.prefix.len() + 4;
-                    let hints_w: usize = s
-                        .hints
-                        .iter()
-                        .map(|(k, d)| k.len() + d.len() + 3)
-                        .sum();
-                    prefix_w + hints_w
-                }
+                PopupContent::KeyHints(s) => key_hints_natural_width(s),
             } as u16;
             natural.max(20).min(term_width.saturating_sub(4))
         }
@@ -112,7 +104,7 @@ fn compute_height(popup: &Popup) -> u16 {
             let lines_shown = s.lines.len().min(18) as u16;
             (2 + lines_shown).max(4)
         }
-        PopupContent::KeyHints(_) => 1,
+        PopupContent::KeyHints(s) => (s.hints.len() as u16 + 2).max(3),
     }
 }
 
@@ -138,6 +130,14 @@ fn compute_rect(
             } else {
                 y_below
             };
+            (x, y, pw, ph)
+        }
+        PopupAnchor::BottomRight => {
+            // Sit just above the 2-row status/command bar, flush to the right margin.
+            let margin_right: u16 = 2;
+            let margin_bottom: u16 = 3; // clears status bar + command line
+            let x = term.right().saturating_sub(pw + margin_right);
+            let y = term.bottom().saturating_sub(ph + margin_bottom);
             (x, y, pw, ph)
         }
         PopupAnchor::BottomStrip => {
@@ -444,92 +444,88 @@ fn render_text_popup(
 }
 
 // ---------------------------------------------------------------------------
-// KeyHints popup (BottomStrip)
+// KeyHints popup (BottomRight bordered window)
 // ---------------------------------------------------------------------------
 
 fn render_key_hints_popup(
     frame: &mut Frame,
-    state: &crate::popup::KeyHintsState,
+    state: &KeyHintsState,
     rect: Rect,
 ) {
-    let buf = frame.buffer_mut();
-    let bg = Color::Rgb(20, 20, 35);
+    // Build a block with the prefix as the title (e.g. " g ")
+    let block = Block::default()
+        .title(format!(" {} ", state.prefix))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(100, 100, 180)))
+        .style(Style::default().bg(Color::Rgb(28, 28, 40)));
 
-    // Fill background
-    for row in 0..rect.height {
-        for col in rect.left()..rect.right() {
-            buf[(col, rect.top() + row)]
-                .set_char(' ')
-                .set_style(Style::default().bg(bg));
-        }
-    }
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
 
-    if rect.height == 0 {
+    if inner.height == 0 || inner.width == 0 {
         return;
     }
 
-    let y = rect.top();
-    let mut x = rect.left();
+    // Compute the max key label width for column alignment.
+    let max_key_w = state.hints.iter().map(|(k, _)| k.len()).max().unwrap_or(1);
 
-    // Prefix label
-    let prefix_text = format!("  {}  ", state.prefix);
-    let prefix_style = Style::default()
-        .fg(Color::Cyan)
-        .bg(bg)
+    let key_style = Style::default()
+        .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
-    for c in prefix_text.chars() {
-        if x >= rect.right() {
-            break;
-        }
-        buf[(x, y)].set_char(c).set_style(prefix_style);
-        x += 1;
-    }
+    let desc_style = Style::default()
+        .fg(Color::Rgb(180, 180, 180));
+    let sep_style = Style::default()
+        .fg(Color::DarkGray);
 
-    // Hints
-    for (key, desc) in &state.hints {
-        if x >= rect.right() {
+    for (row, (key, desc)) in state.hints.iter().enumerate() {
+        if row as u16 >= inner.height {
             break;
         }
-        // Key label
-        let key_style = Style::default()
-            .fg(Color::Yellow)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD);
+        let y = inner.top() + row as u16;
+        let mut x = inner.left();
+
+        // 1-char left padding
+        if x < inner.right() {
+            frame.buffer_mut()[(x, y)].set_char(' ').set_style(Style::default());
+            x += 1;
+        }
+
+        // Key (padded to max_key_w)
         for c in key.chars() {
-            if x >= rect.right() {
-                break;
-            }
-            buf[(x, y)].set_char(c).set_style(key_style);
+            if x >= inner.right() { break; }
+            frame.buffer_mut()[(x, y)].set_char(c).set_style(key_style);
             x += 1;
         }
-        // Space
-        if x < rect.right() {
-            buf[(x, y)]
-                .set_char(' ')
-                .set_style(Style::default().bg(bg));
+        // Pad key column
+        for _ in key.len()..max_key_w {
+            if x >= inner.right() { break; }
+            frame.buffer_mut()[(x, y)].set_char(' ').set_style(Style::default());
             x += 1;
         }
-        // Description
-        let desc_style = Style::default()
-            .fg(Color::Rgb(180, 180, 180))
-            .bg(bg)
-            .add_modifier(Modifier::DIM);
+
+        // Separator "  →  "
+        for c in "  →  ".chars() {
+            if x >= inner.right() { break; }
+            frame.buffer_mut()[(x, y)].set_char(c).set_style(sep_style);
+            x += 1;
+        }
+
+        // Description (truncated to remaining width)
         for c in desc.chars() {
-            if x >= rect.right() {
-                break;
-            }
-            buf[(x, y)].set_char(c).set_style(desc_style);
-            x += 1;
-        }
-        // Separator
-        for c in "  ".chars() {
-            if x >= rect.right() {
-                break;
-            }
-            buf[(x, y)].set_char(c).set_style(Style::default().bg(bg));
+            if x >= inner.right() { break; }
+            frame.buffer_mut()[(x, y)].set_char(c).set_style(desc_style);
             x += 1;
         }
     }
+}
+
+/// Natural width of a KeyHints popup: wide enough to fit the widest row.
+fn key_hints_natural_width(s: &KeyHintsState) -> usize {
+    let max_key = s.hints.iter().map(|(k, _)| k.len()).max().unwrap_or(1);
+    let max_desc = s.hints.iter().map(|(_, d)| d.len()).max().unwrap_or(0);
+    // 1 (left pad) + max_key + 5 (separator "  →  ") + max_desc + 1 (right pad) + 2 (borders)
+    1 + max_key + 5 + max_desc + 1 + 2
 }
 
 // ---------------------------------------------------------------------------
