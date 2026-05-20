@@ -85,14 +85,46 @@ pub struct ListItem {
 }
 
 impl ListState {
-    /// Return indices of items matching `self.filter` via fuzzy match.
+    /// Return indices of matching items sorted by relevance.
+    ///
+    /// When the filter is empty all items are returned in their original order
+    /// (LSP servers and the command palette both provide a meaningful default
+    /// order).  When the filter is non-empty items are scored and sorted:
+    ///
+    ///   0 — exact match
+    ///   1 — label starts with filter  (prefix)
+    ///   2 — a `_`-delimited word segment starts with filter  (word boundary)
+    ///   3 — filter appears as a contiguous substring
+    ///   4 — filter characters appear in order but non-contiguously  (subsequence)
+    ///
+    /// Within each tier items are sorted alphabetically so the list is stable
+    /// as the user types.
     pub fn filtered_indices(&self) -> Vec<usize> {
-        self.items
+        if self.filter.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+
+        let mut scored: Vec<(usize, u32)> = self
+            .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| fuzzy_match(&item.label, &self.filter))
-            .map(|(i, _)| i)
-            .collect()
+            .filter_map(|(i, item)| {
+                match_score(&item.label, &self.filter).map(|s| (i, s))
+            })
+            .collect();
+
+        // Primary sort: score (lower = better match).
+        // Secondary sort: alphabetical within each tier for a stable, predictable list.
+        scored.sort_by(|&(ai, a_score), &(bi, b_score)| {
+            a_score.cmp(&b_score).then_with(|| {
+                self.items[ai]
+                    .label
+                    .to_ascii_lowercase()
+                    .cmp(&self.items[bi].label.to_ascii_lowercase())
+            })
+        });
+
+        scored.into_iter().map(|(i, _)| i).collect()
     }
 
     /// The item at `self.selected` in the filtered set.
@@ -137,18 +169,53 @@ impl ListState {
     }
 }
 
-/// Case-insensitive subsequence match.
-fn fuzzy_match(label: &str, filter: &str) -> bool {
+/// Score how well `label` matches `filter` (case-insensitive).
+/// Returns `None` when there is no match at all.
+fn match_score(label: &str, filter: &str) -> Option<u32> {
     if filter.is_empty() {
-        return true;
+        return Some(u32::MAX); // won't be used — empty filter bypasses scoring
     }
-    let mut label_chars = label.chars().map(|c| c.to_ascii_lowercase());
-    for fc in filter.chars().map(|c| c.to_ascii_lowercase()) {
-        if !label_chars.any(|lc| lc == fc) {
-            return false;
+    let ll = label.to_ascii_lowercase();
+    let fl = filter.to_ascii_lowercase();
+
+    if ll == fl {
+        return Some(0); // exact
+    }
+    if ll.starts_with(fl.as_str()) {
+        return Some(1); // prefix
+    }
+    // Word-boundary prefix: filter matches the start of any `_`-separated segment.
+    if ll
+        .split('_')
+        .skip(1)
+        .any(|seg| seg.starts_with(fl.as_str()))
+    {
+        return Some(2);
+    }
+    if ll.contains(fl.as_str()) {
+        return Some(3); // contiguous substring
+    }
+    if is_subsequence(&ll, &fl) {
+        return Some(4); // non-contiguous subsequence
+    }
+    None
+}
+
+/// True if every character of `filter` appears in `label` in order.
+fn is_subsequence(label: &str, filter: &str) -> bool {
+    let mut filter_chars = filter.chars();
+    let Some(mut target) = filter_chars.next() else {
+        return true;
+    };
+    for c in label.chars() {
+        if c == target {
+            match filter_chars.next() {
+                None => return true,
+                Some(next) => target = next,
+            }
         }
     }
-    true
+    false
 }
 
 // ---------------------------------------------------------------------------

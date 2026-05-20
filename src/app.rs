@@ -15,6 +15,7 @@ use crate::{
     input,
     keymap::Keymap,
     kitty,
+    lang::lang_to_ext,
     lsp_manager::LspManager,
     mode::Mode,
     notebook::Notebook,
@@ -24,23 +25,9 @@ use crate::{
     ui,
 };
 
-/// Tracks an active full-screen cell-edit overlay session.
-///
-/// Carries everything needed for future LSP `notebookDocument` integration:
-/// - `notebook_path` → the `notebookDocument` URI (`file:///…/notebook.ipynb`)
-/// - `cell_index` + `cell_id` → stable cell identity; cell URI = `{notebook_path}#{cell_id}`
-/// - `language` → LSP `languageId` for the cell's virtual `textDocument`
-///
-/// When the overlay is active, `app.buffer` holds the cell source and
-/// `app.buffer.path` is a virtual path with the correct extension for syntax
-/// highlighting (e.g. `notebook__cell2.py`). That path becomes the
-/// `textDocument` URI when LSP is wired up.
+/// Tracks the notebook cell currently loaded into `app.buffer`.
 pub struct CellEditSession {
     pub cell_index: usize,
-    /// Stable cell id from the `.ipynb` — becomes the fragment of the LSP cell URI
-    /// (`notebookDocument` cell `document` field). Unused until Phase 3 LSP.
-    #[allow(dead_code)]
-    pub cell_id: String,
     /// Kernel language, e.g. `"python"` — becomes the LSP `languageId`.
     pub language: String,
     /// Path of the parent notebook — becomes the `notebookDocument` URI.
@@ -117,7 +104,7 @@ impl App {
         // For notebooks, pre-load cell 0 into the buffer so editing works immediately.
         let (buffer, notebook_cell_edit, lsp_language) = if let Some((ref nb, _)) = notebook {
             let lang = nb.metadata.kernel_language.clone();
-            let ext = nb_lang_ext(&lang);
+            let ext = lang_to_ext(&lang);
             let stem = nb.path.file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "notebook".into());
@@ -131,9 +118,8 @@ impl App {
                 buf.rope = cell.source.clone();
             }
             buf.path = Some(vpath.clone());
-            let session = nb.cells.first().map(|cell| crate::app::CellEditSession {
+            let session = nb.cells.first().map(|_cell| crate::app::CellEditSession {
                 cell_index: 0,
-                cell_id: cell.id.clone(),
                 language: lang.clone(),
                 notebook_path: nb.path.clone(),
             });
@@ -192,15 +178,6 @@ impl App {
             return Some(&session.language);
         }
         self.lsp_language.as_deref()
-    }
-}
-
-fn nb_lang_ext(lang: &str) -> &str {
-    match lang {
-        "python" | "python3" => "py",
-        "javascript" | "js" => "js",
-        "rust" => "rs",
-        _ => "txt",
     }
 }
 
@@ -312,7 +289,7 @@ fn run_loop(
                             mode: &app.mode,
                         };
                         let (images, cursor_pos) =
-                            crate::notebook_ui::render(f, state, nb, &app.config, &active);
+                            crate::notebook_ui::render(f, state, nb, &active);
                         app.pending_images = images;
                         nb_cursor = cursor_pos;
 
@@ -343,10 +320,21 @@ fn run_loop(
             })?;
 
             if !app.pending_images.is_empty() {
+                // Always clear stale Kitty graphics so they don't persist from
+                // the previous frame.
                 let _ = kitty::clear_images();
-                let images = std::mem::take(&mut app.pending_images);
-                for req in &images {
-                    let _ = kitty::render_image(req.col, req.row, req.rows, &req.png_data);
+
+                if app.popup.is_none() {
+                    // No popup visible — safe to paint images on top of cells.
+                    let images = std::mem::take(&mut app.pending_images);
+                    for req in &images {
+                        let _ = kitty::render_image(req.col, req.row, req.rows, &req.png_data);
+                    }
+                } else {
+                    // A popup is open: discard image requests for this frame so
+                    // Kitty graphics don't paint over the popup.  The next frame
+                    // without a popup will re-render them.
+                    app.pending_images.clear();
                 }
             }
         } else {

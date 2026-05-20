@@ -15,6 +15,17 @@ use crate::{
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Which LSP position-based request to send.
+#[derive(Debug, Clone, Copy)]
+pub enum LspRequestKind {
+    Completion,
+    Hover,
+    Definition,
+    References,
+    TypeDefinition,
+    Implementation,
+}
+
 /// A processed event from any language server.
 #[derive(Debug)]
 pub enum LspEvent {
@@ -127,7 +138,9 @@ impl LspManager {
                 self.clients.insert(language.to_owned(), client);
             }
             Err(_) => {
-                // Server binary not installed — silently ignore.
+                // Server binary not installed or failed to start.
+                // ki treats a missing LSP server as a soft degradation — no
+                // error displayed, the feature simply stays unavailable.
             }
         }
     }
@@ -156,103 +169,34 @@ impl LspManager {
         }
     }
 
-    pub fn request_completion(
+    /// Dispatch a position-based LSP request.
+    ///
+    /// Returns `false` if the server for `language` is not yet initialised,
+    /// so callers can show "try again in a moment" feedback.
+    pub fn request(
         &mut self,
+        kind: LspRequestKind,
         language: &str,
         path: &std::path::Path,
         rope: &ropey::Rope,
         char_idx: usize,
     ) -> bool {
         if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized { return false; }
+            if !client.initialized {
+                return false;
+            }
             let uri = path_to_uri(path);
             let (line, character) = char_to_lsp_pos(rope, char_idx);
-            client.request_completion(&uri, line, character);
-            return true;
-        }
-        false
-    }
-
-    pub fn request_hover(
-        &mut self,
-        language: &str,
-        path: &std::path::Path,
-        rope: &ropey::Rope,
-        char_idx: usize,
-    ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized { return false; }
-            let uri = path_to_uri(path);
-            let (line, character) = char_to_lsp_pos(rope, char_idx);
-            client.request_hover(&uri, line, character);
-            return true;
-        }
-        false
-    }
-
-    pub fn request_definition(
-        &mut self,
-        language: &str,
-        path: &std::path::Path,
-        rope: &ropey::Rope,
-        char_idx: usize,
-    ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized { return false; }
-            let uri = path_to_uri(path);
-            let (line, character) = char_to_lsp_pos(rope, char_idx);
-            client.request_definition(&uri, line, character);
-            return true;
-        }
-        false
-    }
-
-    pub fn request_references(
-        &mut self,
-        language: &str,
-        path: &std::path::Path,
-        rope: &ropey::Rope,
-        char_idx: usize,
-    ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized { return false; }
-            let uri = path_to_uri(path);
-            let (line, character) = char_to_lsp_pos(rope, char_idx);
-            client.request_references(&uri, line, character);
-            return true;
-        }
-        false
-    }
-
-    pub fn request_type_definition(
-        &mut self,
-        language: &str,
-        path: &std::path::Path,
-        rope: &ropey::Rope,
-        char_idx: usize,
-    ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized { return false; }
-            let uri = path_to_uri(path);
-            let (line, character) = char_to_lsp_pos(rope, char_idx);
-            client.request_type_definition(&uri, line, character);
-            return true;
-        }
-        false
-    }
-
-    pub fn request_implementation(
-        &mut self,
-        language: &str,
-        path: &std::path::Path,
-        rope: &ropey::Rope,
-        char_idx: usize,
-    ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized { return false; }
-            let uri = path_to_uri(path);
-            let (line, character) = char_to_lsp_pos(rope, char_idx);
-            client.request_implementation(&uri, line, character);
+            // All LspClient::request_* methods return a request id (u64) that
+            // is already tracked inside the client; discard it here.
+            let _req_id = match kind {
+                LspRequestKind::Completion    => client.request_completion(&uri, line, character),
+                LspRequestKind::Hover         => client.request_hover(&uri, line, character),
+                LspRequestKind::Definition    => client.request_definition(&uri, line, character),
+                LspRequestKind::References    => client.request_references(&uri, line, character),
+                LspRequestKind::TypeDefinition  => client.request_type_definition(&uri, line, character),
+                LspRequestKind::Implementation  => client.request_implementation(&uri, line, character),
+            };
             return true;
         }
         false
@@ -633,17 +577,27 @@ fn detect_python_venv(start: &std::path::Path) -> Option<std::path::PathBuf> {
 /// Ask the current `python3` on PATH where its executable lives.
 /// Handles pyenv shims, conda envs, and any other non-venv setup where the
 /// user's packages are installed into whichever Python is active in the shell.
+///
+/// Capped at 2 seconds so a misconfigured/slow Python can't hang ki startup.
 fn detect_active_python() -> Option<std::path::PathBuf> {
-    let out = std::process::Command::new("python3")
-        .args(["-c", "import sys; print(sys.executable)"])
-        .output()
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::process::Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output();
+        let _ = tx.send(result);
+    });
+
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .ok()?
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let path = std::path::PathBuf::from(
-        String::from_utf8_lossy(&out.stdout).trim(),
-    );
+    let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
     if path.exists() { Some(path) } else { None }
 }
 

@@ -135,6 +135,20 @@ impl Highlighter {
     }
 }
 
+/// Return the ratatui `Style` for whichever highlight span covers `char_idx`.
+///
+/// Spans may overlap; the last one that contains the index wins (same
+/// semantics as the old per-file helpers in `ui.rs` and `notebook_ui.rs`).
+pub fn style_at(spans: &[Span], char_idx: usize) -> ratatui::style::Style {
+    let mut result = ratatui::style::Style::default();
+    for &(start, end, hl) in spans {
+        if start <= char_idx && char_idx < end {
+            result = crate::theme::style_for_highlight(hl);
+        }
+    }
+    result
+}
+
 /// Build a `HighlightConfiguration` for the given language.
 fn build_config(lang: Language) -> Result<HighlightConfiguration> {
     let (ts_lang, highlights_query, injections_query, locals_query) = match lang {

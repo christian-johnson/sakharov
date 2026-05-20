@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::{
     app::App,
     highlight,
+    lang::lang_to_ext,
     mode::Mode,
     theme,
 };
@@ -141,7 +142,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             }
 
             // Determine base style from highlights
-            let base_style = get_highlight_style(spans, char_idx);
+            let base_style = highlight::style_at(spans, char_idx);
 
             // Apply selection or cursor overlay
             let style = if char_idx == cursor_pos {
@@ -176,20 +177,6 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 let w = c.width().unwrap_or(1);
                 cells.push((c, style));
                 col_offset += w;
-            }
-        }
-
-        // If cursor is past end of line content (empty line), render cursor block
-        if cursor_pos == line_start_char && line_len == 0 || (line_len > 0 && {
-            // cursor on last char slot = newline
-            let last_char_off = line_len.saturating_sub(1);
-            let last_c = line_str.char(last_char_off);
-            line_start_char + last_char_off == cursor_pos && (last_c == '\n' || last_c == '\r')
-        }) {
-            if cursor_pos == line_start_char + line_len.saturating_sub(
-                if line_len > 0 && (line_str.char(line_len-1) == '\n' || line_str.char(line_len-1) == '\r') { 1 } else { 0 }
-            ) || (line_len == 0 && cursor_pos == line_start_char) {
-                // Already handled above
             }
         }
 
@@ -241,18 +228,6 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
     Some((screen_x, screen_y))
 }
 
-fn get_highlight_style(spans: &[highlight::Span], char_idx: usize) -> Style {
-    // Binary search for the last span that starts <= char_idx
-    // Spans may overlap; we take the last one that covers this index.
-    let mut result = Style::default();
-    for &(start, end, hl) in spans {
-        if start <= char_idx && char_idx < end {
-            result = theme::style_for_highlight(hl);
-        }
-    }
-    result
-}
-
 fn char_display_width(c: char, col: usize, tab_width: usize) -> usize {
     if c == '\t' {
         tab_stop(col, tab_width)
@@ -286,12 +261,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         let nb_name = session.notebook_path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("notebook");
-        let ext = match session.language.as_str() {
-            "python" | "python3" => "py",
-            "javascript" | "js" => "js",
-            "rust" => "rs",
-            _ => "txt",
-        };
+        let ext = lang_to_ext(&session.language);
         let m = if app.buffer.modified { " [+]" } else { "" };
         (
             format!("{nb_name}  ·  cell [{}].{ext}", session.cell_index + 1),
@@ -357,7 +327,6 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         mode_style,
         filename: format!("  {filename}{modified}  "),
         right,
-        width: area.width as usize,
     };
     frame.render_widget(status_widget, area);
 }
@@ -446,7 +415,6 @@ struct StatusWidget {
     mode_style: Style,
     filename: String,
     right: String,
-    width: usize,
 }
 
 impl Widget for StatusWidget {
@@ -498,7 +466,6 @@ impl Widget for StatusWidget {
                 rx2 += 1;
             }
         }
-        let _ = self.width;
     }
 }
 

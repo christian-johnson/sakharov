@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use crate::{
-    config::Config,
-    highlight::Highlighter,
+    highlight::{self, Highlighter},
+    lang::lang_to_ext,
     mode::Mode,
     notebook::{Cell, CellType, KernelStatus, MimeData, Notebook, Output},
     notebook_state::NotebookState,
@@ -51,7 +51,6 @@ pub fn render(
     frame: &mut Frame,
     state: &NotebookState,
     nb: &Notebook,
-    config: &Config,
     active: &ActiveCellView<'_>,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let size = frame.area();
@@ -67,7 +66,7 @@ pub fn render(
         height: size.height.saturating_sub(2),
     };
 
-    render_cells(frame, state, nb, config, active, content_area)
+    render_cells(frame, state, nb, active, content_area)
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +77,6 @@ fn render_cells(
     frame: &mut Frame,
     state: &NotebookState,
     nb: &Notebook,
-    config: &Config,
     active: &ActiveCellView<'_>,
     area: Rect,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
@@ -143,7 +141,7 @@ fn render_cells(
 
         if inner.height > 0 {
             let cursor_screen = render_cell_content(
-                frame, state, nb, cell, is_focused, inner, config, active, &mut image_requests,
+                frame, nb, cell, is_focused, inner, active, &mut image_requests,
             );
             if is_focused {
                 focused_cell_screen_pos = cursor_screen;
@@ -166,12 +164,10 @@ fn render_cells(
 #[allow(clippy::too_many_arguments)]
 fn render_cell_content(
     frame: &mut Frame,
-    _state: &NotebookState,
     nb: &Notebook,
     cell: &Cell,
     is_focused: bool,
     area: Rect,
-    config: &Config,
     active: &ActiveCellView<'_>,
     image_requests: &mut Vec<ImageRequest>,
 ) -> Option<(u16, u16)> {
@@ -203,6 +199,14 @@ fn render_cell_content(
         vec![]
     };
 
+    let line_ctx = SourceLineCtx {
+        cursor_pos: cursor_char_idx,
+        sel_range,
+        mode: active.mode,
+        highlight_spans: &highlight_spans,
+        is_code: cell.cell_type == CellType::Code,
+    };
+
     let mut current_row = area.top();
     let mut cursor_screen: Option<(u16, u16)> = None;
     let pad_len = 2u16; // leading spaces
@@ -210,7 +214,6 @@ fn render_cell_content(
     for (line_no, line) in source_lines.iter().enumerate() {
         // Honour intra-cell scroll offset.
         if line_no < scroll_row {
-            // Track the char offset even for skipped lines.
             continue;
         }
         if current_row >= area.bottom() {
@@ -226,15 +229,14 @@ fn render_cell_content(
         // Compute cursor screen position if the cursor is on this line.
         if let Some(ci) = cursor_char_idx {
             let line_len = line.chars().count();
-            // cursor on this line?
             if ci >= line_start_char && ci <= line_start_char + line_len {
                 let col_in_line = ci - line_start_char;
                 let screen_x = area.x + pad_len + col_in_line as u16;
-                if screen_x < area.right() {
-                    cursor_screen = Some((screen_x, current_row));
+                cursor_screen = Some(if screen_x < area.right() {
+                    (screen_x, current_row)
                 } else {
-                    cursor_screen = Some((area.right().saturating_sub(1), current_row));
-                }
+                    (area.right().saturating_sub(1), current_row)
+                });
             }
         }
 
@@ -242,13 +244,8 @@ fn render_cell_content(
             frame,
             single_row(area, current_row),
             line,
-            cell,
             line_start_char,
-            cursor_char_idx,
-            sel_range,
-            active.mode,
-            &highlight_spans,
-            config,
+            &line_ctx,
         );
         current_row += 1;
     }
@@ -345,27 +342,21 @@ fn cell_type_label(cell: &Cell, kernel_language: &str) -> String {
     }
 }
 
-fn lang_to_ext(lang: &str) -> &str {
-    match lang {
-        "python" | "python3" => "py",
-        "javascript" | "js" => "js",
-        "rust" => "rs",
-        _ => "txt",
-    }
+/// Per-line rendering context shared across all source lines in a cell.
+struct SourceLineCtx<'a> {
+    cursor_pos: Option<usize>,
+    sel_range: (usize, usize),
+    mode: &'a Mode,
+    highlight_spans: &'a [(usize, usize, usize)],
+    is_code: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_source_line(
     frame: &mut Frame,
     area: Rect,
     line: &str,
-    cell: &Cell,
     line_start_char: usize,
-    cursor_pos: Option<usize>,
-    sel_range: (usize, usize),
-    mode: &Mode,
-    highlight_spans: &[(usize, usize, usize)],
-    _config: &Config,
+    ctx: &SourceLineCtx<'_>,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -388,13 +379,12 @@ fn render_source_line(
         return;
     }
     let content_area = Rect { x: content_x, y: area.y, width: content_width, height: 1 };
-    let is_code = cell.cell_type == CellType::Code;
-    let cursor_style = match mode {
+    let cursor_style = match ctx.mode {
         Mode::Insert => Style::default().bg(Color::Green).fg(Color::Black),
         _ => Style::default().bg(Color::White).fg(Color::Black),
     };
     let selection_style = Style::default().bg(Color::Rgb(60, 80, 120)).fg(Color::White);
-    let (sel_lo, sel_hi) = sel_range;
+    let (sel_lo, sel_hi) = ctx.sel_range;
     let has_selection = sel_lo != sel_hi;
 
     let mut x = content_area.x;
@@ -405,12 +395,12 @@ fn render_source_line(
             break;
         }
         let char_idx = line_start_char + char_off;
-        let base_style = if is_code {
-            get_highlight_style(highlight_spans, char_idx)
+        let base_style = if ctx.is_code {
+            highlight::style_at(ctx.highlight_spans, char_idx)
         } else {
             Style::default().fg(Color::Gray)
         };
-        let style = if cursor_pos == Some(char_idx) {
+        let style = if ctx.cursor_pos == Some(char_idx) {
             cursor_style
         } else if has_selection && char_idx >= sel_lo && char_idx < sel_hi {
             selection_style
@@ -422,7 +412,7 @@ fn render_source_line(
     }
 
     // Cursor past end-of-line (empty line or cursor at newline position).
-    if let Some(cp) = cursor_pos {
+    if let Some(cp) = ctx.cursor_pos {
         let line_len = line.chars().count();
         if cp == line_start_char + line_len && x < content_area.right() {
             frame.buffer_mut()[(x, area.y)]
@@ -430,16 +420,6 @@ fn render_source_line(
                 .set_style(cursor_style);
         }
     }
-}
-
-fn get_highlight_style(spans: &[(usize, usize, usize)], char_idx: usize) -> Style {
-    let mut result = Style::default();
-    for &(start, end, hl) in spans {
-        if start <= char_idx && char_idx < end {
-            result = crate::theme::style_for_highlight(hl);
-        }
-    }
-    result
 }
 
 fn render_output(

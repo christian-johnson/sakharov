@@ -5,8 +5,9 @@ use crate::{
     buffer::Buffer,
     command::Command,
     highlight::Highlighter,
+    lang::lang_to_ext,
     lsp::{lsp_pos_to_char, path_to_uri, NotebookCell},
-    lsp_manager::LspEvent,
+    lsp_manager::{LspEvent, LspRequestKind},
     mode::{FindDir, Mode},
     motion,
     notebook::{Cell, CellType},
@@ -28,79 +29,25 @@ pub fn execute(app: &mut App, cmd: &Command) {
     let extend = app.mode == Mode::Select;
 
     match cmd {
-        // --- Motions ---
-        Command::MoveLeft => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_left(rope, app.selection, extend);
-        }
-        Command::MoveRight => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_right(rope, app.selection, extend);
-        }
-        Command::MoveUp => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_up(rope, app.selection, extend);
-        }
-        Command::MoveDown => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_down(rope, app.selection, extend);
-        }
-        Command::MoveWordForward => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_word_forward(rope, app.selection, extend);
-        }
-        Command::MoveWordBackward => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_word_backward(rope, app.selection, extend);
-        }
-        Command::MoveWordEnd => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_word_end(rope, app.selection, extend);
-        }
-        Command::MoveBigWordForward => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_big_word_forward(rope, app.selection, extend);
-        }
-        Command::MoveBigWordBackward => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_big_word_backward(rope, app.selection, extend);
-        }
-        Command::MoveBigWordEnd => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_big_word_end(rope, app.selection, extend);
-        }
-        Command::MoveLineStart => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_line_start(rope, app.selection, extend);
-        }
-        Command::MoveLineFirstNonWs => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_line_first_non_ws(rope, app.selection, extend);
-        }
-        Command::MoveLineEnd => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::move_line_end(rope, app.selection, extend);
-        }
-        Command::GotoFileStart => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::goto_file_start(rope, app.selection, extend);
-        }
-        Command::GotoFileEnd => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::goto_file_end(rope, app.selection, extend);
-        }
-        Command::GotoLine(n) => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::goto_line(rope, app.selection, *n, extend);
-        }
-        Command::SelectLine => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::select_line(rope, app.selection);
-        }
-        Command::SelectAll => {
-            let rope = &app.buffer.rope;
-            app.selection = motion::select_all(rope);
-        }
+        // --- Motions (extend = true in Select mode) ---
+        Command::MoveLeft         => app.selection = motion::move_left(&app.buffer.rope, app.selection, extend),
+        Command::MoveRight        => app.selection = motion::move_right(&app.buffer.rope, app.selection, extend),
+        Command::MoveUp           => app.selection = motion::move_up(&app.buffer.rope, app.selection, extend),
+        Command::MoveDown         => app.selection = motion::move_down(&app.buffer.rope, app.selection, extend),
+        Command::MoveWordForward  => app.selection = motion::move_word_forward(&app.buffer.rope, app.selection, extend),
+        Command::MoveWordBackward => app.selection = motion::move_word_backward(&app.buffer.rope, app.selection, extend),
+        Command::MoveWordEnd      => app.selection = motion::move_word_end(&app.buffer.rope, app.selection, extend),
+        Command::MoveBigWordForward  => app.selection = motion::move_big_word_forward(&app.buffer.rope, app.selection, extend),
+        Command::MoveBigWordBackward => app.selection = motion::move_big_word_backward(&app.buffer.rope, app.selection, extend),
+        Command::MoveBigWordEnd      => app.selection = motion::move_big_word_end(&app.buffer.rope, app.selection, extend),
+        Command::MoveLineStart       => app.selection = motion::move_line_start(&app.buffer.rope, app.selection, extend),
+        Command::MoveLineFirstNonWs  => app.selection = motion::move_line_first_non_ws(&app.buffer.rope, app.selection, extend),
+        Command::MoveLineEnd         => app.selection = motion::move_line_end(&app.buffer.rope, app.selection, extend),
+        Command::GotoFileStart       => app.selection = motion::goto_file_start(&app.buffer.rope, app.selection, extend),
+        Command::GotoFileEnd         => app.selection = motion::goto_file_end(&app.buffer.rope, app.selection, extend),
+        Command::GotoLine(n)  => app.selection = motion::goto_line(&app.buffer.rope, app.selection, *n, extend),
+        Command::SelectLine   => app.selection = motion::select_line(&app.buffer.rope, app.selection),
+        Command::SelectAll    => app.selection = motion::select_all(&app.buffer.rope),
 
         // --- Popup / UI ---
         Command::OpenCommandPalette => {
@@ -725,41 +672,32 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- LSP ---
 
         Command::LspHover => {
-            lsp_request(app, LspAction::Hover);
+            lsp_request(app, LspRequestKind::Hover);
             return;
         }
         Command::LspGotoDefinition => {
-            lsp_request(app, LspAction::Definition);
+            lsp_request(app, LspRequestKind::Definition);
             return;
         }
         Command::LspGotoReferences => {
-            lsp_request(app, LspAction::References);
+            lsp_request(app, LspRequestKind::References);
             return;
         }
         Command::LspGotoTypeDefinition => {
-            lsp_request(app, LspAction::TypeDefinition);
+            lsp_request(app, LspRequestKind::TypeDefinition);
             return;
         }
         Command::LspGotoImplementation => {
-            lsp_request(app, LspAction::Implementation);
+            lsp_request(app, LspRequestKind::Implementation);
             return;
         }
         Command::LspRequestCompletion => {
-            lsp_request(app, LspAction::Completion);
+            lsp_request(app, LspRequestKind::Completion);
             return;
         }
     }
 
     update_scroll(app);
-}
-
-fn lang_ext(lang: &str) -> &str {
-    match lang {
-        "python" | "python3" => "py",
-        "javascript" | "js" => "js",
-        "rust" => "rs",
-        _ => "txt",
-    }
 }
 
 /// Snapshot the full cell list before a structural mutation (undo support).
@@ -792,11 +730,10 @@ pub fn load_focused_cell(app: &mut App) {
         }
         let cell = &nb.cells[idx];
         let language = nb.metadata.kernel_language.clone();
-        let cell_id = cell.id.clone();
         let notebook_path = nb.path.clone();
         let source = cell.source.clone();
 
-        let ext = lang_ext(&language);
+        let ext = lang_to_ext(&language);
         let stem = notebook_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -818,7 +755,6 @@ pub fn load_focused_cell(app: &mut App) {
 
         app.notebook_cell_edit = Some(crate::app::CellEditSession {
             cell_index: idx,
-            cell_id,
             language: language.clone(),
             notebook_path,
         });
@@ -1004,7 +940,7 @@ fn open_line_above(app: &mut App) {
 /// Build the full cell list for `notebookDocument/didOpen` or a reopen.
 fn build_notebook_cells(nb: &crate::notebook::Notebook) -> Vec<NotebookCell> {
     let lang = &nb.metadata.kernel_language;
-    let ext = lang_ext(lang);
+    let ext = lang_to_ext(lang);
     let stem = nb.path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "notebook".into());
@@ -1135,16 +1071,7 @@ fn clamp_selection(app: &mut App) {
 // LSP helpers
 // ---------------------------------------------------------------------------
 
-enum LspAction {
-    Hover,
-    Completion,
-    Definition,
-    References,
-    TypeDefinition,
-    Implementation,
-}
-
-fn lsp_request(app: &mut App, action: LspAction) {
+fn lsp_request(app: &mut App, kind: LspRequestKind) {
     let lang = match app.current_language() {
         Some(l) => l.to_owned(),
         None => {
@@ -1162,19 +1089,7 @@ fn lsp_request(app: &mut App, action: LspAction) {
     let char_idx = app.selection.head;
     let rope = app.buffer.rope.clone();
 
-    let sent = match action {
-        LspAction::Hover => app.lsp.request_hover(&lang, &path, &rope, char_idx),
-        LspAction::Completion => app.lsp.request_completion(&lang, &path, &rope, char_idx),
-        LspAction::Definition => app.lsp.request_definition(&lang, &path, &rope, char_idx),
-        LspAction::References => app.lsp.request_references(&lang, &path, &rope, char_idx),
-        LspAction::TypeDefinition => {
-            app.lsp.request_type_definition(&lang, &path, &rope, char_idx)
-        }
-        LspAction::Implementation => {
-            app.lsp.request_implementation(&lang, &path, &rope, char_idx)
-        }
-    };
-    if !sent {
+    if !app.lsp.request(kind, &lang, &path, &rope, char_idx) {
         app.message = Some("LSP server initializing — try again in a moment".into());
     }
 }
