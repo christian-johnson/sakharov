@@ -9,8 +9,10 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     app::App,
+    git::GutterMark,
     highlight,
     lang::lang_to_ext,
+    lsp_manager::DiagnosticSeverity,
     mode::Mode,
     theme,
 };
@@ -50,9 +52,28 @@ pub fn render(frame: &mut Frame, app: &App) {
 // ---------------------------------------------------------------------------
 
 fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
-    let gutter_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
+    // Git gutter is 1 char wide (only for regular files, not notebooks).
+    let git_col: u16 = if app.config.editor.git_gutter && app.notebook.is_none() { 1 } else { 0 };
+    let line_num_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
+    let gutter_width: u16 = git_col + line_num_width;
     let text_width = area.width.saturating_sub(gutter_width) as usize;
     let visible_rows = area.height as usize;
+
+    // Pre-compute per-line diagnostic ranges for the current file.
+    let diag_by_line: std::collections::HashMap<usize, Vec<(usize, usize, DiagnosticSeverity)>> = {
+        let mut map = std::collections::HashMap::new();
+        if let Some(ref path) = app.buffer.path {
+            let key = path.to_string_lossy().to_string();
+            if let Some(diags) = app.lsp.diagnostics.get(&key) {
+                for d in diags {
+                    map.entry(d.line)
+                        .or_insert_with(Vec::new)
+                        .push((d.col_start, d.col_end, d.severity.clone()));
+                }
+            }
+        }
+        map
+    };
 
     let rope = &app.buffer.rope;
     let total_lines = rope.len_lines();
@@ -71,15 +92,26 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
         let y = area.top() + row as u16;
 
         // --- Gutter ---
-        if app.config.editor.line_numbers && gutter_width > 0 {
-            let gutter_area = Rect {
-                x: area.left(),
-                y,
-                width: gutter_width,
-                height: 1,
-            };
-            let line_num_str = if line_idx < total_lines {
-                if app.config.editor.relative_line_numbers {
+        if gutter_width > 0 {
+            let mut gx = area.left();
+            let buf = frame.buffer_mut();
+
+            // Git mark column (1 char).
+            if git_col > 0 {
+                let (mark_ch, mark_color) = match app.git_diff.get(&line_idx) {
+                    Some(GutterMark::Added)    => ('+', Color::Green),
+                    Some(GutterMark::Modified) => ('~', Color::Yellow),
+                    None                       => (' ', Color::DarkGray),
+                };
+                buf[(gx, y)]
+                    .set_char(mark_ch)
+                    .set_style(Style::default().fg(mark_color));
+                gx += 1;
+            }
+
+            // Line number column (5 chars).
+            if line_num_width > 0 && line_idx < total_lines {
+                let line_num_str = if app.config.editor.relative_line_numbers {
                     let cursor_line = rope
                         .char_to_line(app.selection.head.min(rope.len_chars().saturating_sub(1)));
                     if line_idx == cursor_line {
@@ -90,15 +122,26 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 } else {
                     format!("{:4} ", line_idx + 1)
+                };
+                let num_style = Style::default().fg(Color::DarkGray);
+                for c in line_num_str.chars() {
+                    if gx >= area.left() + gutter_width {
+                        break;
+                    }
+                    buf[(gx, y)].set_char(c).set_style(num_style);
+                    gx += 1;
                 }
-            } else {
-                "     ".to_string()
-            };
-            let gutter_widget = GutterWidget {
-                text: line_num_str,
-                style: Style::default().fg(Color::DarkGray),
-            };
-            frame.render_widget(gutter_widget, gutter_area);
+            } else if line_num_width > 0 {
+                // Past end of file — blank line number.
+                let num_style = Style::default().fg(Color::DarkGray);
+                for _ in 0..line_num_width {
+                    if gx >= area.left() + gutter_width {
+                        break;
+                    }
+                    buf[(gx, y)].set_char(' ').set_style(num_style);
+                    gx += 1;
+                }
+            }
         }
 
         // --- Text content ---
@@ -144,7 +187,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             // Determine base style from highlights
             let base_style = highlight::style_at(spans, char_idx);
 
-            // Apply selection or cursor overlay
+            // Apply selection or cursor overlay.
             let style = if char_idx == cursor_pos {
                 match app.mode {
                     Mode::Insert => theme::cursor_insert_style(),
@@ -154,6 +197,31 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 theme::selection_style()
             } else {
                 base_style
+            };
+
+            // Diagnostic underline (does not override cursor/selection colours).
+            let char_off = char_idx - line_start_char;
+            let style = if let Some(line_diags) = diag_by_line.get(&line_idx) {
+                let worst = line_diags
+                    .iter()
+                    .filter(|(cs, ce, _)| char_off >= *cs && char_off < *ce)
+                    .fold(None::<&DiagnosticSeverity>, |acc, (_, _, sev)| {
+                        Some(match acc {
+                            Some(DiagnosticSeverity::Error) => &DiagnosticSeverity::Error,
+                            _ => sev,
+                        })
+                    });
+                match worst {
+                    Some(DiagnosticSeverity::Error) => style
+                        .add_modifier(ratatui::style::Modifier::UNDERLINED)
+                        .underline_color(Color::Red),
+                    Some(_) => style
+                        .add_modifier(ratatui::style::Modifier::UNDERLINED)
+                        .underline_color(Color::Yellow),
+                    None => style,
+                }
+            } else {
+                style
             };
 
             if c == '\n' || c == '\r' {
@@ -188,9 +256,12 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 /// Compute the terminal (col, row) of the cursor for `frame.set_cursor_position`.
 /// Returns None if the cursor is scrolled off screen.
 pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
+    let git_col: u16 = if app.config.editor.git_gutter && app.notebook.is_none() { 1 } else { 0 };
+    let line_num_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
+    let gutter_width = git_col + line_num_width;
+
     let rope = &app.buffer.rope;
     if rope.len_chars() == 0 {
-        let gutter_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
         return Some((lines_area.left() + gutter_width, lines_area.top()));
     }
 
@@ -216,14 +287,13 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
         col += if c == '\t' { tab_stop(col, tab_width) } else { c.width().unwrap_or(1) };
     }
 
-    let gutter_width = if app.config.editor.line_numbers { 5usize } else { 0 };
     let text_col = col.saturating_sub(app.scroll_col);
-    let text_width = lines_area.width.saturating_sub(gutter_width as u16) as usize;
+    let text_width = lines_area.width.saturating_sub(gutter_width) as usize;
     if text_col >= text_width {
         return None;
     }
 
-    let screen_x = lines_area.left() + gutter_width as u16 + text_col as u16;
+    let screen_x = lines_area.left() + gutter_width + text_col as u16;
     let screen_y = lines_area.top() + screen_row as u16;
     Some((screen_x, screen_y))
 }
@@ -362,26 +432,6 @@ fn render_command(frame: &mut Frame, app: &App, area: Rect) {
 // Custom widgets
 // ---------------------------------------------------------------------------
 
-struct GutterWidget {
-    text: String,
-    style: Style,
-}
-
-impl Widget for GutterWidget {
-    fn render(self, area: Rect, buf: &mut RatBuffer) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        let mut x = area.left();
-        for c in self.text.chars() {
-            if x >= area.right() {
-                break;
-            }
-            buf[( x, area.top())].set_char(c).set_style(self.style);
-            x += 1;
-        }
-    }
-}
 
 struct EmptyLineWidget;
 

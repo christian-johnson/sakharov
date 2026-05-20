@@ -7,11 +7,12 @@ use crate::{
     highlight::Highlighter,
     lang::lang_to_ext,
     lsp::{lsp_pos_to_char, path_to_uri, NotebookCell},
-    lsp_manager::{LspEvent, LspRequestKind},
+    lsp_manager::{LspEvent, LspLocation, LspRequestKind},
     mode::{FindDir, Mode},
     motion,
     notebook::{Cell, CellType},
     selection::Selection,
+    symbols,
 };
 
 // Helper: resolve the notebook's parent directory, falling back to cwd.
@@ -56,6 +57,107 @@ pub fn execute(app: &mut App, cmd: &Command) {
             ));
             return;
         }
+        Command::OpenBufferPicker => {
+            let current = app.buffer.path.clone();
+            let items: Vec<crate::popup::ListItem> = app
+                .open_buffers
+                .iter()
+                .filter_map(|p| {
+                    let name = p.file_name()?.to_string_lossy().into_owned();
+                    let detail = p.to_string_lossy().into_owned();
+                    Some(crate::popup::ListItem::navigate(name, detail, p, 0, 0))
+                })
+                .collect();
+            if items.is_empty() {
+                app.message = Some("No open buffers".into());
+            } else {
+                // Pre-select the current file if it's in the list.
+                let mut popup = crate::popup::Popup::navigate("buffers", items);
+                if let crate::popup::PopupContent::List(ref mut state) = popup.content {
+                    if let Some(cur) = &current {
+                        let cur_str = cur.to_string_lossy();
+                        if let Some(idx) = state
+                            .items
+                            .iter()
+                            .position(|it| it.detail.as_deref() == Some(cur_str.as_ref()))
+                        {
+                            state.selected = idx;
+                        }
+                    }
+                }
+                app.popup = Some(popup);
+            }
+            return;
+        }
+        Command::OpenSymbolPicker => {
+            let lang = app.current_language().unwrap_or("").to_owned();
+            let path = app.buffer.path.clone().unwrap_or_else(|| {
+                std::path::PathBuf::from(format!("untitled.{}", crate::lang::lang_to_ext(&lang)))
+            });
+            let syms = symbols::extract_symbols(&app.buffer.rope, &lang);
+            if syms.is_empty() {
+                app.message = Some("No symbols found".into());
+            } else {
+                let items: Vec<crate::popup::ListItem> = syms
+                    .iter()
+                    .map(|s| {
+                        crate::popup::ListItem::navigate(
+                            format!("{} {}", s.kind, s.name),
+                            format!("line {}", s.line + 1),
+                            &path,
+                            s.line,
+                            s.col,
+                        )
+                    })
+                    .collect();
+                app.popup = Some(crate::popup::Popup::navigate("symbols", items));
+            }
+            return;
+        }
+        Command::OpenDiagnosticPicker => {
+            // Collect all diagnostics across every tracked file.
+            let mut items: Vec<crate::popup::ListItem> = Vec::new();
+            for (path_str, diags) in &app.lsp.diagnostics {
+                let path = std::path::PathBuf::from(path_str);
+                let file = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_str.clone());
+                for d in diags {
+                    let sev = match d.severity {
+                        crate::lsp_manager::DiagnosticSeverity::Error => "error",
+                        crate::lsp_manager::DiagnosticSeverity::Warning => "warning",
+                        crate::lsp_manager::DiagnosticSeverity::Information => "info",
+                        crate::lsp_manager::DiagnosticSeverity::Hint => "hint",
+                    };
+                    items.push(crate::popup::ListItem::navigate(
+                        d.message.clone(),
+                        format!("{file}:{} [{sev}]", d.line + 1),
+                        &path,
+                        d.line,
+                        d.col_start,
+                    ));
+                }
+            }
+            if items.is_empty() {
+                app.message = Some("No diagnostics".into());
+            } else {
+                // Sort: errors first, then warnings, then by file+line.
+                items.sort_by(|a, b| {
+                    let sev_rank = |detail: &Option<String>| -> u8 {
+                        match detail.as_deref().and_then(|d| d.split('[').nth(1)) {
+                            Some(s) if s.starts_with("error") => 0,
+                            Some(s) if s.starts_with("warning") => 1,
+                            _ => 2,
+                        }
+                    };
+                    sev_rank(&a.detail).cmp(&sev_rank(&b.detail))
+                        .then_with(|| a.detail.cmp(&b.detail))
+                });
+                app.popup = Some(crate::popup::Popup::navigate("diagnostics", items));
+            }
+            return;
+        }
 
         // --- Sub-mode entries (return early — no scroll update) ---
         Command::EnterGotoMode => {
@@ -67,8 +169,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
             let mut hints = vec![
                 ("g".into(), "go to file start".into()),
                 ("e".into(), "go to file end".into()),
-                ("h/s".into(), "go to line first non-whitespace".into()),
+                ("h".into(), "go to line first non-whitespace".into()),
                 ("l".into(), "go to line end".into()),
+                ("b".into(), "buffer picker".into()),
+                ("s".into(), "symbol picker".into()),
+                ("D".into(), "diagnostic picker  [LSP]".into()),
             ];
             if lsp_active {
                 hints.push(("d".into(), "go to definition  [LSP]".into()));
@@ -250,6 +355,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 match app.buffer.save(None) {
                     Ok(()) => {
                         app.message = Some(format!("Saved {}", app.buffer.display_name()));
+                        if let Some(ref path) = app.buffer.path.clone() {
+                            app.git_diff = crate::git::diff_marks(path);
+                        }
                     }
                     Err(e) => {
                         app.message = Some(format!("Error: {e}"));
@@ -1176,6 +1284,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                             .unwrap_or_else(|| item.label.clone()),
                         detail: item.detail.clone(),
                         kind: item.kind.clone(),
+                        payload: None,
                     })
                     .collect();
                 app.popup = Some(crate::popup::Popup::completion(popup_items));
@@ -1210,6 +1319,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                             label: format!("{}:{}", file, loc.line + 1),
                             detail: Some(loc.path.to_string_lossy().to_string()),
                             kind: None,
+                            payload: None,
                         }
                     })
                     .collect();
@@ -1221,12 +1331,8 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
     }
 }
 
-fn jump_to_location(app: &mut App, loc: &crate::lsp_manager::LspLocation) {
-    let current = app
-        .buffer
-        .path
-        .as_ref()
-        .and_then(|p| p.canonicalize().ok());
+pub fn jump_to_location(app: &mut App, loc: &LspLocation) {
+    let current = app.buffer.path.as_ref().and_then(|p| p.canonicalize().ok());
     let target = loc.path.canonicalize().ok().unwrap_or_else(|| loc.path.clone());
 
     let same_file = current.map(|c| c == target).unwrap_or(false);
@@ -1241,7 +1347,7 @@ fn jump_to_location(app: &mut App, loc: &crate::lsp_manager::LspLocation) {
 }
 
 /// Load `path` into the editor buffer and place the cursor at (line, character).
-fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, character: usize) {
+pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, character: usize) {
     // Close the old virtual document in LSP if applicable.
     if let (Some(ref lang), Some(ref old_path)) = (
         app.lsp_language.clone(),
@@ -1290,6 +1396,14 @@ fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, character: u
     let char_idx = lsp_pos_to_char(&app.buffer.rope, line, character);
     app.selection = Selection::point(char_idx);
     update_scroll(app);
+
+    // Track this path in the session buffer list (deduplicated).
+    if !app.open_buffers.iter().any(|p| p.as_path() == path) {
+        app.open_buffers.push(path.to_path_buf());
+    }
+
+    // Refresh git diff marks for the newly opened file.
+    app.git_diff = crate::git::diff_marks(path);
 
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     app.message = Some(format!("Opened {} (line {})", name, line + 1));

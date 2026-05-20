@@ -11,6 +11,7 @@ use std::panic;
 use crate::{
     buffer::Buffer,
     config::Config,
+    git::GutterMark,
     highlight::{Highlighter, Span},
     input,
     keymap::Keymap,
@@ -77,6 +78,10 @@ pub struct App {
     pub search_current: usize,
     /// Visible text rows in the editor area — updated each render frame.
     pub viewport_height: usize,
+    /// All file paths opened in this session (for the buffer picker).
+    pub open_buffers: Vec<std::path::PathBuf>,
+    /// Git diff marks for the current buffer, keyed by 0-indexed line number.
+    pub git_diff: std::collections::HashMap<usize, GutterMark>,
 }
 
 impl App {
@@ -142,6 +147,21 @@ impl App {
 
         let initial_mode = if notebook.is_some() { Mode::Notebook } else { Mode::Normal };
 
+        // Track the initial file in the buffer list.
+        let mut open_buffers: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(p) = buffer.path.as_ref() {
+            open_buffers.push(p.clone());
+        } else if let Some((ref nb, _)) = notebook {
+            open_buffers.push(nb.path.clone());
+        }
+
+        // Compute initial git diff (best-effort; empty when not in a git repo).
+        let git_diff = buffer
+            .path
+            .as_deref()
+            .map(crate::git::diff_marks)
+            .unwrap_or_default();
+
         Ok(Self {
             buffer,
             selection: Selection::point(0),
@@ -168,6 +188,8 @@ impl App {
             search_matches: Vec::new(),
             search_current: 0,
             viewport_height: 24,
+            open_buffers,
+            git_diff,
         })
     }
 
@@ -289,7 +311,7 @@ fn run_loop(
                             mode: &app.mode,
                         };
                         let (images, cursor_pos) =
-                            crate::notebook_ui::render(f, state, nb, &active);
+                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics);
                         app.pending_images = images;
                         nb_cursor = cursor_pos;
 
@@ -383,7 +405,8 @@ fn update_scroll_to_fit(
 ) {
     let size = terminal.size().unwrap_or_default();
     let visible_rows = size.height.saturating_sub(2) as usize; // minus status + cmd bar
-    let gutter_width: usize = if app.config.editor.line_numbers { 5 } else { 0 };
+    let git_col = if app.config.editor.git_gutter && app.notebook.is_none() { 1usize } else { 0 };
+    let gutter_width: usize = if app.config.editor.line_numbers { 5 + git_col } else { git_col };
     let visible_cols = (size.width as usize).saturating_sub(gutter_width);
 
     if visible_rows == 0 || visible_cols == 0 {

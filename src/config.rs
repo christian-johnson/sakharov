@@ -33,6 +33,9 @@ pub struct EditorConfig {
     pub relative_line_numbers: bool,
     /// Lines to keep visible above/below cursor.
     pub scroll_off: usize,
+    /// Show a 1-column git diff marker to the left of line numbers.
+    #[serde(default)]
+    pub git_gutter: bool,
 }
 
 /// Configuration for a single language server.

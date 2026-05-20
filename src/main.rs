@@ -3,6 +3,7 @@ mod buffer;
 mod command;
 mod config;
 mod exec;
+mod git;
 mod highlight;
 mod input;
 mod keymap;
@@ -19,6 +20,7 @@ mod popup;
 mod popup_input;
 mod popup_ui;
 mod selection;
+mod symbols;
 mod theme;
 mod ui;
 

@@ -5,6 +5,7 @@ use crate::{
     command::Command,
     exec,
     keymap::KeyBinding,
+    lsp_manager::LspLocation,
     mode::{FindDir, Mode},
     motion,
     popup::{PopupAction, PopupContent, PopupTarget},
@@ -240,7 +241,7 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
         KeyCode::Char('e') => {
             app.selection = motion::goto_file_end(&app.buffer.rope, app.selection, extend);
         }
-        KeyCode::Char('h') | KeyCode::Char('s') => {
+        KeyCode::Char('h') => {
             app.selection = motion::move_line_first_non_ws(&app.buffer.rope, app.selection, extend);
         }
         KeyCode::Char('l') => {
@@ -251,6 +252,10 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
         KeyCode::Char('r') => exec::execute(app, &Command::LspGotoReferences),
         KeyCode::Char('y') => exec::execute(app, &Command::LspGotoTypeDefinition),
         KeyCode::Char('i') => exec::execute(app, &Command::LspGotoImplementation),
+        // Picker bindings
+        KeyCode::Char('b') => exec::execute(app, &Command::OpenBufferPicker),
+        KeyCode::Char('s') => exec::execute(app, &Command::OpenSymbolPicker),
+        KeyCode::Char('D') => exec::execute(app, &Command::OpenDiagnosticPicker),
         KeyCode::Esc => {}
         _ => {}
     }
@@ -468,6 +473,16 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
             exec::lsp_did_change(app);
         }
         PopupTarget::Dismiss => {}
+        PopupTarget::Navigate => {
+            // Payload format: "path\0line\0col" (zero-indexed line and col).
+            let parts: Vec<&str> = text.splitn(3, '\0').collect();
+            if parts.len() == 3 {
+                let path = std::path::PathBuf::from(parts[0]);
+                let line: usize = parts[1].parse().unwrap_or(0);
+                let character: usize = parts[2].parse().unwrap_or(0);
+                exec::jump_to_location(app, &LspLocation { path, line, character });
+            }
+        }
     }
 }
 

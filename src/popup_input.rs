@@ -29,7 +29,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         KeyCode::Enter => match &popup.content {
             PopupContent::List(state) => {
                 if let Some(item) = state.selected_item() {
-                    PopupAction::Confirm(item.label.clone())
+                    // Return payload when present (navigate/location pickers),
+                    // otherwise fall back to the label (command palette, completion).
+                    let text = item.payload.as_deref().unwrap_or(&item.label).to_owned();
+                    PopupAction::Confirm(text)
                 } else {
                     PopupAction::Dismiss
                 }

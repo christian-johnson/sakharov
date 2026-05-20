@@ -53,6 +53,12 @@ pub enum Command {
     // Popup / UI
     /// Open the command palette popup.
     OpenCommandPalette,
+    /// Open the fuzzy buffer-list picker.
+    OpenBufferPicker,
+    /// Open the symbol picker (tree-sitter).
+    OpenSymbolPicker,
+    /// Open the diagnostic picker (LSP diagnostics).
+    OpenDiagnosticPicker,
 
     // File / application
     Save,
@@ -177,6 +183,9 @@ impl Command {
             Command::EnterSelect => "enter-select",
             Command::EnterCommandMode => "enter-command-mode",
             Command::OpenCommandPalette => "open-command-palette",
+            Command::OpenBufferPicker => "open-buffer-picker",
+            Command::OpenSymbolPicker => "open-symbol-picker",
+            Command::OpenDiagnosticPicker => "open-diagnostic-picker",
             Command::Save => "save",
             Command::SaveAs(_) => "save-as",
             Command::Quit => "quit",
@@ -276,6 +285,9 @@ impl Command {
 
             // Popup / UI
             "open-command-palette" | "palette" | "commands" => Some(Command::OpenCommandPalette),
+            "open-buffer-picker"     | "buffers" => Some(Command::OpenBufferPicker),
+            "open-symbol-picker"     | "symbols" => Some(Command::OpenSymbolPicker),
+            "open-diagnostic-picker" | "diagnostics" => Some(Command::OpenDiagnosticPicker),
 
             // Canonical no-arg commands
             "move-left"               => Some(Command::MoveLeft),

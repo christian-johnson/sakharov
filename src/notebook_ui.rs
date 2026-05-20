@@ -9,6 +9,7 @@ use ratatui::{
 use crate::{
     highlight::{self, Highlighter},
     lang::lang_to_ext,
+    lsp_manager::{Diagnostic, DiagnosticSeverity},
     mode::Mode,
     notebook::{Cell, CellType, KernelStatus, MimeData, Notebook, Output},
     notebook_state::NotebookState,
@@ -52,6 +53,7 @@ pub fn render(
     state: &NotebookState,
     nb: &Notebook,
     active: &ActiveCellView<'_>,
+    lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let size = frame.area();
     if size.height < 3 {
@@ -66,7 +68,7 @@ pub fn render(
         height: size.height.saturating_sub(2),
     };
 
-    render_cells(frame, state, nb, active, content_area)
+    render_cells(frame, state, nb, active, lsp_diagnostics, content_area)
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +80,7 @@ fn render_cells(
     state: &NotebookState,
     nb: &Notebook,
     active: &ActiveCellView<'_>,
+    lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     area: Rect,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let mut image_requests = Vec::new();
@@ -141,7 +144,8 @@ fn render_cells(
 
         if inner.height > 0 {
             let cursor_screen = render_cell_content(
-                frame, nb, cell, is_focused, inner, active, &mut image_requests,
+                frame, nb, cell, cell_idx, is_focused, inner, active,
+                lsp_diagnostics, &mut image_requests,
             );
             if is_focused {
                 focused_cell_screen_pos = cursor_screen;
@@ -166,9 +170,11 @@ fn render_cell_content(
     frame: &mut Frame,
     nb: &Notebook,
     cell: &Cell,
+    cell_idx: usize,
     is_focused: bool,
     area: Rect,
     active: &ActiveCellView<'_>,
+    lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     image_requests: &mut Vec<ImageRequest>,
 ) -> Option<(u16, u16)> {
     // For the focused cell, use the live buffer rope; otherwise use stored source.
@@ -199,12 +205,37 @@ fn render_cell_content(
         vec![]
     };
 
+    // Collect diagnostics for this cell's virtual path (e.g. notebook__cell0.py).
+    // Format: (line_within_cell, col_start, col_end, severity).
+    let cell_diag_ranges: Vec<(usize, usize, usize, DiagnosticSeverity)> = {
+        let lang = &nb.metadata.kernel_language;
+        let ext = lang_to_ext(lang);
+        let stem = nb.path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "notebook".into());
+        let dir = nb.path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let vpath = dir.join(format!("{stem}__cell{cell_idx}.{ext}"));
+        let key = vpath.to_string_lossy().to_string();
+        lsp_diagnostics
+            .get(&key)
+            .map(|diags| {
+                diags.iter()
+                    .map(|d| (d.line, d.col_start, d.col_end, d.severity.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     let line_ctx = SourceLineCtx {
         cursor_pos: cursor_char_idx,
         sel_range,
         mode: active.mode,
         highlight_spans: &highlight_spans,
         is_code: cell.cell_type == CellType::Code,
+        diag_ranges: &cell_diag_ranges,
     };
 
     let mut current_row = area.top();
@@ -244,6 +275,7 @@ fn render_cell_content(
             frame,
             single_row(area, current_row),
             line,
+            line_no,
             line_start_char,
             &line_ctx,
         );
@@ -349,12 +381,15 @@ struct SourceLineCtx<'a> {
     mode: &'a Mode,
     highlight_spans: &'a [(usize, usize, usize)],
     is_code: bool,
+    /// Diagnostic ranges for this cell: (line_within_cell, col_start, col_end, severity).
+    diag_ranges: &'a [(usize, usize, usize, DiagnosticSeverity)],
 }
 
 fn render_source_line(
     frame: &mut Frame,
     area: Rect,
     line: &str,
+    line_no: usize,
     line_start_char: usize,
     ctx: &SourceLineCtx<'_>,
 ) {
@@ -406,6 +441,28 @@ fn render_source_line(
             selection_style
         } else {
             base_style
+        };
+        // Diagnostic underline (does not override cursor/selection colours).
+        let style = {
+            let worst = ctx
+                .diag_ranges
+                .iter()
+                .filter(|(dl, cs, ce, _)| *dl == line_no && char_off >= *cs && char_off < *ce)
+                .fold(None::<&DiagnosticSeverity>, |acc, (_, _, _, sev)| {
+                    Some(match acc {
+                        Some(DiagnosticSeverity::Error) => &DiagnosticSeverity::Error,
+                        _ => sev,
+                    })
+                });
+            match worst {
+                Some(DiagnosticSeverity::Error) => style
+                    .add_modifier(ratatui::style::Modifier::UNDERLINED)
+                    .underline_color(Color::Red),
+                Some(_) => style
+                    .add_modifier(ratatui::style::Modifier::UNDERLINED)
+                    .underline_color(Color::Yellow),
+                None => style,
+            }
         };
         buf[(x, area.y)].set_char(c).set_style(style);
         x += 1;

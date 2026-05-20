@@ -54,6 +54,9 @@ pub enum PopupTarget {
     InsertText,
     /// Just close the popup (for Text / informational List).
     Dismiss,
+    /// Jump to the location encoded in the confirmed item's payload.
+    /// Payload format: `"path\0line\0col"` (all fields, line/col zero-indexed).
+    Navigate,
 }
 
 /// Returned by popup input handling.
@@ -82,6 +85,32 @@ pub struct ListItem {
     pub label: String,
     pub detail: Option<String>,
     pub kind: Option<String>,
+    /// Returned verbatim as the `Confirm` payload instead of `label`.
+    /// Use `NavigateTarget::encode` or set manually to `"path\0line\0col"`.
+    pub payload: Option<String>,
+}
+
+impl ListItem {
+    /// Convenience constructor for navigate items (buffer/symbol/diagnostic pickers).
+    pub fn navigate(
+        label: impl Into<String>,
+        detail: impl Into<String>,
+        path: &std::path::Path,
+        line: usize,
+        col: usize,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            detail: Some(detail.into()),
+            kind: None,
+            payload: Some(format!(
+                "{}\0{}\0{}",
+                path.to_string_lossy(),
+                line,
+                col
+            )),
+        }
+    }
 }
 
 impl ListState {
@@ -300,6 +329,21 @@ impl Popup {
         }
     }
 
+    /// Fuzzy-filterable navigate list (buffer picker, symbol picker, diagnostics).
+    pub fn navigate(title: &str, items: Vec<ListItem>) -> Self {
+        Self {
+            title: Some(title.into()),
+            content: PopupContent::List(ListState {
+                items,
+                filter: String::new(),
+                selected: 0,
+            }),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.65),
+            on_confirm: PopupTarget::Navigate,
+        }
+    }
+
     /// Which-key strip shown at the bottom of the screen.
     pub fn which_key(prefix: &str, hints: Vec<(String, String)>) -> Self {
         Self {
@@ -397,6 +441,10 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("lsp-request-completion", "Request completions  [ctrl+space]"),
         // UI
         ("open-command-palette", "Open fuzzy-searchable command palette  [Space]"),
+        // Pickers
+        ("open-buffer-picker",     "Switch buffer  [gb]"),
+        ("open-symbol-picker",     "Jump to symbol in file  [gs]"),
+        ("open-diagnostic-picker", "Jump to diagnostic  [gD]"),
     ];
     entries
         .iter()
@@ -404,6 +452,7 @@ pub fn command_palette_items() -> Vec<ListItem> {
             label: label.to_string(),
             detail: Some(detail.to_string()),
             kind: None,
+            payload: None,
         })
         .collect()
 }
