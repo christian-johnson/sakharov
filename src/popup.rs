@@ -441,6 +441,7 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("lsp-request-completion", "Request completions  [ctrl+space]"),
         // UI
         ("open-command-palette", "Open fuzzy-searchable command palette  [Space]"),
+        ("toggle-git-gutter",    "Toggle git gutter indicators  [:toggle-git-gutter]"),
         // Pickers
         ("open-buffer-picker",     "Switch buffer  [gb]"),
         ("open-symbol-picker",     "Jump to symbol in file  [gs]"),

@@ -110,3 +110,4 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 | Command | Default Key | Description |
 |---------|-------------|-------------|
 | `open-command-palette` | `Space`, `:palette` | Open fuzzy-searchable command palette |
+| `toggle-git-gutter` | — | Toggle visibility of the git gutter indicator column |

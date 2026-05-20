@@ -136,6 +136,8 @@ pub enum Command {
     LspGotoImplementation,
     /// Explicitly request completions at the cursor position.
     LspRequestCompletion,
+    /// Toggle visual indicators for the git gutter.
+    ToggleGitGutter,
 }
 
 impl Command {
@@ -225,6 +227,7 @@ impl Command {
             Command::LspGotoTypeDefinition => "lsp-goto-type-definition",
             Command::LspGotoImplementation => "lsp-goto-implementation",
             Command::LspRequestCompletion => "lsp-request-completion",
+            Command::ToggleGitGutter => "toggle-git-gutter",
         }
     }
 
@@ -388,6 +391,7 @@ impl Command {
                 Some(Command::LspGotoImplementation)
             }
             "lsp-request-completion" | "completion" => Some(Command::LspRequestCompletion),
+            "toggle-git-gutter" | "git-gutter" | "gutter" => Some(Command::ToggleGitGutter),
 
             _ => None,
         }

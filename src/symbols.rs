@@ -19,10 +19,9 @@ pub fn extract_symbols(rope: &Rope, language: &str) -> Vec<Symbol> {
             &source,
             tree_sitter_python::language(),
             // Each pattern corresponds to one entry in `kinds` by index.
-            "(function_definition       name: (identifier) @name)
-             (async_function_definition name: (identifier) @name)
-             (class_definition          name: (identifier) @name)",
-            &["fn", "async fn", "class"],
+            "(function_definition name: (identifier) @name)
+             (class_definition    name: (identifier) @name)",
+            &["fn", "class"],
         ),
         "rust" => run(
             &source,
@@ -90,4 +89,53 @@ fn run(
 
     symbols.sort_by_key(|s| s.line);
     symbols
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_python_symbols() {
+        let code = "def foo():\n    pass\n\nasync def bar():\n    pass\n\nclass Bar:\n    def baz():\n        pass";
+        let rope = ropey::Rope::from_str(code);
+        let syms = extract_symbols(&rope, "python");
+        assert_eq!(syms.len(), 4);
+        assert_eq!(syms[0].name, "foo");
+        assert_eq!(syms[0].kind, "fn");
+        assert_eq!(syms[1].name, "bar");
+        assert_eq!(syms[1].kind, "fn");
+        assert_eq!(syms[2].name, "Bar");
+        assert_eq!(syms[2].kind, "class");
+        assert_eq!(syms[3].name, "baz");
+        assert_eq!(syms[3].kind, "fn");
+    }
+
+    #[test]
+    fn test_rust_symbols() {
+        let code = "fn foo() {} \nstruct Bar; \nimpl Bar {}";
+        let rope = ropey::Rope::from_str(code);
+        let syms = extract_symbols(&rope, "rust");
+        assert_eq!(syms.len(), 3);
+        assert_eq!(syms[0].name, "foo");
+        assert_eq!(syms[0].kind, "fn");
+        assert_eq!(syms[1].name, "Bar");
+        assert_eq!(syms[1].kind, "struct");
+        assert_eq!(syms[2].name, "Bar");
+        assert_eq!(syms[2].kind, "impl");
+    }
+
+    #[test]
+    fn test_javascript_symbols() {
+        let code = "function foo() {} \nclass Bar { baz() {} }";
+        let rope = ropey::Rope::from_str(code);
+        let syms = extract_symbols(&rope, "javascript");
+        assert_eq!(syms.len(), 3);
+        assert_eq!(syms[0].name, "foo");
+        assert_eq!(syms[0].kind, "fn");
+        assert_eq!(syms[1].name, "Bar");
+        assert_eq!(syms[1].kind, "class");
+        assert_eq!(syms[2].name, "baz");
+        assert_eq!(syms[2].kind, "method");
+    }
 }

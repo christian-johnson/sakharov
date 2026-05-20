@@ -81,3 +81,20 @@ fn parse_diff(diff: &str) -> HashMap<usize, GutterMark> {
 
     marks
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_diff() {
+        let diff = "@@ -10,0 +11,3 @@\n+added 1\n+added 2\n+added 3\n@@ -20,2 +23,2 @@\n-old 1\n-old 2\n+new 1\n+new 2";
+        let marks = parse_diff(diff);
+        assert_eq!(marks.get(&10), Some(&GutterMark::Added));
+        assert_eq!(marks.get(&11), Some(&GutterMark::Added));
+        assert_eq!(marks.get(&12), Some(&GutterMark::Added));
+        assert_eq!(marks.get(&22), Some(&GutterMark::Modified));
+        assert_eq!(marks.get(&23), Some(&GutterMark::Modified));
+        assert_eq!(marks.len(), 5);
+    }
+}

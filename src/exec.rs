@@ -336,6 +336,18 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
 
+        Command::ToggleGitGutter => {
+            app.config.editor.git_gutter = !app.config.editor.git_gutter;
+            if app.config.editor.git_gutter {
+                if let Some(path) = &app.buffer.path {
+                    app.git_diff = crate::git::diff_marks(path);
+                }
+            } else {
+                app.git_diff.clear();
+            }
+            return;
+        }
+
         // --- File / application ---
         Command::Save => {
             if let Some((ref mut nb, _)) = app.notebook {
@@ -371,6 +383,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
             match app.buffer.save(Some(&path)) {
                 Ok(()) => {
                     app.message = Some(format!("Saved {path}"));
+                    if let Some(ref p) = app.buffer.path {
+                        app.git_diff = crate::git::diff_marks(p);
+                    }
                 }
                 Err(e) => {
                     app.message = Some(format!("Error: {e}"));

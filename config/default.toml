@@ -10,6 +10,7 @@ tab_width = 4
 line_numbers = true
 relative_line_numbers = false
 scroll_off = 5
+git_gutter = true
 
 # Language servers — uncomment and adjust to match servers installed on your system.
 # ki always uses the directory it is launched from as the workspace root, so run
