@@ -84,6 +84,10 @@ pub enum Command {
     // Kernel lifecycle
     NotebookRestartKernel,
     NotebookInterruptKernel,
+    /// Undo the last structural notebook change (add/delete cell).
+    NotebookUndoStructural,
+    /// Redo the last undone structural notebook change.
+    NotebookRedoStructural,
 
     // Cell edit overlay
     /// Open focused cell in a full-screen Helix edit overlay.
@@ -92,6 +96,10 @@ pub enum Command {
     NotebookCloseCellEdit,
     /// Abandon edits and close the overlay without writing back.
     NotebookDiscardCellEdit,
+
+    // Notebook
+    /// Enter Notebook navigation mode (cell-level j/k/o/e/d bindings).
+    EnterNotebook,
 
     // Search
     /// Enter forward search mode (builds query; Enter jumps to first match).
@@ -190,9 +198,12 @@ impl Command {
             Command::NotebookClearOutputs => "notebook-clear-outputs",
             Command::NotebookRestartKernel => "notebook-restart-kernel",
             Command::NotebookInterruptKernel => "notebook-interrupt-kernel",
+            Command::NotebookUndoStructural => "notebook-undo-structural",
+            Command::NotebookRedoStructural => "notebook-redo-structural",
             Command::NotebookOpenCellEdit => "notebook-open-cell-edit",
             Command::NotebookCloseCellEdit => "notebook-close-cell-edit",
             Command::NotebookDiscardCellEdit => "notebook-discard-cell-edit",
+            Command::EnterNotebook => "enter-notebook",
             Command::SearchForward => "search-forward",
             Command::SearchBackward => "search-backward",
             Command::SearchNext => "search-next",
@@ -329,6 +340,8 @@ impl Command {
             "notebook-interrupt-kernel" | "interrupt-kernel" | "kernel-interrupt" => {
                 Some(Command::NotebookInterruptKernel)
             }
+            "notebook-undo-structural" => Some(Command::NotebookUndoStructural),
+            "notebook-redo-structural" => Some(Command::NotebookRedoStructural),
             "notebook-open-cell-edit" | "open-cell" | "edit-cell" => {
                 Some(Command::NotebookOpenCellEdit)
             }
@@ -338,6 +351,9 @@ impl Command {
             "notebook-discard-cell-edit" | "discard-cell" => {
                 Some(Command::NotebookDiscardCellEdit)
             }
+
+            // Notebook mode
+            "enter-notebook" | "nb" | "notebook" => Some(Command::EnterNotebook),
 
             // Search
             "search-forward" | "search" | "/" => Some(Command::SearchForward),

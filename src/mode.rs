@@ -22,6 +22,8 @@ pub enum Mode {
     FindChar { dir: FindDir, till: bool },
     /// Buffer search — typing builds the query; Enter confirms, Esc cancels.
     Search { forward: bool },
+    /// Notebook cell-navigation mode — j/k move between cells, o/e/d etc.
+    Notebook,
 }
 
 impl Mode {
@@ -34,8 +36,8 @@ impl Mode {
             Mode::Command => "CMD",
             Mode::Goto => "GTO",
             Mode::FindChar { .. } => "FND",
-            Mode::Search { forward: true } => "SRC",
-            Mode::Search { forward: false } => "SRC",
+            Mode::Search { .. } => "SRC",
+            Mode::Notebook => "NB ",
         }
     }
 }

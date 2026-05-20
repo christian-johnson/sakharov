@@ -79,6 +79,9 @@ pub struct App {
     /// Language id of the currently edited document (e.g. "python", "rust").
     /// Updated when opening a cell edit overlay so LSP routes to the right server.
     pub lsp_language: Option<String>,
+    /// True when the full-screen focused cell editor is active (Enter in notebook).
+    /// False = multi-cell notebook view with in-place editing.
+    pub notebook_focused_edit: bool,
     /// Current search query (set when entering Search mode).
     pub search_query: String,
     /// Char indices of the start of each match for the last search.
@@ -111,28 +114,54 @@ impl App {
             None
         };
 
-        let buffer = match path {
-            Some(p) if !is_notebook => Buffer::from_path(p).unwrap_or_else(|_| {
-                let mut b = Buffer::new_empty();
-                b.path = Some(std::path::PathBuf::from(p));
-                b
-            }),
-            _ => Buffer::new_empty(),
+        // For notebooks, pre-load cell 0 into the buffer so editing works immediately.
+        let (buffer, notebook_cell_edit, lsp_language) = if let Some((ref nb, _)) = notebook {
+            let lang = nb.metadata.kernel_language.clone();
+            let ext = nb_lang_ext(&lang);
+            let stem = nb.path.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "notebook".into());
+            let dir = nb.path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let vpath = dir.join(format!("{stem}__cell0.{ext}"));
+            let mut buf = Buffer::new_empty();
+            if let Some(cell) = nb.cells.first() {
+                buf.rope = cell.source.clone();
+            }
+            buf.path = Some(vpath.clone());
+            let session = nb.cells.first().map(|cell| crate::app::CellEditSession {
+                cell_index: 0,
+                cell_id: cell.id.clone(),
+                language: lang.clone(),
+                notebook_path: nb.path.clone(),
+            });
+            (buf, session, Some(lang))
+        } else {
+            let buf = match path {
+                Some(p) => Buffer::from_path(p).unwrap_or_else(|_| {
+                    let mut b = Buffer::new_empty();
+                    b.path = Some(std::path::PathBuf::from(p));
+                    b
+                }),
+                None => Buffer::new_empty(),
+            };
+            let lang = language_for_path(buf.path.as_deref()).map(str::to_owned);
+            (buf, None, lang)
         };
 
-        let lsp_language = language_for_path(buffer.path.as_deref()).map(str::to_owned);
-
         let highlighter = Highlighter::new(buffer.path.as_deref());
-        let highlight_spans = highlighter
-            .highlight(&buffer.rope)
-            .unwrap_or_default();
+        let highlight_spans = highlighter.highlight(&buffer.rope).unwrap_or_default();
+
+        let initial_mode = if notebook.is_some() { Mode::Notebook } else { Mode::Normal };
 
         Ok(Self {
             buffer,
             selection: Selection::point(0),
             scroll_row: 0,
             scroll_col: 0,
-            mode: Mode::Normal,
+            mode: initial_mode,
             command_buf: String::new(),
             message: None,
             clipboard: String::new(),
@@ -144,7 +173,8 @@ impl App {
             keymap: Keymap::default_bindings(),
             notebook,
             pending_images: Vec::new(),
-            notebook_cell_edit: None,
+            notebook_cell_edit,
+            notebook_focused_edit: false,
             popup: None,
             lsp: LspManager::new(),
             lsp_language,
@@ -162,6 +192,15 @@ impl App {
             return Some(&session.language);
         }
         self.lsp_language.as_deref()
+    }
+}
+
+fn nb_lang_ext(lang: &str) -> &str {
+    match lang {
+        "python" | "python3" => "py",
+        "javascript" | "js" => "js",
+        "rust" => "rs",
+        _ => "txt",
     }
 }
 
@@ -187,8 +226,6 @@ pub fn run(path: Option<&str>) -> Result<()> {
     let mut app = App::new(path, config)?;
 
     // Start LSP server for the opened file if configured.
-    // rootUri is always current_dir() (handled inside ensure_server); we pass
-    // the file's directory only as a last-resort fallback.
     if let Some(ref lang) = app.lsp_language.clone() {
         if let Some(server_config) = app.config.language_servers.get(lang).cloned() {
             let fallback_root = app.buffer.path.as_ref().and_then(|p| p.parent()).and_then(
@@ -202,6 +239,24 @@ pub fn run(path: Option<&str>) -> Result<()> {
             );
             app.lsp
                 .ensure_server(lang, &server_config, fallback_root.as_deref());
+        }
+    }
+
+    // Also start the LSP server for the notebook's kernel language.
+    if let Some((ref nb, _)) = app.notebook {
+        let lang = nb.metadata.kernel_language.clone();
+        if !lang.is_empty() {
+            if let Some(server_config) = app.config.language_servers.get(lang.as_str()).cloned() {
+                let nb_dir = nb.path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.to_path_buf());
+                app.lsp.ensure_server(&lang, &server_config, nb_dir.as_deref());
+                // Expose the notebook language so which-key hints and other
+                // UI that checks current_language() work in navigate mode.
+                if app.lsp_language.is_none() {
+                    app.lsp_language = Some(lang);
+                }
+            }
         }
     }
 
@@ -232,18 +287,34 @@ fn run_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        // Cell-edit overlay: notebook is loaded but we render the plain text
-        // editor over it so the user gets full Helix motions inside the cell.
-        let in_cell_edit = app.notebook_cell_edit.is_some();
+        // Always update scroll so intra-cell cursor stays visible whether the
+        // notebook view or the full-screen overlay is active.
+        update_scroll_to_fit(terminal, app);
+        if let Ok(size) = terminal.size() {
+            app.viewport_height = size.height.saturating_sub(2) as usize;
+        }
 
-        if app.notebook.is_some() && !in_cell_edit {
-            // Notebook navigation view.
+        if app.notebook.is_some() && !app.notebook_focused_edit {
+            // Notebook multi-cell view — the focused cell is in app.buffer.
             terminal.draw(|f| {
                 let size = f.area();
+                // Track the cursor position returned by the notebook renderer so
+                // completion popups anchor to the right spot inside the cell.
+                let mut nb_cursor: Option<(u16, u16)> = None;
+
                 if size.height >= 3 {
                     if let Some((ref nb, ref state)) = app.notebook {
-                        let images = crate::notebook_ui::render(f, state, nb, &app.config);
+                        let active = crate::notebook_ui::ActiveCellView {
+                            rope: &app.buffer.rope,
+                            cursor: app.selection.head,
+                            sel_anchor: app.selection.anchor,
+                            scroll_row: app.scroll_row,
+                            mode: &app.mode,
+                        };
+                        let (images, cursor_pos) =
+                            crate::notebook_ui::render(f, state, nb, &app.config, &active);
                         app.pending_images = images;
+                        nb_cursor = cursor_pos;
 
                         let status_area = ratatui::layout::Rect {
                             x: size.x,
@@ -258,13 +329,16 @@ fn run_loop(
                             height: 1,
                         };
                         let ks = nb.kernel.as_ref().map(|k| &k.status);
-                        crate::notebook_ui::render_notebook_status(f, nb, state, ks, status_area);
+                        crate::notebook_ui::render_notebook_status(
+                            f, nb, state, ks, status_area, app.mode.label(),
+                        );
                         ui::render_command_nb(f, app, cmd_area);
                     }
                 }
                 if let Some(ref popup) = app.popup {
-                    let cursor_pos = ui::cursor_screen_pos(app, f.area());
-                    crate::popup_ui::render(f, popup, cursor_pos);
+                    // Use the in-cell cursor position so completions appear
+                    // directly below the insertion point, not at row 0.
+                    crate::popup_ui::render(f, popup, nb_cursor);
                 }
             })?;
 
@@ -276,12 +350,7 @@ fn run_loop(
                 }
             }
         } else {
-            // Plain text editor: either a regular file, or cell-edit overlay.
-            update_scroll_to_fit(terminal, app);
-            // Keep viewport_height in sync for page-up/down commands.
-            if let Ok(size) = terminal.size() {
-                app.viewport_height = size.height.saturating_sub(2) as usize;
-            }
+            // Plain text editor: regular file or full-screen focused-cell overlay.
             terminal.draw(|f| {
                 ui::render(f, app);
                 if let Some(ref popup) = app.popup {

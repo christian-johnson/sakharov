@@ -219,6 +219,7 @@ pub struct NotebookMeta {
     pub kernel_language: String,
 }
 
+#[derive(Clone)]
 pub struct Cell {
     #[allow(dead_code)]
     pub id: String,
@@ -235,6 +236,7 @@ pub enum CellType {
     Raw,
 }
 
+#[derive(Clone)]
 pub enum Output {
     Stream {
         name: String,
@@ -254,6 +256,7 @@ pub enum Output {
     },
 }
 
+#[derive(Clone)]
 pub struct MimeData {
     pub text_plain: Option<String>,
     /// Decoded from base64.

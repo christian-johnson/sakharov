@@ -9,12 +9,27 @@ use ratatui::{
 use crate::{
     config::Config,
     highlight::Highlighter,
+    mode::Mode,
     notebook::{Cell, CellType, KernelStatus, MimeData, Notebook, Output},
-    notebook_state::{NotebookEditMode, NotebookState},
+    notebook_state::NotebookState,
 };
 
 /// Number of terminal cell rows reserved for each image output.
 const IMAGE_ROWS: u16 = 12;
+
+/// Info about the focused cell that comes from `app.buffer`/`app.selection`.
+pub struct ActiveCellView<'a> {
+    /// The rope backing the focused cell (= `app.buffer.rope`).
+    pub rope: &'a ropey::Rope,
+    /// Cursor char-index within that rope (= `app.selection.head`).
+    pub cursor: usize,
+    /// Selection anchor (= `app.selection.anchor`). Equal to cursor when no selection.
+    pub sel_anchor: usize,
+    /// First visible line inside the cell (= `app.scroll_row`).
+    pub scroll_row: usize,
+    /// Current editor mode — determines cursor highlight style.
+    pub mode: &'a Mode,
+}
 
 /// A request to render a PNG image via the Kitty graphics protocol.
 pub struct ImageRequest {
@@ -27,15 +42,21 @@ pub struct ImageRequest {
 /// Render the notebook view into the frame.
 ///
 /// Returns a list of images to draw via Kitty after `terminal.draw()`.
+/// Render the notebook view.
+///
+/// Returns `(image_requests, cursor_screen_pos)`.  The cursor position is the
+/// terminal (col, row) of the insertion point inside the focused cell — pass
+/// it to `popup_ui::render` so completion popups anchor to the right spot.
 pub fn render(
     frame: &mut Frame,
     state: &NotebookState,
     nb: &Notebook,
     config: &Config,
-) -> Vec<ImageRequest> {
+    active: &ActiveCellView<'_>,
+) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let size = frame.area();
     if size.height < 3 {
-        return vec![];
+        return (vec![], None);
     }
 
     // Content area — leave last 2 rows for status bar + command line.
@@ -46,7 +67,7 @@ pub fn render(
         height: size.height.saturating_sub(2),
     };
 
-    render_cells(frame, state, nb, config, content_area)
+    render_cells(frame, state, nb, config, active, content_area)
 }
 
 // ---------------------------------------------------------------------------
@@ -58,10 +79,12 @@ fn render_cells(
     state: &NotebookState,
     nb: &Notebook,
     config: &Config,
+    active: &ActiveCellView<'_>,
     area: Rect,
-) -> Vec<ImageRequest> {
+) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let mut image_requests = Vec::new();
     let mut current_row = area.top();
+    let mut focused_cell_screen_pos: Option<(u16, u16)> = None;
 
     for (cell_idx, cell) in nb.cells.iter().enumerate() {
         if cell_idx < state.scroll_cell {
@@ -77,7 +100,13 @@ fn render_cells(
         }
 
         let is_focused = cell_idx == state.focused_cell;
-        let cell_height = cell_display_height(cell).min(remaining);
+        // Use the live buffer rope for the focused cell's height so it reflects
+        // any edits made since the last save.
+        let cell_height = if is_focused {
+            focused_cell_display_height(active.rope, cell).min(remaining)
+        } else {
+            cell_display_height(cell).min(remaining)
+        };
 
         let cell_rect = Rect {
             x: area.x,
@@ -113,29 +142,51 @@ fn render_cells(
         frame.render_widget(block, cell_rect);
 
         if inner.height > 0 {
-            render_cell_content(
-                frame, state, nb, cell, is_focused, inner, config, &mut image_requests,
+            let cursor_screen = render_cell_content(
+                frame, state, nb, cell, is_focused, inner, config, active, &mut image_requests,
             );
+            if is_focused {
+                focused_cell_screen_pos = cursor_screen;
+            }
         }
 
         current_row += cell_height + 1; // +1 blank gap between cells
     }
 
-    image_requests
+    // Position the hardware cursor inside the focused cell.
+    if let Some((cx, cy)) = focused_cell_screen_pos {
+        frame.set_cursor_position((cx, cy));
+    }
+
+    (image_requests, focused_cell_screen_pos)
 }
 
 /// Render source lines and outputs inside a cell's bordered inner area.
+/// Returns the screen (col, row) of the cursor when `is_focused` is true.
+#[allow(clippy::too_many_arguments)]
 fn render_cell_content(
     frame: &mut Frame,
-    state: &NotebookState,
+    _state: &NotebookState,
     nb: &Notebook,
     cell: &Cell,
     is_focused: bool,
     area: Rect,
     config: &Config,
+    active: &ActiveCellView<'_>,
     image_requests: &mut Vec<ImageRequest>,
-) {
-    let source_text = cell.source.to_string();
+) -> Option<(u16, u16)> {
+    // For the focused cell, use the live buffer rope; otherwise use stored source.
+    let rope_storage;
+    let (rope, cursor_char_idx, sel_range, scroll_row) = if is_focused {
+        let lo = active.cursor.min(active.sel_anchor);
+        let hi = active.cursor.max(active.sel_anchor);
+        (active.rope, Some(active.cursor), (lo, hi), active.scroll_row)
+    } else {
+        rope_storage = cell.source.clone();
+        (&rope_storage, None, (0usize, 0usize), 0usize)
+    };
+
+    let source_text = rope.to_string();
     let source_lines: Vec<&str> = if source_text.is_empty() {
         vec![""]
     } else {
@@ -147,29 +198,55 @@ fn render_cell_content(
             "_.{}",
             lang_to_ext(&nb.metadata.kernel_language)
         ))));
-        hl.highlight(&cell.source).unwrap_or_default()
+        hl.highlight(rope).unwrap_or_default()
     } else {
         vec![]
     };
 
-    let cursor_pos = if is_focused { Some(state.cursor_pos) } else { None };
     let mut current_row = area.top();
+    let mut cursor_screen: Option<(u16, u16)> = None;
+    let pad_len = 2u16; // leading spaces
 
     for (line_no, line) in source_lines.iter().enumerate() {
+        // Honour intra-cell scroll offset.
+        if line_no < scroll_row {
+            // Track the char offset even for skipped lines.
+            continue;
+        }
         if current_row >= area.bottom() {
             break;
         }
+
+        // Compute the char index at the start of this line.
         let line_start_char: usize = source_lines[..line_no]
             .iter()
             .map(|l| l.chars().count() + 1)
             .sum();
+
+        // Compute cursor screen position if the cursor is on this line.
+        if let Some(ci) = cursor_char_idx {
+            let line_len = line.chars().count();
+            // cursor on this line?
+            if ci >= line_start_char && ci <= line_start_char + line_len {
+                let col_in_line = ci - line_start_char;
+                let screen_x = area.x + pad_len + col_in_line as u16;
+                if screen_x < area.right() {
+                    cursor_screen = Some((screen_x, current_row));
+                } else {
+                    cursor_screen = Some((area.right().saturating_sub(1), current_row));
+                }
+            }
+        }
+
         render_source_line(
             frame,
             single_row(area, current_row),
             line,
             cell,
             line_start_char,
-            cursor_pos,
+            cursor_char_idx,
+            sel_range,
+            active.mode,
             &highlight_spans,
             config,
         );
@@ -194,6 +271,8 @@ fn render_cell_content(
             render_output(frame, output, area, &mut current_row, image_requests);
         }
     }
+
+    cursor_screen
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +288,16 @@ fn cell_display_height(cell: &Cell) -> u16 {
         0
     };
     2 + source_lines + output_h // 2 = top border + bottom border
+}
+
+fn focused_cell_display_height(rope: &ropey::Rope, cell: &Cell) -> u16 {
+    let source_lines = rope.len_lines().max(1) as u16;
+    let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
+        1 + cell.outputs.iter().map(single_output_height_count).sum::<u16>()
+    } else {
+        0
+    };
+    2 + source_lines + output_h
 }
 
 fn single_output_height_count(output: &Output) -> u16 {
@@ -273,6 +362,8 @@ fn render_source_line(
     cell: &Cell,
     line_start_char: usize,
     cursor_pos: Option<usize>,
+    sel_range: (usize, usize),
+    mode: &Mode,
     highlight_spans: &[(usize, usize, usize)],
     _config: &Config,
 ) {
@@ -283,19 +374,10 @@ fn render_source_line(
     let padding = "  ";
     let pad_len = padding.chars().count() as u16;
 
-    // Left-margin padding.
     if area.width > 0 {
-        let pad_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: pad_len.min(area.width),
-            height: 1,
-        };
+        let pad_area = Rect { x: area.x, y: area.y, width: pad_len.min(area.width), height: 1 };
         frame.render_widget(
-            SingleLineWidget {
-                text: padding.to_string(),
-                style: Style::default(),
-            },
+            SingleLineWidget { text: padding.to_string(), style: Style::default() },
             pad_area,
         );
     }
@@ -305,14 +387,15 @@ fn render_source_line(
     if content_width == 0 {
         return;
     }
-    let content_area = Rect {
-        x: content_x,
-        y: area.y,
-        width: content_width,
-        height: 1,
-    };
-
+    let content_area = Rect { x: content_x, y: area.y, width: content_width, height: 1 };
     let is_code = cell.cell_type == CellType::Code;
+    let cursor_style = match mode {
+        Mode::Insert => Style::default().bg(Color::Green).fg(Color::Black),
+        _ => Style::default().bg(Color::White).fg(Color::Black),
+    };
+    let selection_style = Style::default().bg(Color::Rgb(60, 80, 120)).fg(Color::White);
+    let (sel_lo, sel_hi) = sel_range;
+    let has_selection = sel_lo != sel_hi;
 
     let mut x = content_area.x;
     let buf = frame.buffer_mut();
@@ -322,32 +405,29 @@ fn render_source_line(
             break;
         }
         let char_idx = line_start_char + char_off;
-
-        // Determine base style.
         let base_style = if is_code {
             get_highlight_style(highlight_spans, char_idx)
         } else {
             Style::default().fg(Color::Gray)
         };
-
         let style = if cursor_pos == Some(char_idx) {
-            Style::default().bg(Color::White).fg(Color::Black)
+            cursor_style
+        } else if has_selection && char_idx >= sel_lo && char_idx < sel_hi {
+            selection_style
         } else {
             base_style
         };
-
         buf[(x, area.y)].set_char(c).set_style(style);
         x += 1;
     }
 
-    // Render cursor at end-of-line if focused and cursor is past all chars.
+    // Cursor past end-of-line (empty line or cursor at newline position).
     if let Some(cp) = cursor_pos {
         let line_len = line.chars().count();
         if cp == line_start_char + line_len && x < content_area.right() {
-            let buf = frame.buffer_mut();
-            buf[(x, area.y)]
+            frame.buffer_mut()[(x, area.y)]
                 .set_char(' ')
-                .set_style(Style::default().bg(Color::White).fg(Color::Black));
+                .set_style(cursor_style);
         }
     }
 }
@@ -514,24 +594,13 @@ pub fn render_notebook_status(
     state: &NotebookState,
     kernel_status: Option<&KernelStatus>,
     area: Rect,
+    mode_label: &str,
 ) {
-    let mode_label = match state.mode {
-        NotebookEditMode::Navigate => "NAV",
-        NotebookEditMode::Edit => "EDT",
-    };
-    let mode_style = match state.mode {
-        NotebookEditMode::Navigate => {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        }
-        NotebookEditMode::Edit => {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        }
+    let mode_style = match mode_label {
+        "INS" => Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
+        "SEL" => Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+        "NOR" => Style::default().fg(Color::Black).bg(Color::Blue).add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
     };
 
     let filename = nb

@@ -6,7 +6,8 @@ use serde_json::Value;
 use crate::{
     config::LanguageServerConfig,
     lsp::{
-        char_to_lsp_pos, path_to_uri, uri_to_path, LspClient, PendingKind, ServerMessage,
+        char_to_lsp_pos, path_to_uri, uri_to_path, LspClient, NotebookCell, PendingKind,
+        ServerMessage,
     },
 };
 
@@ -78,6 +79,8 @@ pub struct LspManager {
     clients: HashMap<String, LspClient>,
     /// Diagnostics indexed by canonicalized path string.
     pub diagnostics: HashMap<String, Vec<Diagnostic>>,
+    /// Open notebooks: notebook_uri → (code_cell_uris, current_notebook_version).
+    notebook_state: HashMap<String, (Vec<String>, i32)>,
 }
 
 impl LspManager {
@@ -85,6 +88,7 @@ impl LspManager {
         Self {
             clients: HashMap::new(),
             diagnostics: HashMap::new(),
+            notebook_state: HashMap::new(),
         }
     }
 
@@ -252,6 +256,86 @@ impl LspManager {
             return true;
         }
         false
+    }
+
+    /// True if `path` has already been opened on the named server.
+    pub fn is_doc_open(&self, language: &str, path: &std::path::Path) -> bool {
+        let uri = path_to_uri(path);
+        self.clients
+            .get(language)
+            .map(|c| c.is_doc_open(&uri))
+            .unwrap_or(false)
+    }
+
+    /// True if the named server advertised `notebookDocumentSync`.
+    pub fn notebook_sync_supported(&self, language: &str) -> bool {
+        self.clients
+            .get(language)
+            .map(|c| c.supports_notebook_sync())
+            .unwrap_or(false)
+    }
+
+    /// Send `notebookDocument/didOpen` for the whole notebook.
+    /// Returns false if the server isn't initialised yet.
+    pub fn notebook_did_open(
+        &mut self,
+        language: &str,
+        notebook_uri: &str,
+        cells: &[NotebookCell],
+    ) -> bool {
+        if let Some(client) = self.clients.get_mut(language) {
+            if !client.initialized {
+                return false;
+            }
+            let entry = self
+                .notebook_state
+                .entry(notebook_uri.to_owned())
+                .or_insert((vec![], 0));
+            entry.1 += 1;
+            let version = entry.1;
+            entry.0 = cells
+                .iter()
+                .filter(|c| c.kind == 2)
+                .map(|c| c.uri.clone())
+                .collect();
+            client.notebook_did_open(notebook_uri, version, cells);
+            return true;
+        }
+        false
+    }
+
+    /// Send `notebookDocument/didChange` for one cell's text content.
+    /// Returns false if the server isn't initialised yet.
+    pub fn notebook_did_change_cell(
+        &mut self,
+        language: &str,
+        notebook_uri: &str,
+        cell_uri: &str,
+        text: &str,
+    ) -> bool {
+        if let Some(client) = self.clients.get_mut(language) {
+            if !client.initialized {
+                return false;
+            }
+            let entry = self
+                .notebook_state
+                .entry(notebook_uri.to_owned())
+                .or_insert((vec![], 0));
+            entry.1 += 1;
+            let nb_version = entry.1;
+            client.notebook_did_change_cell(notebook_uri, nb_version, cell_uri, text);
+            return true;
+        }
+        false
+    }
+
+    /// Send `notebookDocument/didClose` and clear tracking state.
+    pub fn notebook_did_close(&mut self, language: &str, notebook_uri: &str) {
+        if let Some((cell_uris, _)) = self.notebook_state.remove(notebook_uri) {
+            if let Some(client) = self.clients.get_mut(language) {
+                client.notebook_did_close(notebook_uri, &cell_uris);
+            }
+        }
     }
 
     /// Drain all pending server messages and return semantic events.

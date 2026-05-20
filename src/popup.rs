@@ -309,6 +309,8 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("notebook-open-cell-edit", "Open cell in editor  [Enter, i]"),
         ("notebook-close-cell-edit", "Save cell and return  [ctrl+enter]"),
         ("notebook-discard-cell-edit", "Discard cell edits  [:discard-cell]"),
+        // Notebook
+        ("enter-notebook", "Enter notebook navigation mode  [n]"),
         // Search
         ("search-forward", "Search forward  [/]"),
         ("search-backward", "Search backward  [?]"),

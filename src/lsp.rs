@@ -31,6 +31,18 @@ pub enum PendingKind {
     Implementation,
 }
 
+/// One cell in a `notebookDocument/didOpen` or `didChange` payload.
+pub struct NotebookCell {
+    /// 1 = markup (markdown/raw), 2 = code.
+    pub kind: u8,
+    /// The cell's virtual textDocument URI.
+    pub uri: String,
+    /// LSP languageId for the cell (e.g. "python", "markdown").
+    pub language_id: String,
+    /// Full source text of the cell.
+    pub text: String,
+}
+
 /// A single language server process.
 pub struct LspClient {
     stdin: BufWriter<ChildStdin>,
@@ -102,6 +114,12 @@ impl LspClient {
                     "typeDefinition": { "dynamicRegistration": false },
                     "implementation": { "dynamicRegistration": false },
                     "publishDiagnostics": {}
+                },
+                "notebookDocument": {
+                    "synchronization": {
+                        "dynamicRegistration": false,
+                        "executionSummarySupport": false
+                    }
                 }
             }
         });
@@ -185,6 +203,94 @@ impl LspClient {
             "textDocument": { "uri": uri },
             "position": { "line": line, "character": character }
         }), PendingKind::Implementation)
+    }
+
+    /// True if `uri` has been opened on this client (via `did_open` or `notebook_did_open`).
+    pub fn is_doc_open(&self, uri: &str) -> bool {
+        self.doc_versions.contains_key(uri)
+    }
+
+    /// True if the server advertised `notebookDocumentSync` in its capabilities.
+    pub fn supports_notebook_sync(&self) -> bool {
+        self.server_capabilities
+            .get("notebookDocumentSync")
+            .map(|v| !v.is_null())
+            .unwrap_or(false)
+    }
+
+    pub fn notebook_did_open(&mut self, notebook_uri: &str, version: i32, cells: &[NotebookCell]) {
+        let nb_cells: Vec<Value> = cells
+            .iter()
+            .map(|c| json!({"kind": c.kind, "document": c.uri}))
+            .collect();
+
+        // Only code cells get a text-document entry; markup cells have no LSP content.
+        let cell_docs: Vec<Value> = cells
+            .iter()
+            .filter(|c| c.kind == 2)
+            .map(|c| {
+                self.doc_versions.insert(c.uri.clone(), 1);
+                json!({
+                    "uri": c.uri,
+                    "languageId": c.language_id,
+                    "version": 1,
+                    "text": c.text,
+                })
+            })
+            .collect();
+
+        self.send_notification("notebookDocument/didOpen", json!({
+            "notebookDocument": {
+                "uri": notebook_uri,
+                "notebookType": "jupyter-notebook",
+                "version": version,
+                "cells": nb_cells,
+            },
+            "cellTextDocuments": cell_docs,
+        }));
+    }
+
+    pub fn notebook_did_change_cell(
+        &mut self,
+        notebook_uri: &str,
+        nb_version: i32,
+        cell_uri: &str,
+        text: &str,
+    ) {
+        let cell_v = self.doc_versions.entry(cell_uri.to_owned()).or_insert(0);
+        *cell_v += 1;
+        let cell_version = *cell_v;
+        self.send_notification("notebookDocument/didChange", json!({
+            "notebookDocument": {
+                "uri": notebook_uri,
+                "version": nb_version,
+            },
+            "change": {
+                "cells": {
+                    "textContent": [{
+                        "document": {
+                            "uri": cell_uri,
+                            "version": cell_version,
+                        },
+                        "changes": [{"text": text}],
+                    }]
+                }
+            }
+        }));
+    }
+
+    pub fn notebook_did_close(&mut self, notebook_uri: &str, cell_uris: &[String]) {
+        let cell_docs: Vec<Value> = cell_uris
+            .iter()
+            .map(|uri| {
+                self.doc_versions.remove(uri);
+                json!({"uri": uri})
+            })
+            .collect();
+        self.send_notification("notebookDocument/didClose", json!({
+            "notebookDocument": {"uri": notebook_uri},
+            "cellTextDocuments": cell_docs,
+        }));
     }
 
     pub fn send_request(&mut self, method: &str, params: Value, kind: PendingKind) -> u64 {

@@ -277,6 +277,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Select => Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
         Mode::Command => Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
         Mode::Goto | Mode::FindChar { .. } | Mode::Search { .. } => Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD),
+        Mode::Notebook => Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
     };
 
     // When in a cell-edit overlay, show the notebook + cell context instead of

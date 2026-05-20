@@ -7,7 +7,6 @@ use crate::{
     keymap::KeyBinding,
     mode::{FindDir, Mode},
     motion,
-    notebook_state::NotebookEditMode,
     popup::{PopupAction, PopupContent, PopupTarget},
     selection::Selection,
 };
@@ -59,19 +58,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Ctrl+Enter: save cell and close overlay from any mode.
-    if app.notebook_cell_edit.is_some()
-        && key.code == KeyCode::Enter
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-    {
-        exec::execute(app, &Command::NotebookCloseCellEdit);
-        return;
-    }
-
-    // Notebook navigation mode — only when NOT in the cell-edit overlay.
-    if app.notebook.is_some() && app.notebook_cell_edit.is_none() {
-        handle_notebook_key(app, key);
-        return;
+    // Ctrl+Enter: execute cell (notebook view) or close focused overlay.
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if app.notebook_focused_edit {
+            exec::execute(app, &Command::NotebookCloseCellEdit);
+        } else if app.notebook.is_some() {
+            exec::execute(app, &Command::NotebookExecuteCell);
+        }
+        if app.notebook.is_some() {
+            return;
+        }
     }
 
     match app.mode.clone() {
@@ -92,13 +88,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Goto => handle_goto(app, key),
         Mode::FindChar { dir, till } => handle_find_char(app, key, dir, till),
         Mode::Search { forward } => handle_search(app, key, forward),
+        Mode::Notebook => handle_notebook_mode(app, key),
     }
 
-    // After inserting a char (or backspacing) while a completion popup was open,
-    // sync the popup filter to the word prefix now at the cursor so the list
-    // narrows as the user types.
+    // Sync completion popup filter after insertions.
     if had_completion_popup && app.mode == Mode::Insert {
         sync_completion_filter(app);
+    }
+
+    // Keep the focused notebook cell's stored source in sync with app.buffer
+    // after any operation (edit, undo, paste, delete, etc.), then push the
+    // updated content to the LSP server so goto-def, completions, etc. are
+    // always working against the latest code.
+    if app.notebook.is_some() && !app.notebook_focused_edit {
+        sync_buffer_to_notebook(app);
+        // Only push to LSP when actually editing (not during pure navigation).
+        if matches!(app.mode, Mode::Insert | Mode::Normal | Mode::Select) {
+            exec::lsp_did_change(app);
+        }
     }
 }
 
@@ -357,143 +364,68 @@ fn begin_insert_edit(app: &mut App) {
 }
 
 // ---------------------------------------------------------------------------
-// Notebook key handling
+// Notebook mode
 // ---------------------------------------------------------------------------
 
-fn handle_notebook_key(app: &mut App, key: KeyEvent) {
-    // Determine the current notebook edit mode (avoid borrowing app twice).
-    let nb_mode = app
-        .notebook
-        .as_ref()
-        .map(|(_, s)| s.mode.clone())
-        .unwrap_or(NotebookEditMode::Navigate);
+fn handle_notebook_mode(app: &mut App, key: KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('s') => exec::execute(app, &Command::Save),
+            KeyCode::Char('r') => exec::execute(app, &Command::NotebookRestartKernel),
+            _ => {}
+        }
+        return;
+    }
 
-    match nb_mode {
-        NotebookEditMode::Navigate => {
-            // Command mode is handled separately.
-            if app.mode == crate::mode::Mode::Command {
-                handle_command(app, key);
-                return;
-            }
-            let kb = KeyBinding::from(key);
-            if let Some(cmds) = app.keymap.lookup_notebook_navigate(&kb).map(|v| v.to_vec()) {
-                exec::run_many(app, &cmds);
-            }
+    match key.code {
+        // Cell navigation
+        KeyCode::Char('j') | KeyCode::Down  => exec::execute(app, &Command::NotebookNextCell),
+        KeyCode::Char('k') | KeyCode::Up    => exec::execute(app, &Command::NotebookPrevCell),
+
+        // Edit focused cell in-place (Normal mode on the cell buffer)
+        KeyCode::Char('i') => {
+            app.mode = Mode::Insert;
+            exec::lsp_did_change(app); // ensure server has current content
         }
-        NotebookEditMode::Edit => {
-            handle_notebook_edit_key(app, key);
-        }
+        KeyCode::Char('v') => app.mode = Mode::Normal,
+
+        // Full-screen focused editor
+        KeyCode::Enter => exec::execute(app, &Command::NotebookOpenCellEdit),
+
+        // Cell management
+        KeyCode::Char('o') => exec::execute(app, &Command::NotebookNewCellBelow),
+        KeyCode::Char('O') => exec::execute(app, &Command::NotebookNewCellAbove),
+        KeyCode::Char('d') => exec::execute(app, &Command::NotebookDeleteCell),
+        KeyCode::Char('x') => exec::execute(app, &Command::NotebookClearOutputs),
+
+        // Execution
+        KeyCode::Char('e') => exec::execute(app, &Command::NotebookExecuteCell),
+        KeyCode::Char('E') => exec::execute(app, &Command::NotebookExecuteAndAdvance),
+
+        // Structural undo/redo
+        KeyCode::Char('u') => exec::execute(app, &Command::NotebookUndoStructural),
+        KeyCode::Char('U') => exec::execute(app, &Command::NotebookRedoStructural),
+
+        // Exit to Normal mode (for in-cell Helix editing)
+        KeyCode::Esc => app.mode = Mode::Normal,
+
+        // Command line
+        KeyCode::Char(':') => exec::execute(app, &Command::EnterCommandMode),
+
+        _ => {}
     }
 }
 
-fn handle_notebook_edit_key(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            exec::execute(app, &Command::NotebookExitEdit);
-        }
-        KeyCode::Backspace => {
-            begin_notebook_edit(app);
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let rope = &mut nb.cells[state.focused_cell].source;
-                if state.cursor_pos > 0 {
-                    state.cursor_pos -= 1;
-                    rope.remove(state.cursor_pos..state.cursor_pos + 1);
-                    nb.modified = true;
-                }
-            }
-        }
-        KeyCode::Delete => {
-            begin_notebook_edit(app);
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let rope = &mut nb.cells[state.focused_cell].source;
-                let len = rope.len_chars();
-                if state.cursor_pos < len {
-                    rope.remove(state.cursor_pos..state.cursor_pos + 1);
-                    nb.modified = true;
-                }
-            }
-        }
-        KeyCode::Enter => {
-            begin_notebook_edit(app);
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let pos = state.cursor_pos;
-                nb.cells[state.focused_cell].source.insert(pos, "\n");
-                state.cursor_pos = pos + 1;
+fn sync_buffer_to_notebook(app: &mut App) {
+    if let Some((ref mut nb, ref state)) = app.notebook {
+        let idx = state.focused_cell;
+        if idx < nb.cells.len() {
+            nb.cells[idx].source = app.buffer.rope.clone();
+            // Only mark modified when actually edited (buffer modified flag tracks this).
+            if app.buffer.modified {
                 nb.modified = true;
             }
         }
-        KeyCode::Left => {
-            if let Some((_, ref mut state)) = app.notebook {
-                state.cursor_pos = state.cursor_pos.saturating_sub(1);
-            }
-        }
-        KeyCode::Right => {
-            if let Some((ref nb, ref mut state)) = app.notebook {
-                let len = nb.cells[state.focused_cell].source.len_chars();
-                state.cursor_pos = (state.cursor_pos + 1).min(len);
-            }
-        }
-        KeyCode::Up => {
-            if let Some((ref nb, ref mut state)) = app.notebook {
-                let rope = &nb.cells[state.focused_cell].source;
-                // Move to same column on previous line.
-                let pos = state.cursor_pos.min(rope.len_chars().saturating_sub(1));
-                if rope.len_chars() == 0 {
-                    return;
-                }
-                let line_idx = rope.char_to_line(pos);
-                if line_idx == 0 {
-                    state.cursor_pos = 0;
-                    return;
-                }
-                let col = pos - rope.line_to_char(line_idx);
-                let prev_line_start = rope.line_to_char(line_idx - 1);
-                let prev_line_len = rope.line(line_idx - 1).len_chars().saturating_sub(1);
-                state.cursor_pos = prev_line_start + col.min(prev_line_len);
-            }
-        }
-        KeyCode::Down => {
-            if let Some((ref nb, ref mut state)) = app.notebook {
-                let rope = &nb.cells[state.focused_cell].source;
-                if rope.len_chars() == 0 {
-                    return;
-                }
-                let pos = state.cursor_pos.min(rope.len_chars().saturating_sub(1));
-                let line_idx = rope.char_to_line(pos);
-                let total_lines = rope.len_lines();
-                if line_idx + 1 >= total_lines {
-                    return;
-                }
-                let col = pos - rope.line_to_char(line_idx);
-                let next_line_start = rope.line_to_char(line_idx + 1);
-                let next_line_len = rope.line(line_idx + 1).len_chars().saturating_sub(1);
-                state.cursor_pos = next_line_start + col.min(next_line_len);
-            }
-        }
-        KeyCode::Tab => {
-            begin_notebook_edit(app);
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let pos = state.cursor_pos;
-                nb.cells[state.focused_cell].source.insert(pos, "\t");
-                state.cursor_pos = pos + 1;
-                nb.modified = true;
-            }
-        }
-        KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                return;
-            }
-            begin_notebook_edit(app);
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let pos = state.cursor_pos;
-                let mut buf = [0u8; 4];
-                let s = c.encode_utf8(&mut buf);
-                nb.cells[state.focused_cell].source.insert(pos, s);
-                state.cursor_pos = pos + 1;
-                nb.modified = true;
-            }
-        }
-        _ => {}
     }
 }
 
@@ -539,15 +471,4 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
     }
 }
 
-/// Snapshot the focused cell's rope at the start of each Edit session.
-fn begin_notebook_edit(app: &mut App) {
-    if let Some((ref nb, ref mut state)) = app.notebook {
-        if !state.insert_session_active {
-            let snapshot = nb.cells[state.focused_cell].source.clone();
-            state.undo_stack.push((state.focused_cell, snapshot));
-            state.redo_stack.clear();
-            state.insert_session_active = true;
-        }
-    }
-}
 

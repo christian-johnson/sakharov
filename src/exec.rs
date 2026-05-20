@@ -5,12 +5,11 @@ use crate::{
     buffer::Buffer,
     command::Command,
     highlight::Highlighter,
-    lsp::{lsp_pos_to_char},
+    lsp::{lsp_pos_to_char, path_to_uri, NotebookCell},
     lsp_manager::LspEvent,
     mode::{FindDir, Mode},
     motion,
     notebook::{Cell, CellType},
-    notebook_state::NotebookEditMode,
     selection::Selection,
 };
 
@@ -397,20 +396,32 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         // --- Notebook commands ---
         Command::NotebookNextCell => {
-            if let Some((ref nb, ref mut state)) = app.notebook {
-                let last = nb.cells.len().saturating_sub(1);
-                state.focused_cell = (state.focused_cell + 1).min(last);
-                state.cursor_pos = 0;
-                state.ensure_focused_visible();
+            // Sync current cell to LSP before leaving it.
+            lsp_did_change(app);
+            save_focused_cell(app);
+            {
+                if let Some((ref nb, ref mut state)) = app.notebook {
+                    let last = nb.cells.len().saturating_sub(1);
+                    state.focused_cell = (state.focused_cell + 1).min(last);
+                    state.ensure_focused_visible();
+                }
             }
+            load_focused_cell(app);
+            app.mode = Mode::Notebook;
             return;
         }
         Command::NotebookPrevCell => {
-            if let Some((_, ref mut state)) = app.notebook {
-                state.focused_cell = state.focused_cell.saturating_sub(1);
-                state.cursor_pos = 0;
-                state.ensure_focused_visible();
+            // Sync current cell to LSP before leaving it.
+            lsp_did_change(app);
+            save_focused_cell(app);
+            {
+                if let Some((_, ref mut state)) = app.notebook {
+                    state.focused_cell = state.focused_cell.saturating_sub(1);
+                    state.ensure_focused_visible();
+                }
             }
+            load_focused_cell(app);
+            app.mode = Mode::Notebook;
             return;
         }
         Command::NotebookScrollDown => {
@@ -426,21 +437,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
-        Command::NotebookEnterEdit => {
-            if let Some((_, ref mut state)) = app.notebook {
-                state.mode = NotebookEditMode::Edit;
-                state.insert_session_active = false;
-            }
-            return;
-        }
-        Command::NotebookExitEdit => {
-            if let Some((_, ref mut state)) = app.notebook {
-                state.mode = NotebookEditMode::Navigate;
-                state.insert_session_active = false;
-            }
+        Command::NotebookEnterEdit | Command::NotebookExitEdit => {
+            // No-op: notebook editing is now always in-place via app.buffer.
             return;
         }
         Command::NotebookExecuteCell => {
+            // Flush the live buffer into the cell before executing so the
+            // kernel always runs whatever is currently visible on screen.
+            save_focused_cell(app);
+
             if let Some((ref mut nb, ref mut state)) = app.notebook {
                 let nb_dir = notebook_dir(&nb.path.clone());
 
@@ -509,49 +514,127 @@ pub fn execute(app: &mut App, cmd: &Command) {
             execute(app, &Command::NotebookNextCell);
             return;
         }
-        Command::NotebookNewCellBelow => {
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let new_idx = state.focused_cell + 1;
-                nb.cells.insert(new_idx, Cell {
-                    id: new_cell_id(),
-                    cell_type: CellType::Code,
-                    source: Rope::new(),
-                    outputs: vec![],
-                    execution_count: None,
-                });
-                state.focused_cell = new_idx;
-                state.cursor_pos = 0;
-                nb.modified = true;
-                state.ensure_focused_visible();
+        Command::NotebookUndoStructural => {
+            let snap = {
+                let current = app.notebook.as_ref()
+                    .map(|(nb, state)| (state.focused_cell, nb.cells.clone()));
+                if let Some((focused, cells)) = current {
+                    if let Some((_, ref mut state)) = app.notebook {
+                        state.pop_snapshot_undo(focused, &cells)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some((focused, cells)) = snap {
+                if let Some((ref mut nb, ref mut state)) = app.notebook {
+                    nb.cells = cells;
+                    nb.modified = true;
+                    state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
+                    state.ensure_focused_visible();
+                }
+                load_focused_cell(app);
+                notebook_lsp_reopen(app);
+                app.mode = Mode::Notebook;
+            } else {
+                app.message = Some("Nothing to undo".into());
             }
+            return;
+        }
+        Command::NotebookRedoStructural => {
+            let snap = {
+                let current = app.notebook.as_ref()
+                    .map(|(nb, state)| (state.focused_cell, nb.cells.clone()));
+                if let Some((focused, cells)) = current {
+                    if let Some((_, ref mut state)) = app.notebook {
+                        state.pop_snapshot_redo(focused, &cells)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some((focused, cells)) = snap {
+                if let Some((ref mut nb, ref mut state)) = app.notebook {
+                    nb.cells = cells;
+                    nb.modified = true;
+                    state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
+                    state.ensure_focused_visible();
+                }
+                load_focused_cell(app);
+                notebook_lsp_reopen(app);
+                app.mode = Mode::Notebook;
+            } else {
+                app.message = Some("Nothing to redo".into());
+            }
+            return;
+        }
+        Command::NotebookNewCellBelow => {
+            save_focused_cell(app);
+            push_cell_snapshot(app);
+            {
+                if let Some((ref mut nb, ref mut state)) = app.notebook {
+                    let new_idx = state.focused_cell + 1;
+                    nb.cells.insert(new_idx, Cell {
+                        id: new_cell_id(),
+                        cell_type: CellType::Code,
+                        source: Rope::new(),
+                        outputs: vec![],
+                        execution_count: None,
+                    });
+                    state.focused_cell = new_idx;
+                    nb.modified = true;
+                    state.ensure_focused_visible();
+                }
+            }
+            load_focused_cell(app);
+            notebook_lsp_reopen(app);
+            app.mode = Mode::Notebook;
             return;
         }
         Command::NotebookNewCellAbove => {
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let new_idx = state.focused_cell;
-                nb.cells.insert(new_idx, Cell {
-                    id: new_cell_id(),
-                    cell_type: CellType::Code,
-                    source: Rope::new(),
-                    outputs: vec![],
-                    execution_count: None,
-                });
-                state.cursor_pos = 0;
-                nb.modified = true;
-                state.ensure_focused_visible();
+            save_focused_cell(app);
+            push_cell_snapshot(app);
+            {
+                if let Some((ref mut nb, ref mut state)) = app.notebook {
+                    let new_idx = state.focused_cell;
+                    nb.cells.insert(new_idx, Cell {
+                        id: new_cell_id(),
+                        cell_type: CellType::Code,
+                        source: Rope::new(),
+                        outputs: vec![],
+                        execution_count: None,
+                    });
+                    // focused_cell already points at the new empty cell (same index).
+                    nb.modified = true;
+                    state.ensure_focused_visible();
+                }
             }
+            load_focused_cell(app);
+            notebook_lsp_reopen(app);
+            app.mode = Mode::Notebook;
             return;
         }
         Command::NotebookDeleteCell => {
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                if !nb.cells.is_empty() {
-                    nb.cells.remove(state.focused_cell);
-                    nb.modified = true;
-                    let last = nb.cells.len().saturating_sub(1);
-                    state.focused_cell = state.focused_cell.min(last);
-                    state.cursor_pos = 0;
+            save_focused_cell(app);
+            push_cell_snapshot(app);
+            {
+                if let Some((ref mut nb, ref mut state)) = app.notebook {
+                    if !nb.cells.is_empty() {
+                        nb.cells.remove(state.focused_cell);
+                        nb.modified = true;
+                        state.focused_cell =
+                            state.focused_cell.min(nb.cells.len().saturating_sub(1));
+                        state.ensure_focused_visible();
+                    }
                 }
             }
+            load_focused_cell(app);
+            notebook_lsp_reopen(app);
+            app.mode = Mode::Notebook;
             return;
         }
         Command::NotebookClearOutputs => {
@@ -568,93 +651,38 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // ── Cell edit overlay ────────────────────────────────────────────────
 
         Command::NotebookOpenCellEdit => {
-            if let Some((ref nb, ref state)) = app.notebook {
-                let idx = state.focused_cell;
-                if idx >= nb.cells.len() { return; }
-
-                let cell = &nb.cells[idx];
-                let language = nb.metadata.kernel_language.clone();
-                let cell_id  = cell.id.clone();
-                let notebook_path = nb.path.clone();
-
-                // Virtual path gives tree-sitter the right extension without
-                // touching the filesystem. This path also becomes the LSP
-                // textDocument URI when LSP is wired up.
-                let ext = lang_ext(&language);
-                let stem = notebook_path.file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "notebook".into());
-                let dir = notebook_path.parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    });
-                let virtual_path = dir.join(format!("{stem}__cell{idx}.{ext}"));
-
-                // Check out cell source into app.buffer.
-                app.buffer = crate::buffer::Buffer::new_empty();
-                app.buffer.rope = cell.source.clone();
-                app.buffer.path = Some(virtual_path.clone());
-                app.selection = crate::selection::Selection::point(0);
-                app.mode = crate::mode::Mode::Normal;
-                app.insert_session_active = false;
-                app.scroll_row = 0;
-                app.scroll_col = 0;
-
-                app.notebook_cell_edit = Some(crate::app::CellEditSession {
-                    cell_index: idx,
-                    cell_id,
-                    language: language.clone(),
-                    notebook_path,
-                });
-
-                // Update highlighter for the cell's language.
-                app.highlighter = crate::highlight::Highlighter::new(Some(&virtual_path));
-                recompute_highlights(app);
-
-                // Start LSP server for the cell's language if configured, then
-                // open the virtual document so the server knows about it.
-                if let Some(server_config) =
-                    app.config.language_servers.get(&language).cloned()
-                {
-                    // ensure_server uses current_dir() as workspace root internally.
-                    app.lsp.ensure_server(&language, &server_config, None);
-                    let text = app.buffer.rope.to_string();
-                    app.lsp.did_open(&language, &virtual_path, &text);
-                }
-            }
+            // The focused cell is already in app.buffer; just switch to the
+            // full-screen rendering so the user gets an uncluttered edit view.
+            app.notebook_focused_edit = true;
+            app.mode = Mode::Normal;
             return;
         }
 
-        Command::NotebookCloseCellEdit => {
-            if let Some(session) = app.notebook_cell_edit.take() {
-                // Close the virtual document in the LSP server.
-                if let Some(path) = app.buffer.path.clone() {
-                    app.lsp.did_close(&session.language, &path);
-                }
-                // Write buffer back to the notebook cell.
-                if let Some((ref mut nb, _)) = app.notebook {
-                    let idx = session.cell_index;
-                    if idx < nb.cells.len() {
-                        nb.cells[idx].source = app.buffer.rope.clone();
-                        nb.modified = true;
-                    }
-                }
-                reset_after_cell_edit(app);
-            }
-            return;
-        }
-
-        Command::NotebookDiscardCellEdit => {
-            // Close the virtual document before discarding.
+        Command::NotebookCloseCellEdit | Command::NotebookDiscardCellEdit => {
+            // Return to the multi-cell view and re-enter Notebook mode.
+            app.notebook_focused_edit = false;
+            app.mode = Mode::Notebook;
+            // Sync final cell source in case edits happened in the overlay.
             if let Some(ref session) = app.notebook_cell_edit {
                 if let Some(path) = app.buffer.path.clone() {
-                    app.lsp.did_close(&session.language, &path);
+                    if app.lsp.notebook_sync_supported(&session.language) {
+                        let notebook_uri = path_to_uri(&session.notebook_path);
+                        let cell_uri = path_to_uri(&path);
+                        let text = app.buffer.rope.to_string();
+                        app.lsp.notebook_did_change_cell(
+                            &session.language, &notebook_uri, &cell_uri, &text,
+                        );
+                    }
                 }
             }
-            app.notebook_cell_edit = None;
-            reset_after_cell_edit(app);
+            return;
+        }
+
+        // --- Notebook mode ---
+        Command::EnterNotebook => {
+            if app.notebook.is_some() {
+                app.mode = Mode::Notebook;
+            }
             return;
         }
 
@@ -725,24 +753,102 @@ pub fn execute(app: &mut App, cmd: &Command) {
     update_scroll(app);
 }
 
-/// Clear buffer and restore editor state after closing a cell-edit overlay.
-fn reset_after_cell_edit(app: &mut App) {
-    app.buffer = crate::buffer::Buffer::new_empty();
-    app.selection = crate::selection::Selection::point(0);
-    app.mode = crate::mode::Mode::Normal;
-    app.insert_session_active = false;
-    app.scroll_row = 0;
-    app.scroll_col = 0;
-    app.highlighter = crate::highlight::Highlighter::new(None);
-    app.highlight_spans = Vec::new();
-}
-
 fn lang_ext(lang: &str) -> &str {
     match lang {
         "python" | "python3" => "py",
         "javascript" | "js" => "js",
         "rust" => "rs",
         _ => "txt",
+    }
+}
+
+/// Snapshot the full cell list before a structural mutation (undo support).
+fn push_cell_snapshot(app: &mut App) {
+    let snapshot = app.notebook.as_ref()
+        .map(|(nb, state)| (state.focused_cell, nb.cells.clone()));
+    if let Some((focused, cells)) = snapshot {
+        if let Some((_, ref mut state)) = app.notebook {
+            state.push_snapshot(focused, &cells);
+        }
+    }
+}
+
+/// Write app.buffer.rope back to the currently focused notebook cell.
+fn save_focused_cell(app: &mut App) {
+    if let Some((ref mut nb, ref state)) = app.notebook {
+        let idx = state.focused_cell;
+        if idx < nb.cells.len() {
+            nb.cells[idx].source = app.buffer.rope.clone();
+        }
+    }
+}
+
+/// Load the focused notebook cell into app.buffer, updating all dependent state.
+pub fn load_focused_cell(app: &mut App) {
+    if let Some((ref nb, ref state)) = app.notebook {
+        let idx = state.focused_cell;
+        if idx >= nb.cells.len() {
+            return;
+        }
+        let cell = &nb.cells[idx];
+        let language = nb.metadata.kernel_language.clone();
+        let cell_id = cell.id.clone();
+        let notebook_path = nb.path.clone();
+        let source = cell.source.clone();
+
+        let ext = lang_ext(&language);
+        let stem = notebook_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "notebook".into());
+        let dir = notebook_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let virtual_path = dir.join(format!("{stem}__cell{idx}.{ext}"));
+
+        app.buffer = Buffer::new_empty();
+        app.buffer.rope = source;
+        app.buffer.path = Some(virtual_path.clone());
+        app.selection = Selection::point(0);
+        app.scroll_row = 0;
+        app.scroll_col = 0;
+        app.insert_session_active = false;
+
+        app.notebook_cell_edit = Some(crate::app::CellEditSession {
+            cell_index: idx,
+            cell_id,
+            language: language.clone(),
+            notebook_path,
+        });
+
+        app.highlighter = Highlighter::new(Some(&virtual_path));
+        recompute_highlights(app);
+
+        // Ensure the LSP server is running.
+        if let Some(server_config) = app.config.language_servers.get(&language).cloned() {
+            let nb_dir = app.notebook.as_ref()
+                .and_then(|(nb, _)| nb.path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.to_path_buf()));
+            app.lsp.ensure_server(&language, &server_config, nb_dir.as_deref());
+        }
+
+        // For servers using the notebookDocument protocol, all cells are already
+        // tracked — no per-cell textDocument notification needed.
+        // For plain textDocument servers, open the cell if this is the first
+        // visit, or send a change if we've been here before (no duplicate opens).
+        if let Some(ref session) = app.notebook_cell_edit {
+            if !app.lsp.notebook_sync_supported(&session.language) {
+                let text = app.buffer.rope.to_string();
+                if app.lsp.is_doc_open(&session.language, &virtual_path) {
+                    app.lsp.did_change(&session.language, &virtual_path, &text);
+                } else {
+                    app.lsp.did_open(&session.language, &virtual_path, &text);
+                }
+            }
+        }
     }
 }
 
@@ -892,6 +998,74 @@ fn open_line_above(app: &mut App) {
 }
 
 // ---------------------------------------------------------------------------
+// Notebook LSP helpers
+// ---------------------------------------------------------------------------
+
+/// Build the full cell list for `notebookDocument/didOpen` or a reopen.
+fn build_notebook_cells(nb: &crate::notebook::Notebook) -> Vec<NotebookCell> {
+    let lang = &nb.metadata.kernel_language;
+    let ext = lang_ext(lang);
+    let stem = nb.path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "notebook".into());
+    let dir = nb.path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    nb.cells
+        .iter()
+        .enumerate()
+        .map(|(idx, cell)| {
+            let kind = match cell.cell_type {
+                CellType::Code => 2,
+                _ => 1,
+            };
+            let cell_path = dir.join(format!("{stem}__cell{idx}.{ext}"));
+            let language_id = match cell.cell_type {
+                CellType::Code => lang.clone(),
+                CellType::Markdown => "markdown".into(),
+                _ => "plaintext".into(),
+            };
+            NotebookCell {
+                kind,
+                uri: path_to_uri(&cell_path),
+                language_id,
+                text: cell.source.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Send `notebookDocument/didOpen` for the currently-loaded notebook.
+pub fn notebook_lsp_open(app: &mut App) {
+    if let Some((ref nb, _)) = app.notebook {
+        let lang = nb.metadata.kernel_language.clone();
+        if !app.lsp.is_ready(&lang) || !app.lsp.notebook_sync_supported(&lang) {
+            return;
+        }
+        let notebook_uri = path_to_uri(&nb.path);
+        let cells = build_notebook_cells(nb);
+        app.lsp.notebook_did_open(&lang, &notebook_uri, &cells);
+    }
+}
+
+/// Close the notebook in LSP (does nothing if not currently open there).
+fn notebook_lsp_close(app: &mut App) {
+    if let Some((ref nb, _)) = app.notebook {
+        let lang = nb.metadata.kernel_language.clone();
+        let notebook_uri = path_to_uri(&nb.path);
+        app.lsp.notebook_did_close(&lang, &notebook_uri);
+    }
+}
+
+/// Close and immediately reopen the notebook in LSP after a structural change.
+fn notebook_lsp_reopen(app: &mut App) {
+    notebook_lsp_close(app);
+    notebook_lsp_open(app);
+}
+
+// ---------------------------------------------------------------------------
 // Search helpers
 // ---------------------------------------------------------------------------
 
@@ -1016,6 +1190,18 @@ pub fn lsp_did_change(app: &mut App) {
         None => return,
     };
     let text = app.buffer.rope.to_string();
+
+    // In a cell-edit overlay with notebookDocument support, route the change
+    // through the notebook protocol so the server has full cross-cell context.
+    if let Some(ref session) = app.notebook_cell_edit {
+        if app.lsp.notebook_sync_supported(&lang) {
+            let notebook_uri = path_to_uri(&session.notebook_path);
+            let cell_uri = path_to_uri(&path);
+            app.lsp.notebook_did_change_cell(&lang, &notebook_uri, &cell_uri, &text);
+            return;
+        }
+    }
+
     app.lsp.did_change(&lang, &path, &text);
 }
 
@@ -1030,8 +1216,28 @@ pub fn process_lsp_events(app: &mut App) {
 fn handle_lsp_event(app: &mut App, event: LspEvent) {
     match event {
         LspEvent::Initialized { language } => {
-            // Re-open the current document now that the server is ready.
-            // (did_open was skipped earlier because initialized was false.)
+            // If a notebook is open (and we're not inside a cell-edit overlay),
+            // prefer the notebookDocument protocol.
+            let notebook_lang = app.notebook.as_ref()
+                .map(|(nb, _)| nb.metadata.kernel_language.clone());
+
+            if notebook_lang.as_deref() == Some(&language)
+                && !app.notebook_focused_edit
+            {
+                if app.lsp.notebook_sync_supported(&language) {
+                    notebook_lsp_open(app);
+                }
+                // Fallback: open the current cell as a standalone textDocument.
+                if !app.lsp.notebook_sync_supported(&language) {
+                    if let Some(path) = app.buffer.path.clone() {
+                        let text = app.buffer.rope.to_string();
+                        app.lsp.did_open(&language, &path, &text);
+                    }
+                }
+                return;
+            }
+
+            // Regular file (or cell-edit overlay that opened before Initialized).
             if app.current_language() == Some(&language) {
                 if let Some(path) = app.buffer.path.clone() {
                     let text = app.buffer.rope.to_string();
