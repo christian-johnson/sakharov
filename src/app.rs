@@ -268,6 +268,7 @@ pub fn run(path: Option<&str>) -> Result<()> {
 
     // Set up terminal
     terminal::enable_raw_mode()?;
+    crate::theme::initialize_color_cache();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -371,7 +372,7 @@ fn run_loop(
         }
 
         // Update terminal cursor shape to reflect the current mode.
-        set_cursor_shape(app.mode.clone());
+        set_cursor_shape(&app.mode);
 
         // Poll with a short timeout so LSP responses are processed promptly
         // without requiring a keypress to trigger the next iteration.
@@ -466,20 +467,26 @@ fn unicode_display_width(c: char) -> usize {
 }
 
 fn restore_terminal() -> Result<()> {
+    use std::io::Write;
     terminal::disable_raw_mode()?;
+    let mut stdout = io::stdout();
     execute!(
-        io::stdout(),
+        stdout,
         LeaveAlternateScreen,
         crossterm::cursor::SetCursorStyle::DefaultUserShape,
     )?;
+    let _ = write!(stdout, "\x1b]112\x07");
+    let _ = stdout.flush();
     Ok(())
 }
 
-fn set_cursor_shape(mode: Mode) {
+fn set_cursor_shape(mode: &Mode) {
     use crossterm::cursor::SetCursorStyle;
-    let shape = match mode {
-        Mode::Insert => SetCursorStyle::BlinkingBar,
-        _ => SetCursorStyle::SteadyBlock,
-    };
-    let _ = execute!(io::stdout(), shape);
+    use std::io::Write;
+    let _ = execute!(io::stdout(), SetCursorStyle::SteadyBlock);
+    if let Some(color_spec) = crate::theme::color_to_osc_spec(crate::theme::mode_color(mode)) {
+        let mut stdout = io::stdout();
+        let _ = write!(stdout, "\x1b]12;{}\x07", color_spec);
+        let _ = stdout.flush();
+    }
 }

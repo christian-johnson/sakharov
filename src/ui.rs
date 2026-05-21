@@ -189,10 +189,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             // Apply selection or cursor overlay.
             let style = if char_idx == cursor_pos {
-                match app.mode {
-                    Mode::Insert => theme::cursor_insert_style(),
-                    _ => theme::cursor_style(),
-                }
+                theme::cursor_style(&app.mode)
             } else if char_idx >= sel_start && char_idx <= sel_end && sel_start != sel_end {
                 theme::selection_style()
             } else {
@@ -226,10 +223,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             if c == '\n' || c == '\r' {
                 if char_idx == cursor_pos {
-                    let cs = match app.mode {
-                        Mode::Insert => theme::cursor_insert_style(),
-                        _ => theme::cursor_style(),
-                    };
+                    let cs = theme::cursor_style(&app.mode);
                     cells.push((' ', cs));
                 }
                 break;
@@ -316,14 +310,10 @@ fn tab_stop(col: usize, tab_width: usize) -> usize {
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let mode_label = app.mode.label();
-    let mode_style = match app.mode {
-        Mode::Normal => Style::default().fg(Color::Black).bg(Color::Blue).add_modifier(Modifier::BOLD),
-        Mode::Insert => Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
-        Mode::Select => Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
-        Mode::Command => Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
-        Mode::Goto | Mode::FindChar { .. } | Mode::Search { .. } => Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD),
-        Mode::Notebook => Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
-    };
+    let mode_style = Style::default()
+        .fg(Color::Black)
+        .bg(theme::mode_color(&app.mode))
+        .add_modifier(Modifier::BOLD);
 
     // When in a cell-edit overlay, show the notebook + cell context instead of
     // the virtual buffer path. Ctrl+Enter hint keeps the affordance visible.

@@ -414,10 +414,7 @@ fn render_source_line(
         return;
     }
     let content_area = Rect { x: content_x, y: area.y, width: content_width, height: 1 };
-    let cursor_style = match ctx.mode {
-        Mode::Insert => Style::default().bg(Color::Green).fg(Color::Black),
-        _ => Style::default().bg(Color::White).fg(Color::Black),
-    };
+    let cursor_style = crate::theme::cursor_style(ctx.mode);
     let selection_style = Style::default().bg(Color::Rgb(60, 80, 120)).fg(Color::White);
     let (sel_lo, sel_hi) = ctx.sel_range;
     let has_selection = sel_lo != sel_hi;

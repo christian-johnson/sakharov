@@ -279,6 +279,7 @@ dependencies = [
  "base64",
  "crossterm",
  "dirs",
+ "libc",
  "ratatui",
  "ropey",
  "serde",
