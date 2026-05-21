@@ -57,6 +57,33 @@ pub fn execute(app: &mut App, cmd: &Command) {
             ));
             return;
         }
+        Command::GrepBuffer => {
+            let rope = &app.buffer.rope;
+            let path = app.buffer.path.clone().unwrap_or_default();
+            let items: Vec<crate::popup::ListItem> = rope
+                .lines()
+                .enumerate()
+                .map(|(line_idx, line)| {
+                    let line_str = line.to_string();
+                    let label = line_str.trim_end_matches(&['\r', '\n'][..]).to_owned();
+                    crate::popup::ListItem::navigate(
+                        label,
+                        format!("Line {}", line_idx + 1),
+                        &path,
+                        line_idx,
+                        0,
+                    )
+                })
+                .collect();
+
+            let popup = crate::popup::Popup::grep_buffer(
+                "grep-buffer",
+                items,
+                app.search_query.clone(),
+            );
+            app.popup = Some(popup);
+            return;
+        }
         Command::OpenBufferPicker => {
             let current = app.buffer.path.clone();
             let items: Vec<crate::popup::ListItem> = app
@@ -759,12 +786,16 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- Search ---
         Command::SearchForward => {
             app.mode = Mode::Search { forward: true };
-            app.search_query.clear();
+            app.search_query_just_opened = true;
+            app.search_active = false;
+            search_compute_matches(app);
             return;
         }
         Command::SearchBackward => {
             app.mode = Mode::Search { forward: false };
-            app.search_query.clear();
+            app.search_query_just_opened = true;
+            app.search_active = false;
+            search_compute_matches(app);
             return;
         }
         Command::SearchNext => {
@@ -1347,10 +1378,13 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
 }
 
 pub fn jump_to_location(app: &mut App, loc: &LspLocation) {
-    let current = app.buffer.path.as_ref().and_then(|p| p.canonicalize().ok());
     let target = loc.path.canonicalize().ok().unwrap_or_else(|| loc.path.clone());
-
-    let same_file = current.map(|c| c == target).unwrap_or(false);
+    let same_file = if app.buffer.path.is_none() && loc.path.as_os_str().is_empty() {
+        true
+    } else {
+        let current = app.buffer.path.as_ref().and_then(|p| p.canonicalize().ok());
+        current.map(|c| c == target).unwrap_or(false)
+    };
 
     if same_file {
         let char_idx = lsp_pos_to_char(&app.buffer.rope, loc.line, loc.character);

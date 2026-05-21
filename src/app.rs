@@ -76,6 +76,10 @@ pub struct App {
     pub search_matches: Vec<usize>,
     /// Index into search_matches pointing at the current match.
     pub search_current: usize,
+    /// True when search-navigation (locking matches/hijacking n/p keys) is active.
+    pub search_active: bool,
+    /// True when search has just been opened, allowing first typed char to overwrite query.
+    pub search_query_just_opened: bool,
     /// Visible text rows in the editor area — updated each render frame.
     pub viewport_height: usize,
     /// All file paths opened in this session (for the buffer picker).
@@ -190,6 +194,8 @@ impl App {
             search_query: String::new(),
             search_matches: Vec::new(),
             search_current: 0,
+            search_active: false,
+            search_query_just_opened: false,
             viewport_height: 24,
             open_buffers,
             git_diff,

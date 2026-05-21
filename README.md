@@ -1,6 +1,12 @@
 # ki — Personal TUI Text Editor & Notebook Environment
 
-`ki` is a lightweight, from-scratch Terminal User Interface (TUI) modal text editor and Jupyter Notebook environment written in Rust. It combines selection-first editing (inspired by Helix) with interactive Jupyter notebook capabilities, persistent kernels, Kitty graphics protocol integration, and LSP support.
+`ki` is a lightweight text editor heavily inspired by Helix.
+It steals many of Helix's features (noun->verb modal editing; simple configuration) while adding a few additional pieces for data science support, namely:
+- Native Jupyter notebook interface
+- Notebook LSP support
+- Compatible with Kitty graphics protocol
+
+That means you can u
 
 ---
 

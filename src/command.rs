@@ -116,6 +116,8 @@ pub enum Command {
     SearchNext,
     /// Jump to the previous search match.
     SearchPrev,
+    /// Telescope-style grep buffer popup.
+    GrepBuffer,
 
     // Scroll
     /// Scroll half a page up (cursor moves with viewport).
@@ -219,6 +221,7 @@ impl Command {
             Command::SearchBackward => "search-backward",
             Command::SearchNext => "search-next",
             Command::SearchPrev => "search-prev",
+            Command::GrepBuffer => "grep-buffer",
             Command::PageUp => "page-up",
             Command::PageDown => "page-down",
             Command::LspHover => "lsp-hover",
@@ -375,6 +378,7 @@ impl Command {
             "search-backward" | "?" => Some(Command::SearchBackward),
             "search-next" | "n" => Some(Command::SearchNext),
             "search-prev" | "N" => Some(Command::SearchPrev),
+            "grep-buffer" | "grep" => Some(Command::GrepBuffer),
 
             // Scroll
             "page-up" => Some(Command::PageUp),
