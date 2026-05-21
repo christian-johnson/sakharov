@@ -308,7 +308,7 @@ fn render_cell_content(
 // Cell height / colour helpers
 // ---------------------------------------------------------------------------
 
-fn cell_display_height(cell: &Cell) -> u16 {
+pub fn cell_display_height(cell: &Cell) -> u16 {
     let source_text = cell.source.to_string();
     let source_lines = source_text.lines().count().max(1) as u16;
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
@@ -319,7 +319,7 @@ fn cell_display_height(cell: &Cell) -> u16 {
     2 + source_lines + output_h // 2 = top border + bottom border
 }
 
-fn focused_cell_display_height(rope: &ropey::Rope, cell: &Cell) -> u16 {
+pub fn focused_cell_display_height(rope: &ropey::Rope, cell: &Cell) -> u16 {
     let source_lines = rope.len_lines().max(1) as u16;
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
         1 + cell.outputs.iter().map(single_output_height_count).sum::<u16>()

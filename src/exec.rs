@@ -314,7 +314,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 let rope = &app.buffer.rope;
                 let pos = app.selection.head;
                 let ls = if rope.len_chars() > 0 {
-                    let li = rope.char_to_line(pos.min(rope.len_chars().saturating_sub(1)));
+                    let li = rope.char_to_line(pos.min(rope.len_chars()));
                     rope.line_to_char(li)
                 } else {
                     0
@@ -473,7 +473,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 if let Some((ref nb, ref mut state)) = app.notebook {
                     let last = nb.cells.len().saturating_sub(1);
                     state.focused_cell = (state.focused_cell + 1).min(last);
-                    state.ensure_focused_visible();
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
                 }
             }
             load_focused_cell(app);
@@ -485,9 +485,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
             lsp_did_change(app);
             save_focused_cell(app);
             {
-                if let Some((_, ref mut state)) = app.notebook {
+                if let Some((ref nb, ref mut state)) = app.notebook {
                     state.focused_cell = state.focused_cell.saturating_sub(1);
-                    state.ensure_focused_visible();
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
                 }
             }
             load_focused_cell(app);
@@ -603,7 +603,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.cells = cells;
                     nb.modified = true;
                     state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible();
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
                 }
                 load_focused_cell(app);
                 notebook_lsp_reopen(app);
@@ -632,7 +632,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.cells = cells;
                     nb.modified = true;
                     state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible();
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
                 }
                 load_focused_cell(app);
                 notebook_lsp_reopen(app);
@@ -657,7 +657,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     });
                     state.focused_cell = new_idx;
                     nb.modified = true;
-                    state.ensure_focused_visible();
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
                 }
             }
             load_focused_cell(app);
@@ -680,7 +680,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     });
                     // focused_cell already points at the new empty cell (same index).
                     nb.modified = true;
-                    state.ensure_focused_visible();
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
                 }
             }
             load_focused_cell(app);
@@ -698,7 +698,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                         nb.modified = true;
                         state.focused_cell =
                             state.focused_cell.min(nb.cells.len().saturating_sub(1));
-                        state.ensure_focused_visible();
+                        state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
                     }
                 }
             }
@@ -947,7 +947,7 @@ pub fn update_scroll(app: &mut App) {
         return;
     }
 
-    let pos = app.selection.head.min(rope.len_chars().saturating_sub(1));
+    let pos = app.selection.head.min(rope.len_chars());
     let line_idx = rope.char_to_line(pos);
     let line_start = rope.line_to_char(line_idx);
     let col = pos - line_start;
@@ -975,7 +975,7 @@ fn delete_selection(app: &mut App) {
     let end = app.selection.end();
     let del_end = (end + 1).min(app.buffer.rope.len_chars());
     app.buffer.remove(start, del_end);
-    let new_pos = start.min(app.buffer.rope.len_chars().saturating_sub(1));
+    let new_pos = start.min(app.buffer.rope.len_chars());
     app.selection = Selection::point(new_pos);
     recompute_highlights(app);
     update_scroll(app);
@@ -1020,7 +1020,7 @@ fn open_line_below(app: &mut App) {
     let le = if rope.len_chars() == 0 {
         0
     } else {
-        let line_idx = rope.char_to_line(pos.min(rope.len_chars().saturating_sub(1)));
+        let line_idx = rope.char_to_line(pos.min(rope.len_chars()));
         let line_str = rope.line(line_idx);
         let line_len = line_str.len_chars();
         let content_len = if line_len > 0
@@ -1046,7 +1046,7 @@ fn open_line_above(app: &mut App) {
     let ls = if rope.len_chars() == 0 {
         0
     } else {
-        let line_idx = rope.char_to_line(pos.min(rope.len_chars().saturating_sub(1)));
+        let line_idx = rope.char_to_line(pos.min(rope.len_chars()));
         rope.line_to_char(line_idx)
     };
     app.buffer.insert(ls, "\n");
@@ -1185,8 +1185,8 @@ pub fn search_jump(app: &mut App, reverse: bool) {
 
 fn clamp_selection(app: &mut App) {
     let len = app.buffer.rope.len_chars();
-    let head = app.selection.head.min(len.saturating_sub(1));
-    let anchor = app.selection.anchor.min(len.saturating_sub(1));
+    let head = app.selection.head.min(len);
+    let anchor = app.selection.anchor.min(len);
     app.selection = Selection::new(anchor, head);
 }
 
@@ -1422,4 +1422,43 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
 
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     app.message = Some(format!("Opened {} (line {})", name, line + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn test_exec_clamping_behavior() {
+        let config = Config::load().expect("failed to load config");
+        let mut app = App::new(None, config).unwrap();
+        
+        // 1. Setup buffer with some text ending in newline.
+        app.buffer.rope = Rope::from_str("hello\nworld\n");
+        let len = app.buffer.rope.len_chars();
+        assert_eq!(len, 12); // "hello\n" (6) + "world\n" (6)
+
+        // 2. Test clamp_selection: setting cursor head beyond len should clamp to len, not len - 1
+        app.selection = Selection::point(20);
+        clamp_selection(&mut app);
+        assert_eq!(app.selection.head, 12);
+        assert_eq!(app.selection.anchor, 12);
+
+        // 3. Test update_scroll: cursor at len (12) should place pos on line index 2.
+        app.selection = Selection::point(12);
+        update_scroll(&mut app);
+        assert_eq!(app.buffer.rope.char_to_line(12), 2);
+    }
+
+    #[test]
+    fn test_delete_selection_clamping() {
+        let config = Config::load().expect("failed to load config");
+        let mut app = App::new(None, config).unwrap();
+        app.buffer.rope = Rope::from_str("abc");
+        app.selection = Selection::new(0, 2); // selects 'abc' (char indexes 0, 1, 2)
+        delete_selection(&mut app);
+        assert_eq!(app.buffer.rope.len_chars(), 0);
+        assert_eq!(app.selection.head, 0);
+    }
 }

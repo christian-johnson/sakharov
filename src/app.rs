@@ -421,7 +421,7 @@ fn update_scroll_to_fit(
         return;
     }
 
-    let pos = app.selection.head.min(rope.len_chars().saturating_sub(1));
+    let pos = app.selection.head.min(rope.len_chars());
     let line_idx = rope.char_to_line(pos);
     let scroll_off = app.config.editor.scroll_off;
 

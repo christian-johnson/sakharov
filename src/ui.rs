@@ -113,7 +113,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             if line_num_width > 0 && line_idx < total_lines {
                 let line_num_str = if app.config.editor.relative_line_numbers {
                     let cursor_line = rope
-                        .char_to_line(app.selection.head.min(rope.len_chars().saturating_sub(1)));
+                        .char_to_line(app.selection.head.min(rope.len_chars()));
                     if line_idx == cursor_line {
                         format!("{:4} ", line_idx + 1)
                     } else {
@@ -259,7 +259,7 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
         return Some((lines_area.left() + gutter_width, lines_area.top()));
     }
 
-    let head = app.selection.head.min(rope.len_chars().saturating_sub(1));
+    let head = app.selection.head.min(rope.len_chars());
     let line_idx = rope.char_to_line(head);
 
     if line_idx < app.scroll_row {
@@ -332,7 +332,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let rope = &app.buffer.rope;
-    let cursor_pos = app.selection.head.min(rope.len_chars().saturating_sub(1));
+    let cursor_pos = app.selection.head.min(rope.len_chars());
     let line_idx = if rope.len_chars() == 0 {
         0
     } else {
