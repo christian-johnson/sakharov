@@ -9,9 +9,20 @@ use std::path::PathBuf;
 pub struct Config {
     pub theme: ThemeConfig,
     pub editor: EditorConfig,
+    #[serde(default)]
+    pub keys: KeysConfig,
     /// Language server definitions, keyed by language id (e.g. "python", "rust").
     #[serde(default)]
     pub language_servers: HashMap<String, LanguageServerConfig>,
+}
+
+/// Custom key bindings config.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct KeysConfig {
+    #[serde(default)]
+    pub normal: HashMap<String, String>,
+    #[serde(default)]
+    pub select: HashMap<String, String>,
 }
 
 /// Theme color configuration (hex strings).

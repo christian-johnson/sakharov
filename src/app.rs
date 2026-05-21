@@ -162,6 +162,9 @@ impl App {
             .map(crate::git::diff_marks)
             .unwrap_or_default();
 
+        let mut keymap = Keymap::default_bindings();
+        keymap.apply_custom_bindings(&config.keys);
+
         Ok(Self {
             buffer,
             selection: Selection::point(0),
@@ -176,7 +179,7 @@ impl App {
             highlighter,
             highlight_spans,
             config,
-            keymap: Keymap::default_bindings(),
+            keymap,
             notebook,
             pending_images: Vec::new(),
             notebook_cell_edit,

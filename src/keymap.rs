@@ -31,6 +31,59 @@ impl KeyBinding {
             modifiers: KeyModifiers::CONTROL,
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+
+        let parts: Vec<&str> = s.split(|c| c == '+' || c == '-').collect();
+        let mut modifiers = KeyModifiers::NONE;
+        let mut key_part = "";
+
+        for (i, part) in parts.iter().enumerate() {
+            let part = part.trim();
+            if i == parts.len() - 1 {
+                key_part = part;
+            } else {
+                match part.to_lowercase().as_str() {
+                    "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+                    "alt" => modifiers |= KeyModifiers::ALT,
+                    "shift" => modifiers |= KeyModifiers::SHIFT,
+                    _ => {}
+                }
+            }
+        }
+
+        let code = match key_part.to_lowercase().as_str() {
+            "enter" | "return" => KeyCode::Enter,
+            "esc" | "escape" => KeyCode::Esc,
+            "tab" => KeyCode::Tab,
+            "backspace" => KeyCode::Backspace,
+            "space" => KeyCode::Char(' '),
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            "pageup" | "pgup" => KeyCode::PageUp,
+            "pagedown" | "pgdn" => KeyCode::PageDown,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "insert" => KeyCode::Insert,
+            "delete" | "del" => KeyCode::Delete,
+            _ => {
+                let chars: Vec<char> = key_part.chars().collect();
+                if chars.len() == 1 {
+                    KeyCode::Char(chars[0])
+                } else {
+                    return None;
+                }
+            }
+        };
+
+        Some(Self { code, modifiers })
+    }
 }
 
 impl From<KeyEvent> for KeyBinding {
@@ -225,5 +278,74 @@ impl Keymap {
     #[allow(dead_code)]
     pub fn set_select(&mut self, kb: KeyBinding, cmds: Vec<Command>) {
         self.select.insert(kb, cmds);
+    }
+
+    pub fn apply_custom_bindings(&mut self, keys: &crate::config::KeysConfig) {
+        for (key_str, cmd_str) in &keys.normal {
+            if let Some(kb) = KeyBinding::parse(key_str) {
+                if let Some(cmd) = Command::parse(cmd_str) {
+                    self.normal.insert(kb, vec![cmd]);
+                }
+            }
+        }
+        for (key_str, cmd_str) in &keys.select {
+            if let Some(kb) = KeyBinding::parse(key_str) {
+                if let Some(cmd) = Command::parse(cmd_str) {
+                    self.select.insert(kb, vec![cmd]);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_binding_parse() {
+        assert_eq!(
+            KeyBinding::parse("j"),
+            Some(KeyBinding {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::NONE
+            })
+        );
+        assert_eq!(
+            KeyBinding::parse("J"),
+            Some(KeyBinding {
+                code: KeyCode::Char('J'),
+                modifiers: KeyModifiers::NONE
+            })
+        );
+        assert_eq!(
+            KeyBinding::parse("ctrl+d"),
+            Some(KeyBinding {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL
+            })
+        );
+        assert_eq!(
+            KeyBinding::parse("ctrl-u"),
+            Some(KeyBinding {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers::CONTROL
+            })
+        );
+        assert_eq!(
+            KeyBinding::parse("PgUp"),
+            Some(KeyBinding {
+                code: KeyCode::PageUp,
+                modifiers: KeyModifiers::NONE
+            })
+        );
+        assert_eq!(
+            KeyBinding::parse("shift+escape"),
+            Some(KeyBinding {
+                code: KeyCode::Esc,
+                modifiers: KeyModifiers::SHIFT
+            })
+        );
+        assert_eq!(KeyBinding::parse("invalidkeyname"), None);
     }
 }
