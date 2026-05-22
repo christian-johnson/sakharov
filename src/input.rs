@@ -12,15 +12,10 @@ use crate::{
     selection::Selection,
 };
 
-
-
 /// Dispatch a key event to the appropriate handler based on the current mode.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     app.message = None;
 
-    // Popup takes priority over all other input.
-    // For completion (InsertText) popups we keep the popup alive when the user
-    // types printable chars or backspaces — the filter is updated afterwards.
     let had_completion_popup = app.popup.as_ref()
         .map(|p| p.on_confirm == PopupTarget::InsertText)
         .unwrap_or(false);
@@ -34,12 +29,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             }
             PopupAction::DismissPassthrough => {
                 if had_completion_popup {
-                    // Keep the popup alive; let the key reach handle_insert
-                    // so the char is inserted, then sync the filter below.
+                    // Keep the popup alive; let the key reach handle_insert.
                 } else {
                     app.popup = None;
                 }
-                // fall through to normal handling below
+                // fall through
             }
             PopupAction::Confirm(text) => {
                 let target = app.popup.as_ref().map(|p| p.on_confirm.clone());
@@ -53,7 +47,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
     }
 
-    // Ctrl+C is a global hint in all modes.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.message = Some("use :q to quit, :q! to force quit".into());
         return;
@@ -61,7 +54,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
     // Ctrl+Enter: execute cell (notebook view) or close focused overlay.
     if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
-        if app.notebook_focused_edit {
+        if app.notebook_focused_edit() {
             exec::execute(app, &Command::NotebookCloseCellEdit);
         } else if app.notebook.is_some() {
             exec::execute(app, &Command::NotebookExecuteCell);
@@ -97,13 +90,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         sync_completion_filter(app);
     }
 
-    // Keep the focused notebook cell's stored source in sync with app.buffer
-    // after any operation (edit, undo, paste, delete, etc.), then push the
-    // updated content to the LSP server so goto-def, completions, etc. are
-    // always working against the latest code.
-    if app.notebook.is_some() && !app.notebook_focused_edit {
+    // Keep the focused notebook cell's stored source in sync with app.buffer.
+    if app.notebook.is_some() && !app.notebook_focused_edit() {
         sync_buffer_to_notebook(app);
-        // Only push to LSP when actually editing (not during pure navigation).
         if matches!(app.mode, Mode::Insert | Mode::Normal | Mode::Select) {
             exec::lsp_did_change(app);
         }
@@ -134,7 +123,9 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             if pos < len {
                 begin_insert_edit(app);
                 app.buffer.remove_raw(pos, pos + 1);
-                app.selection = Selection::point(pos.min(app.buffer.rope.len_chars().saturating_sub(1)));
+                app.selection = Selection::point(
+                    pos.min(app.buffer.rope.len_chars().saturating_sub(1)),
+                );
                 exec::recompute_highlights(app);
             }
         }
@@ -166,13 +157,11 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             app.selection = Selection::point(pos + 1);
             exec::recompute_highlights(app);
         }
-        // Ctrl+Space arrives as NUL (ASCII 0) on most terminals.
         KeyCode::Null => {
             exec::execute(app, &Command::LspRequestCompletion);
         }
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                // Ctrl+Space fallback for terminals that send it as Char(' ')+CONTROL.
                 if c == ' ' {
                     exec::execute(app, &Command::LspRequestCompletion);
                 }
@@ -186,7 +175,6 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             app.selection = Selection::point(pos + 1);
             exec::recompute_highlights(app);
             exec::lsp_did_change(app);
-            // Auto-trigger completion after `.` or `:`
             if c == '.' || c == ':' {
                 exec::execute(app, &Command::LspRequestCompletion);
             }
@@ -242,17 +230,16 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
             app.selection = motion::goto_file_end(&app.buffer.rope, app.selection, extend);
         }
         KeyCode::Char('h') => {
-            app.selection = motion::move_line_first_non_ws(&app.buffer.rope, app.selection, extend);
+            app.selection =
+                motion::move_line_first_non_ws(&app.buffer.rope, app.selection, extend);
         }
         KeyCode::Char('l') => {
             app.selection = motion::move_line_end(&app.buffer.rope, app.selection, extend);
         }
-        // LSP goto bindings
         KeyCode::Char('d') => exec::execute(app, &Command::LspGotoDefinition),
         KeyCode::Char('r') => exec::execute(app, &Command::LspGotoReferences),
         KeyCode::Char('y') => exec::execute(app, &Command::LspGotoTypeDefinition),
         KeyCode::Char('i') => exec::execute(app, &Command::LspGotoImplementation),
-        // Picker bindings
         KeyCode::Char('b') => exec::execute(app, &Command::OpenBufferPicker),
         KeyCode::Char('s') => exec::execute(app, &Command::OpenSymbolPicker),
         KeyCode::Char('D') => exec::execute(app, &Command::OpenDiagnosticPicker),
@@ -290,7 +277,7 @@ fn handle_search(app: &mut App, key: KeyEvent, forward: bool) {
             app.message = None;
         }
         KeyCode::Backspace => {
-            app.search_query.pop();
+            app.search.query.pop();
             exec::search_compute_matches(app);
         }
         KeyCode::Enter => {
@@ -299,10 +286,9 @@ fn handle_search(app: &mut App, key: KeyEvent, forward: bool) {
             exec::search_jump(app, !forward);
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.search_query.push(c);
-            // Live preview: recompute and jump as the user types.
+            app.search.query.push(c);
             exec::search_compute_matches(app);
-            if !app.search_matches.is_empty() {
+            if !app.search.matches.is_empty() {
                 exec::search_jump(app, !forward);
                 app.mode = Mode::Search { forward };
             }
@@ -315,9 +301,6 @@ fn handle_search(app: &mut App, key: KeyEvent, forward: bool) {
 // Completion filter sync
 // ---------------------------------------------------------------------------
 
-/// After a char is inserted (or deleted) in Insert mode, update the completion
-/// popup's filter string to match the word prefix immediately before the cursor.
-/// Dismisses the popup if the current filter has no matches.
 fn sync_completion_filter(app: &mut App) {
     let pos = app.selection.head;
     let prefix: String = {
@@ -341,9 +324,7 @@ fn sync_completion_filter(app: &mut App) {
                 if let PopupContent::List(ref mut list) = popup.content {
                     list.filter = prefix.clone();
                     list.selected = 0;
-                    // Dismiss when something is typed but nothing matches.
-                    should_dismiss =
-                        !prefix.is_empty() && list.filtered_indices().is_empty();
+                    should_dismiss = !prefix.is_empty() && list.filtered_indices().is_empty();
                 }
             }
         }
@@ -359,8 +340,6 @@ fn sync_completion_filter(app: &mut App) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Snapshot the buffer once at the start of each Insert session for undo coalescing.
-/// Subsequent edits in the same session use raw (no-snapshot) methods.
 fn begin_insert_edit(app: &mut App) {
     if !app.insert_session_active {
         app.buffer.begin_edit_session();
@@ -373,51 +352,14 @@ fn begin_insert_edit(app: &mut App) {
 // ---------------------------------------------------------------------------
 
 fn handle_notebook_mode(app: &mut App, key: KeyEvent) {
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('s') => exec::execute(app, &Command::Save),
-            KeyCode::Char('r') => exec::execute(app, &Command::NotebookRestartKernel),
-            _ => {}
+    let kb = KeyBinding::from(key);
+    if let Some(cmds) = app.keymap.lookup_notebook(&kb).map(|v| v.to_vec()) {
+        let was_notebook = app.mode == Mode::Notebook;
+        exec::run_many(app, &cmds);
+        // When the binding transitions to Insert mode, ensure LSP has current content.
+        if was_notebook && app.mode == Mode::Insert {
+            exec::lsp_did_change(app);
         }
-        return;
-    }
-
-    match key.code {
-        // Cell navigation
-        KeyCode::Char('j') | KeyCode::Down  => exec::execute(app, &Command::NotebookNextCell),
-        KeyCode::Char('k') | KeyCode::Up    => exec::execute(app, &Command::NotebookPrevCell),
-
-        // Edit focused cell in-place (Normal mode on the cell buffer)
-        KeyCode::Char('i') => {
-            app.mode = Mode::Insert;
-            exec::lsp_did_change(app); // ensure server has current content
-        }
-        KeyCode::Char('v') => app.mode = Mode::Normal,
-
-        // Full-screen focused editor
-        KeyCode::Enter => exec::execute(app, &Command::NotebookOpenCellEdit),
-
-        // Cell management
-        KeyCode::Char('o') => exec::execute(app, &Command::NotebookNewCellBelow),
-        KeyCode::Char('O') => exec::execute(app, &Command::NotebookNewCellAbove),
-        KeyCode::Char('d') => exec::execute(app, &Command::NotebookDeleteCell),
-        KeyCode::Char('x') => exec::execute(app, &Command::NotebookClearOutputs),
-
-        // Execution
-        KeyCode::Char('e') => exec::execute(app, &Command::NotebookExecuteCell),
-        KeyCode::Char('E') => exec::execute(app, &Command::NotebookExecuteAndAdvance),
-
-        // Structural undo/redo
-        KeyCode::Char('u') => exec::execute(app, &Command::NotebookUndoStructural),
-        KeyCode::Char('U') => exec::execute(app, &Command::NotebookRedoStructural),
-
-        // Exit to Normal mode (for in-cell Helix editing)
-        KeyCode::Esc => app.mode = Mode::Normal,
-
-        // Command line
-        KeyCode::Char(':') => exec::execute(app, &Command::EnterCommandMode),
-
-        _ => {}
     }
 }
 
@@ -426,7 +368,6 @@ fn sync_buffer_to_notebook(app: &mut App) {
         let idx = state.focused_cell;
         if idx < nb.cells.len() {
             nb.cells[idx].source = app.buffer.rope.clone();
-            // Only mark modified when actually edited (buffer modified flag tracks this).
             if app.buffer.modified {
                 nb.modified = true;
             }
@@ -449,8 +390,6 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
         }
         PopupTarget::InsertText => {
             let pos = app.selection.head;
-            // Delete the word prefix the user has already typed so the
-            // completion replaces it rather than appending after it.
             let word_start = {
                 let rope = &app.buffer.rope;
                 let mut i = pos;
@@ -474,7 +413,6 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
         }
         PopupTarget::Dismiss => {}
         PopupTarget::Navigate => {
-            // Payload format: "path\0line\0col" (zero-indexed line and col).
             let parts: Vec<&str> = text.splitn(3, '\0').collect();
             if parts.len() == 3 {
                 let path = std::path::PathBuf::from(parts[0]);
@@ -485,5 +423,3 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
         }
     }
 }
-
-

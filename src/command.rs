@@ -118,6 +118,8 @@ pub enum Command {
     SearchPrev,
     /// Telescope-style grep buffer popup.
     GrepBuffer,
+    /// Telescope-style project-wide grep popup (uses ripgrep/grep).
+    GrepProject,
 
     // Scroll
     /// Scroll half a page up (cursor moves with viewport).
@@ -222,6 +224,7 @@ impl Command {
             Command::SearchNext => "search-next",
             Command::SearchPrev => "search-prev",
             Command::GrepBuffer => "grep-buffer",
+            Command::GrepProject => "grep-project",
             Command::PageUp => "page-up",
             Command::PageDown => "page-down",
             Command::LspHover => "lsp-hover",
@@ -378,7 +381,8 @@ impl Command {
             "search-backward" | "?" => Some(Command::SearchBackward),
             "search-next" | "n" => Some(Command::SearchNext),
             "search-prev" | "N" => Some(Command::SearchPrev),
-            "grep-buffer" | "grep" => Some(Command::GrepBuffer),
+            "grep-buffer" => Some(Command::GrepBuffer),
+            "grep-project" | "grep" | "rg" => Some(Command::GrepProject),
 
             // Scroll
             "page-up" => Some(Command::PageUp),

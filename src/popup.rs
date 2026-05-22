@@ -79,6 +79,12 @@ pub struct ListState {
     pub items: Vec<ListItem>,
     pub filter: String,
     pub selected: usize,
+    /// When true, first ESC switches to navigation mode instead of dismissing.
+    /// Used by grep popups so the user can type a query then switch to j/k nav.
+    pub two_phase: bool,
+    /// True once the user has pressed ESC in a two_phase popup.
+    /// In this mode printable keys navigate (j/k) instead of updating the filter.
+    pub navigating: bool,
 }
 
 pub struct ListItem {
@@ -171,9 +177,15 @@ impl ListState {
         self.selected = (self.selected + 1) % count;
     }
 
-    /// Retreat selected, clamping at 0.
+    /// Retreat selected, wrapping around to the last item.
     pub fn move_up(&mut self) {
-        if self.selected > 0 {
+        let count = self.filtered_indices().len();
+        if count == 0 {
+            return;
+        }
+        if self.selected == 0 {
+            self.selected = count - 1;
+        } else {
             self.selected -= 1;
         }
     }
@@ -228,6 +240,54 @@ fn match_score(label: &str, filter: &str) -> Option<u32> {
         return Some(4); // non-contiguous subsequence
     }
     None
+}
+
+/// Returns the char indices in `label` that were matched by `filter` (case-insensitive),
+/// using the same tier logic as `match_score`. Returns `None` when there is no match.
+pub fn match_positions(label: &str, filter: &str) -> Option<Vec<usize>> {
+    if filter.is_empty() {
+        return Some(vec![]);
+    }
+    let ll = label.to_ascii_lowercase();
+    let fl = filter.to_ascii_lowercase();
+    let fl_char_count = fl.chars().count();
+
+    // Exact or prefix: 0..fl_char_count
+    if ll.starts_with(fl.as_str()) {
+        return Some((0..fl_char_count).collect());
+    }
+
+    // Word-boundary prefix: find the first non-first segment that starts with filter.
+    let chars: Vec<char> = ll.chars().collect();
+    for i in 1..chars.len() {
+        if chars[i - 1] == '_' {
+            let seg: String = chars[i..].iter().collect();
+            if seg.starts_with(fl.as_str()) {
+                return Some((i..i + fl_char_count).collect());
+            }
+        }
+    }
+
+    // Contiguous substring
+    if let Some(byte_pos) = ll.find(fl.as_str()) {
+        let char_start = ll[..byte_pos].chars().count();
+        return Some((char_start..char_start + fl_char_count).collect());
+    }
+
+    // Subsequence
+    subsequence_positions(&chars, &fl.chars().collect::<Vec<_>>())
+}
+
+fn subsequence_positions(label: &[char], filter: &[char]) -> Option<Vec<usize>> {
+    let mut positions = Vec::with_capacity(filter.len());
+    let mut fi = 0;
+    for (li, &c) in label.iter().enumerate() {
+        if fi < filter.len() && c == filter[fi] {
+            positions.push(li);
+            fi += 1;
+        }
+    }
+    if fi == filter.len() { Some(positions) } else { None }
 }
 
 /// True if every character of `filter` appears in `label` in order.
@@ -291,6 +351,8 @@ impl Popup {
                 items,
                 filter: String::new(),
                 selected: 0,
+                two_phase: false,
+                navigating: false,
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.55),
@@ -307,6 +369,8 @@ impl Popup {
                 items,
                 filter: String::new(),
                 selected: 0,
+                two_phase: false,
+                navigating: false,
             }),
             anchor: PopupAnchor::CursorBelow,
             width: PopupSize::Auto,
@@ -337,9 +401,28 @@ impl Popup {
                 items,
                 filter: String::new(),
                 selected: 0,
+                two_phase: false,
+                navigating: false,
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.65),
+            on_confirm: PopupTarget::Navigate,
+        }
+    }
+
+    /// Grep popup — two-phase: type to filter, ESC → j/k navigation, Enter → jump.
+    pub fn grep(title: &str, items: Vec<ListItem>, initial_filter: String) -> Self {
+        Self {
+            title: Some(title.into()),
+            content: PopupContent::List(ListState {
+                items,
+                filter: initial_filter,
+                selected: 0,
+                two_phase: true,
+                navigating: false,
+            }),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.75),
             on_confirm: PopupTarget::Navigate,
         }
     }
@@ -422,11 +505,13 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("notebook-discard-cell-edit", "Discard cell edits  [:discard-cell]"),
         // Notebook
         ("enter-notebook", "Enter notebook navigation mode  [n]"),
-        // Search
+        // Search / Grep
         ("search-forward", "Search forward  [/]"),
         ("search-backward", "Search backward  [?]"),
         ("search-next", "Next match  [n]"),
         ("search-prev", "Previous match  [N]"),
+        ("grep-buffer", "Grep current buffer  [ctrl+f]"),
+        ("grep-project", "Grep project files  [ctrl+g]"),
         // Scroll
         ("page-down", "Scroll half page down  [ctrl+d, PgDn]"),
         ("page-up", "Scroll half page up  [ctrl+u, PgUp]"),

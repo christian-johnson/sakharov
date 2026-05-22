@@ -26,6 +26,36 @@ use crate::{
     ui,
 };
 
+// ---------------------------------------------------------------------------
+// Search state
+// ---------------------------------------------------------------------------
+
+pub struct SearchState {
+    pub query: String,
+    pub matches: Vec<usize>,
+    pub current: usize,
+    pub active: bool,
+    /// True when search was just opened — allows the first typed char to
+    /// replace the previous query instead of appending to it.
+    pub just_opened: bool,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            matches: Vec::new(),
+            current: 0,
+            active: false,
+            just_opened: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cell edit session
+// ---------------------------------------------------------------------------
+
 /// Tracks the notebook cell currently loaded into `app.buffer`.
 pub struct CellEditSession {
     pub cell_index: usize,
@@ -33,7 +63,13 @@ pub struct CellEditSession {
     pub language: String,
     /// Path of the parent notebook — becomes the `notebookDocument` URI.
     pub notebook_path: std::path::PathBuf,
+    /// True while the full-screen cell overlay (Enter from notebook nav) is active.
+    pub focused_edit: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Central application state
+// ---------------------------------------------------------------------------
 
 /// Central application state.
 pub struct App {
@@ -57,31 +93,21 @@ pub struct App {
     pub notebook: Option<(Notebook, NotebookState)>,
     /// Image draw requests collected by the last notebook render pass.
     pub pending_images: Vec<ImageRequest>,
-    /// When Some, the plain-text editor renders over the notebook view,
-    /// allowing full Helix-style editing of the focused cell.
+    /// Tracks which cell is loaded in `buffer` and whether the full-screen
+    /// overlay is active. Always `Some` while a notebook is open.
     pub notebook_cell_edit: Option<CellEditSession>,
     /// Active floating popup overlay, if any.
     pub popup: Option<crate::popup::Popup>,
     /// LSP client manager — one server per language.
     pub lsp: LspManager,
     /// Language id of the currently edited document (e.g. "python", "rust").
-    /// Updated when opening a cell edit overlay so LSP routes to the right server.
     pub lsp_language: Option<String>,
-    /// True when the full-screen focused cell editor is active (Enter in notebook).
-    /// False = multi-cell notebook view with in-place editing.
-    pub notebook_focused_edit: bool,
-    /// Current search query (set when entering Search mode).
-    pub search_query: String,
-    /// Char indices of the start of each match for the last search.
-    pub search_matches: Vec<usize>,
-    /// Index into search_matches pointing at the current match.
-    pub search_current: usize,
-    /// True when search-navigation (locking matches/hijacking n/p keys) is active.
-    pub search_active: bool,
-    /// True when search has just been opened, allowing first typed char to overwrite query.
-    pub search_query_just_opened: bool,
+    /// Buffer search state (query, match list, current index, etc.).
+    pub search: SearchState,
     /// Visible text rows in the editor area — updated each render frame.
     pub viewport_height: usize,
+    /// Visible text columns — updated each render frame, used by scroll logic.
+    pub viewport_width: usize,
     /// All file paths opened in this session (for the buffer picker).
     pub open_buffers: Vec<std::path::PathBuf>,
     /// Git diff marks for the current buffer, keyed by 0-indexed line number.
@@ -89,19 +115,30 @@ pub struct App {
 }
 
 impl App {
+    /// Returns true when the focused-cell full-screen overlay is active.
+    pub fn notebook_focused_edit(&self) -> bool {
+        self.notebook_cell_edit
+            .as_ref()
+            .map_or(false, |s| s.focused_edit)
+    }
+
+    /// The language id for the document currently in the editor buffer.
+    pub fn current_language(&self) -> Option<&str> {
+        if let Some(ref session) = self.notebook_cell_edit {
+            return Some(&session.language);
+        }
+        self.lsp_language.as_deref()
+    }
+
     /// Create a new App, loading `path` if provided.
     pub fn new(path: Option<&str>, config: Config) -> Result<Self> {
-        // Detect .ipynb and load as a notebook.
-        let is_notebook = path
-            .map(|p| p.ends_with(".ipynb"))
-            .unwrap_or(false);
+        let is_notebook = path.map(|p| p.ends_with(".ipynb")).unwrap_or(false);
 
         let notebook = if is_notebook {
             let p = path.expect("checked above");
             match Notebook::from_path(std::path::Path::new(p)) {
                 Ok(nb) => Some((nb, NotebookState::new())),
                 Err(e) => {
-                    // Fall through to regular buffer with an error message.
                     eprintln!("ki: failed to load notebook: {e}");
                     None
                 }
@@ -127,10 +164,11 @@ impl App {
                 buf.rope = cell.source.clone();
             }
             buf.path = Some(vpath.clone());
-            let session = nb.cells.first().map(|_cell| crate::app::CellEditSession {
+            let session = nb.cells.first().map(|_cell| CellEditSession {
                 cell_index: 0,
                 language: lang.clone(),
                 notebook_path: nb.path.clone(),
+                focused_edit: false,
             });
             (buf, session, Some(lang))
         } else {
@@ -151,7 +189,6 @@ impl App {
 
         let initial_mode = if notebook.is_some() { Mode::Notebook } else { Mode::Normal };
 
-        // Track the initial file in the buffer list.
         let mut open_buffers: Vec<std::path::PathBuf> = Vec::new();
         if let Some(p) = buffer.path.as_ref() {
             open_buffers.push(p.clone());
@@ -159,7 +196,6 @@ impl App {
             open_buffers.push(nb.path.clone());
         }
 
-        // Compute initial git diff (best-effort; empty when not in a git repo).
         let git_diff = buffer
             .path
             .as_deref()
@@ -187,28 +223,15 @@ impl App {
             notebook,
             pending_images: Vec::new(),
             notebook_cell_edit,
-            notebook_focused_edit: false,
             popup: None,
             lsp: LspManager::new(),
             lsp_language,
-            search_query: String::new(),
-            search_matches: Vec::new(),
-            search_current: 0,
-            search_active: false,
-            search_query_just_opened: false,
+            search: SearchState::default(),
             viewport_height: 24,
+            viewport_width: 80,
             open_buffers,
             git_diff,
         })
-    }
-
-    /// The language id for the document currently in the editor buffer.
-    /// In cell-edit mode this reflects the cell's language.
-    pub fn current_language(&self) -> Option<&str> {
-        if let Some(ref session) = self.notebook_cell_edit {
-            return Some(&session.language);
-        }
-        self.lsp_language.as_deref()
     }
 }
 
@@ -259,8 +282,6 @@ pub fn run(path: Option<&str>) -> Result<()> {
                     .filter(|p| !p.as_os_str().is_empty())
                     .map(|p| p.to_path_buf());
                 app.lsp.ensure_server(&lang, &server_config, nb_dir.as_deref());
-                // Expose the notebook language so which-key hints and other
-                // UI that checks current_language() work in navigate mode.
                 if app.lsp_language.is_none() {
                     app.lsp_language = Some(lang);
                 }
@@ -268,14 +289,12 @@ pub fn run(path: Option<&str>) -> Result<()> {
         }
     }
 
-    // Install panic hook to restore terminal on panic
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let _ = restore_terminal();
         original_hook(info);
     }));
 
-    // Set up terminal
     terminal::enable_raw_mode()?;
     crate::theme::initialize_color_cache();
     let mut stdout = io::stdout();
@@ -285,7 +304,6 @@ pub fn run(path: Option<&str>) -> Result<()> {
 
     let result = run_loop(&mut terminal, &mut app);
 
-    // Always restore terminal
     restore_terminal()?;
 
     result
@@ -296,19 +314,19 @@ fn run_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        // Always update scroll so intra-cell cursor stays visible whether the
-        // notebook view or the full-screen overlay is active.
-        update_scroll_to_fit(terminal, app);
+        // Update stored viewport dimensions, then recompute scroll.
+        // This runs before every render so the scroll is always based on the
+        // current terminal size (handles resize events too).
         if let Ok(size) = terminal.size() {
             app.viewport_height = size.height.saturating_sub(2) as usize;
+            app.viewport_width = size.width as usize;
         }
+        crate::exec::update_scroll(app);
 
-        if app.notebook.is_some() && !app.notebook_focused_edit {
+        if app.notebook.is_some() && !app.notebook_focused_edit() {
             // Notebook multi-cell view — the focused cell is in app.buffer.
             terminal.draw(|f| {
                 let size = f.area();
-                // Track the cursor position returned by the notebook renderer so
-                // completion popups anchor to the right spot inside the cell.
                 let mut nb_cursor: Option<(u16, u16)> = None;
 
                 if size.height >= 3 {
@@ -345,32 +363,24 @@ fn run_loop(
                     }
                 }
                 if let Some(ref popup) = app.popup {
-                    // Use the in-cell cursor position so completions appear
-                    // directly below the insertion point, not at row 0.
                     crate::popup_ui::render(f, popup, nb_cursor);
                 }
             })?;
 
             if !app.pending_images.is_empty() {
-                // Always clear stale Kitty graphics so they don't persist from
-                // the previous frame.
                 let _ = kitty::clear_images();
 
                 if app.popup.is_none() {
-                    // No popup visible — safe to paint images on top of cells.
                     let images = std::mem::take(&mut app.pending_images);
                     for req in &images {
                         let _ = kitty::render_image(req.col, req.row, req.rows, &req.png_data);
                     }
                 } else {
-                    // A popup is open: discard image requests for this frame so
-                    // Kitty graphics don't paint over the popup.  The next frame
-                    // without a popup will re-render them.
                     app.pending_images.clear();
                 }
             }
         } else {
-            // Plain text editor: regular file or full-screen focused-cell overlay.
+            // Plain text editor or full-screen focused-cell overlay.
             terminal.draw(|f| {
                 ui::render(f, app);
                 if let Some(ref popup) = app.popup {
@@ -380,25 +390,18 @@ fn run_loop(
             })?;
         }
 
-        // Update terminal cursor shape to reflect the current mode.
         set_cursor_shape(&app.mode);
 
-        // Poll with a short timeout so LSP responses are processed promptly
-        // without requiring a keypress to trigger the next iteration.
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
                     input::handle_key(app, key);
                 }
-                Event::Resize(_, _) => {
-                    // Terminal will redraw on next iteration.
-                }
+                Event::Resize(_, _) => {}
                 _ => {}
             }
         }
 
-        // Process any pending LSP responses from background threads.
-        // Runs every ~50 ms regardless of whether a key was pressed.
         crate::exec::process_lsp_events(app);
 
         if app.should_quit {
@@ -406,73 +409,6 @@ fn run_loop(
         }
     }
     Ok(())
-}
-
-/// Adjust scroll_row and scroll_col so the cursor is within the visible area.
-fn update_scroll_to_fit(
-    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-) {
-    let size = terminal.size().unwrap_or_default();
-    let visible_rows = size.height.saturating_sub(2) as usize; // minus status + cmd bar
-    let git_col = if app.config.editor.git_gutter && app.notebook.is_none() { 1usize } else { 0 };
-    let gutter_width: usize = if app.config.editor.line_numbers { 5 + git_col } else { git_col };
-    let visible_cols = (size.width as usize).saturating_sub(gutter_width);
-
-    if visible_rows == 0 || visible_cols == 0 {
-        return;
-    }
-
-    let rope = &app.buffer.rope;
-    if rope.len_chars() == 0 {
-        app.scroll_row = 0;
-        app.scroll_col = 0;
-        return;
-    }
-
-    let pos = app.selection.head.min(rope.len_chars());
-    let line_idx = rope.char_to_line(pos);
-    let scroll_off = app.config.editor.scroll_off;
-
-    // Vertical: scroll up
-    let top_bound = line_idx.saturating_sub(scroll_off);
-    if app.scroll_row > top_bound {
-        app.scroll_row = top_bound;
-    }
-    // Vertical: scroll down
-    let bottom_bound = line_idx + scroll_off;
-    if bottom_bound >= app.scroll_row + visible_rows {
-        app.scroll_row = bottom_bound.saturating_sub(visible_rows) + 1;
-    }
-
-    // Horizontal: compute display column of cursor (tabs expand to tab stops)
-    let line_start = rope.line_to_char(line_idx);
-    let line_str = rope.line(line_idx);
-    let cursor_off = pos - line_start;
-    let tab_width = app.config.editor.tab_width;
-    let mut display_col: usize = 0;
-    for i in 0..cursor_off {
-        let c = line_str.char(i);
-        display_col += if c == '\t' {
-            tab_width - (display_col % tab_width)
-        } else {
-            unicode_display_width(c)
-        };
-    }
-
-    // Horizontal: scroll left
-    if display_col < app.scroll_col {
-        app.scroll_col = display_col;
-    }
-    // Horizontal: scroll right
-    if display_col >= app.scroll_col + visible_cols {
-        app.scroll_col = display_col.saturating_sub(visible_cols) + 1;
-    }
-}
-
-fn unicode_display_width(c: char) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    c.width().unwrap_or(1)
 }
 
 fn restore_terminal() -> Result<()> {

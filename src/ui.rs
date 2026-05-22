@@ -407,8 +407,22 @@ pub fn render_command_nb(frame: &mut Frame, app: &App, area: Rect) {
 fn render_command(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
         Mode::Command => format!(":{}", app.command_buf),
-        Mode::Search { forward: true } => format!("/{}", app.search_query),
-        Mode::Search { forward: false } => format!("?{}", app.search_query),
+        Mode::Search { forward } => {
+            let prefix = if *forward { '/' } else { '?' };
+            let count = app.search.matches.len();
+            if app.search.query.is_empty() {
+                format!("{prefix}")
+            } else if count == 0 {
+                format!("{prefix}{} [no matches]", app.search.query)
+            } else {
+                format!(
+                    "{prefix}{} [{}/{}]",
+                    app.search.query,
+                    app.search.current + 1,
+                    count,
+                )
+            }
+        }
         _ => app.message.clone().unwrap_or_default(),
     };
     let cmd_widget = SingleLineWidget {

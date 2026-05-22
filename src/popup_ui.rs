@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::popup::{KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize};
+use crate::popup::{match_positions, KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize};
 
 /// Render a popup on top of the current frame.
 pub fn render(frame: &mut Frame, popup: &Popup, cursor_screen: Option<(u16, u16)>) {
@@ -176,10 +176,9 @@ fn render_list_popup(
 
     let buf = frame.buffer_mut();
 
-    // Row 0: filter input "  > {filter}"
+    // Row 0: filter input "  > {filter}" or navigation hint
     let filter_y = inner.top();
     {
-        let prefix = "> ";
         let mut x = inner.left();
         // Clear row background
         for col in inner.left()..inner.right() {
@@ -187,36 +186,45 @@ fn render_list_popup(
                 .set_char(' ')
                 .set_style(Style::default().bg(Color::Rgb(28, 28, 40)));
         }
-        // Draw prefix
-        for c in prefix.chars() {
-            if x >= inner.right() {
-                break;
+        if state.navigating {
+            // Navigation mode: show a hint instead of the cursor
+            let hint = format!("  j/k navigate · i to type · esc to close · {}", state.filter);
+            for c in hint.chars() {
+                if x >= inner.right() { break; }
+                buf[(x, filter_y)]
+                    .set_char(c)
+                    .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
+                x += 1;
             }
-            buf[(x, filter_y)]
-                .set_char(c)
-                .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
-            x += 1;
-        }
-        // Draw filter text
-        for c in state.filter.chars() {
-            if x >= inner.right() {
-                break;
+        } else {
+            let prefix = "> ";
+            // Draw prefix
+            for c in prefix.chars() {
+                if x >= inner.right() { break; }
+                buf[(x, filter_y)]
+                    .set_char(c)
+                    .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
+                x += 1;
             }
-            buf[(x, filter_y)]
-                .set_char(c)
-                .set_style(Style::default().fg(Color::White).bg(Color::Rgb(28, 28, 40)));
-            x += 1;
-        }
-        // Cursor block
-        if x < inner.right() {
-            buf[(x, filter_y)]
-                .set_char(' ')
-                .set_style(
-                    Style::default()
-                        .fg(Color::Rgb(28, 28, 40))
-                        .bg(Color::White)
-                        .add_modifier(Modifier::REVERSED),
-                );
+            // Draw filter text
+            for c in state.filter.chars() {
+                if x >= inner.right() { break; }
+                buf[(x, filter_y)]
+                    .set_char(c)
+                    .set_style(Style::default().fg(Color::White).bg(Color::Rgb(28, 28, 40)));
+                x += 1;
+            }
+            // Cursor block
+            if x < inner.right() {
+                buf[(x, filter_y)]
+                    .set_char(' ')
+                    .set_style(
+                        Style::default()
+                            .fg(Color::Rgb(28, 28, 40))
+                            .bg(Color::White)
+                            .add_modifier(Modifier::REVERSED),
+                    );
+            }
         }
     }
 
@@ -321,13 +329,33 @@ fn render_list_popup(
             }
         }
 
-        // Label
+        // Label — highlight chars that matched the filter.
         let label_start = x;
-        for c in item.label.chars() {
+        let matched: std::collections::HashSet<usize> = if state.filter.is_empty() {
+            Default::default()
+        } else {
+            match_positions(&item.label, &state.filter)
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        };
+        let match_style = if is_selected {
+            Style::default()
+                .fg(Color::Rgb(255, 225, 80))
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Rgb(255, 175, 0))
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD)
+        };
+        for (char_idx, c) in item.label.chars().enumerate() {
             if x >= inner.right().saturating_sub(scrollbar_width) {
                 break;
             }
-            buf[(x, y)].set_char(c).set_style(base_style);
+            let style = if matched.contains(&char_idx) { match_style } else { base_style };
+            buf[(x, y)].set_char(c).set_style(style);
             x += 1;
         }
         let label_end = x;

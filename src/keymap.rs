@@ -104,13 +104,15 @@ impl From<KeyEvent> for KeyBinding {
 pub struct Keymap {
     normal: HashMap<KeyBinding, Vec<Command>>,
     select: HashMap<KeyBinding, Vec<Command>>,
+    notebook: HashMap<KeyBinding, Vec<Command>>,
 }
 
 impl Keymap {
-    /// Build the default key bindings for Normal and Select modes.
+    /// Build the default key bindings for Normal, Select, and Notebook modes.
     pub fn default_bindings() -> Self {
         let mut normal: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut select: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        let mut notebook: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
 
         // Helper macro to insert into both maps
         macro_rules! both {
@@ -220,14 +222,18 @@ impl Keymap {
 
         // --- Normal-mode-only bindings ---
 
-        // / → search forward, ? → search backward
-        // n → enter Notebook mode (mnemonic); Ctrl+N/Ctrl+P cycle search matches
+        // Search: standard vim n/N bindings for next/prev match.
+        // Notebook mode is accessible via :nb / :notebook (or by opening a .ipynb file).
         normal.insert(KeyBinding::char('/'), vec![Command::SearchForward]);
         normal.insert(KeyBinding::char('?'), vec![Command::SearchBackward]);
-        normal.insert(KeyBinding::char('n'), vec![Command::EnterNotebook]);
+        normal.insert(KeyBinding::char('n'), vec![Command::SearchNext]);
         normal.insert(KeyBinding::char('N'), vec![Command::SearchPrev]);
+        // Ctrl+N/P also navigate within popups and search matches.
         normal.insert(KeyBinding::ctrl('n'), vec![Command::SearchNext]);
         normal.insert(KeyBinding::ctrl('p'), vec![Command::SearchPrev]);
+        // Ctrl+F → grep buffer; Ctrl+G → grep project
+        normal.insert(KeyBinding::ctrl('f'), vec![Command::GrepBuffer]);
+        normal.insert(KeyBinding::ctrl('g'), vec![Command::GrepProject]);
 
         // Space opens command palette
         normal.insert(
@@ -259,7 +265,38 @@ impl Keymap {
 
         select.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
 
-        Self { normal, select }
+        // --- Notebook navigation mode bindings ---
+
+        notebook.insert(KeyBinding::char('j'), vec![Command::NotebookNextCell]);
+        notebook.insert(KeyBinding::key(KeyCode::Down), vec![Command::NotebookNextCell]);
+        notebook.insert(KeyBinding::char('k'), vec![Command::NotebookPrevCell]);
+        notebook.insert(KeyBinding::key(KeyCode::Up), vec![Command::NotebookPrevCell]);
+
+        // Enter opens full-screen cell overlay; i enters Insert in-place
+        notebook.insert(KeyBinding::key(KeyCode::Enter), vec![Command::NotebookOpenCellEdit]);
+        notebook.insert(KeyBinding::char('i'), vec![Command::EnterInsert]);
+        notebook.insert(KeyBinding::char('v'), vec![Command::EnterNormal]);
+
+        // Cell management
+        notebook.insert(KeyBinding::char('o'), vec![Command::NotebookNewCellBelow]);
+        notebook.insert(KeyBinding::char('O'), vec![Command::NotebookNewCellAbove]);
+        notebook.insert(KeyBinding::char('d'), vec![Command::NotebookDeleteCell]);
+        notebook.insert(KeyBinding::char('x'), vec![Command::NotebookClearOutputs]);
+
+        // Execution
+        notebook.insert(KeyBinding::char('e'), vec![Command::NotebookExecuteCell]);
+        notebook.insert(KeyBinding::char('E'), vec![Command::NotebookExecuteAndAdvance]);
+
+        // Structural undo / redo
+        notebook.insert(KeyBinding::char('u'), vec![Command::NotebookUndoStructural]);
+        notebook.insert(KeyBinding::char('U'), vec![Command::NotebookRedoStructural]);
+
+        notebook.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
+        notebook.insert(KeyBinding::char(':'), vec![Command::EnterCommandMode]);
+        notebook.insert(KeyBinding::ctrl('s'), vec![Command::Save]);
+        notebook.insert(KeyBinding::ctrl('r'), vec![Command::NotebookRestartKernel]);
+
+        Self { normal, select, notebook }
     }
 
     pub fn lookup_normal(&self, kb: &KeyBinding) -> Option<&[Command]> {
@@ -268,6 +305,10 @@ impl Keymap {
 
     pub fn lookup_select(&self, kb: &KeyBinding) -> Option<&[Command]> {
         self.select.get(kb).map(Vec::as_slice)
+    }
+
+    pub fn lookup_notebook(&self, kb: &KeyBinding) -> Option<&[Command]> {
+        self.notebook.get(kb).map(Vec::as_slice)
     }
 
     #[allow(dead_code)]

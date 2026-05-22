@@ -23,6 +23,39 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
     // handling so that typing into the buffer continues uninterrupted.
     let is_completion = popup.on_confirm == PopupTarget::InsertText;
 
+    // Two-phase list: ESC transitions typing → navigating; second ESC dismisses.
+    if let PopupContent::List(ref mut s) = popup.content {
+        if s.two_phase {
+            match key.code {
+                KeyCode::Esc => {
+                    if s.navigating {
+                        return PopupAction::Dismiss;
+                    } else {
+                        s.navigating = true;
+                        return PopupAction::Continue;
+                    }
+                }
+                KeyCode::Char('j') if s.navigating => {
+                    s.move_down();
+                    return PopupAction::Continue;
+                }
+                KeyCode::Char('k') if s.navigating => {
+                    s.move_up();
+                    return PopupAction::Continue;
+                }
+                KeyCode::Char('i') if s.navigating => {
+                    s.navigating = false;
+                    return PopupAction::Continue;
+                }
+                KeyCode::Char(_) if s.navigating => {
+                    // In navigation mode, printable keys are consumed but do nothing.
+                    return PopupAction::Continue;
+                }
+                _ => {}
+            }
+        }
+    }
+
     match key.code {
         KeyCode::Esc => PopupAction::Dismiss,
 
