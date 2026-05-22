@@ -112,6 +112,9 @@ pub struct App {
     pub open_buffers: Vec<std::path::PathBuf>,
     /// Git diff marks for the current buffer, keyed by 0-indexed line number.
     pub git_diff: std::collections::HashMap<usize, GutterMark>,
+    /// Code actions returned by the last LSP `textDocument/codeAction` request.
+    /// Indexed by popup item payload (as a string-encoded usize).
+    pub pending_code_actions: Vec<serde_json::Value>,
 }
 
 impl App {
@@ -231,6 +234,7 @@ impl App {
             viewport_width: 80,
             open_buffers,
             git_diff,
+            pending_code_actions: Vec::new(),
         })
     }
 }

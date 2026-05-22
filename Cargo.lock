@@ -272,28 +272,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "ki"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "crossterm",
- "dirs",
- "libc",
- "ratatui",
- "ropey",
- "serde",
- "serde_json",
- "toml",
- "tree-sitter",
- "tree-sitter-highlight",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "unicode-width 0.2.0",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,6 +320,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
 dependencies = [
  "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "majorana"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "crossterm",
+ "dirs",
+ "libc",
+ "ratatui",
+ "ropey",
+ "serde",
+ "serde_json",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-highlight",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

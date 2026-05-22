@@ -45,6 +45,8 @@ pub enum LspEvent {
     DefinitionResult { location: Option<LspLocation> },
     /// References response — may be multiple locations.
     ReferencesResult { locations: Vec<LspLocation> },
+    /// Code actions available at the cursor/selection position.
+    CodeActionsResult { actions: Vec<serde_json::Value> },
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +168,39 @@ impl LspManager {
     pub fn did_close(&mut self, language: &str, path: &std::path::Path) {
         if let Some(client) = self.clients.get_mut(language) {
             client.did_close(&path_to_uri(path));
+        }
+    }
+
+    /// Request code actions for the given character range.
+    ///
+    /// Returns `false` if the server for `language` is not yet initialised.
+    pub fn request_code_actions(
+        &mut self,
+        language: &str,
+        path: &std::path::Path,
+        rope: &ropey::Rope,
+        start_char: usize,
+        end_char: usize,
+    ) -> bool {
+        if let Some(client) = self.clients.get_mut(language) {
+            if !client.initialized {
+                return false;
+            }
+            let uri = path_to_uri(path);
+            let (sl, sc) = char_to_lsp_pos(rope, start_char);
+            let (el, ec) = char_to_lsp_pos(rope, end_char);
+            client.request_code_actions(&uri, sl, sc, el, ec);
+            return true;
+        }
+        false
+    }
+
+    /// Send `workspace/executeCommand` to apply a code action command-side effect.
+    pub fn execute_command(&mut self, language: &str, command: &str, args: serde_json::Value) {
+        if let Some(client) = self.clients.get_mut(language) {
+            if client.initialized {
+                client.execute_command(command, args);
+            }
         }
     }
 
@@ -353,6 +388,11 @@ fn process_message(
                     let locations = parse_locations_result(&result);
                     Some(LspEvent::ReferencesResult { locations })
                 }
+                PendingKind::CodeAction => {
+                    let actions = result.as_array().cloned().unwrap_or_default();
+                    Some(LspEvent::CodeActionsResult { actions })
+                }
+                PendingKind::ExecuteCommand => None,
             }
         }
         ServerMessage::Notification { method, params } => {

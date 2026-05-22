@@ -29,6 +29,9 @@ pub enum PendingKind {
     References,
     TypeDefinition,
     Implementation,
+    CodeAction,
+    /// Fire-and-forget server command — response is discarded.
+    ExecuteCommand,
 }
 
 /// One cell in a `notebookDocument/didOpen` or `didChange` payload.
@@ -113,7 +116,20 @@ impl LspClient {
                     "references": { "dynamicRegistration": false },
                     "typeDefinition": { "dynamicRegistration": false },
                     "implementation": { "dynamicRegistration": false },
-                    "publishDiagnostics": {}
+                    "publishDiagnostics": {},
+                    "codeAction": {
+                        "dynamicRegistration": false,
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {
+                                "valueSet": [
+                                    "", "quickfix", "refactor",
+                                    "refactor.extract", "refactor.inline", "refactor.rewrite",
+                                    "source", "source.organizeImports", "source.fixAll"
+                                ]
+                            }
+                        },
+                        "resolveSupport": { "properties": ["edit"] }
+                    }
                 },
                 "notebookDocument": {
                     "synchronization": {
@@ -203,6 +219,31 @@ impl LspClient {
             "textDocument": { "uri": uri },
             "position": { "line": line, "character": character }
         }), PendingKind::Implementation)
+    }
+
+    pub fn request_code_actions(
+        &mut self,
+        uri: &str,
+        start_line: u32,
+        start_char: u32,
+        end_line: u32,
+        end_char: u32,
+    ) -> u64 {
+        self.send_request("textDocument/codeAction", json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": start_line, "character": start_char },
+                "end":   { "line": end_line,   "character": end_char   }
+            },
+            "context": { "diagnostics": [] }
+        }), PendingKind::CodeAction)
+    }
+
+    pub fn execute_command(&mut self, command: &str, args: serde_json::Value) {
+        self.send_request("workspace/executeCommand", json!({
+            "command": command,
+            "arguments": args,
+        }), PendingKind::ExecuteCommand);
     }
 
     /// True if `uri` has been opened on this client (via `did_open` or `notebook_did_open`).

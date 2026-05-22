@@ -57,6 +57,8 @@ pub enum PopupTarget {
     /// Jump to the location encoded in the confirmed item's payload.
     /// Payload format: `"path\0line\0col"` (all fields, line/col zero-indexed).
     Navigate,
+    /// Apply the code action whose index is encoded in the confirmed item's payload.
+    ApplyCodeAction,
 }
 
 /// Returned by popup input handling.
@@ -427,6 +429,23 @@ impl Popup {
         }
     }
 
+    /// Filterable list of LSP code actions; confirms by applying the selected action.
+    pub fn code_actions(items: Vec<ListItem>) -> Self {
+        Self {
+            title: Some("code actions".into()),
+            content: PopupContent::List(ListState {
+                items,
+                filter: String::new(),
+                selected: 0,
+                two_phase: false,
+                navigating: false,
+            }),
+            anchor: PopupAnchor::CursorBelow,
+            width: PopupSize::FractionOfScreen(0.5),
+            on_confirm: PopupTarget::ApplyCodeAction,
+        }
+    }
+
     /// Which-key strip shown at the bottom of the screen.
     pub fn which_key(prefix: &str, hints: Vec<(String, String)>) -> Self {
         Self {
@@ -517,8 +536,11 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("page-up", "Scroll half page up  [ctrl+u, PgUp]"),
         // Shell
         ("shell", "Run a shell command  [:shell <cmd>]"),
+        // Editing
+        ("comment-region", "Toggle comment/uncomment  [gc]"),
         // LSP
         ("lsp-hover", "Show hover documentation  [K]"),
+        ("lsp-code-actions", "Show code actions  [ga]"),
         ("lsp-goto-definition", "Go to definition  [gd]"),
         ("lsp-goto-references", "Go to references  [gr]"),
         ("lsp-goto-type-definition", "Go to type definition  [gy]"),

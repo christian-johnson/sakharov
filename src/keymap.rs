@@ -235,17 +235,14 @@ impl Keymap {
         normal.insert(KeyBinding::ctrl('f'), vec![Command::GrepBuffer]);
         normal.insert(KeyBinding::ctrl('g'), vec![Command::GrepProject]);
 
-        // Space opens command palette
-        normal.insert(
-            KeyBinding {
-                code: KeyCode::Char(' '),
-                modifiers: KeyModifiers::NONE,
-            },
-            vec![Command::OpenCommandPalette],
-        );
+        // Space opens command palette (both Normal and Select)
+        let space = KeyBinding { code: KeyCode::Char(' '), modifiers: KeyModifiers::NONE };
+        normal.insert(space.clone(), vec![Command::OpenCommandPalette]);
+        select.insert(space, vec![Command::OpenCommandPalette]);
 
         // K → LspHover
         normal.insert(KeyBinding::char('K'), vec![Command::LspHover]);
+
 
         normal.insert(KeyBinding::char('i'), vec![Command::EnterInsert]);
         normal.insert(KeyBinding::char('a'), vec![Command::EnterInsertAfter]);

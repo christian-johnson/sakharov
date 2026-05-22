@@ -3,7 +3,7 @@ mod notebook;
 mod search;
 mod text;
 
-pub use lsp::{jump_to_location, lsp_did_change, process_lsp_events};
+pub use lsp::{apply_code_action, jump_to_location, lsp_did_change, process_lsp_events};
 pub use search::{search_compute_matches, search_jump};
 
 use ropey::Rope;
@@ -251,9 +251,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 ("l".into(), "go to line end".into()),
                 ("b".into(), "buffer picker".into()),
                 ("s".into(), "symbol picker".into()),
-                ("D".into(), "diagnostic picker  [LSP]".into()),
+                ("c".into(), "comment/uncomment selection".into()),
+                ("D".into(), "diagnostic picker".into()),
             ];
             if lsp_active {
+                hints.push(("a".into(), "code actions  [LSP]".into()));
                 hints.push(("d".into(), "go to definition  [LSP]".into()));
                 hints.push(("r".into(), "go to references  [LSP]".into()));
                 hints.push(("y".into(), "go to type definition  [LSP]".into()));
@@ -812,6 +814,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::LspGotoTypeDefinition => { lsp::lsp_request(app, LspRequestKind::TypeDefinition); return; }
         Command::LspGotoImplementation => { lsp::lsp_request(app, LspRequestKind::Implementation); return; }
         Command::LspRequestCompletion => { lsp::lsp_request(app, LspRequestKind::Completion);     return; }
+        Command::LspCodeActions      => { lsp::lsp_code_actions_request(app);                     return; }
+
+        // --- Editing (continued) ---
+        Command::CommentRegion => {
+            text::comment_region(app);
+            if app.mode == Mode::Select {
+                app.mode = Mode::Normal;
+            }
+        }
     }
 
     update_scroll(app);

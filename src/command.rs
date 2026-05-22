@@ -33,6 +33,8 @@ pub enum Command {
     // Editing
     DeleteSelection,
     ChangeSelection,
+    /// Toggle comment/uncomment on the selected lines.
+    CommentRegion,
     YankSelection,
     PasteAfter,
     PasteBefore,
@@ -130,6 +132,8 @@ pub enum Command {
     // LSP
     /// Show hover documentation for the symbol under the cursor.
     LspHover,
+    /// Show code actions available at the cursor/selection.
+    LspCodeActions,
     /// Jump to the definition of the symbol under the cursor.
     LspGotoDefinition,
     /// List all references to the symbol under the cursor.
@@ -174,6 +178,7 @@ impl Command {
             Command::TillCharBackward => "till-char-backward",
             Command::DeleteSelection => "delete-selection",
             Command::ChangeSelection => "change-selection",
+            Command::CommentRegion => "comment-region",
             Command::YankSelection => "yank-selection",
             Command::PasteAfter => "paste-after",
             Command::PasteBefore => "paste-before",
@@ -228,6 +233,7 @@ impl Command {
             Command::PageUp => "page-up",
             Command::PageDown => "page-down",
             Command::LspHover => "lsp-hover",
+            Command::LspCodeActions => "lsp-code-actions",
             Command::LspGotoDefinition => "lsp-goto-definition",
             Command::LspGotoReferences => "lsp-goto-references",
             Command::LspGotoTypeDefinition => "lsp-goto-type-definition",
@@ -323,6 +329,7 @@ impl Command {
             "till-char-backward"      => Some(Command::TillCharBackward),
             "delete-selection" | "delete" => Some(Command::DeleteSelection),
             "change-selection" | "change" => Some(Command::ChangeSelection),
+            "comment-region" | "comment" => Some(Command::CommentRegion),
             "yank-selection"   | "yank"   => Some(Command::YankSelection),
             "paste-after"      | "paste"  => Some(Command::PasteAfter),
             "paste-before"               => Some(Command::PasteBefore),
@@ -390,6 +397,7 @@ impl Command {
 
             // LSP commands
             "lsp-hover" | "hover" | "K" => Some(Command::LspHover),
+            "lsp-code-actions" | "code-actions" | "ga" => Some(Command::LspCodeActions),
             "lsp-goto-definition" | "goto-definition" | "gd" => Some(Command::LspGotoDefinition),
             "lsp-goto-references" | "goto-references" | "gr" => Some(Command::LspGotoReferences),
             "lsp-goto-type-definition" | "goto-type-definition" | "gy" => {

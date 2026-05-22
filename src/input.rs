@@ -243,6 +243,8 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
         KeyCode::Char('b') => exec::execute(app, &Command::OpenBufferPicker),
         KeyCode::Char('s') => exec::execute(app, &Command::OpenSymbolPicker),
         KeyCode::Char('D') => exec::execute(app, &Command::OpenDiagnosticPicker),
+        KeyCode::Char('a') => exec::execute(app, &Command::LspCodeActions),
+        KeyCode::Char('c') => exec::execute(app, &Command::CommentRegion),
         KeyCode::Esc => {}
         _ => {}
     }
@@ -412,6 +414,11 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
             exec::lsp_did_change(app);
         }
         PopupTarget::Dismiss => {}
+        PopupTarget::ApplyCodeAction => {
+            if let Ok(idx) = text.parse::<usize>() {
+                exec::apply_code_action(app, idx);
+            }
+        }
         PopupTarget::Navigate => {
             let parts: Vec<&str> = text.splitn(3, '\0').collect();
             if parts.len() == 3 {
