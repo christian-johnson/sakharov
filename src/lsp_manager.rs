@@ -124,7 +124,7 @@ impl LspManager {
                     .unwrap_or_else(|| "file:///".into());
 
                 // Venv/environment search root: prefer the file's own directory
-                // so a .venv sitting next to the file is found even when ki was
+                // so a .venv sitting next to the file is found even when mj was
                 // launched from a different directory.
                 let venv_root = root_path.or(cwd.as_deref());
 
@@ -139,7 +139,7 @@ impl LspManager {
             }
             Err(_) => {
                 // Server binary not installed or failed to start.
-                // ki treats a missing LSP server as a soft degradation — no
+                // majorana treats a missing LSP server as a soft degradation — no
                 // error displayed, the feature simply stays unavailable.
             }
         }
@@ -578,7 +578,7 @@ fn detect_python_venv(start: &std::path::Path) -> Option<std::path::PathBuf> {
 /// Handles pyenv shims, conda envs, and any other non-venv setup where the
 /// user's packages are installed into whichever Python is active in the shell.
 ///
-/// Capped at 2 seconds so a misconfigured/slow Python can't hang ki startup.
+/// Capped at 2 seconds so a misconfigured/slow Python can't hang mj startup.
 fn detect_active_python() -> Option<std::path::PathBuf> {
     use std::sync::mpsc;
 

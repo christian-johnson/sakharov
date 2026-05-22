@@ -1,9 +1,9 @@
-# ki — personal TUI text editor
+# majorana — personal TUI text editor
 
 ## What this is
 
 A from-scratch TUI text editor written in Rust, built for personal use.
-Invoked as `ki [file]`. Binary at `target/debug/ki` (or `target/release/ki`).
+Invoked as `mj [file]`. Binary at `target/debug/mj` (or `target/release/mj`).
 
 ## Current status — Phase 2 complete
 
@@ -18,7 +18,7 @@ Invoked as `ki [file]`. Binary at `target/debug/ki` (or `target/release/ki`).
 - Status bar: mode indicator (colour-coded), filename, modified flag, line:col, scroll %
 - Block cursor (white in Normal, cyan in Insert); hardware cursor positioned via `frame.set_cursor_position`
 - Ctrl+S saves; Ctrl+C shows quit hint
-- Config at `~/.config/ki/config.toml` (theme colours, tab width, line numbers, scroll_off)
+- Config at `~/.config/majorana/config.toml` (theme colours, tab width, line numbers, scroll_off)
 
 ### Phase 2 (Jupyter notebooks) — complete
 - Opens `.ipynb` files automatically in notebook mode

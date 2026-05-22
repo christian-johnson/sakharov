@@ -1,6 +1,6 @@
-# ki — Personal TUI Text Editor & Notebook Environment
+# majorana — Personal TUI Text Editor & Notebook Environment
 
-`ki` is a lightweight text editor heavily inspired by Helix.
+`majorana` is a lightweight text editor heavily inspired by Helix.
 It steals many of Helix's features (noun->verb modal editing; simple configuration) while adding a few additional pieces for data science support, namely:
 - Native Jupyter notebook interface
 - Notebook LSP support
@@ -25,13 +25,13 @@ That means you can u
 
 ## Prerequisites
 
-To compile and run `ki`, make sure you have the following:
+To compile and run `majorana`, make sure you have the following:
 
 1. **Rust Toolchain**: `cargo` and `rustc` (Edition 2021).
 2. **Python 3**: For running Jupyter notebook cells. Make sure you have python installed. It is highly recommended to have `ipykernel` or `jupyter` installed in your project virtual environments.
 3. **Kitty Terminal (Optional)**: Needed if you want to view rich graphical outputs (like plots and images) inside notebooks using the Kitty graphics protocol.
 4. **Language Servers (Optional)**:
-   - Python: `pylsp`
+   - Python: `ruff` (≥ 0.4, built-in LSP via `ruff server`)
    - Rust: `rust-analyzer`
    - JavaScript/TypeScript: `typescript-language-server`
 
@@ -39,7 +39,7 @@ To compile and run `ki`, make sure you have the following:
 
 ## Installation
 
-To build and install `ki` from source:
+To build and install `majorana` from source:
 
 1. Clone the repository:
    ```bash
@@ -52,20 +52,20 @@ To build and install `ki` from source:
    ```
 3. Copy the compiled binary to your path:
    ```bash
-   cp target/release/ki ~/.local/bin/  # Or any directory on your $PATH
+   cp target/release/mj ~/.local/bin/  # Or any directory on your $PATH
    ```
 
-To run `ki`, simply pass a file path:
+To run `majorana`, simply pass a file path:
 ```bash
-ki my_script.py
-ki my_notebook.ipynb
+mj my_script.py
+mj my_notebook.ipynb
 ```
 
 ---
 
 ## Modes & Keybindings
 
-`ki` uses Helix-style selection-first editing. Most actions operate on the current selection. In Normal mode, the selection is collapsed to a single-character "point" cursor.
+`majorana` uses Helix-style selection-first editing. Most actions operate on the current selection. In Normal mode, the selection is collapsed to a single-character "point" cursor.
 
 ### Normal & Select Modes
 
@@ -148,7 +148,7 @@ Activated automatically for `.ipynb` files, or by pressing `n` in Normal mode. I
 
 ## Configuration
 
-`ki` reads configuration from `~/.config/ki/config.toml`. The user configuration is deep-merged on top of built-in defaults.
+`majorana` reads configuration from `~/.config/majorana/config.toml`. The user configuration is deep-merged on top of built-in defaults.
 
 ### Default Options
 
@@ -185,10 +185,10 @@ git_gutter = true
 
 ### Example Keybinding Configuration
 
-If you want to customize your keys (for example, mapping `J` and `K` to page down/page up instead of cell navigation or default bindings), add `[keys.normal]` and `[keys.select]` sections to `~/.config/ki/config.toml`:
+If you want to customize your keys (for example, mapping `J` and `K` to page down/page up instead of cell navigation or default bindings), add `[keys.normal]` and `[keys.select]` sections to `~/.config/majorana/config.toml`:
 
 ```toml
-# ~/.config/ki/config.toml
+# ~/.config/majorana/config.toml
 
 [theme]
 # Use custom theme colors
@@ -207,6 +207,30 @@ relative_line_numbers = true
 [keys.select]
 "J" = "page-down"
 "K" = "page-up"
+```
+
+### Example Language Server Configuration
+
+To enable Python LSP support with [ruff](https://docs.astral.sh/ruff/), add a `[language_servers.python]` section. Run `majorana` from your project root so it can find your virtualenv automatically.
+
+```toml
+# ~/.config/majorana/config.toml
+
+[language_servers.python]
+command = "ruff"
+args = ["server"]
+```
+
+For Rust and JavaScript/TypeScript:
+
+```toml
+[language_servers.rust]
+command = "rust-analyzer"
+args = []
+
+[language_servers.javascript]
+command = "typescript-language-server"
+args = ["--stdio"]
 ```
 
 ---

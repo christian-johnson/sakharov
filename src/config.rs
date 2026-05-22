@@ -58,7 +58,7 @@ pub struct LanguageServerConfig {
     #[serde(default)]
     pub args: Vec<String>,
     /// Server-specific `initializationOptions` (arbitrary JSON).
-    /// If absent, ki auto-detects sensible defaults (e.g. venv for Python).
+    /// If absent, majorana auto-detects sensible defaults (e.g. venv for Python).
     #[serde(default)]
     pub init_options: Option<serde_json::Value>,
 }
@@ -66,7 +66,7 @@ pub struct LanguageServerConfig {
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 impl Config {
-    /// Load config from `~/.config/ki/config.toml`.
+    /// Load config from `~/.config/majorana/config.toml`.
     ///
     /// The user file is deep-merged on top of the compiled-in defaults, so a
     /// partial config (e.g. only `[language_servers]`) works without repeating
@@ -111,21 +111,21 @@ fn deep_merge(base: toml::Value, over: toml::Value) -> toml::Value {
 /// Return the path to the user config file.
 ///
 /// Search order:
-/// 1. `$XDG_CONFIG_HOME/ki/config.toml`
-/// 2. `~/.config/ki/config.toml`  (preferred on all platforms)
-/// 3. `dirs::config_dir()/ki/config.toml`  (macOS: ~/Library/Application Support)
+/// 1. `$XDG_CONFIG_HOME/majorana/config.toml`
+/// 2. `~/.config/majorana/config.toml`  (preferred on all platforms)
+/// 3. `dirs::config_dir()/majorana/config.toml`  (macOS: ~/Library/Application Support)
 fn config_path() -> Option<PathBuf> {
     // Explicit XDG override wins.
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(xdg).join("ki").join("config.toml"));
+        return Some(PathBuf::from(xdg).join("majorana").join("config.toml"));
     }
     // ~/.config is the standard location for CLI tools on all platforms.
     if let Some(home) = dirs::home_dir() {
-        let xdg_default = home.join(".config").join("ki").join("config.toml");
+        let xdg_default = home.join(".config").join("majorana").join("config.toml");
         if xdg_default.exists() {
             return Some(xdg_default);
         }
     }
     // Fallback to the platform-native location (~/Library/Application Support on macOS).
-    dirs::config_dir().map(|d| d.join("ki").join("config.toml"))
+    dirs::config_dir().map(|d| d.join("majorana").join("config.toml"))
 }

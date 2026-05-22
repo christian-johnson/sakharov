@@ -139,7 +139,7 @@ impl App {
             match Notebook::from_path(std::path::Path::new(p)) {
                 Ok(nb) => Some((nb, NotebookState::new())),
                 Err(e) => {
-                    eprintln!("ki: failed to load notebook: {e}");
+                    eprintln!("mj: failed to load notebook: {e}");
                     None
                 }
             }
@@ -249,7 +249,7 @@ pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str>
 /// Set up terminal, run the event loop, then restore terminal.
 pub fn run(path: Option<&str>) -> Result<()> {
     let config = Config::load().unwrap_or_else(|e| {
-        eprintln!("ki: config error: {e} — using built-in defaults");
+        eprintln!("mj: config error: {e} — using built-in defaults");
         toml::from_str(include_str!("../config/default.toml"))
             .expect("default config must parse")
     });
