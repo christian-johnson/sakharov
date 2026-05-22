@@ -240,8 +240,8 @@ impl Keymap {
         normal.insert(space.clone(), vec![Command::OpenCommandPalette]);
         select.insert(space, vec![Command::OpenCommandPalette]);
 
-        // K → LspHover
-        normal.insert(KeyBinding::char('K'), vec![Command::LspHover]);
+        // K → lsp-show-documentation (kept for muscle memory; gk is the canonical binding)
+        normal.insert(KeyBinding::char('K'), vec![Command::LspShowDocumentation]);
 
 
         normal.insert(KeyBinding::char('i'), vec![Command::EnterInsert]);
@@ -256,7 +256,7 @@ impl Keymap {
         normal.insert(KeyBinding::char('v'), vec![Command::EnterSelect]);
         normal.insert(KeyBinding::char(':'), vec![Command::EnterCommandMode]);
         normal.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
-        normal.insert(KeyBinding::ctrl('s'), vec![Command::Save]);
+        normal.insert(KeyBinding::ctrl('s'), vec![Command::Write]);
 
         // --- Select-mode-only bindings ---
 
@@ -290,7 +290,7 @@ impl Keymap {
 
         notebook.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
         notebook.insert(KeyBinding::char(':'), vec![Command::EnterCommandMode]);
-        notebook.insert(KeyBinding::ctrl('s'), vec![Command::Save]);
+        notebook.insert(KeyBinding::ctrl('s'), vec![Command::Write]);
         notebook.insert(KeyBinding::ctrl('r'), vec![Command::NotebookRestartKernel]);
 
         Self { normal, select, notebook }

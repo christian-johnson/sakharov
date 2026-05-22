@@ -112,9 +112,15 @@ pub struct App {
     pub open_buffers: Vec<std::path::PathBuf>,
     /// Git diff marks for the current buffer, keyed by 0-indexed line number.
     pub git_diff: std::collections::HashMap<usize, GutterMark>,
+    /// Current git branch name (read at startup, refreshed on write).
+    pub git_branch: Option<String>,
     /// Code actions returned by the last LSP `textDocument/codeAction` request.
     /// Indexed by popup item payload (as a string-encoded usize).
     pub pending_code_actions: Vec<serde_json::Value>,
+    /// (char_pos, label) pairs computed when entering Jump mode.
+    pub jump_labels: Vec<(usize, String)>,
+    /// Characters typed so far in Jump mode (used to filter labels).
+    pub jump_typed: String,
 }
 
 impl App {
@@ -234,7 +240,10 @@ impl App {
             viewport_width: 80,
             open_buffers,
             git_diff,
+            git_branch: crate::git::current_branch(),
             pending_code_actions: Vec::new(),
+            jump_labels: Vec::new(),
+            jump_typed: String::new(),
         })
     }
 }

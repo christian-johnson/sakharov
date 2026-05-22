@@ -11,6 +11,7 @@ use ropey::Rope;
 use crate::{
     app::App,
     command::Command,
+    jump,
     lsp_manager::LspRequestKind,
     mode::{FindDir, Mode},
     motion,
@@ -249,6 +250,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 ("e".into(), "go to file end".into()),
                 ("h".into(), "go to line first non-whitespace".into()),
                 ("l".into(), "go to line end".into()),
+                ("w".into(), "jump to label in view".into()),
                 ("b".into(), "buffer picker".into()),
                 ("s".into(), "symbol picker".into()),
                 ("c".into(), "comment/uncomment selection".into()),
@@ -256,12 +258,22 @@ pub fn execute(app: &mut App, cmd: &Command) {
             ];
             if lsp_active {
                 hints.push(("a".into(), "code actions  [LSP]".into()));
+                hints.push(("k".into(), "show documentation  [LSP]".into()));
                 hints.push(("d".into(), "go to definition  [LSP]".into()));
                 hints.push(("r".into(), "go to references  [LSP]".into()));
                 hints.push(("y".into(), "go to type definition  [LSP]".into()));
                 hints.push(("i".into(), "go to implementation  [LSP]".into()));
             }
             app.popup = Some(crate::popup::Popup::which_key("g", hints));
+            return;
+        }
+        Command::EnterJumpMode => {
+            let positions =
+                jump::visible_word_starts(&app.buffer.rope, app.scroll_row, app.viewport_height);
+            app.jump_labels = jump::generate_labels(&positions);
+            app.jump_typed = String::new();
+            app.popup = None;
+            app.mode = Mode::Jump;
             return;
         }
         Command::FindCharForward => {
@@ -409,7 +421,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         // --- File / application ---
-        Command::Save => {
+        Command::Write => {
             if let Some((ref mut nb, _)) = app.notebook {
                 match nb.save() {
                     Ok(()) => {
@@ -427,6 +439,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                         app.message = Some(format!("Saved {}", app.buffer.display_name()));
                         if let Some(ref path) = app.buffer.path.clone() {
                             app.git_diff = crate::git::diff_marks(path);
+                            app.git_branch = crate::git::current_branch();
                         }
                     }
                     Err(e) => app.message = Some(format!("Error: {e}")),
@@ -434,13 +447,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
-        Command::SaveAs(path) => {
+        Command::WriteAs(path) => {
             let path = path.clone();
             match app.buffer.save(Some(&path)) {
                 Ok(()) => {
                     app.message = Some(format!("Saved {path}"));
                     if let Some(ref p) = app.buffer.path {
                         app.git_diff = crate::git::diff_marks(p);
+                        app.git_branch = crate::git::current_branch();
                     }
                 }
                 Err(e) => app.message = Some(format!("Error: {e}")),
@@ -461,7 +475,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.buffer.modified
             };
             if modified {
-                app.message = Some("Unsaved changes — use :q! to force quit".to_string());
+                app.message = Some("Unsaved changes — use :w to write, :q! to force quit".to_string());
             } else {
                 app.should_quit = true;
             }
@@ -476,6 +490,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 Ok(()) => app.should_quit = true,
                 Err(e) => app.message = Some(format!("Error: {e}")),
             }
+            return;
+        }
+
+        Command::ToggleLineNumbers => {
+            app.config.editor.line_numbers = !app.config.editor.line_numbers;
+            return;
+        }
+        Command::ToggleRelativeLineNumbers => {
+            app.config.editor.relative_line_numbers = !app.config.editor.relative_line_numbers;
             return;
         }
 
@@ -808,7 +831,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         // --- LSP ---
-        Command::LspHover            => { lsp::lsp_request(app, LspRequestKind::Hover);           return; }
+        Command::LspShowDocumentation => { lsp::lsp_request(app, LspRequestKind::Hover);          return; }
         Command::LspGotoDefinition   => { lsp::lsp_request(app, LspRequestKind::Definition);      return; }
         Command::LspGotoReferences   => { lsp::lsp_request(app, LspRequestKind::References);      return; }
         Command::LspGotoTypeDefinition => { lsp::lsp_request(app, LspRequestKind::TypeDefinition); return; }

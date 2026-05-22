@@ -56,7 +56,12 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let git_col: u16 = if app.config.editor.git_gutter && app.notebook.is_none() { 1 } else { 0 };
     let line_num_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
     let gutter_width: u16 = git_col + line_num_width;
-    let text_width = area.width.saturating_sub(gutter_width) as usize;
+    // 1-column right diagnostic gutter (only when there are diagnostics).
+    let has_diags = app.buffer.path.as_ref()
+        .map(|p| app.lsp.diagnostics.contains_key(&p.to_string_lossy().to_string()))
+        .unwrap_or(false);
+    let right_gutter: u16 = if has_diags { 1 } else { 0 };
+    let text_width = area.width.saturating_sub(gutter_width + right_gutter) as usize;
     let visible_rows = area.height as usize;
 
     // Pre-compute per-line diagnostic ranges for the current file.
@@ -242,8 +247,79 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
 
+        // Jump label overlay — patch cells in-place before rendering.
+        if app.mode == crate::mode::Mode::Jump && !app.jump_labels.is_empty() {
+            let typed_len = app.jump_typed.len();
+            let jump_pending = Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(255, 160, 0))
+                .add_modifier(Modifier::BOLD);
+            let jump_confirmed = Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD);
+
+            for &(pos, ref label) in &app.jump_labels {
+                // Skip labels that don't match the typed prefix.
+                if !label.starts_with(app.jump_typed.as_str()) {
+                    continue;
+                }
+                if pos < line_start_char {
+                    continue;
+                }
+                let char_off = pos - line_start_char;
+                if char_off >= line_len {
+                    continue;
+                }
+
+                // Compute display column for this char offset.
+                let display_col = {
+                    let mut col = 0usize;
+                    for i in 0..char_off {
+                        let c = line_str.char(i);
+                        col += char_display_width(c, col, tab_width);
+                    }
+                    col
+                };
+
+                if display_col < app.scroll_col {
+                    continue;
+                }
+                let cell_idx = display_col - app.scroll_col;
+
+                for (j, lc) in label.chars().enumerate() {
+                    let idx = cell_idx + j;
+                    if idx >= cells.len() {
+                        break;
+                    }
+                    let style = if j < typed_len { jump_confirmed } else { jump_pending };
+                    cells[idx] = (lc, style);
+                }
+            }
+        }
+
         let line_widget = LineWidget { cells };
         frame.render_widget(line_widget, text_area);
+
+        // Right diagnostic gutter marker.
+        if right_gutter > 0 && line_idx < total_lines {
+            let rx = area.right() - 1;
+            let buf = frame.buffer_mut();
+            if let Some(line_diags) = diag_by_line.get(&line_idx) {
+                let has_error = line_diags.iter().any(|(_, _, s)| *s == DiagnosticSeverity::Error);
+                let has_warn  = line_diags.iter().any(|(_, _, s)| *s == DiagnosticSeverity::Warning);
+                let (ch, color) = if has_error {
+                    ('●', Color::Red)
+                } else if has_warn {
+                    ('◆', Color::Yellow)
+                } else {
+                    (' ', Color::Reset)
+                };
+                buf[(rx, y)].set_char(ch).set_style(Style::default().fg(color));
+            } else {
+                buf[(rx, y)].set_char(' ').set_style(Style::default());
+            }
+        }
     }
 }
 
@@ -349,44 +425,30 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let total_lines = rope.len_lines().max(1);
     let scroll_pct = (line_idx * 100) / total_lines;
 
-    // Diagnostic count for the current file.
-    let diag_suffix = if let Some(ref path) = app.buffer.path {
+    // Diagnostic counts for the current file (split by severity for coloring).
+    let (diag_errors, diag_warnings) = if let Some(ref path) = app.buffer.path {
         let path_str = path.to_string_lossy().to_string();
-        let diags = app.lsp.diagnostics.get(&path_str);
-        if let Some(diags) = diags {
-            let errors = diags
-                .iter()
-                .filter(|d| d.severity == crate::lsp_manager::DiagnosticSeverity::Error)
-                .count();
-            let warnings = diags
-                .iter()
-                .filter(|d| d.severity == crate::lsp_manager::DiagnosticSeverity::Warning)
-                .count();
-            match (errors, warnings) {
-                (0, 0) => String::new(),
-                (1, 0) => "  1 error".to_string(),
-                (e, 0) => format!("  {e} errors"),
-                (0, 1) => "  1 warning".to_string(),
-                (0, w) => format!("  {w} warnings"),
-                (1, 1) => "  1 error  1 warning".to_string(),
-                (1, w) => format!("  1 error  {w} warnings"),
-                (e, 1) => format!("  {e} errors  1 warning"),
-                (e, w) => format!("  {e} errors  {w} warnings"),
-            }
+        if let Some(diags) = app.lsp.diagnostics.get(&path_str) {
+            let e = diags.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
+            let w = diags.iter().filter(|d| d.severity == DiagnosticSeverity::Warning).count();
+            (e, w)
         } else {
-            String::new()
+            (0, 0)
         }
     } else {
-        String::new()
+        (0, 0)
     };
 
-    let right = format!("{}  {}:{}  {}%", diag_suffix, line_num, col, scroll_pct);
+    let position = format!("  {}:{}  {}%", line_num, col, scroll_pct);
 
     let status_widget = StatusWidget {
         mode_label: format!(" {mode_label} "),
         mode_style,
-        filename: format!("  {filename}{modified}  "),
-        right,
+        branch: app.git_branch.clone(),
+        filename: format!(" {filename}{modified} "),
+        diag_errors,
+        diag_warnings,
+        position,
     };
     frame.render_widget(status_widget, area);
 }
@@ -406,6 +468,13 @@ pub fn render_command_nb(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_command(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
+        Mode::Jump => {
+            if app.jump_typed.is_empty() {
+                "Jump: type label chars...".to_string()
+            } else {
+                format!("Jump: {}_", app.jump_typed)
+            }
+        }
         Mode::Command => format!(":{}", app.command_buf),
         Mode::Search { forward } => {
             let prefix = if *forward { '/' } else { '?' };
@@ -467,8 +536,13 @@ impl Widget for LineWidget {
 struct StatusWidget {
     mode_label: String,
     mode_style: Style,
+    /// Git branch name (e.g. "main").
+    branch: Option<String>,
     filename: String,
-    right: String,
+    diag_errors: usize,
+    diag_warnings: usize,
+    /// Right-aligned position text e.g. "  42:10  23%"
+    position: String,
 }
 
 impl Widget for StatusWidget {
@@ -477,47 +551,64 @@ impl Widget for StatusWidget {
             return;
         }
         let y = area.top();
-        let mut x = area.left();
-        let right_width = self.right.len() as u16;
+        let bg = Style::default().bg(Color::DarkGray).fg(Color::White);
 
-        // Fill background
+        // Fill background.
         for col in area.left()..area.right() {
-            buf[(col, y)]
-                .set_char(' ')
-                .set_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+            buf[(col, y)].set_char(' ').set_style(bg);
         }
 
-        // Mode label
+        // Left side: mode label.
+        let mut x = area.left();
         for c in self.mode_label.chars() {
-            if x >= area.right() {
-                break;
-            }
+            if x >= area.right() { break; }
             buf[(x, y)].set_char(c).set_style(self.mode_style);
             x += 1;
         }
 
-        // Filename
-        let filename_style = Style::default().bg(Color::DarkGray).fg(Color::White);
-        for c in self.filename.chars() {
-            if x >= area.right() {
-                break;
+        // Branch name (dimmed, with  prefix).
+        if let Some(ref branch) = self.branch {
+            let branch_str = format!("  \u{e0a0} {branch}"); // nerd-font branch icon
+            let branch_style = Style::default().bg(Color::DarkGray).fg(Color::Rgb(170, 170, 170));
+            for c in branch_str.chars() {
+                if x >= area.right() { break; }
+                buf[(x, y)].set_char(c).set_style(branch_style);
+                x += 1;
             }
-            buf[(x, y)].set_char(c).set_style(filename_style);
+        }
+
+        // Filename.
+        for c in self.filename.chars() {
+            if x >= area.right() { break; }
+            buf[(x, y)].set_char(c).set_style(bg);
             x += 1;
         }
 
-        // Right side (position info)
-        if area.right() >= right_width {
-            let rx = area.right() - right_width;
-            let mut rx2 = rx;
-            for c in self.right.chars() {
-                if rx2 >= area.right() {
-                    break;
+        // Right side: build colored segments and measure total width.
+        // Segments are rendered right-to-left (position → warnings → errors).
+        let mut segments: Vec<(String, Style)> = Vec::new();
+        segments.push((self.position.clone(), bg));
+        if self.diag_warnings > 0 {
+            let s = format!("  ◆{}", self.diag_warnings);
+            segments.push((s, Style::default().bg(Color::DarkGray).fg(Color::Yellow)));
+        }
+        if self.diag_errors > 0 {
+            let s = format!("  ●{}", self.diag_errors);
+            segments.push((s, Style::default().bg(Color::DarkGray).fg(Color::Red)));
+        }
+
+        let total_right: u16 = segments.iter()
+            .map(|(s, _)| s.chars().count() as u16)
+            .sum();
+
+        if area.right() >= total_right {
+            let mut rx = area.right() - total_right;
+            for (text, style) in segments {
+                for c in text.chars() {
+                    if rx >= area.right() { break; }
+                    buf[(rx, y)].set_char(c).set_style(style);
+                    rx += 1;
                 }
-                buf[(rx2, y)]
-                    .set_char(c)
-                    .set_style(Style::default().bg(Color::DarkGray).fg(Color::White));
-                rx2 += 1;
             }
         }
     }

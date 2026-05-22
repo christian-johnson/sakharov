@@ -7,6 +7,29 @@ pub enum GutterMark {
     Modified,
 }
 
+/// Return the current git branch name, or `None` when git is unavailable or
+/// the working directory is not inside a repository.
+pub fn current_branch() -> Option<String> {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output();
+        let _ = tx.send(out);
+    });
+    let output = rx.recv_timeout(std::time::Duration::from_secs(2)).ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
 /// Compute per-line git diff marks for `path`.
 ///
 /// Returns an empty map when the file is untracked, git is unavailable,

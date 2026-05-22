@@ -6,6 +6,7 @@ mod exec;
 mod git;
 mod highlight;
 mod input;
+mod jump;
 mod keymap;
 mod kitty;
 mod lang;

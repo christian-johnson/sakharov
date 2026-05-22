@@ -24,6 +24,8 @@ pub enum Mode {
     Search { forward: bool },
     /// Notebook cell-navigation mode — j/k move between cells, o/e/d etc.
     Notebook,
+    /// Label-jump mode — visible word starts are labelled; type label to jump.
+    Jump,
 }
 
 impl Mode {
@@ -38,6 +40,7 @@ impl Mode {
             Mode::FindChar { .. } => "FND",
             Mode::Search { .. } => "SRC",
             Mode::Notebook => "NB ",
+            Mode::Jump => "JMP",
         }
     }
 }

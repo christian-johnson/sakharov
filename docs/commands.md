@@ -1,4 +1,4 @@
-# Ki Commands
+# Majorana Commands
 
 All commands are accessible in Normal mode via `:command-name`. Arguments follow the name separated by a space.
 
@@ -39,6 +39,7 @@ These commands enter a sub-mode that awaits a second key.
 | Command | Default Key | Description |
 |---------|-------------|-------------|
 | `enter-goto-mode` | `g` | Enter Goto mode; press `g` again to go to file start |
+| `enter-jump-mode` | `gw` (via Goto mode) | Overlay 2-char labels on visible word starts; type label to jump |
 | `find-char-forward` | `f` | Enter Find mode; next char moves cursor to that char forward |
 | `till-char-forward` | `t` | Enter Till mode; next char moves cursor before that char forward |
 | `find-char-backward` | `F` | Enter Find mode backward; next char moves cursor to that char backward |
@@ -48,6 +49,7 @@ These commands enter a sub-mode that awaits a second key.
 
 | Command | Default Key | Description |
 |---------|-------------|-------------|
+| `comment-region` | `gc` (via Goto mode) | Toggle comment/uncomment for the current selection or line |
 | `delete-selection` | `d` | Delete the current selection |
 | `change-selection` | `c` | Delete the current selection and enter Insert mode |
 | `yank-selection` | `y` | Copy the current selection to the clipboard |
@@ -74,11 +76,11 @@ These commands enter a sub-mode that awaits a second key.
 
 | Command | Default Key | Vim Alias | Description |
 |---------|-------------|-----------|-------------|
-| `save` | `ctrl+s` | `:w` | Save current file |
-| `save-as <path>` | — | `:w <path>` | Save to a new path |
+| `write` | `ctrl+s` | `:w` | Write (save) current file (`save` is a backward-compat alias) |
+| `write-as <path>` | — | `:w <path>` | Write to a new path |
 | `quit` | — | `:q` | Quit (fails if there are unsaved changes) |
 | `force-quit` | — | `:q!` | Quit without saving |
-| `write-quit` | — | `:wq`, `:x` | Save then quit |
+| `write-quit` | — | `:wq`, `:x` | Write then quit |
 
 ## Scripting
 
@@ -105,9 +107,23 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 | `page-down` | `ctrl+d`, `PgDn` | Scroll half a page down (cursor moves with viewport) |
 | `page-up` | `ctrl+u`, `PgUp` | Scroll half a page up (cursor moves with viewport) |
 
+## LSP
+
+| Command | Default Key | Description |
+|---------|-------------|-------------|
+| `lsp-show-documentation` | `gk`, `K` | Show hover documentation for the symbol under the cursor |
+| `lsp-code-actions` | `ga` (via Goto mode) | Show code actions for the current selection |
+| `lsp-goto-definition` | `gd` (via Goto mode) | Jump to the definition of the symbol under the cursor |
+| `lsp-goto-references` | `gr` (via Goto mode) | List all references to the symbol under the cursor |
+| `lsp-goto-type-definition` | `gy` (via Goto mode) | Jump to the type definition of the symbol |
+| `lsp-goto-implementation` | `gi` (via Goto mode) | Jump to the implementation of the symbol |
+| `lsp-request-completion` | `ctrl+space` | Manually trigger completion suggestions |
+
 ## Popup / UI
 
 | Command | Default Key | Description |
 |---------|-------------|-------------|
 | `open-command-palette` | `Space`, `:palette` | Open fuzzy-searchable command palette |
 | `toggle-git-gutter` | — | Toggle visibility of the git gutter indicator column |
+| `toggle-line-numbers` | — | Toggle line number display |
+| `toggle-relative-line-numbers` | — | Toggle relative line numbers (shows distance from current line) |

@@ -471,11 +471,11 @@ impl Popup {
 pub fn command_palette_items() -> Vec<ListItem> {
     let entries: &[(&str, &str)] = &[
         // File
-        ("save", "Save file  [ctrl+s, :w]"),
-        ("save-as", "Save to new path  [:w <path>]"),
+        ("write", "Write file  [ctrl+s, :w]"),
+        ("write-as", "Write to new path  [:w <path>]"),
         ("quit", "Quit  [:q]"),
         ("force-quit", "Quit without saving  [:q!]"),
-        ("write-quit", "Save and quit  [:wq]"),
+        ("write-quit", "Write and quit  [:wq]"),
         // Motions
         ("move-left", "Move cursor left  [h]"),
         ("move-right", "Move cursor right  [l]"),
@@ -537,9 +537,10 @@ pub fn command_palette_items() -> Vec<ListItem> {
         // Shell
         ("shell", "Run a shell command  [:shell <cmd>]"),
         // Editing
+        ("enter-jump-mode", "Jump to label in view  [gw]"),
         ("comment-region", "Toggle comment/uncomment  [gc]"),
         // LSP
-        ("lsp-hover", "Show hover documentation  [K]"),
+        ("lsp-show-documentation", "Show hover documentation  [gk, K]"),
         ("lsp-code-actions", "Show code actions  [ga]"),
         ("lsp-goto-definition", "Go to definition  [gd]"),
         ("lsp-goto-references", "Go to references  [gr]"),
@@ -548,7 +549,9 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("lsp-request-completion", "Request completions  [ctrl+space]"),
         // UI
         ("open-command-palette", "Open fuzzy-searchable command palette  [Space]"),
-        ("toggle-git-gutter",    "Toggle git gutter indicators  [:toggle-git-gutter]"),
+        ("toggle-git-gutter",          "Toggle git gutter indicators  [:toggle-git-gutter]"),
+        ("toggle-line-numbers",        "Toggle line numbers  [:toggle-line-numbers]"),
+        ("toggle-relative-line-numbers", "Toggle relative line numbers  [:toggle-relative-line-numbers]"),
         // Pickers
         ("open-buffer-picker",     "Switch buffer  [gb]"),
         ("open-symbol-picker",     "Jump to symbol in file  [gs]"),

@@ -83,6 +83,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::FindChar { dir, till } => handle_find_char(app, key, dir, till),
         Mode::Search { forward } => handle_search(app, key, forward),
         Mode::Notebook => handle_notebook_mode(app, key),
+        Mode::Jump => handle_jump(app, key),
     }
 
     // Sync completion popup filter after insertions.
@@ -240,11 +241,13 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
         KeyCode::Char('r') => exec::execute(app, &Command::LspGotoReferences),
         KeyCode::Char('y') => exec::execute(app, &Command::LspGotoTypeDefinition),
         KeyCode::Char('i') => exec::execute(app, &Command::LspGotoImplementation),
+        KeyCode::Char('w') => exec::execute(app, &Command::EnterJumpMode),
         KeyCode::Char('b') => exec::execute(app, &Command::OpenBufferPicker),
         KeyCode::Char('s') => exec::execute(app, &Command::OpenSymbolPicker),
         KeyCode::Char('D') => exec::execute(app, &Command::OpenDiagnosticPicker),
         KeyCode::Char('a') => exec::execute(app, &Command::LspCodeActions),
         KeyCode::Char('c') => exec::execute(app, &Command::CommentRegion),
+        KeyCode::Char('k') => exec::execute(app, &Command::LspShowDocumentation),
         KeyCode::Esc => {}
         _ => {}
     }
@@ -374,6 +377,42 @@ fn sync_buffer_to_notebook(app: &mut App) {
                 nb.modified = true;
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Jump mode
+// ---------------------------------------------------------------------------
+
+fn handle_jump(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.jump_labels.clear();
+            app.jump_typed.clear();
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.jump_typed.push(c);
+            let typed = app.jump_typed.clone();
+
+            // Exact match → jump and return to Normal.
+            if let Some(&(pos, _)) = app.jump_labels.iter().find(|(_, l)| *l == typed) {
+                app.selection = Selection::point(pos);
+                app.mode = Mode::Normal;
+                app.jump_labels.clear();
+                app.jump_typed.clear();
+                exec::update_scroll(app);
+                return;
+            }
+
+            // No label starts with the typed prefix → cancel.
+            if !app.jump_labels.iter().any(|(_, l)| l.starts_with(typed.as_str())) {
+                app.mode = Mode::Normal;
+                app.jump_labels.clear();
+                app.jump_typed.clear();
+            }
+        }
+        _ => {}
     }
 }
 

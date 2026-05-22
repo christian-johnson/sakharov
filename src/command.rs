@@ -25,6 +25,8 @@ pub enum Command {
 
     // Two-character sequences — enter a pending sub-mode
     EnterGotoMode,
+    /// Enter label-jump mode: overlay labels on visible word starts.
+    EnterJumpMode,
     FindCharForward,
     FindCharBackward,
     TillCharForward,
@@ -63,8 +65,8 @@ pub enum Command {
     OpenDiagnosticPicker,
 
     // File / application
-    Save,
-    SaveAs(String),
+    Write,
+    WriteAs(String),
     Quit,
     ForceQuit,
     WriteQuit,
@@ -130,8 +132,8 @@ pub enum Command {
     PageDown,
 
     // LSP
-    /// Show hover documentation for the symbol under the cursor.
-    LspHover,
+    /// Show documentation/hover for the symbol under the cursor.
+    LspShowDocumentation,
     /// Show code actions available at the cursor/selection.
     LspCodeActions,
     /// Jump to the definition of the symbol under the cursor.
@@ -146,6 +148,10 @@ pub enum Command {
     LspRequestCompletion,
     /// Toggle visual indicators for the git gutter.
     ToggleGitGutter,
+    /// Toggle line number display.
+    ToggleLineNumbers,
+    /// Toggle relative line numbers.
+    ToggleRelativeLineNumbers,
 }
 
 impl Command {
@@ -172,6 +178,7 @@ impl Command {
             Command::SelectLine => "select-line",
             Command::SelectAll => "select-all",
             Command::EnterGotoMode => "enter-goto-mode",
+            Command::EnterJumpMode => "enter-jump-mode",
             Command::FindCharForward => "find-char-forward",
             Command::FindCharBackward => "find-char-backward",
             Command::TillCharForward => "till-char-forward",
@@ -197,8 +204,8 @@ impl Command {
             Command::OpenBufferPicker => "open-buffer-picker",
             Command::OpenSymbolPicker => "open-symbol-picker",
             Command::OpenDiagnosticPicker => "open-diagnostic-picker",
-            Command::Save => "save",
-            Command::SaveAs(_) => "save-as",
+            Command::Write => "write",
+            Command::WriteAs(_) => "write-as",
             Command::Quit => "quit",
             Command::ForceQuit => "force-quit",
             Command::WriteQuit => "write-quit",
@@ -232,7 +239,7 @@ impl Command {
             Command::GrepProject => "grep-project",
             Command::PageUp => "page-up",
             Command::PageDown => "page-down",
-            Command::LspHover => "lsp-hover",
+            Command::LspShowDocumentation => "lsp-show-documentation",
             Command::LspCodeActions => "lsp-code-actions",
             Command::LspGotoDefinition => "lsp-goto-definition",
             Command::LspGotoReferences => "lsp-goto-references",
@@ -240,6 +247,8 @@ impl Command {
             Command::LspGotoImplementation => "lsp-goto-implementation",
             Command::LspRequestCompletion => "lsp-request-completion",
             Command::ToggleGitGutter => "toggle-git-gutter",
+            Command::ToggleLineNumbers => "toggle-line-numbers",
+            Command::ToggleRelativeLineNumbers => "toggle-relative-line-numbers",
         }
     }
 
@@ -266,10 +275,10 @@ impl Command {
             "w" => {
                 if let Some(path) = arg {
                     if !path.is_empty() {
-                        return Some(Command::SaveAs(path.to_string()));
+                        return Some(Command::WriteAs(path.to_string()));
                     }
                 }
-                Some(Command::Save)
+                Some(Command::Write)
             }
             "q" => Some(Command::Quit),
             "q!" => Some(Command::ForceQuit),
@@ -277,12 +286,12 @@ impl Command {
             "u" => Some(Command::Undo),
 
             // Canonical names with arguments
-            "save-as" => {
+            "write-as" | "save-as" => {
                 let path = arg.unwrap_or("").trim();
                 if path.is_empty() {
                     None
                 } else {
-                    Some(Command::SaveAs(path.to_string()))
+                    Some(Command::WriteAs(path.to_string()))
                 }
             }
             "shell" | "sh" => {
@@ -322,7 +331,8 @@ impl Command {
             "goto-file-end"           => Some(Command::GotoFileEnd),
             "select-line"             => Some(Command::SelectLine),
             "select-all"              => Some(Command::SelectAll),
-            "enter-goto-mode"         => Some(Command::EnterGotoMode),
+            "enter-goto-mode"                     => Some(Command::EnterGotoMode),
+            "enter-jump-mode" | "jump-mode" | "jump" => Some(Command::EnterJumpMode),
             "find-char-forward"       => Some(Command::FindCharForward),
             "find-char-backward"      => Some(Command::FindCharBackward),
             "till-char-forward"       => Some(Command::TillCharForward),
@@ -344,7 +354,7 @@ impl Command {
             "enter-normal"               => Some(Command::EnterNormal),
             "enter-select"               => Some(Command::EnterSelect),
             "enter-command-mode"         => Some(Command::EnterCommandMode),
-            "save"                       => Some(Command::Save),
+            "write" | "save"             => Some(Command::Write),
             "quit"                       => Some(Command::Quit),
             "force-quit"                 => Some(Command::ForceQuit),
             "write-quit"                 => Some(Command::WriteQuit),
@@ -396,7 +406,7 @@ impl Command {
             "page-down" => Some(Command::PageDown),
 
             // LSP commands
-            "lsp-hover" | "hover" | "K" => Some(Command::LspHover),
+            "lsp-show-documentation" | "lsp-hover" | "hover" | "doc" => Some(Command::LspShowDocumentation),
             "lsp-code-actions" | "code-actions" | "ga" => Some(Command::LspCodeActions),
             "lsp-goto-definition" | "goto-definition" | "gd" => Some(Command::LspGotoDefinition),
             "lsp-goto-references" | "goto-references" | "gr" => Some(Command::LspGotoReferences),
@@ -408,6 +418,8 @@ impl Command {
             }
             "lsp-request-completion" | "completion" => Some(Command::LspRequestCompletion),
             "toggle-git-gutter" | "git-gutter" | "gutter" => Some(Command::ToggleGitGutter),
+            "toggle-line-numbers" | "line-numbers" => Some(Command::ToggleLineNumbers),
+            "toggle-relative-line-numbers" | "relative-line-numbers" => Some(Command::ToggleRelativeLineNumbers),
 
             _ => None,
         }
