@@ -9,13 +9,18 @@ pub fn search_compute_matches(app: &mut App) {
     }
     let text = app.buffer.rope.to_string();
     let query = app.search.query.clone();
-    let mut start = 0;
-    while start < text.len() {
-        if let Some(rel) = text[start..].find(query.as_str()) {
-            let byte_pos = start + rel;
-            let char_idx = text[..byte_pos].chars().count();
-            app.search.matches.push(char_idx);
-            start = byte_pos + query.len().max(1);
+    let mut byte_pos = 0usize;
+    let mut char_pos = 0usize; // chars counted up to byte_pos — updated incrementally
+    while byte_pos < text.len() {
+        if let Some(rel) = text[byte_pos..].find(query.as_str()) {
+            // Advance char_pos from the previous byte_pos to the match start.
+            let match_byte = byte_pos + rel;
+            char_pos += text[byte_pos..match_byte].chars().count();
+            app.search.matches.push(char_pos);
+            // Advance past this match for the next iteration.
+            let next_byte = match_byte + query.len().max(1);
+            char_pos += text[match_byte..next_byte.min(text.len())].chars().count();
+            byte_pos = next_byte;
         } else {
             break;
         }

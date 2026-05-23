@@ -87,6 +87,11 @@ fn render_cells(
     let mut current_row = area.top();
     let mut focused_cell_screen_pos: Option<(u16, u16)> = None;
 
+    // One Highlighter shared across all cells — avoids rebuilding the
+    // tree-sitter HighlightConfiguration (grammar query parse) per cell.
+    let lang_ext = format!("_.{}", lang_to_ext(&nb.metadata.kernel_language));
+    let mut shared_hl = Highlighter::new(Some(std::path::Path::new(&lang_ext)));
+
     for (cell_idx, cell) in nb.cells.iter().enumerate() {
         if cell_idx < state.scroll_cell {
             continue;
@@ -145,7 +150,7 @@ fn render_cells(
         if inner.height > 0 {
             let cursor_screen = render_cell_content(
                 frame, nb, cell, cell_idx, is_focused, inner, active,
-                lsp_diagnostics, &mut image_requests,
+                lsp_diagnostics, &mut image_requests, &mut shared_hl,
             );
             if is_focused {
                 focused_cell_screen_pos = cursor_screen;
@@ -176,6 +181,7 @@ fn render_cell_content(
     active: &ActiveCellView<'_>,
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     image_requests: &mut Vec<ImageRequest>,
+    highlighter: &mut Highlighter,
 ) -> Option<(u16, u16)> {
     // For the focused cell, use the live buffer rope; otherwise use stored source.
     let rope_storage;
@@ -196,11 +202,7 @@ fn render_cell_content(
     };
 
     let highlight_spans = if cell.cell_type == CellType::Code {
-        let hl = Highlighter::new(Some(std::path::Path::new(&format!(
-            "_.{}",
-            lang_to_ext(&nb.metadata.kernel_language)
-        ))));
-        hl.highlight(rope).unwrap_or_default()
+        highlighter.highlight(rope).unwrap_or_default()
     } else {
         vec![]
     };
@@ -309,8 +311,8 @@ fn render_cell_content(
 // ---------------------------------------------------------------------------
 
 pub fn cell_display_height(cell: &Cell) -> u16 {
-    let source_text = cell.source.to_string();
-    let source_lines = source_text.lines().count().max(1) as u16;
+    // len_lines() is O(1) on a Rope; avoids the O(n) to_string() conversion.
+    let source_lines = cell.source.len_lines().max(1) as u16;
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
         1 + cell.outputs.iter().map(single_output_height_count).sum::<u16>()
     } else {

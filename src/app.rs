@@ -17,7 +17,7 @@ use crate::{
     keymap::Keymap,
     kitty,
     lang::lang_to_ext,
-    lsp_manager::LspManager,
+    lsp_manager::{DiagnosticSeverity, LspManager},
     mode::Mode,
     notebook::Notebook,
     notebook_state::NotebookState,
@@ -124,6 +124,15 @@ pub struct App {
     /// Set after suspending and resuming the terminal (e.g. external file picker).
     /// Causes the render loop to call `terminal.clear()` once to force a full repaint.
     pub needs_clear: bool,
+    /// True when `buffer.rope` has changed and `highlight_spans` needs recomputing.
+    /// The render loop recomputes lazily once per frame instead of once per keystroke.
+    pub highlights_dirty: bool,
+    /// Per-line diagnostic ranges for the current file, rebuilt on LSP diagnostics
+    /// events and on file switches.  Avoids rebuilding this map every render frame.
+    pub diag_by_line: std::collections::HashMap<usize, Vec<(usize, usize, DiagnosticSeverity)>>,
+    /// The mode that was active during the last rendered frame.  Used to skip the
+    /// cursor-shape OSC write when the mode hasn't changed.
+    pub last_rendered_mode: Option<Mode>,
 }
 
 impl App {
@@ -196,7 +205,7 @@ impl App {
             (buf, None, lang)
         };
 
-        let highlighter = Highlighter::new(buffer.path.as_deref());
+        let mut highlighter = Highlighter::new(buffer.path.as_deref());
         let highlight_spans = highlighter.highlight(&buffer.rope).unwrap_or_default();
 
         let initial_mode = if notebook.is_some() { Mode::Notebook } else { Mode::Normal };
@@ -249,6 +258,9 @@ impl App {
             jump_labels: Vec::new(),
             jump_typed: String::new(),
             needs_clear: false,
+            highlights_dirty: false,
+            diag_by_line: std::collections::HashMap::new(),
+            last_rendered_mode: None,
         })
     }
 }
@@ -341,6 +353,16 @@ fn run_loop(
         }
         crate::exec::update_scroll(app);
 
+        // Recompute syntax highlights at most once per frame.
+        // Individual edits only set the dirty flag; the cost is paid here.
+        if app.highlights_dirty {
+            app.highlights_dirty = false;
+            app.highlight_spans = app
+                .highlighter
+                .highlight(&app.buffer.rope)
+                .unwrap_or_default();
+        }
+
         // After an external program (file picker etc.) suspends and resumes the
         // terminal, ratatui's diffing state is stale — force a full repaint.
         if app.needs_clear {
@@ -415,7 +437,11 @@ fn run_loop(
             })?;
         }
 
-        set_cursor_shape(&app.mode);
+        // Only write cursor-shape OSC sequences when the mode actually changes.
+        if app.last_rendered_mode.as_ref() != Some(&app.mode) {
+            app.last_rendered_mode = Some(app.mode.clone());
+            set_cursor_shape(&app.mode);
+        }
 
         // Block up to 16 ms for the first event (≈60 fps idle rate).
         // Once an event arrives, drain every additional event that is already

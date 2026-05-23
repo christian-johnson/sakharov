@@ -89,11 +89,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-            // Try ripgrep first, fall back to grep.
-            let rg_available = std::process::Command::new("rg")
-                .arg("--version")
-                .output()
-                .is_ok();
+            // Try ripgrep first, fall back to grep.  Cache the availability
+            // check so we don't spawn a process on every invocation.
+            let rg_available = rg_is_available();
 
             let output = if rg_available {
                 std::process::Command::new("rg")
@@ -881,12 +879,27 @@ pub fn run_many(app: &mut App, cmds: &[Command]) {
     }
 }
 
-/// Recompute syntax highlight spans from the current buffer.
+/// Mark highlight spans as stale.  The render loop recomputes them once per
+/// frame, so callers don't pay the tree-sitter cost on every keystroke.
 pub fn recompute_highlights(app: &mut App) {
-    app.highlight_spans = app
-        .highlighter
-        .highlight(&app.buffer.rope)
-        .unwrap_or_default();
+    app.highlights_dirty = true;
+}
+
+/// Rebuild the per-line diagnostic cache for the current buffer.
+/// Call this after diagnostics change or after switching files.
+pub fn rebuild_diag_cache(app: &mut App) {
+    app.diag_by_line.clear();
+    if let Some(ref path) = app.buffer.path {
+        let key = path.to_string_lossy().to_string();
+        if let Some(diags) = app.lsp.diagnostics.get(&key) {
+            for d in diags {
+                app.diag_by_line
+                    .entry(d.line)
+                    .or_default()
+                    .push((d.col_start, d.col_end, d.severity.clone()));
+            }
+        }
+    }
 }
 
 /// Update scroll_row / scroll_col so the cursor is visible.
@@ -956,6 +969,17 @@ fn unicode_display_width(c: char) -> usize {
 // ---------------------------------------------------------------------------
 // File picker helpers
 // ---------------------------------------------------------------------------
+
+fn rg_is_available() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .is_ok()
+    })
+}
 
 /// Open a fuzzy-filterable file list popup from the project root.
 fn open_file_picker_popup(app: &mut App) {

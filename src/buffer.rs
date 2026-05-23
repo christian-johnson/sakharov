@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use ropey::Rope;
+use std::collections::VecDeque;
 use std::path::PathBuf;
+
+const MAX_UNDO: usize = 200;
 
 /// A text buffer backed by a `ropey::Rope` with undo/redo support.
 pub struct Buffer {
@@ -8,7 +11,8 @@ pub struct Buffer {
     pub path: Option<PathBuf>,
     pub modified: bool,
     /// Undo stack: each entry is the full rope state before an edit.
-    undo_stack: Vec<Rope>,
+    /// Capped at MAX_UNDO entries; oldest entries are evicted first.
+    undo_stack: VecDeque<Rope>,
     /// Redo stack: states pushed when undo is performed.
     redo_stack: Vec<Rope>,
 }
@@ -20,7 +24,7 @@ impl Buffer {
             rope: Rope::new(),
             path: None,
             modified: false,
-            undo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
         }
     }
@@ -37,7 +41,7 @@ impl Buffer {
             rope: Rope::from_str(&text),
             path: Some(path),
             modified: false,
-            undo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
         })
     }
@@ -56,7 +60,10 @@ impl Buffer {
 
     /// Save the current rope state for undo before making an edit.
     fn push_undo(&mut self) {
-        self.undo_stack.push(self.rope.clone());
+        self.undo_stack.push_back(self.rope.clone());
+        if self.undo_stack.len() > MAX_UNDO {
+            self.undo_stack.pop_front();
+        }
         self.redo_stack.clear();
     }
 
@@ -99,7 +106,7 @@ impl Buffer {
 
     /// Undo the last edit. Returns true if an undo was available.
     pub fn undo(&mut self) -> bool {
-        if let Some(prev) = self.undo_stack.pop() {
+        if let Some(prev) = self.undo_stack.pop_back() {
             self.redo_stack.push(self.rope.clone());
             self.rope = prev;
             self.modified = true;
@@ -112,7 +119,10 @@ impl Buffer {
     /// Redo the last undone edit. Returns true if a redo was available.
     pub fn redo(&mut self) -> bool {
         if let Some(next) = self.redo_stack.pop() {
-            self.undo_stack.push(self.rope.clone());
+            self.undo_stack.push_back(self.rope.clone());
+            if self.undo_stack.len() > MAX_UNDO {
+                self.undo_stack.pop_front();
+            }
             self.rope = next;
             self.modified = true;
             true

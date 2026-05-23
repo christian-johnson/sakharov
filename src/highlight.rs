@@ -60,6 +60,8 @@ pub struct Highlighter {
     #[allow(dead_code)]
     language: Option<Language>,
     config: Option<HighlightConfiguration>,
+    /// Reused across calls — avoids allocating a new Parser on every highlight pass.
+    ts_highlighter: TsHighlighter,
 }
 
 impl Highlighter {
@@ -72,7 +74,7 @@ impl Highlighter {
 
         let config = language.and_then(|lang| build_config(lang).ok());
 
-        Self { language, config }
+        Self { language, config, ts_highlighter: TsHighlighter::new() }
     }
 
     /// Update the language based on a new path.
@@ -92,7 +94,8 @@ impl Highlighter {
     /// Compute highlight spans for the given rope contents.
     ///
     /// Returns a list of `(char_start, char_end, highlight_index)` triples.
-    pub fn highlight(&self, rope: &Rope) -> Result<Vec<Span>> {
+    /// Takes `&mut self` so the internal tree-sitter parser can be reused.
+    pub fn highlight(&mut self, rope: &Rope) -> Result<Vec<Span>> {
         let config = match &self.config {
             Some(c) => c,
             None => return Ok(Vec::new()),
@@ -101,9 +104,8 @@ impl Highlighter {
         let text = rope.to_string();
         let source = text.as_bytes();
 
-        let mut highlighter = TsHighlighter::new();
         let events =
-            highlighter.highlight(config, source, None, |_| None)?;
+            self.ts_highlighter.highlight(config, source, None, |_| None)?;
 
         let mut spans = Vec::new();
         let mut current_highlight: Option<usize> = None;
@@ -137,16 +139,25 @@ impl Highlighter {
 
 /// Return the ratatui `Style` for whichever highlight span covers `char_idx`.
 ///
-/// Spans may overlap; the last one that contains the index wins (same
-/// semantics as the old per-file helpers in `ui.rs` and `notebook_ui.rs`).
+/// Spans may overlap; the last (highest-index) one that contains the index
+/// wins — matching tree-sitter's inner-scope-wins rendering semantic.
+///
+/// Uses binary search on the sorted span list, so O(log n + depth) instead
+/// of the previous O(n) linear scan.
 pub fn style_at(spans: &[Span], char_idx: usize) -> ratatui::style::Style {
-    let mut result = ratatui::style::Style::default();
-    for &(start, end, hl) in spans {
-        if start <= char_idx && char_idx < end {
-            result = crate::theme::style_for_highlight(hl);
+    // Find the first span index whose start > char_idx.
+    let right = spans.partition_point(|&(start, _, _)| start <= char_idx);
+    // Scan backward: the first span we find that covers char_idx is the
+    // last-indexed one (innermost scope), which is the "last wins" winner.
+    for i in (0..right).rev() {
+        let (_, end, hl) = spans[i];
+        if char_idx < end {
+            return crate::theme::style_for_highlight(hl);
         }
+        // end <= char_idx: this span finishes before char_idx.
+        // An earlier (longer) span might still cover it, so keep scanning.
     }
-    result
+    ratatui::style::Style::default()
 }
 
 /// Build a `HighlightConfiguration` for the given language.

@@ -119,6 +119,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
         }
         LspEvent::Diagnostics { path: _, ref items } => {
             let _ = items;
+            super::rebuild_diag_cache(app);
         }
         LspEvent::CompletionResult { items } => {
             if app.mode == Mode::Insert && !items.is_empty() {
@@ -267,6 +268,7 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     }
 
     app.git_diff = crate::git::diff_marks(path);
+    super::rebuild_diag_cache(app);
 
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     app.message = Some(format!("Opened {} (line {})", name, line + 1));

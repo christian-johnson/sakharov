@@ -57,40 +57,28 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let line_num_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
     let gutter_width: u16 = git_col + line_num_width;
     // 1-column right diagnostic gutter (only when there are diagnostics).
-    let has_diags = app.buffer.path.as_ref()
-        .map(|p| app.lsp.diagnostics.contains_key(&p.to_string_lossy().to_string()))
-        .unwrap_or(false);
+    let has_diags = !app.diag_by_line.is_empty();
     let right_gutter: u16 = if has_diags { 1 } else { 0 };
     let text_width = area.width.saturating_sub(gutter_width + right_gutter) as usize;
     let visible_rows = area.height as usize;
 
-    // Pre-compute per-line diagnostic ranges for the current file.
-    let diag_by_line: std::collections::HashMap<usize, Vec<(usize, usize, DiagnosticSeverity)>> = {
-        let mut map = std::collections::HashMap::new();
-        if let Some(ref path) = app.buffer.path {
-            let key = path.to_string_lossy().to_string();
-            if let Some(diags) = app.lsp.diagnostics.get(&key) {
-                for d in diags {
-                    map.entry(d.line)
-                        .or_insert_with(Vec::new)
-                        .push((d.col_start, d.col_end, d.severity.clone()));
-                }
-            }
-        }
-        map
-    };
+    // Diagnostic ranges are pre-built in app.diag_by_line and refreshed on
+    // LSP events; no per-frame HashMap construction needed here.
+    let diag_by_line = &app.diag_by_line;
 
     let rope = &app.buffer.rope;
     let total_lines = rope.len_lines();
     let scroll_row = app.scroll_row;
 
-    // Build highlight map: char_index -> style
-    // We store spans sorted; during rendering we pick the active style per char.
     let spans = &app.highlight_spans;
 
     let sel_start = app.selection.start();
     let sel_end = app.selection.end();
     let cursor_pos = app.selection.head;
+
+    // Reuse a single allocation across all visible lines instead of allocating
+    // a fresh Vec per line.
+    let mut cells: Vec<(char, Style)> = Vec::with_capacity(text_width + 8);
 
     for row in 0..visible_rows {
         let line_idx = scroll_row + row;
@@ -168,8 +156,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
         let line_str = rope.line(line_idx);
         let line_len = line_str.len_chars();
 
-        // Build character cells for this line
-        let mut cells: Vec<(char, Style)> = Vec::new();
+        cells.clear();
         let mut col_offset = 0usize;
         let tab_width = app.config.editor.tab_width;
 
@@ -298,7 +285,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
 
-        let line_widget = LineWidget { cells };
+        let line_widget = LineWidget { cells: &cells };
         frame.render_widget(line_widget, text_area);
 
         // Right diagnostic gutter marker.
@@ -512,11 +499,11 @@ impl Widget for EmptyLineWidget {
     fn render(self, _area: Rect, _buf: &mut RatBuffer) {}
 }
 
-struct LineWidget {
-    cells: Vec<(char, Style)>,
+struct LineWidget<'a> {
+    cells: &'a [(char, Style)],
 }
 
-impl Widget for LineWidget {
+impl Widget for LineWidget<'_> {
     fn render(self, area: Rect, buf: &mut RatBuffer) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -527,7 +514,7 @@ impl Widget for LineWidget {
                 break;
             }
             let w = c.width().unwrap_or(1) as u16;
-            buf[(x, area.top())].set_char(c).set_style(style);
+            buf[(x, area.top())].set_char(*c).set_style(*style);
             x += w;
         }
     }

@@ -94,7 +94,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     // Keep the focused notebook cell's stored source in sync with app.buffer.
     if app.notebook.is_some() && !app.notebook_focused_edit() {
         sync_buffer_to_notebook(app);
-        if matches!(app.mode, Mode::Insert | Mode::Normal | Mode::Select) {
+        // Insert mode already calls lsp_did_change on every typed character;
+        // avoid the duplicate rope.to_string() + LSP write.
+        if !matches!(app.mode, Mode::Insert) {
             exec::lsp_did_change(app);
         }
     }
