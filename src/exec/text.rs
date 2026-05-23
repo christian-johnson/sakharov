@@ -171,7 +171,10 @@ pub(super) fn comment_region(app: &mut App) {
             }
         }
     } else {
-        // Comment: prepend prefix after the leading whitespace on each line.
+        // Comment: prepend prefix at column 0 on each non-empty line.
+        // Placing markers at col 0 (not after indentation) keeps the code
+        // valid for whitespace-sensitive languages like Python: a commented-out
+        // indented block remains syntactically inert when the comment is removed.
         for li in (start_line..=end_line).rev() {
             let line_start = app.buffer.rope.line_to_char(li);
             let content: String = app.buffer.rope
@@ -182,11 +185,7 @@ pub(super) fn comment_region(app: &mut App) {
             if content.trim_start().is_empty() {
                 continue;
             }
-            let indent: usize = content
-                .chars()
-                .take_while(|c| c.is_whitespace())
-                .count();
-            app.buffer.insert_raw(line_start + indent, prefix);
+            app.buffer.insert_raw(line_start, prefix);
         }
     }
 
