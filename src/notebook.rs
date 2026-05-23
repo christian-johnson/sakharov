@@ -11,10 +11,14 @@ use serde_json::Value;
 // ---------------------------------------------------------------------------
 
 const RUNNER_SCRIPT: &str = r#"
-import sys, json, io, traceback
+import sys, json, io, traceback, base64
+
 _ns = {'__name__': '__main__'}
+_inline_matplotlib = False
+
 sys.stdout.write('__KI_READY__\n')
 sys.stdout.flush()
+
 while True:
     lines = []
     for line in sys.stdin:
@@ -22,18 +26,73 @@ while True:
         if s == '__KI_CODE_END__':
             break
         lines.append(s)
-    code = '\n'.join(lines)
+
+    # Handle IPython-style line magics. Only %matplotlib is processed;
+    # everything else starting with % or ! is silently dropped for now.
+    code_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('%matplotlib'):
+            parts = stripped.split()
+            backend = parts[1] if len(parts) > 1 else 'inline'
+            if backend == 'inline':
+                _inline_matplotlib = True
+                try:
+                    import matplotlib as _mpl
+                    try:
+                        _mpl.use('Agg', force=True)
+                    except TypeError:
+                        _mpl.use('Agg')
+                except Exception:
+                    pass
+            else:
+                _inline_matplotlib = False
+                try:
+                    import matplotlib as _mpl
+                    try:
+                        _mpl.use(backend, force=True)
+                    except TypeError:
+                        _mpl.use(backend)
+                except Exception:
+                    pass
+        elif stripped.startswith('%') or stripped.startswith('!'):
+            pass  # other magics/shell escapes ignored
+        else:
+            code_lines.append(line)
+
+    code = '\n'.join(code_lines)
     _out, _err, _exc = io.StringIO(), io.StringIO(), None
+    images = []
+
     sys.stdout, sys.stderr = _out, _err
     try:
-        exec(compile(code, '<cell>', 'exec'), _ns)
+        if code.strip():
+            exec(compile(code, '<cell>', 'exec'), _ns)
+        if _inline_matplotlib:
+            try:
+                import matplotlib.pyplot as _plt
+                for _num in _plt.get_fignums():
+                    _fig = _plt.figure(_num)
+                    _buf = io.BytesIO()
+                    _fig.savefig(_buf, format='png', bbox_inches='tight', dpi=150)
+                    _buf.seek(0)
+                    images.append(base64.b64encode(_buf.read()).decode('ascii'))
+                _plt.close('all')
+            except Exception:
+                pass
     except SystemExit:
         pass
     except BaseException:
         _exc = traceback.format_exc()
     finally:
         sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
-    sys.stdout.write(json.dumps({'stdout': _out.getvalue(), 'stderr': _err.getvalue(), 'error': _exc}) + '\n')
+
+    sys.stdout.write(json.dumps({
+        'stdout': _out.getvalue(),
+        'stderr': _err.getvalue(),
+        'error': _exc,
+        'images': images,
+    }) + '\n')
     sys.stdout.write('__KI_OUTPUT_END__\n')
     sys.stdout.flush()
 "#;
@@ -54,6 +113,8 @@ pub struct KernelOutput {
     pub stderr: String,
     /// Full traceback string if an exception occurred.
     pub error: Option<String>,
+    /// PNG images captured from matplotlib figures (only when %matplotlib inline is active).
+    pub images: Vec<Vec<u8>>,
 }
 
 pub struct KernelSession {
@@ -178,8 +239,21 @@ impl KernelSession {
             .get("error")
             .and_then(|s| s.as_str())
             .map(str::to_owned);
+        let images: Vec<Vec<u8>> = v
+            .get("images")
+            .and_then(|arr| arr.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|img| {
+                        img.as_str().and_then(|s| {
+                            base64::engine::general_purpose::STANDARD.decode(s).ok()
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        Ok(KernelOutput { stdout, stderr, error })
+        Ok(KernelOutput { stdout, stderr, error, images })
     }
 
     /// Send SIGINT to the child process (Unix/macOS).
@@ -493,7 +567,7 @@ impl Notebook {
             }
             let lines: Vec<&str> = text.split('\n').collect();
             let n = lines.len();
-            let arr: Vec<Value> = lines
+            let mut arr: Vec<Value> = lines
                 .iter()
                 .enumerate()
                 .map(|(i, line)| {
@@ -503,95 +577,111 @@ impl Notebook {
                         Value::String((*line).to_string())
                     }
                 })
-                    .collect();
-            // If the last element is an empty string produced by a trailing newline,
-            // remove it (that newline is already encoded in the previous line).
-            let mut arr2 = arr;
-            if let Some(Value::String(last)) = arr2.last() {
+                .collect();
+            // Drop trailing empty string produced by a trailing newline.
+            if let Some(Value::String(last)) = arr.last() {
                 if last.is_empty() {
-                    arr2.pop();
+                    arr.pop();
                 }
             }
-            Value::Array(arr2)
+            Value::Array(arr)
         };
 
-        // Read existing JSON to preserve top-level structure.
+        let serialise_output = |o: &Output| -> Value {
+            match o {
+                Output::Stream { name, text } => {
+                    let lines: Vec<Value> = text
+                        .split('\n')
+                        .enumerate()
+                        .map(|(i, line)| {
+                            let s = if i + 1 < text.split('\n').count() {
+                                format!("{line}\n")
+                            } else {
+                                line.to_string()
+                            };
+                            Value::String(s)
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "output_type": "stream",
+                        "name": name,
+                        "text": lines,
+                    })
+                }
+                Output::DisplayData { data } => {
+                    let mut d = serde_json::Map::new();
+                    if let Some(t) = &data.text_plain {
+                        d.insert("text/plain".into(), Value::String(t.clone()));
+                    }
+                    if let Some(bytes) = &data.image_png {
+                        d.insert(
+                            "image/png".into(),
+                            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                        );
+                    }
+                    serde_json::json!({ "output_type": "display_data", "data": d, "metadata": {} })
+                }
+                Output::ExecuteResult { execution_count, data } => {
+                    let mut d = serde_json::Map::new();
+                    if let Some(t) = &data.text_plain {
+                        d.insert("text/plain".into(), Value::String(t.clone()));
+                    }
+                    if let Some(bytes) = &data.image_png {
+                        d.insert(
+                            "image/png".into(),
+                            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                        );
+                    }
+                    serde_json::json!({
+                        "output_type": "execute_result",
+                        "execution_count": execution_count,
+                        "data": d,
+                        "metadata": {},
+                    })
+                }
+                Output::Error { ename, evalue, traceback } => serde_json::json!({
+                    "output_type": "error",
+                    "ename": ename,
+                    "evalue": evalue,
+                    "traceback": traceback,
+                }),
+            }
+        };
+
+        // Read existing JSON so we preserve notebook-level metadata (nbformat,
+        // kernelspec, etc.) without having to round-trip it through our structs.
         let raw = std::fs::read_to_string(&self.path)
             .with_context(|| format!("reading notebook {}", self.path.display()))?;
         let mut json: Value = serde_json::from_str(&raw).context("parsing notebook JSON")?;
 
-        let cells_json = json
-            .get_mut("cells")
-            .and_then(|v| v.as_array_mut())
-            .context("notebook has no 'cells' array")?;
-
-        for (i, cell) in self.cells.iter().enumerate() {
-            if let Some(cell_obj) = cells_json.get_mut(i) {
-                cell_obj["source"] = serialise_source(&cell.source);
-                cell_obj["execution_count"] = match cell.execution_count {
+        // Rebuild the cells array completely from self.cells.  Patching by index
+        // (the old approach) silently dropped any cells that were added or deleted.
+        let new_cells: Vec<Value> = self.cells.iter().map(|cell| {
+            let cell_type_str = match cell.cell_type {
+                CellType::Code => "code",
+                CellType::Markdown => "markdown",
+                CellType::Raw => "raw",
+            };
+            let mut obj = serde_json::json!({
+                "id": cell.id,
+                "cell_type": cell_type_str,
+                "metadata": {},
+                "source": serialise_source(&cell.source),
+            });
+            // Only code cells carry outputs and execution_count.
+            if matches!(cell.cell_type, CellType::Code) {
+                obj["execution_count"] = match cell.execution_count {
                     Some(n) => Value::Number(n.into()),
                     None => Value::Null,
                 };
-
-                // Serialise outputs
-                let outputs: Vec<Value> = cell.outputs.iter().map(|o| match o {
-                    Output::Stream { name, text } => serde_json::json!({
-                        "output_type": "stream",
-                        "name": name,
-                        "text": text.split('\n').map(|line| {
-                            line.to_string()
-                        }).collect::<Vec<_>>()
-                    }),
-                    Output::DisplayData { data } => {
-                        let mut d = serde_json::Map::new();
-                        if let Some(t) = &data.text_plain {
-                            d.insert("text/plain".to_string(), Value::String(t.clone()));
-                        }
-                        if let Some(bytes) = &data.image_png {
-                            d.insert(
-                                "image/png".to_string(),
-                                Value::String(
-                                    base64::engine::general_purpose::STANDARD.encode(bytes),
-                                ),
-                            );
-                        }
-                        serde_json::json!({
-                            "output_type": "display_data",
-                            "data": d,
-                            "metadata": {}
-                        })
-                    }
-                    Output::ExecuteResult { execution_count, data } => {
-                        let mut d = serde_json::Map::new();
-                        if let Some(t) = &data.text_plain {
-                            d.insert("text/plain".to_string(), Value::String(t.clone()));
-                        }
-                        if let Some(bytes) = &data.image_png {
-                            d.insert(
-                                "image/png".to_string(),
-                                Value::String(
-                                    base64::engine::general_purpose::STANDARD.encode(bytes),
-                                ),
-                            );
-                        }
-                        serde_json::json!({
-                            "output_type": "execute_result",
-                            "execution_count": execution_count,
-                            "data": d,
-                            "metadata": {}
-                        })
-                    }
-                    Output::Error { ename, evalue, traceback } => serde_json::json!({
-                        "output_type": "error",
-                        "ename": ename,
-                        "evalue": evalue,
-                        "traceback": traceback
-                    }),
-                }).collect();
-
-                cell_obj["outputs"] = Value::Array(outputs);
+                obj["outputs"] = Value::Array(
+                    cell.outputs.iter().map(|o| serialise_output(o)).collect(),
+                );
             }
-        }
+            obj
+        }).collect();
+
+        json["cells"] = Value::Array(new_cells);
 
         let serialised =
             serde_json::to_string_pretty(&json).context("serialising notebook JSON")?;
@@ -641,6 +731,14 @@ impl Cell {
                 ename: ename.to_owned(),
                 evalue: evalue.to_owned(),
                 traceback: lines,
+            });
+        }
+        for image_bytes in out.images {
+            self.outputs.push(Output::DisplayData {
+                data: MimeData {
+                    text_plain: None,
+                    image_png: Some(image_bytes),
+                },
             });
         }
         Ok(())

@@ -431,16 +431,20 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         // --- File / application ---
         Command::Write => {
-            if let Some((ref mut nb, _)) = app.notebook {
-                match nb.save() {
-                    Ok(()) => {
-                        let name = nb.path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("notebook.ipynb")
-                            .to_string();
-                        app.message = Some(format!("Saved {name}"));
+            if app.notebook.is_some() {
+                // Flush any in-progress cell edits into nb.cells before serialising.
+                notebook::save_focused_cell(app);
+                if let Some((ref mut nb, _)) = app.notebook {
+                    match nb.save() {
+                        Ok(()) => {
+                            let name = nb.path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("notebook.ipynb")
+                                .to_string();
+                            app.message = Some(format!("Saved {name}"));
+                        }
+                        Err(e) => app.message = Some(format!("Error: {e}")),
                     }
-                    Err(e) => app.message = Some(format!("Error: {e}")),
                 }
             } else {
                 match app.buffer.save(None) {
@@ -495,9 +499,19 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::WriteQuit => {
-            match app.buffer.save(None) {
-                Ok(()) => app.should_quit = true,
-                Err(e) => app.message = Some(format!("Error: {e}")),
+            if app.notebook.is_some() {
+                notebook::save_focused_cell(app);
+                if let Some((ref mut nb, _)) = app.notebook {
+                    match nb.save() {
+                        Ok(()) => app.should_quit = true,
+                        Err(e) => app.message = Some(format!("Error: {e}")),
+                    }
+                }
+            } else {
+                match app.buffer.save(None) {
+                    Ok(()) => app.should_quit = true,
+                    Err(e) => app.message = Some(format!("Error: {e}")),
+                }
             }
             return;
         }
@@ -700,7 +714,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             notebook::save_focused_cell(app);
             notebook::push_cell_snapshot(app);
             if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let new_idx = state.focused_cell + 1;
+                let new_idx = (state.focused_cell + 1).min(nb.cells.len());
                 nb.cells.insert(new_idx, Cell {
                     id: notebook::new_cell_id(),
                     cell_type: CellType::Code,

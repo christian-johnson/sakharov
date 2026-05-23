@@ -417,13 +417,22 @@ fn run_loop(
 
         set_cursor_shape(&app.mode);
 
-        if event::poll(std::time::Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    input::handle_key(app, key);
+        // Block up to 16 ms for the first event (≈60 fps idle rate).
+        // Once an event arrives, drain every additional event that is already
+        // queued before yielding back to the render loop.  This ensures that a
+        // burst of key-repeat events is consumed in a single frame rather than
+        // trickling in one per frame, which caused the cursor to keep moving
+        // briefly after a key was released.
+        if event::poll(std::time::Duration::from_millis(16))? {
+            loop {
+                match event::read()? {
+                    Event::Key(key) => input::handle_key(app, key),
+                    Event::Resize(_, _) => {}
+                    _ => {}
                 }
-                Event::Resize(_, _) => {}
-                _ => {}
+                if !event::poll(std::time::Duration::from_millis(0))? {
+                    break;
+                }
             }
         }
 
