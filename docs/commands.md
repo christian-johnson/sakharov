@@ -78,9 +78,26 @@ These commands enter a sub-mode that awaits a second key.
 |---------|-------------|-----------|-------------|
 | `write` | `ctrl+s` | `:w` | Write (save) current file (`save` is a backward-compat alias) |
 | `write-as <path>` | — | `:w <path>` | Write to a new path |
+| `open-file-picker` | `ctrl+o` | `:e` | Open a file (built-in fuzzy picker, or external via `editor.file_picker` config) |
 | `quit` | — | `:q` | Quit (fails if there are unsaved changes) |
 | `force-quit` | — | `:q!` | Quit without saving |
 | `write-quit` | — | `:wq`, `:x` | Write then quit |
+
+### External file picker
+
+Set `editor.file_picker` in `~/.config/majorana/config.toml` to any shell command.
+The command receives `MJ_PICKER_FILE` (write the chosen path there) and `MJ_CURRENT_DIR`
+(directory of the current buffer). Stdout is used as a fallback if the temp file is empty.
+
+```toml
+# yazi (recommended — writes its choice to MJ_PICKER_FILE automatically)
+[editor]
+file_picker = "yazi --chooser-file=$MJ_PICKER_FILE"
+
+# fzf (writes to stdout, which majorana reads after it exits)
+[editor]
+file_picker = "find . -type f | fzf"
+```
 
 ## Scripting
 

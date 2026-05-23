@@ -47,6 +47,16 @@ pub struct EditorConfig {
     /// Show a 1-column git diff marker to the left of line numbers.
     #[serde(default)]
     pub git_gutter: bool,
+    /// Shell command to invoke as an external file picker (e.g. yazi, fzf).
+    ///
+    /// The command receives two environment variables:
+    ///   MJ_PICKER_FILE  — path to a temp file; write the chosen path there
+    ///                     (alternative to stdout, preferred for TUI pickers)
+    ///   MJ_CURRENT_DIR  — directory of the currently open file
+    ///
+    /// If unset, the built-in fuzzy file list is used instead.
+    #[serde(default)]
+    pub file_picker: Option<String>,
 }
 
 /// Configuration for a single language server.

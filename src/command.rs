@@ -63,6 +63,8 @@ pub enum Command {
     OpenSymbolPicker,
     /// Open the diagnostic picker (LSP diagnostics).
     OpenDiagnosticPicker,
+    /// Open a file picker (built-in fuzzy list, or external via config).
+    OpenFilePicker,
 
     // File / application
     Write,
@@ -204,6 +206,7 @@ impl Command {
             Command::OpenBufferPicker => "open-buffer-picker",
             Command::OpenSymbolPicker => "open-symbol-picker",
             Command::OpenDiagnosticPicker => "open-diagnostic-picker",
+            Command::OpenFilePicker => "open-file-picker",
             Command::Write => "write",
             Command::WriteAs(_) => "write-as",
             Command::Quit => "quit",
@@ -312,6 +315,7 @@ impl Command {
             "open-buffer-picker"     | "buffers" => Some(Command::OpenBufferPicker),
             "open-symbol-picker"     | "symbols" => Some(Command::OpenSymbolPicker),
             "open-diagnostic-picker" | "diagnostics" => Some(Command::OpenDiagnosticPicker),
+            "open-file-picker" | "open-file" | "e" => Some(Command::OpenFilePicker),
 
             // Canonical no-arg commands
             "move-left"               => Some(Command::MoveLeft),

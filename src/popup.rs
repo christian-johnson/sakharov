@@ -553,6 +553,7 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("toggle-line-numbers",        "Toggle line numbers  [:toggle-line-numbers]"),
         ("toggle-relative-line-numbers", "Toggle relative line numbers  [:toggle-relative-line-numbers]"),
         // Pickers
+        ("open-file-picker",       "Open file  [ctrl+o, :e]"),
         ("open-buffer-picker",     "Switch buffer  [gb]"),
         ("open-symbol-picker",     "Jump to symbol in file  [gs]"),
         ("open-diagnostic-picker", "Jump to diagnostic  [gD]"),

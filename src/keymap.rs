@@ -231,9 +231,10 @@ impl Keymap {
         // Ctrl+N/P also navigate within popups and search matches.
         normal.insert(KeyBinding::ctrl('n'), vec![Command::SearchNext]);
         normal.insert(KeyBinding::ctrl('p'), vec![Command::SearchPrev]);
-        // Ctrl+F → grep buffer; Ctrl+G → grep project
+        // Ctrl+F → grep buffer; Ctrl+G → grep project; Ctrl+O → file picker
         normal.insert(KeyBinding::ctrl('f'), vec![Command::GrepBuffer]);
         normal.insert(KeyBinding::ctrl('g'), vec![Command::GrepProject]);
+        normal.insert(KeyBinding::ctrl('o'), vec![Command::OpenFilePicker]);
 
         // Space opens command palette (both Normal and Select)
         let space = KeyBinding { code: KeyCode::Char(' '), modifiers: KeyModifiers::NONE };

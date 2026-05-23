@@ -258,8 +258,12 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     app.selection = Selection::point(char_idx);
     super::update_scroll(app);
 
-    if !app.open_buffers.iter().any(|p| p.as_path() == path) {
-        app.open_buffers.push(path.to_path_buf());
+    // Canonicalize before dedup so relative vs absolute comparisons work correctly.
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !app.open_buffers.iter().any(|stored| {
+        stored.canonicalize().unwrap_or_else(|_| stored.clone()) == canon
+    }) {
+        app.open_buffers.push(canon);
     }
 
     app.git_diff = crate::git::diff_marks(path);

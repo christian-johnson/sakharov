@@ -197,6 +197,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
+        Command::OpenFilePicker => {
+            let picker_cmd = app.config.editor.file_picker.clone();
+            if let Some(cmd) = picker_cmd {
+                open_file_external_picker(app, &cmd);
+            } else {
+                open_file_picker_popup(app);
+            }
+            return;
+        }
         Command::OpenDiagnosticPicker => {
             let mut items: Vec<crate::popup::ListItem> = Vec::new();
             for (path_str, diags) in &app.lsp.diagnostics {
@@ -928,6 +937,146 @@ pub fn update_scroll(app: &mut App) {
 fn unicode_display_width(c: char) -> usize {
     use unicode_width::UnicodeWidthChar;
     c.width().unwrap_or(1)
+}
+
+// ---------------------------------------------------------------------------
+// File picker helpers
+// ---------------------------------------------------------------------------
+
+/// Open a fuzzy-filterable file list popup from the project root.
+fn open_file_picker_popup(app: &mut App) {
+    let root = std::env::current_dir()
+        .unwrap_or_else(|_| {
+            app.buffer.path.as_deref()
+                .and_then(|p| p.parent())
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default()
+        });
+
+    let mut items: Vec<crate::popup::ListItem> = Vec::new();
+    collect_files(&root, &root, &mut items, 0);
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+
+    if items.is_empty() {
+        app.message = Some("No files found".into());
+        return;
+    }
+
+    app.popup = Some(crate::popup::Popup::navigate("open file", items));
+}
+
+/// Recursively collect files under `dir` relative to `base`, skipping noise.
+fn collect_files(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    items: &mut Vec<crate::popup::ListItem>,
+    depth: usize,
+) {
+    const MAX_DEPTH: usize = 10;
+    const MAX_FILES: usize = 2000;
+    if depth > MAX_DEPTH || items.len() >= MAX_FILES {
+        return;
+    }
+
+    let Ok(read_dir) = std::fs::read_dir(dir) else { return };
+
+    let mut entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        if items.len() >= MAX_FILES {
+            break;
+        }
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if name_str.starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            if matches!(
+                name_str.as_ref(),
+                "target" | "node_modules" | "__pycache__" | "dist" | "build" | "out"
+            ) {
+                continue;
+            }
+            collect_files(base, &path, items, depth + 1);
+        } else {
+            let rel = path.strip_prefix(base).unwrap_or(&path);
+            let label = rel.to_string_lossy().into_owned();
+            let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+            items.push(crate::popup::ListItem::navigate(label, abs.to_string_lossy(), &abs, 0, 0));
+        }
+    }
+}
+
+/// Suspend the TUI, run an external picker command, then resume.
+///
+/// The command receives:
+///   MJ_PICKER_FILE  — path to a temp file; write the chosen file path there
+///                     (preferred for TUI pickers like yazi that own the screen)
+///   MJ_CURRENT_DIR  — directory of the currently open buffer
+///
+/// If MJ_PICKER_FILE is non-empty after the command exits, that path is used.
+/// Otherwise the command's stdout is used (works well with fzf).
+fn open_file_external_picker(app: &mut App, cmd: &str) {
+    use crossterm::{execute, terminal};
+    use std::io::{self, Write};
+
+    let tmp_path = std::env::temp_dir()
+        .join(format!("mj-picker-{}.txt", std::process::id()));
+
+    let current_dir = app.buffer.path.as_deref()
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    // Suspend TUI so the external picker has the full terminal.
+    let _ = terminal::disable_raw_mode();
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, crossterm::terminal::LeaveAlternateScreen);
+    let _ = stdout.flush();
+
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .env("MJ_PICKER_FILE", &tmp_path)
+        .env("MJ_CURRENT_DIR", &current_dir)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .output();
+
+    // Resume TUI.
+    let _ = execute!(stdout, crossterm::terminal::EnterAlternateScreen);
+    let _ = terminal::enable_raw_mode();
+    crate::theme::initialize_color_cache();
+
+    // Determine chosen path: temp file wins over stdout.
+    let chosen = if tmp_path.exists() {
+        let content = std::fs::read_to_string(&tmp_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&tmp_path);
+        content.trim().to_owned()
+    } else {
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+            Err(e) => {
+                app.message = Some(format!("File picker error: {e}"));
+                return;
+            }
+        }
+    };
+
+    if !chosen.is_empty() {
+        let path = std::path::PathBuf::from(&chosen);
+        lsp::open_file_at(app, &path, 0, 0);
+    }
+
+    app.needs_clear = true;
 }
 
 // ---------------------------------------------------------------------------

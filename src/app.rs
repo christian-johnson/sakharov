@@ -121,6 +121,9 @@ pub struct App {
     pub jump_labels: Vec<(usize, String)>,
     /// Characters typed so far in Jump mode (used to filter labels).
     pub jump_typed: String,
+    /// Set after suspending and resuming the terminal (e.g. external file picker).
+    /// Causes the render loop to call `terminal.clear()` once to force a full repaint.
+    pub needs_clear: bool,
 }
 
 impl App {
@@ -200,9 +203,10 @@ impl App {
 
         let mut open_buffers: Vec<std::path::PathBuf> = Vec::new();
         if let Some(p) = buffer.path.as_ref() {
-            open_buffers.push(p.clone());
+            // Always store canonical absolute paths so dedup comparisons work reliably.
+            open_buffers.push(p.canonicalize().unwrap_or_else(|_| p.clone()));
         } else if let Some((ref nb, _)) = notebook {
-            open_buffers.push(nb.path.clone());
+            open_buffers.push(nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone()));
         }
 
         let git_diff = buffer
@@ -244,6 +248,7 @@ impl App {
             pending_code_actions: Vec::new(),
             jump_labels: Vec::new(),
             jump_typed: String::new(),
+            needs_clear: false,
         })
     }
 }
@@ -335,6 +340,13 @@ fn run_loop(
             app.viewport_width = size.width as usize;
         }
         crate::exec::update_scroll(app);
+
+        // After an external program (file picker etc.) suspends and resumes the
+        // terminal, ratatui's diffing state is stale — force a full repaint.
+        if app.needs_clear {
+            app.needs_clear = false;
+            let _ = terminal.clear();
+        }
 
         if app.notebook.is_some() && !app.notebook_focused_edit() {
             // Notebook multi-cell view — the focused cell is in app.buffer.
