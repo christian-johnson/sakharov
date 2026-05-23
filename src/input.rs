@@ -133,8 +133,20 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             begin_insert_edit(app);
             let pos = app.selection.head;
-            app.buffer.insert_raw(pos, "\n");
-            app.selection = Selection::point(pos + 1);
+            if crate::indent::is_bracket_pair(&app.buffer.rope, pos) {
+                // {|} → {\n    |\n} : expand bracket pair onto three lines.
+                let inner = crate::indent::for_new_line(&app.buffer.rope, pos);
+                let base = crate::indent::for_line_above(&app.buffer.rope, pos);
+                let inner_len = inner.chars().count();
+                let to_insert = format!("\n{inner}\n{base}");
+                app.buffer.insert_raw(pos, &to_insert);
+                app.selection = Selection::point(pos + 1 + inner_len);
+            } else {
+                let ind = crate::indent::for_new_line(&app.buffer.rope, pos);
+                let ind_len = ind.chars().count();
+                app.buffer.insert_raw(pos, &format!("\n{ind}"));
+                app.selection = Selection::point(pos + 1 + ind_len);
+            }
             exec::recompute_highlights(app);
         }
         KeyCode::Left => {

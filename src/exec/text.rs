@@ -1,4 +1,4 @@
-use crate::{app::App, mode::Mode, selection::Selection};
+use crate::{app::App, indent, mode::Mode, selection::Selection};
 
 pub(super) fn delete_selection(app: &mut App) {
     let start = app.selection.start();
@@ -45,40 +45,56 @@ pub(super) fn paste_before(app: &mut App) {
 }
 
 pub(super) fn open_line_below(app: &mut App) {
-    let rope = &app.buffer.rope;
     let pos = app.selection.head;
-    let le = if rope.len_chars() == 0 {
-        0
-    } else {
-        let line_idx = rope.char_to_line(pos.min(rope.len_chars()));
-        let line_str = rope.line(line_idx);
-        let line_len = line_str.len_chars();
-        if line_len > 0
-            && (line_str.char(line_len - 1) == '\n' || line_str.char(line_len - 1) == '\r')
-        {
-            rope.line_to_char(line_idx) + line_len - 1
+    // Compute indentation before borrowing mutably.
+    let ind = indent::for_new_line(&app.buffer.rope, pos);
+
+    let le = {
+        let rope = &app.buffer.rope;
+        if rope.len_chars() == 0 {
+            0
         } else {
-            rope.line_to_char(line_idx) + line_len
+            let line_idx = rope.char_to_line(pos.min(rope.len_chars()));
+            let line_str = rope.line(line_idx);
+            let line_len = line_str.len_chars();
+            if line_len > 0
+                && (line_str.char(line_len - 1) == '\n' || line_str.char(line_len - 1) == '\r')
+            {
+                rope.line_to_char(line_idx) + line_len - 1
+            } else {
+                rope.line_to_char(line_idx) + line_len
+            }
         }
     };
-    app.buffer.insert(le, "\n");
-    app.selection = Selection::point(le + 1);
+
+    let ind_len = ind.chars().count();
+    let to_insert = format!("\n{ind}");
+    app.buffer.insert(le, &to_insert);
+    app.selection = Selection::point(le + 1 + ind_len);
     app.mode = Mode::Insert;
     super::recompute_highlights(app);
     super::update_scroll(app);
 }
 
 pub(super) fn open_line_above(app: &mut App) {
-    let rope = &app.buffer.rope;
     let pos = app.selection.head;
-    let ls = if rope.len_chars() == 0 {
-        0
-    } else {
-        let line_idx = rope.char_to_line(pos.min(rope.len_chars()));
-        rope.line_to_char(line_idx)
+    let ind = indent::for_line_above(&app.buffer.rope, pos);
+
+    let ls = {
+        let rope = &app.buffer.rope;
+        if rope.len_chars() == 0 {
+            0
+        } else {
+            let line_idx = rope.char_to_line(pos.min(rope.len_chars()));
+            rope.line_to_char(line_idx)
+        }
     };
-    app.buffer.insert(ls, "\n");
-    app.selection = Selection::point(ls);
+
+    let ind_len = ind.chars().count();
+    let to_insert = format!("{ind}\n");
+    app.buffer.insert(ls, &to_insert);
+    // Cursor after the indentation, on the newline (end of new blank line).
+    app.selection = Selection::point(ls + ind_len);
     app.mode = Mode::Insert;
     super::recompute_highlights(app);
     super::update_scroll(app);

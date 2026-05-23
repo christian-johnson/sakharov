@@ -5,6 +5,7 @@ mod config;
 mod exec;
 mod git;
 mod highlight;
+mod indent;
 mod input;
 mod jump;
 mod keymap;
