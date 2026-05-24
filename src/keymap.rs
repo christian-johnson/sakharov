@@ -241,6 +241,9 @@ impl Keymap {
         normal.insert(space.clone(), vec![Command::OpenCommandPalette]);
         select.insert(space, vec![Command::OpenCommandPalette]);
 
+        // z → enter fold sub-mode
+        normal.insert(KeyBinding::char('z'), vec![Command::EnterFoldMode]);
+
         // K → lsp-show-documentation (kept for muscle memory; gk is the canonical binding)
         normal.insert(KeyBinding::char('K'), vec![Command::LspShowDocumentation]);
 
@@ -288,6 +291,10 @@ impl Keymap {
         // Structural undo / redo
         notebook.insert(KeyBinding::char('u'), vec![Command::NotebookUndoStructural]);
         notebook.insert(KeyBinding::char('U'), vec![Command::NotebookRedoStructural]);
+
+        // z/Z → cell folding
+        notebook.insert(KeyBinding::char('z'), vec![Command::NotebookToggleFoldCell]);
+        notebook.insert(KeyBinding::char('Z'), vec![Command::NotebookToggleAllFolds]);
 
         notebook.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
         notebook.insert(KeyBinding::char(':'), vec![Command::EnterCommandMode]);

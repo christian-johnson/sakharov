@@ -3,6 +3,7 @@ mod buffer;
 mod command;
 mod config;
 mod exec;
+mod fold;
 mod git;
 mod highlight;
 mod indent;

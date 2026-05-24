@@ -57,8 +57,7 @@ impl Language {
 
 /// Syntax highlighter wrapping tree-sitter.
 pub struct Highlighter {
-    #[allow(dead_code)]
-    language: Option<Language>,
+    pub language: Option<Language>,
     config: Option<HighlightConfiguration>,
     /// Reused across calls — avoids allocating a new Parser on every highlight pass.
     ts_highlighter: TsHighlighter,

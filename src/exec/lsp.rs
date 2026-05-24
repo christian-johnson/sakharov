@@ -214,6 +214,33 @@ pub fn jump_to_location(app: &mut App, loc: &LspLocation) {
 
 /// Load `path` into the editor buffer and place the cursor at (line, character).
 pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, character: usize) {
+    // Redirect special buffer names to their own switch handler.
+    if super::is_special_path(path) {
+        super::save_current_special_buffer(app);
+        super::switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
+        return;
+    }
+
+    // Save scratch content when leaving it.
+    super::save_current_special_buffer(app);
+
+    // If a notebook is open, tear it down cleanly before loading a plain file.
+    if app.notebook.is_some() {
+        // Preserve the .ipynb path in the buffer list before clearing notebook state.
+        if let Some((ref nb, _)) = app.notebook {
+            let nb_path = nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone());
+            if !app.open_buffers.iter().any(|p| {
+                p.canonicalize().unwrap_or_else(|_| p.clone()) == nb_path
+            }) {
+                app.open_buffers.push(nb_path);
+            }
+        }
+        super::notebook::notebook_lsp_close(app);
+        app.notebook = None;
+        app.notebook_cell_edit = None;
+        app.mode = crate::mode::Mode::Normal;
+    }
+
     if let (Some(ref lang), Some(ref old_path)) = (
         app.lsp_language.clone(),
         app.buffer.path.clone(),

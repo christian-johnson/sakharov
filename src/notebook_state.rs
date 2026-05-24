@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::notebook::Cell;
 
 /// Per-session notebook UI state (not persisted).
@@ -13,6 +15,9 @@ pub struct NotebookState {
     cell_snapshots: Vec<(usize, Vec<Cell>)>,
     /// Snapshots for structural redo.
     cell_redo: Vec<(usize, Vec<Cell>)>,
+    /// Indices of cells that are currently folded (collapsed to one line).
+    /// Session-only; not persisted to .ipynb.
+    pub folded_cells: BTreeSet<usize>,
 }
 
 impl NotebookState {
@@ -23,7 +28,33 @@ impl NotebookState {
             executing_cell: None,
             cell_snapshots: Vec::new(),
             cell_redo: Vec::new(),
+            folded_cells: BTreeSet::new(),
         }
+    }
+
+    /// True if cell `idx` is currently folded.
+    pub fn is_cell_folded(&self, idx: usize) -> bool {
+        self.folded_cells.contains(&idx)
+    }
+
+    pub fn toggle_cell_fold(&mut self, idx: usize) {
+        if self.folded_cells.contains(&idx) {
+            self.folded_cells.remove(&idx);
+        } else {
+            self.folded_cells.insert(idx);
+        }
+    }
+
+    pub fn fold_all_cells(&mut self, cell_count: usize) {
+        for i in 0..cell_count {
+            if i != self.focused_cell {
+                self.folded_cells.insert(i);
+            }
+        }
+    }
+
+    pub fn unfold_all_cells(&mut self) {
+        self.folded_cells.clear();
     }
 
     /// Adjust scroll_cell so the focused cell is visible.
@@ -49,6 +80,8 @@ impl NotebookState {
         for (idx, cell) in cells.iter().enumerate() {
             let h = if idx == focused {
                 crate::notebook_ui::focused_cell_display_height(active_rope, cell) as usize
+            } else if self.is_cell_folded(idx) {
+                3usize // top border + 1 summary line + bottom border
             } else {
                 crate::notebook_ui::cell_display_height(cell) as usize
             };

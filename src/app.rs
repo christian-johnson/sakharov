@@ -11,6 +11,7 @@ use std::panic;
 use crate::{
     buffer::Buffer,
     config::Config,
+    fold::FoldState,
     git::GutterMark,
     highlight::{Highlighter, Span},
     input,
@@ -133,6 +134,16 @@ pub struct App {
     /// The mode that was active during the last rendered frame.  Used to skip the
     /// cursor-shape OSC write when the mode hasn't changed.
     pub last_rendered_mode: Option<Mode>,
+    /// Code fold state for the plain-text editor (fold ranges + which are closed).
+    pub fold: FoldState,
+    /// Chronological log of every message shown in the minibuffer.
+    /// Powers the *Messages* special buffer.
+    pub messages_log: Vec<String>,
+    /// The last message that was appended to `messages_log`, used to avoid
+    /// logging the same message twice when it persists across frames.
+    pub last_logged_message: Option<String>,
+    /// Persisted rope content for special buffers (currently only *scratch*).
+    pub special_buffer_ropes: std::collections::HashMap<String, ropey::Rope>,
 }
 
 impl App {
@@ -207,15 +218,24 @@ impl App {
 
         let mut highlighter = Highlighter::new(buffer.path.as_deref());
         let highlight_spans = highlighter.highlight(&buffer.rope).unwrap_or_default();
+        // Compute fold ranges immediately so folding works before the first edit.
+        let initial_fold_ranges = highlighter.language
+            .map(|lang| crate::fold::compute_fold_ranges(&buffer.rope, lang))
+            .unwrap_or_default();
 
         let initial_mode = if notebook.is_some() { Mode::Notebook } else { Mode::Normal };
 
-        let mut open_buffers: Vec<std::path::PathBuf> = Vec::new();
-        if let Some(p) = buffer.path.as_ref() {
+        // *scratch* and *Messages* are always present at the front of the buffer list.
+        let mut open_buffers: Vec<std::path::PathBuf> = vec![
+            std::path::PathBuf::from("*scratch*"),
+            std::path::PathBuf::from("*Messages*"),
+        ];
+        if let Some((ref nb, _)) = notebook {
+            // For notebooks, always track the .ipynb file — never the virtual cell paths.
+            open_buffers.push(nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone()));
+        } else if let Some(p) = buffer.path.as_ref() {
             // Always store canonical absolute paths so dedup comparisons work reliably.
             open_buffers.push(p.canonicalize().unwrap_or_else(|_| p.clone()));
-        } else if let Some((ref nb, _)) = notebook {
-            open_buffers.push(nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone()));
         }
 
         let git_diff = buffer
@@ -261,6 +281,24 @@ impl App {
             highlights_dirty: false,
             diag_by_line: std::collections::HashMap::new(),
             last_rendered_mode: None,
+            fold: {
+                let mut f = FoldState::default();
+                f.ranges = initial_fold_ranges;
+                f
+            },
+            messages_log: Vec::new(),
+            last_logged_message: None,
+            special_buffer_ropes: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "*scratch*".to_string(),
+                    ropey::Rope::from_str(
+                        ";; This buffer is for notes you don't want to save.\n\
+                         ;; Use it for scratch text.\n",
+                    ),
+                );
+                m
+            },
         })
     }
 }
@@ -353,7 +391,7 @@ fn run_loop(
         }
         crate::exec::update_scroll(app);
 
-        // Recompute syntax highlights at most once per frame.
+        // Recompute syntax highlights and fold ranges at most once per frame.
         // Individual edits only set the dirty flag; the cost is paid here.
         if app.highlights_dirty {
             app.highlights_dirty = false;
@@ -361,6 +399,18 @@ fn run_loop(
                 .highlighter
                 .highlight(&app.buffer.rope)
                 .unwrap_or_default();
+            // Recompute foldable ranges from the updated syntax tree.
+            if let Some(lang) = app.highlighter.language {
+                app.fold.ranges =
+                    crate::fold::compute_fold_ranges(&app.buffer.rope, lang);
+                // Discard any stored folds whose start lines no longer exist.
+                let valid: std::collections::BTreeSet<usize> =
+                    app.fold.ranges.iter().map(|&(s, _)| s).collect();
+                app.fold.folded.retain(|s| valid.contains(s));
+            } else {
+                app.fold.ranges.clear();
+                app.fold.folded.clear();
+            }
         }
 
         // After an external program (file picker etc.) suspends and resumes the
@@ -463,6 +513,14 @@ fn run_loop(
         }
 
         crate::exec::process_lsp_events(app);
+
+        // Append any new minibuffer message to the *Messages* log.
+        if app.message.as_deref() != app.last_logged_message.as_deref() {
+            if let Some(ref msg) = app.message {
+                app.messages_log.push(msg.clone());
+                app.last_logged_message = app.message.clone();
+            }
+        }
 
         if app.should_quit {
             break;

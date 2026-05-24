@@ -62,8 +62,6 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let text_width = area.width.saturating_sub(gutter_width + right_gutter) as usize;
     let visible_rows = area.height as usize;
 
-    // Diagnostic ranges are pre-built in app.diag_by_line and refreshed on
-    // LSP events; no per-frame HashMap construction needed here.
     let diag_by_line = &app.diag_by_line;
 
     let rope = &app.buffer.rope;
@@ -76,12 +74,12 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let sel_end = app.selection.end();
     let cursor_pos = app.selection.head;
 
-    // Reuse a single allocation across all visible lines instead of allocating
-    // a fresh Vec per line.
+    // Build the fold-aware list of visible entries once.
+    let visible_entries = app.fold.visible_entries(scroll_row, visible_rows, total_lines);
+
     let mut cells: Vec<(char, Style)> = Vec::with_capacity(text_width + 8);
 
-    for row in 0..visible_rows {
-        let line_idx = scroll_row + row;
+    for (row, &(line_idx, fold_end_opt)) in visible_entries.iter().enumerate() {
         let y = area.top() + row as u16;
 
         // --- Gutter ---
@@ -91,14 +89,20 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             // Git mark column (1 char).
             if git_col > 0 {
-                let (mark_ch, mark_color) = match app.git_diff.get(&line_idx) {
-                    Some(GutterMark::Added)    => ('+', Color::Green),
-                    Some(GutterMark::Modified) => ('~', Color::Yellow),
-                    None                       => (' ', Color::DarkGray),
-                };
-                buf[(gx, y)]
-                    .set_char(mark_ch)
-                    .set_style(Style::default().fg(mark_color));
+                let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+                if fold_end_opt.is_some() {
+                    // Fold indicator: show arrow in the git column, overriding the git mark.
+                    buf[(gx, y)].set_char('▶').set_style(arrow_style);
+                } else {
+                    let (mark_ch, mark_color) = match app.git_diff.get(&line_idx) {
+                        Some(GutterMark::Added)    => ('+', Color::Green),
+                        Some(GutterMark::Modified) => ('~', Color::Yellow),
+                        None                       => (' ', Color::DarkGray),
+                    };
+                    buf[(gx, y)]
+                        .set_char(mark_ch)
+                        .set_style(Style::default().fg(mark_color));
+                }
                 gx += 1;
             }
 
@@ -117,20 +121,30 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                     format!("{:4} ", line_idx + 1)
                 };
                 let num_style = Style::default().fg(Color::DarkGray);
-                for c in line_num_str.chars() {
-                    if gx >= area.left() + gutter_width {
-                        break;
-                    }
-                    buf[(gx, y)].set_char(c).set_style(num_style);
+
+                if fold_end_opt.is_some() && git_col == 0 && line_num_width >= 2 {
+                    // No git column: fold arrow occupies the leftmost char of the line
+                    // number area; the rest of the number renders in its normal gray style.
+                    let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+                    buf[(gx, y)].set_char('▶').set_style(arrow_style);
                     gx += 1;
+                    // Skip the first char of line_num_str so the total width stays the same.
+                    for c in line_num_str.chars().skip(1) {
+                        if gx >= area.left() + gutter_width { break; }
+                        buf[(gx, y)].set_char(c).set_style(num_style);
+                        gx += 1;
+                    }
+                } else {
+                    for c in line_num_str.chars() {
+                        if gx >= area.left() + gutter_width { break; }
+                        buf[(gx, y)].set_char(c).set_style(num_style);
+                        gx += 1;
+                    }
                 }
             } else if line_num_width > 0 {
-                // Past end of file — blank line number.
                 let num_style = Style::default().fg(Color::DarkGray);
                 for _ in 0..line_num_width {
-                    if gx >= area.left() + gutter_width {
-                        break;
-                    }
+                    if gx >= area.left() + gutter_width { break; }
                     buf[(gx, y)].set_char(' ').set_style(num_style);
                     gx += 1;
                 }
@@ -146,15 +160,21 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
         };
 
         if line_idx >= total_lines {
-            // Past end of file
-            let empty = EmptyLineWidget;
-            frame.render_widget(empty, text_area);
+            frame.render_widget(EmptyLineWidget, text_area);
             continue;
         }
 
         let line_start_char = rope.line_to_char(line_idx);
         let line_str = rope.line(line_idx);
         let line_len = line_str.len_chars();
+
+        // When this row is a fold indicator, reserve space for the fold badge.
+        let fold_badge: Option<String> = fold_end_opt.map(|end| {
+            let hidden = end - line_idx; // hidden lines (not counting the visible first)
+            format!("  ▶ {} lines", hidden)
+        });
+        let badge_len = fold_badge.as_ref().map(|b| b.chars().count()).unwrap_or(0);
+        let content_width = text_width.saturating_sub(badge_len);
 
         cells.clear();
         let mut col_offset = 0usize;
@@ -171,8 +191,8 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 continue;
             }
 
-            // Past visible width
-            if col_offset - app.scroll_col >= text_width {
+            // Past visible width (leave room for fold badge when present)
+            if col_offset - app.scroll_col >= content_width {
                 break;
             }
 
@@ -188,12 +208,12 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 base_style
             };
 
-            // Diagnostic underline (does not override cursor/selection colours).
-            let char_off = char_idx - line_start_char;
+            // Diagnostic underline.
+            let char_off_diag = char_idx - line_start_char;
             let style = if let Some(line_diags) = diag_by_line.get(&line_idx) {
                 let worst = line_diags
                     .iter()
-                    .filter(|(cs, ce, _)| char_off >= *cs && char_off < *ce)
+                    .filter(|(cs, ce, _)| char_off_diag >= *cs && char_off_diag < *ce)
                     .fold(None::<&DiagnosticSeverity>, |acc, (_, _, sev)| {
                         Some(match acc {
                             Some(DiagnosticSeverity::Error) => &DiagnosticSeverity::Error,
@@ -222,7 +242,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             } else if c == '\t' {
                 let w = tab_stop(col_offset, tab_width);
                 for i in 0..w {
-                    if col_offset - app.scroll_col + i < text_width {
+                    if col_offset - app.scroll_col + i < content_width {
                         cells.push((' ', style));
                     }
                 }
@@ -234,53 +254,59 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
 
-        // Jump label overlay — patch cells in-place before rendering.
-        if app.mode == crate::mode::Mode::Jump && !app.jump_labels.is_empty() {
-            let typed_len = app.jump_typed.len();
-            let jump_pending = Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(255, 160, 0))
-                .add_modifier(Modifier::BOLD);
-            let jump_confirmed = Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD);
+        // Append fold badge when this row is a fold indicator.
+        if let Some(ref badge) = fold_badge {
+            let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+            let count_style = Style::default().fg(Color::DarkGray);
+            for (i, c) in badge.chars().enumerate() {
+                // "  ▶ " = first 4 chars in orange, rest in gray
+                let style = if i < 4 { arrow_style } else { count_style };
+                cells.push((c, style));
+            }
+        } else {
+            // Jump label overlay — only on normal (non-fold) lines.
+            if app.mode == crate::mode::Mode::Jump && !app.jump_labels.is_empty() {
+                let typed_len = app.jump_typed.len();
+                let jump_pending = Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Rgb(255, 160, 0))
+                    .add_modifier(Modifier::BOLD);
+                let jump_confirmed = Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD);
 
-            for &(pos, ref label) in &app.jump_labels {
-                // Skip labels that don't match the typed prefix.
-                if !label.starts_with(app.jump_typed.as_str()) {
-                    continue;
-                }
-                if pos < line_start_char {
-                    continue;
-                }
-                let char_off = pos - line_start_char;
-                if char_off >= line_len {
-                    continue;
-                }
-
-                // Compute display column for this char offset.
-                let display_col = {
-                    let mut col = 0usize;
-                    for i in 0..char_off {
-                        let c = line_str.char(i);
-                        col += char_display_width(c, col, tab_width);
+                for &(pos, ref label) in &app.jump_labels {
+                    if !label.starts_with(app.jump_typed.as_str()) {
+                        continue;
                     }
-                    col
-                };
-
-                if display_col < app.scroll_col {
-                    continue;
-                }
-                let cell_idx = display_col - app.scroll_col;
-
-                for (j, lc) in label.chars().enumerate() {
-                    let idx = cell_idx + j;
-                    if idx >= cells.len() {
-                        break;
+                    if pos < line_start_char {
+                        continue;
                     }
-                    let style = if j < typed_len { jump_confirmed } else { jump_pending };
-                    cells[idx] = (lc, style);
+                    let char_off = pos - line_start_char;
+                    if char_off >= line_len {
+                        continue;
+                    }
+                    let display_col = {
+                        let mut col = 0usize;
+                        for i in 0..char_off {
+                            let c = line_str.char(i);
+                            col += char_display_width(c, col, tab_width);
+                        }
+                        col
+                    };
+                    if display_col < app.scroll_col {
+                        continue;
+                    }
+                    let cell_idx = display_col - app.scroll_col;
+                    for (j, lc) in label.chars().enumerate() {
+                        let idx = cell_idx + j;
+                        if idx >= cells.len() {
+                            break;
+                        }
+                        let style = if j < typed_len { jump_confirmed } else { jump_pending };
+                        cells[idx] = (lc, style);
+                    }
                 }
             }
         }
@@ -288,8 +314,8 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
         let line_widget = LineWidget { cells: &cells };
         frame.render_widget(line_widget, text_area);
 
-        // Right diagnostic gutter marker.
-        if right_gutter > 0 && line_idx < total_lines {
+        // Right diagnostic gutter marker (only on non-fold lines).
+        if right_gutter > 0 && line_idx < total_lines && fold_end_opt.is_none() {
             let rx = area.right() - 1;
             let buf = frame.buffer_mut();
             if let Some(line_diags) = diag_by_line.get(&line_idx) {
@@ -311,7 +337,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Compute the terminal (col, row) of the cursor for `frame.set_cursor_position`.
-/// Returns None if the cursor is scrolled off screen.
+/// Returns None if the cursor is scrolled off screen or inside a hidden fold.
 pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
     let git_col: u16 = if app.config.editor.git_gutter && app.notebook.is_none() { 1 } else { 0 };
     let line_num_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
@@ -325,13 +351,15 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
     let head = app.selection.head.min(rope.len_chars());
     let line_idx = rope.char_to_line(head);
 
-    if line_idx < app.scroll_row {
+    // Cursor must not be inside a hidden fold region.
+    if app.fold.is_hidden(line_idx) {
         return None;
     }
-    let screen_row = line_idx - app.scroll_row;
-    if screen_row >= lines_area.height as usize {
-        return None;
-    }
+
+    // Find the visible row of this line using fold-aware entry list.
+    let total_lines = rope.len_lines();
+    let entries = app.fold.visible_entries(app.scroll_row, lines_area.height as usize, total_lines);
+    let screen_row = entries.iter().position(|&(l, _)| l == line_idx)?;
 
     let line_start = rope.line_to_char(line_idx);
     let line_str = rope.line(line_idx);

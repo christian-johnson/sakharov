@@ -146,7 +146,7 @@ impl ListState {
             .iter()
             .enumerate()
             .filter_map(|(i, item)| {
-                match_score(&item.label, &self.filter).map(|s| (i, s))
+                match_score_item(item, &self.filter).map(|s| (i, s))
             })
             .collect();
 
@@ -212,6 +212,33 @@ impl ListState {
     }
 }
 
+/// Score an item against the user's filter string.
+///
+/// Two normalizations are applied before scoring:
+///  * Spaces in the filter are treated as dashes, so `"write quit"` finds `"write-quit"`.
+///  * Both the item label and its detail string are checked; detail matches receive a +5
+///    score penalty so label matches always rank above them.  This lets aliases/keybindings
+///    embedded in the detail (e.g. `[:q!]`) be searched without burying label matches.
+fn match_score_item(item: &ListItem, filter: &str) -> Option<u32> {
+    let normalized = filter.replace(' ', "-");
+
+    let label_score = match_score(&item.label, &normalized);
+
+    // Detail matches get a +5 penalty so they rank below any label match.
+    let detail_score = item
+        .detail
+        .as_deref()
+        .and_then(|d| match_score(d, &normalized))
+        .map(|s| s + 5);
+
+    match (label_score, detail_score) {
+        (Some(l), Some(d)) => Some(l.min(d)),
+        (Some(l), None) => Some(l),
+        (None, Some(d)) => Some(d),
+        (None, None) => None,
+    }
+}
+
 /// Score how well `label` matches `filter` (case-insensitive).
 /// Returns `None` when there is no match at all.
 fn match_score(label: &str, filter: &str) -> Option<u32> {
@@ -246,12 +273,15 @@ fn match_score(label: &str, filter: &str) -> Option<u32> {
 
 /// Returns the char indices in `label` that were matched by `filter` (case-insensitive),
 /// using the same tier logic as `match_score`. Returns `None` when there is no match.
+///
+/// Spaces in `filter` are treated as dashes to match the normalization applied during scoring.
 pub fn match_positions(label: &str, filter: &str) -> Option<Vec<usize>> {
     if filter.is_empty() {
         return Some(vec![]);
     }
     let ll = label.to_ascii_lowercase();
-    let fl = filter.to_ascii_lowercase();
+    // Mirror the space→dash normalization used in match_score_item.
+    let fl = filter.replace(' ', "-").to_ascii_lowercase();
     let fl_char_count = fl.chars().count();
 
     // Exact or prefix: 0..fl_char_count
@@ -547,6 +577,11 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("lsp-goto-type-definition", "Go to type definition  [gy]"),
         ("lsp-goto-implementation", "Go to implementation  [gi]"),
         ("lsp-request-completion", "Request completions  [ctrl+space]"),
+        // Buffers
+        ("buffer-close",       "Close current buffer  [:bd]"),
+        ("buffer-force-close", "Force-close current buffer (discard changes)  [:bd!]"),
+        ("switch-to-scratch",  "Switch to *scratch* buffer  [:scratch]"),
+        ("switch-to-messages", "Switch to *Messages* log buffer  [:messages]"),
         // UI
         ("open-command-palette", "Open fuzzy-searchable command palette  [Space]"),
         ("toggle-git-gutter",          "Toggle git gutter indicators  [:toggle-git-gutter]"),
@@ -557,6 +592,12 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("open-buffer-picker",     "Switch buffer  [gb]"),
         ("open-symbol-picker",     "Jump to symbol in file  [gs]"),
         ("open-diagnostic-picker", "Jump to diagnostic  [gD]"),
+        // Code folding
+        ("fold-toggle",     "Toggle fold at cursor  [za]"),
+        ("fold-toggle-all", "Toggle all folds  [zA]"),
+        // Notebook folding
+        ("notebook-toggle-fold-cell",  "Toggle cell fold  [z]"),
+        ("notebook-toggle-all-folds",  "Toggle all cell folds  [Z]"),
     ];
     entries
         .iter()
@@ -567,4 +608,44 @@ pub fn command_palette_items() -> Vec<ListItem> {
             payload: None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(label: &str, detail: &str) -> ListItem {
+        ListItem { label: label.into(), detail: Some(detail.into()), kind: None, payload: None }
+    }
+
+    #[test]
+    fn space_matches_dash_in_label() {
+        // "write quit" should find "write-quit"
+        assert!(match_score_item(&item("write-quit", "Write and quit [:wq]"), "write quit").is_some());
+    }
+
+    #[test]
+    fn alias_in_detail_is_matched() {
+        // ":q!" should find "force-quit" via its detail string
+        let force_quit = item("force-quit", "Quit without saving  [:q!]");
+        assert!(match_score_item(&force_quit, ":q!").is_some());
+    }
+
+    #[test]
+    fn label_match_ranks_above_detail_match() {
+        // "quit" directly matches the label "quit"; "force-quit" only matches via detail's ":q".
+        // The label match should score lower (better).
+        let quit = item("quit", "Quit  [:q]");
+        let force_quit = item("force-quit", "Quit without saving  [:q!]");
+        let qs = match_score_item(&quit, "quit").unwrap();
+        let fqs = match_score_item(&force_quit, "quit").unwrap();
+        assert!(qs < fqs, "label match ({qs}) should beat detail match ({fqs})");
+    }
+
+    #[test]
+    fn match_positions_normalizes_spaces() {
+        // Highlight positions for "write quit" against label "write-quit" should be non-empty.
+        let pos = match_positions("write-quit", "write quit");
+        assert!(pos.is_some() && !pos.unwrap().is_empty());
+    }
 }

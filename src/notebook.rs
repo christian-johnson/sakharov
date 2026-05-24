@@ -445,7 +445,10 @@ fn gen_id() -> String {
 /// Checks common virtual-environment layouts (.venv, venv, .env, env) in
 /// the notebook's directory and the current working directory, then falls
 /// back to the system `python3`.
-pub fn find_python_executable(base: &Path) -> String {
+///
+/// Returns `(python_path, found_venv)`. When `found_venv` is false the
+/// caller should warn the user that the system python3 is being used.
+pub fn find_python_executable(base: &Path) -> (String, bool) {
     let venv_names = [".venv", "venv", ".env", "env"];
 
     let mut search = vec![base.to_path_buf()];
@@ -459,17 +462,17 @@ pub fn find_python_executable(base: &Path) -> String {
         for name in &venv_names {
             let candidate = dir.join(name).join("bin").join("python");
             if candidate.is_file() {
-                return candidate.to_string_lossy().into_owned();
+                return (candidate.to_string_lossy().into_owned(), true);
             }
             // Windows layout (bin → Scripts)
             let candidate_win = dir.join(name).join("Scripts").join("python.exe");
             if candidate_win.is_file() {
-                return candidate_win.to_string_lossy().into_owned();
+                return (candidate_win.to_string_lossy().into_owned(), true);
             }
         }
     }
 
-    "python3".to_string()
+    ("python3".to_string(), false)
 }
 
 // ---------------------------------------------------------------------------
@@ -551,10 +554,12 @@ impl Notebook {
     }
 
     /// Start (or restart) the persistent Python kernel for this notebook.
-    pub fn start_kernel(&mut self, notebook_dir: &Path) -> Result<()> {
-        let python = find_python_executable(notebook_dir);
+    /// Returns `Ok(true)` when a venv was found, `Ok(false)` when falling
+    /// back to system python3 (the caller should surface a warning).
+    pub fn start_kernel(&mut self, notebook_dir: &Path) -> Result<bool> {
+        let (python, found_venv) = find_python_executable(notebook_dir);
         self.kernel = Some(KernelSession::new(&python, notebook_dir)?);
-        Ok(())
+        Ok(found_venv)
     }
 
     /// Serialise the notebook back to `self.path` as valid nbformat 4 JSON.

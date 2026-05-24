@@ -82,6 +82,10 @@ These commands enter a sub-mode that awaits a second key.
 | `quit` | — | `:q` | Quit (fails if there are unsaved changes) |
 | `force-quit` | — | `:q!` | Quit without saving |
 | `write-quit` | — | `:wq`, `:x` | Write then quit |
+| `buffer-close` | — | `:bd` | Close the current buffer; warns if modified |
+| `buffer-force-close` | — | `:bd!` | Close the current buffer, discarding unsaved changes |
+| `switch-to-scratch` | — | `:scratch` | Switch to the persistent `*scratch*` buffer |
+| `switch-to-messages` | — | `:messages` | Switch to the `*Messages*` buffer (minibuffer message log) |
 
 ### External file picker
 
@@ -144,3 +148,31 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 | `toggle-git-gutter` | — | Toggle visibility of the git gutter indicator column |
 | `toggle-line-numbers` | — | Toggle line number display |
 | `toggle-relative-line-numbers` | — | Toggle relative line numbers (shows distance from current line) |
+
+## Code Folding (plain-text editor)
+
+Press `z` in Normal mode to enter Fold sub-mode; the available keys are shown in a popup.
+
+| Command | Default Key | Alias | Description |
+|---------|-------------|-------|-------------|
+| `enter-fold-mode` | `z` | `:fold` | Enter fold sub-mode (shows key hint popup) |
+| `fold-toggle` | `za` | `:fold-toggle` | Toggle fold on the innermost foldable region at the cursor |
+| `fold-toggle-all` | `zA` | `:fold-toggle-all` | Toggle all folds: close all if any are open, else open all |
+
+Foldable constructs are detected via tree-sitter:
+- **Python**: `def`, `class`, `for`, `while`, `if`, `with`, `try`, decorated definitions
+- **Rust**: `fn`, `impl`, `struct`, `enum`, `trait`, `mod`, `match`, closures
+- **JavaScript/TypeScript**: `function`, arrow functions, `class`, `if`, `for`, `while`, `switch`, `try`
+
+A fold indicator line shows the first line of the folded region with a `▶ N lines` badge.
+The cursor is automatically snapped past folds when moving down, and to the fold-start when moving up.
+
+## Notebook Cell Folding
+
+| Command | Default Key | Alias | Description |
+|---------|-------------|-------|-------------|
+| `notebook-toggle-fold-cell` | `z` (notebook mode) | `:fold-cell` | Toggle collapse of the focused cell |
+| `notebook-toggle-all-folds` | `Z` (notebook mode) | `:fold-all-cells` | Toggle all cells: fold all if any are expanded, else unfold all |
+
+A folded cell shows: first line of source + `▶ N lines · M outputs` indicator.
+Entering edit mode (`i`) on a folded cell auto-unfolds it.

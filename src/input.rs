@@ -84,6 +84,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Search { forward } => handle_search(app, key, forward),
         Mode::Notebook => handle_notebook_mode(app, key),
         Mode::Jump => handle_jump(app, key),
+        Mode::Fold => handle_fold(app, key),
     }
 
     // Sync completion popup filter after insertions.
@@ -375,8 +376,11 @@ fn handle_notebook_mode(app: &mut App, key: KeyEvent) {
     if let Some(cmds) = app.keymap.lookup_notebook(&kb).map(|v| v.to_vec()) {
         let was_notebook = app.mode == Mode::Notebook;
         exec::run_many(app, &cmds);
-        // When the binding transitions to Insert mode, ensure LSP has current content.
+        // When the binding transitions to Insert mode, unfold and ensure LSP has current content.
         if was_notebook && app.mode == Mode::Insert {
+            if let Some((_, ref mut state)) = app.notebook {
+                state.folded_cells.remove(&state.focused_cell);
+            }
             exec::lsp_did_change(app);
         }
     }
@@ -391,6 +395,21 @@ fn sync_buffer_to_notebook(app: &mut App) {
                 nb.modified = true;
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fold mode (after 'z')
+// ---------------------------------------------------------------------------
+
+fn handle_fold(app: &mut App, key: KeyEvent) {
+    app.mode = Mode::Normal;
+    app.popup = None;
+    match key.code {
+        KeyCode::Char('a') => exec::execute(app, &Command::FoldToggle),
+        KeyCode::Char('A') => exec::execute(app, &Command::FoldToggleAll),
+        KeyCode::Esc => {}
+        _ => {}
     }
 }
 
@@ -478,7 +497,13 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
                 let path = std::path::PathBuf::from(parts[0]);
                 let line: usize = parts[1].parse().unwrap_or(0);
                 let character: usize = parts[2].parse().unwrap_or(0);
-                exec::jump_to_location(app, &LspLocation { path, line, character });
+                if exec::is_special_path(&path) {
+                    exec::switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
+                } else if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+                    exec::open_as_notebook(app, &path);
+                } else {
+                    exec::jump_to_location(app, &LspLocation { path, line, character });
+                }
             }
         }
     }

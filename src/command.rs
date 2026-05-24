@@ -72,6 +72,14 @@ pub enum Command {
     Quit,
     ForceQuit,
     WriteQuit,
+    /// Close the current buffer; warn if modified.
+    BufferClose,
+    /// Close the current buffer unconditionally (discard unsaved changes).
+    BufferForceClose,
+    /// Switch to the persistent *scratch* buffer.
+    SwitchToScratch,
+    /// Switch to the *Messages* buffer showing the message log.
+    SwitchToMessages,
 
     // Scripting / composition
     Shell(String),
@@ -154,6 +162,20 @@ pub enum Command {
     ToggleLineNumbers,
     /// Toggle relative line numbers.
     ToggleRelativeLineNumbers,
+
+    // Code folding (plain text editor)
+    /// Enter fold sub-mode (awaits a second key: a/A).
+    EnterFoldMode,
+    /// Toggle fold on the innermost range at the cursor line.
+    FoldToggle,
+    /// Toggle all folds: close all if any are open, otherwise open all.
+    FoldToggleAll,
+
+    // Notebook cell folding
+    /// Toggle fold on the focused notebook cell (collapse to first line).
+    NotebookToggleFoldCell,
+    /// Toggle all notebook cells: fold all if any are unfolded, else unfold all.
+    NotebookToggleAllFolds,
 }
 
 impl Command {
@@ -212,6 +234,10 @@ impl Command {
             Command::Quit => "quit",
             Command::ForceQuit => "force-quit",
             Command::WriteQuit => "write-quit",
+            Command::BufferClose => "buffer-close",
+            Command::BufferForceClose => "buffer-force-close",
+            Command::SwitchToScratch => "switch-to-scratch",
+            Command::SwitchToMessages => "switch-to-messages",
             Command::Shell(_) => "shell",
             Command::Sequence(_) => "sequence",
             Command::NotebookNextCell => "notebook-next-cell",
@@ -252,6 +278,11 @@ impl Command {
             Command::ToggleGitGutter => "toggle-git-gutter",
             Command::ToggleLineNumbers => "toggle-line-numbers",
             Command::ToggleRelativeLineNumbers => "toggle-relative-line-numbers",
+            Command::EnterFoldMode => "enter-fold-mode",
+            Command::FoldToggle => "fold-toggle",
+            Command::FoldToggleAll => "fold-toggle-all",
+            Command::NotebookToggleFoldCell => "notebook-toggle-fold-cell",
+            Command::NotebookToggleAllFolds => "notebook-toggle-all-folds",
         }
     }
 
@@ -362,6 +393,10 @@ impl Command {
             "quit"                       => Some(Command::Quit),
             "force-quit"                 => Some(Command::ForceQuit),
             "write-quit"                 => Some(Command::WriteQuit),
+            "buffer-close" | "bd"        => Some(Command::BufferClose),
+            "buffer-force-close" | "bd!" => Some(Command::BufferForceClose),
+            "switch-to-scratch" | "scratch" => Some(Command::SwitchToScratch),
+            "switch-to-messages" | "messages" => Some(Command::SwitchToMessages),
 
             // Notebook commands
             "notebook-next-cell"             => Some(Command::NotebookNextCell),
@@ -424,6 +459,15 @@ impl Command {
             "toggle-git-gutter" | "git-gutter" | "gutter" => Some(Command::ToggleGitGutter),
             "toggle-line-numbers" | "line-numbers" => Some(Command::ToggleLineNumbers),
             "toggle-relative-line-numbers" | "relative-line-numbers" => Some(Command::ToggleRelativeLineNumbers),
+
+            // Fold commands
+            "enter-fold-mode" | "fold" => Some(Command::EnterFoldMode),
+            "fold-toggle" | "za" => Some(Command::FoldToggle),
+            "fold-toggle-all" | "zA" => Some(Command::FoldToggleAll),
+
+            // Notebook fold commands
+            "notebook-toggle-fold-cell" | "fold-cell" => Some(Command::NotebookToggleFoldCell),
+            "notebook-toggle-all-folds" | "fold-all-cells" => Some(Command::NotebookToggleAllFolds),
 
             _ => None,
         }

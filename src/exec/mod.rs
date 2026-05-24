@@ -21,12 +21,100 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// Special buffers
+// ---------------------------------------------------------------------------
+
+const SCRATCH_INTRO: &str = "\
+;; This buffer is for notes you don't want to save.\n\
+;; Use it for scratch text.\n";
+
+/// Returns true for virtual buffer names that don't correspond to real files.
+pub fn is_special_path(path: &std::path::Path) -> bool {
+    matches!(path.to_str(), Some("*scratch*") | Some("*Messages*"))
+}
+
+/// Save the scratch buffer rope when leaving it (so edits survive switches).
+pub(super) fn save_current_special_buffer(app: &mut App) {
+    if let Some(ref path) = app.buffer.path.clone() {
+        if path.to_str() == Some("*scratch*") {
+            app.special_buffer_ropes
+                .insert("*scratch*".to_string(), app.buffer.rope.clone());
+        }
+    }
+}
+
+/// Switch the editor to a named special buffer (`*scratch*` or `*Messages*`).
+pub fn switch_to_special_buffer(app: &mut App, name: &str) {
+    save_current_special_buffer(app);
+
+    // Tear down any open notebook.
+    if app.notebook.is_some() {
+        notebook::notebook_lsp_close(app);
+        app.notebook = None;
+        app.notebook_cell_edit = None;
+    }
+
+    // Close LSP for the current plain-text buffer.
+    if let (Some(ref lang), Some(ref old_path)) =
+        (app.lsp_language.clone(), app.buffer.path.clone())
+    {
+        if !is_special_path(old_path) {
+            app.lsp.did_close(lang, old_path);
+        }
+    }
+
+    let rope = if name == "*scratch*" {
+        app.special_buffer_ropes
+            .get("*scratch*")
+            .cloned()
+            .unwrap_or_else(|| Rope::from_str(SCRATCH_INTRO))
+    } else {
+        // *Messages*: rebuild from the accumulated log.
+        let content = if app.messages_log.is_empty() {
+            String::new()
+        } else {
+            let mut s = app.messages_log.join("\n");
+            s.push('\n');
+            s
+        };
+        Rope::from_str(&content)
+    };
+
+    let mut buf = crate::buffer::Buffer::new_empty();
+    buf.rope = rope;
+    buf.path = Some(std::path::PathBuf::from(name));
+
+    app.buffer = buf;
+    app.selection = Selection::point(0);
+    app.scroll_row = 0;
+    app.scroll_col = 0;
+    app.insert_session_active = false;
+    app.lsp_language = None;
+    app.highlighter = crate::highlight::Highlighter::new(None);
+    recompute_highlights(app);
+    app.mode = Mode::Normal;
+    app.git_diff.clear();
+    rebuild_diag_cache(app);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Execute a single command against the application state.
 pub fn execute(app: &mut App, cmd: &Command) {
     let extend = app.mode == Mode::Select;
+
+    // Capture cursor line before the command so we can detect movement direction.
+    let pre_exec_line: usize = {
+        let rope = &app.buffer.rope;
+        if rope.len_chars() == 0 {
+            0
+        } else {
+            let pos = app.selection.head.min(rope.len_chars());
+            rope.char_to_line(pos)
+        }
+    };
 
     match cmd {
         // --- Motions ---
@@ -427,8 +515,44 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
 
+        // --- Code folding ---
+        Command::EnterFoldMode => {
+            app.mode = crate::mode::Mode::Fold;
+            app.popup = Some(crate::popup::Popup::which_key(
+                "z",
+                vec![
+                    ("a".into(), "toggle fold at cursor".into()),
+                    ("A".into(), "toggle all folds".into()),
+                ],
+            ));
+            return;
+        }
+        Command::FoldToggle => {
+            let cursor_line = {
+                let rope = &app.buffer.rope;
+                let pos = app.selection.head.min(rope.len_chars());
+                if rope.len_chars() == 0 { 0 } else { rope.char_to_line(pos) }
+            };
+            app.fold.toggle_at_line(cursor_line);
+            normalize_cursor_folds(app);
+            return;
+        }
+        Command::FoldToggleAll => {
+            if app.fold.folded.is_empty() {
+                app.fold.close_all();
+                normalize_cursor_folds(app);
+            } else {
+                app.fold.open_all();
+            }
+            return;
+        }
+
         // --- File / application ---
         Command::Write => {
+            if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
+                app.message = Some("Special buffer — nothing to save".into());
+                return;
+            }
             if app.notebook.is_some() {
                 // Flush any in-progress cell edits into nb.cells before serialising.
                 notebook::save_focused_cell(app);
@@ -456,6 +580,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     Err(e) => app.message = Some(format!("Error: {e}")),
                 }
             }
+            return;
+        }
+        Command::WriteAs(_) if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) => {
+            app.message = Some("Special buffer — nothing to save".into());
             return;
         }
         Command::WriteAs(path) => {
@@ -497,6 +625,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::WriteQuit => {
+            if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
+                app.should_quit = true;
+                return;
+            }
             if app.notebook.is_some() {
                 notebook::save_focused_cell(app);
                 if let Some((ref mut nb, _)) = app.notebook {
@@ -511,6 +643,90 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     Err(e) => app.message = Some(format!("Error: {e}")),
                 }
             }
+            return;
+        }
+
+        Command::BufferClose | Command::BufferForceClose => {
+            let force = matches!(cmd, Command::BufferForceClose);
+
+            // Special buffers cannot be closed.
+            let is_special = app.buffer.path.as_deref()
+                .map(is_special_path)
+                .unwrap_or(false);
+            if is_special {
+                let name = app.buffer.path.as_ref()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or("this buffer");
+                app.message = Some(format!("Cannot close special buffer {name}"));
+                return;
+            }
+
+            // Check for unsaved changes.
+            let is_modified = if let Some((ref nb, _)) = app.notebook {
+                nb.modified
+            } else {
+                app.buffer.modified
+            };
+            if is_modified && !force {
+                app.message = Some(
+                    "Buffer modified — save with :w or use :bd! to force close".into(),
+                );
+                return;
+            }
+
+            // Determine the path to remove (notebook path, not virtual cell path).
+            let path_to_remove: Option<std::path::PathBuf> =
+                if let Some((ref nb, _)) = app.notebook {
+                    Some(nb.path.clone())
+                } else {
+                    app.buffer.path.clone()
+                };
+
+            // Tear down notebook/LSP for the current buffer.
+            if app.notebook.is_some() {
+                notebook::save_focused_cell(app);
+                notebook::notebook_lsp_close(app);
+                app.notebook = None;
+                app.notebook_cell_edit = None;
+            } else if let (Some(ref lang), Some(ref old_path)) =
+                (app.lsp_language.clone(), app.buffer.path.clone())
+            {
+                app.lsp.did_close(lang, old_path);
+            }
+
+            // Remove the closed buffer from the buffer list.
+            if let Some(ref p) = path_to_remove {
+                let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
+                app.open_buffers.retain(|stored| {
+                    let sc = stored.canonicalize().unwrap_or_else(|_| stored.clone());
+                    sc != canon && stored != p
+                });
+            }
+
+            // Pick the next buffer: prefer real files over *Messages*, fall back to *scratch*.
+            let next = app.open_buffers.iter()
+                .find(|p| p.to_str() != Some("*Messages*"))
+                .cloned()
+                .unwrap_or_else(|| std::path::PathBuf::from("*scratch*"));
+
+            if is_special_path(&next) {
+                switch_to_special_buffer(app, next.to_str().unwrap_or("*scratch*"));
+            } else if next.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+                open_as_notebook(app, &next);
+            } else {
+                lsp::open_file_at(app, &next, 0, 0);
+            }
+
+            app.message = Some("Buffer closed".into());
+            return;
+        }
+
+        Command::SwitchToScratch => {
+            switch_to_special_buffer(app, "*scratch*");
+            return;
+        }
+        Command::SwitchToMessages => {
+            switch_to_special_buffer(app, "*Messages*");
             return;
         }
 
@@ -602,7 +818,13 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     || !nb.kernel.as_mut().map(|k| k.is_alive()).unwrap_or(false)
                 {
                     match nb.start_kernel(&nb_dir) {
-                        Ok(()) => {}
+                        Ok(found_venv) => {
+                            if !found_venv {
+                                app.message = Some(
+                                    "Kernel started (no venv found — using system python3)".into(),
+                                );
+                            }
+                        }
                         Err(e) => {
                             app.message = Some(format!("Kernel start failed: {e}"));
                             return;
@@ -636,7 +858,13 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 nb.kernel = None;
                 let nb_dir = notebook::notebook_dir(&nb.path.clone());
                 match nb.start_kernel(&nb_dir) {
-                    Ok(()) => app.message = Some("Kernel restarted".into()),
+                    Ok(found_venv) => {
+                        app.message = Some(if found_venv {
+                            "Kernel restarted".into()
+                        } else {
+                            "Kernel restarted (no venv found — using system python3)".into()
+                        });
+                    }
                     Err(e) => app.message = Some(format!("Kernel restart failed: {e}")),
                 }
             }
@@ -777,6 +1005,29 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
 
+        // --- Notebook cell folding ---
+        Command::NotebookToggleFoldCell => {
+            if let Some((_, ref mut state)) = app.notebook {
+                let idx = state.focused_cell;
+                state.toggle_cell_fold(idx);
+            }
+            return;
+        }
+        Command::NotebookToggleAllFolds => {
+            if let Some((ref nb, ref mut state)) = app.notebook {
+                let count = nb.cells.len();
+                // If any non-focused cell is unfolded, fold all; otherwise unfold all.
+                let any_unfolded = (0..count)
+                    .any(|i| i != state.focused_cell && !state.folded_cells.contains(&i));
+                if any_unfolded {
+                    state.fold_all_cells(count);
+                } else {
+                    state.unfold_all_cells();
+                }
+            }
+            return;
+        }
+
         // --- Cell edit overlay ---
         Command::NotebookOpenCellEdit => {
             if let Some(ref mut session) = app.notebook_cell_edit {
@@ -869,7 +1120,138 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
     }
 
+    // If a motion landed the cursor inside a hidden fold, snap out direction-aware.
+    normalize_cursor_folds_directional(app, pre_exec_line);
     update_scroll(app);
+}
+
+/// If the cursor is inside a hidden fold region, move it to the fold's start line.
+pub fn normalize_cursor_folds(app: &mut App) {
+    if app.fold.ranges.is_empty() { return; }
+    let rope = &app.buffer.rope;
+    if rope.len_chars() == 0 { return; }
+    let pos = app.selection.head.min(rope.len_chars());
+    let line_idx = rope.char_to_line(pos);
+    if app.fold.is_hidden(line_idx) {
+        let vis_line = app.fold.normalize_line(line_idx);
+        let new_pos = rope.line_to_char(vis_line);
+        app.selection = Selection::point(new_pos);
+    }
+}
+
+/// Direction-aware version: if cursor landed inside a hidden fold, snap to
+/// fold_start when moving backward/up or to fold_end+1 when moving forward/down.
+fn normalize_cursor_folds_directional(app: &mut App, pre_exec_line: usize) {
+    if app.fold.ranges.is_empty() { return; }
+    let rope = &app.buffer.rope;
+    if rope.len_chars() == 0 { return; }
+    let pos = app.selection.head.min(rope.len_chars());
+    let line_idx = rope.char_to_line(pos);
+    if !app.fold.is_hidden(line_idx) { return; }
+
+    let moved_forward = line_idx > pre_exec_line;
+
+    if moved_forward {
+        // Moving down/forward: jump past the fold to the first line after it.
+        // Find the fold that contains this hidden line.
+        let snap_line = app.fold.folded.iter()
+            .filter_map(|&start| app.fold.range_starting_at(start))
+            .find(|&(s, e)| line_idx > s && line_idx <= e)
+            .map(|(_, e)| (e + 1).min(rope.len_lines().saturating_sub(1)))
+            .unwrap_or_else(|| app.fold.normalize_line(line_idx));
+        let new_pos = rope.line_to_char(snap_line);
+        app.selection = Selection::point(new_pos);
+    } else {
+        // Moving up/backward: snap to the fold start line.
+        let vis_line = app.fold.normalize_line(line_idx);
+        let new_pos = rope.line_to_char(vis_line);
+        app.selection = Selection::point(new_pos);
+    }
+}
+
+/// Open a `.ipynb` file as a notebook, replacing whatever is currently open.
+/// Called when the user selects a notebook from the buffer picker.
+pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
+    use crate::{
+        app::CellEditSession,
+        buffer::Buffer,
+        highlight::Highlighter,
+        lang::lang_to_ext,
+        notebook::Notebook,
+        notebook_state::NotebookState,
+    };
+
+    // Save scratch content when leaving it.
+    save_current_special_buffer(app);
+
+    // Tear down any existing notebook state.
+    if app.notebook.is_some() {
+        notebook::notebook_lsp_close(app);
+        app.notebook = None;
+        app.notebook_cell_edit = None;
+    }
+    // Close the currently-open plain file from LSP perspective.
+    if let (Some(ref lang), Some(ref old_path)) =
+        (app.lsp_language.clone(), app.buffer.path.clone())
+    {
+        app.lsp.did_close(lang, old_path);
+    }
+
+    let nb = match Notebook::from_path(path) {
+        Ok(n) => n,
+        Err(e) => {
+            app.message = Some(format!("Failed to open notebook: {e}"));
+            return;
+        }
+    };
+
+    let lang = nb.metadata.kernel_language.clone();
+    let ext = lang_to_ext(&lang);
+    let stem = nb.path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "notebook".into());
+    let dir = nb.path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let vpath = dir.join(format!("{stem}__cell0.{ext}"));
+
+    let mut buf = Buffer::new_empty();
+    if let Some(cell) = nb.cells.first() {
+        buf.rope = cell.source.clone();
+    }
+    buf.path = Some(vpath.clone());
+
+    let session = nb.cells.first().map(|_| CellEditSession {
+        cell_index: 0,
+        language: lang.clone(),
+        notebook_path: nb.path.clone(),
+        focused_edit: false,
+    });
+
+    let nb_path_canon = nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone());
+
+    app.buffer = buf;
+    app.notebook = Some((nb, NotebookState::new()));
+    app.notebook_cell_edit = session;
+    app.selection = Selection::point(0);
+    app.scroll_row = 0;
+    app.scroll_col = 0;
+    app.mode = Mode::Notebook;
+    app.lsp_language = Some(lang.clone());
+    app.highlighter = Highlighter::new(Some(&vpath));
+    recompute_highlights(app);
+
+    if !app.open_buffers.iter().any(|p| {
+        p.canonicalize().unwrap_or_else(|_| p.clone()) == nb_path_canon
+    }) {
+        app.open_buffers.push(nb_path_canon);
+    }
+
+    app.message = Some(format!(
+        "Opened {}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+    ));
 }
 
 /// Execute a slice of commands in order.
@@ -906,8 +1288,7 @@ pub fn rebuild_diag_cache(app: &mut App) {
 ///
 /// Uses the stored viewport dimensions (`app.viewport_height` / `app.viewport_width`)
 /// which are refreshed at the top of every render frame.  This is the single
-/// authoritative scroll function; the previous `update_scroll_to_fit` in
-/// app.rs is gone.
+/// authoritative scroll function.
 pub fn update_scroll(app: &mut App) {
     let visible_rows = app.viewport_height;
     let git_col = if app.config.editor.git_gutter && app.notebook.is_none() { 1usize } else { 0 };
@@ -926,16 +1307,24 @@ pub fn update_scroll(app: &mut App) {
 
     let pos = app.selection.head.min(rope.len_chars());
     let line_idx = rope.char_to_line(pos);
+    let total_lines = rope.len_lines();
     let scroll_off = app.config.editor.scroll_off;
 
-    // Vertical
-    let top_bound = line_idx.saturating_sub(scroll_off);
-    if app.scroll_row > top_bound {
-        app.scroll_row = top_bound;
-    }
-    let bottom_bound = line_idx + scroll_off;
-    if bottom_bound >= app.scroll_row + visible_rows {
-        app.scroll_row = bottom_bound.saturating_sub(visible_rows) + 1;
+    // Normalize scroll_row so it never points inside a hidden fold region.
+    app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
+
+    // Vertical — fold-aware.
+    // Count visible rows from scroll_row to cursor.
+    let vdist = app.fold.visible_row_count(app.scroll_row, line_idx, total_lines);
+
+    if vdist < scroll_off || app.scroll_row > line_idx {
+        // Cursor too close to top (or above scroll area): scroll up.
+        let desired = scroll_off.min(line_idx);
+        app.scroll_row = app.fold.scroll_row_for_cursor(line_idx, desired);
+    } else if vdist + scroll_off >= visible_rows {
+        // Cursor too close to bottom: scroll down.
+        let desired = visible_rows.saturating_sub(scroll_off + 1);
+        app.scroll_row = app.fold.scroll_row_for_cursor(line_idx, desired);
     }
 
     // Horizontal — accurate display-column calculation (handles tabs)

@@ -26,6 +26,8 @@ pub enum Mode {
     Notebook,
     /// Label-jump mode — visible word starts are labelled; type label to jump.
     Jump,
+    /// Waiting for second key after 'z' (fold operations).
+    Fold,
 }
 
 impl Mode {
@@ -41,6 +43,7 @@ impl Mode {
             Mode::Search { .. } => "SRC",
             Mode::Notebook => "NB ",
             Mode::Jump => "JMP",
+            Mode::Fold => "FLD",
         }
     }
 }

@@ -106,9 +106,12 @@ fn render_cells(
         }
 
         let is_focused = cell_idx == state.focused_cell;
-        // Use the live buffer rope for the focused cell's height so it reflects
-        // any edits made since the last save.
-        let cell_height = if is_focused {
+        let is_folded = state.is_cell_folded(cell_idx);
+        // Folded cells always get the compact height regardless of focus.
+        // For the focused non-folded cell, use the live buffer rope height.
+        let cell_height = if is_folded {
+            3u16.min(remaining) // border-top + 1 summary line + border-bottom
+        } else if is_focused {
             focused_cell_display_height(active.rope, cell).min(remaining)
         } else {
             cell_display_height(cell).min(remaining)
@@ -148,12 +151,18 @@ fn render_cells(
         frame.render_widget(block, cell_rect);
 
         if inner.height > 0 {
-            let cursor_screen = render_cell_content(
-                frame, nb, cell, cell_idx, is_focused, inner, active,
-                lsp_diagnostics, &mut image_requests, &mut shared_hl,
-            );
-            if is_focused {
-                focused_cell_screen_pos = cursor_screen;
+            if is_folded {
+                // For the focused cell, use the live rope so unsaved edits are shown.
+                let rope_for_summary = if is_focused { active.rope } else { &cell.source };
+                render_folded_cell_summary_rope(frame, rope_for_summary, &cell.outputs, inner);
+            } else {
+                let cursor_screen = render_cell_content(
+                    frame, nb, cell, cell_idx, is_focused, inner, active,
+                    lsp_diagnostics, &mut image_requests, &mut shared_hl,
+                );
+                if is_focused {
+                    focused_cell_screen_pos = cursor_screen;
+                }
             }
         }
 
@@ -304,6 +313,61 @@ fn render_cell_content(
     }
 
     cursor_screen
+}
+
+/// Render a single summary line for a folded (collapsed) cell.
+/// Uses the provided rope (may be the live editor rope for the focused cell).
+fn render_folded_cell_summary_rope(
+    frame: &mut Frame,
+    source: &ropey::Rope,
+    outputs: &[Output],
+    area: Rect,
+) {
+    if area.height == 0 {
+        return;
+    }
+    let row = single_row(area, area.y);
+
+    let total_lines = source.len_lines().max(1) as usize;
+    let hidden_lines = total_lines.saturating_sub(1);
+    let output_count = outputs.len();
+
+    let source_str = source.to_string();
+    let first_line = source_str.lines().next().unwrap_or("").trim_end();
+    let max_content = (area.width as usize).saturating_sub(30);
+    let content: String = first_line.chars().take(max_content).collect();
+
+    let suffix = if output_count > 0 {
+        format!("  ▶ {} lines · {} outputs", hidden_lines, output_count)
+    } else {
+        format!("  ▶ {} lines", hidden_lines)
+    };
+
+    let buf = frame.buffer_mut();
+    let y = row.y;
+    let mut x = row.x;
+
+    let content_style = Style::default().fg(Color::Rgb(120, 120, 150));
+    let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+    let count_style = Style::default().fg(Color::DarkGray);
+
+    for c in format!("  {content}").chars() {
+        if x >= row.right() { break; }
+        buf[(x, y)].set_char(c).set_style(content_style);
+        x += 1;
+    }
+    for c in "  ▶ ".chars() {
+        if x >= row.right() { break; }
+        let style = if c == '▶' { arrow_style } else { count_style };
+        buf[(x, y)].set_char(c).set_style(style);
+        x += 1;
+    }
+    let count_part: String = suffix.chars().skip(4).collect();
+    for c in count_part.chars() {
+        if x >= row.right() { break; }
+        buf[(x, y)].set_char(c).set_style(count_style);
+        x += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
