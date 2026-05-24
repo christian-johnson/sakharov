@@ -1,29 +1,27 @@
-# majorana — Personal TUI Text Editor & Notebook Environment
+# majorana 
 
-`majorana` is a lightweight text editor heavily inspired by Helix.
-It steals many of Helix's features (noun->verb modal editing; simple configuration) while adding a few additional pieces for data science support, namely:
+`majorana` (pronounced __my-your-on-uh__) is a lightweight text editor heavily inspired by Helix.
+It steals many of Helix's features (noun->verb modal editing; minimal configuration), while adding a few additional pieces for data science support, namely:
 - Native Jupyter notebook interface
 - Notebook LSP support
 - Compatible with Kitty graphics protocol
 
-That means you can u
+This means you can use Jupyter notebooks with the full customizability and power of a TUI text editor. 
+
+There are other projects in the same vein out there (e.g. Euporie, ...) but I have never been fully happy with any of them.
+Along came LLMs and the ability to build a custom text editor, so here we are.
+
+__AI disclosure: This application was entirely vibe-coded, mostly with Claude Sonnet 4.6. It is almost certain to have numerous bugs and missing features as a result.__
+__Until a version 1.0 is released, breaking changes and instability are to be expected.__
 
 ---
-
-## Features
-
-- **Helix-style modal editing**: Selection-first modal editing supporting Normal, Insert, Select, Goto, and FindChar modes.
-- **Jupyter Notebook mode**: Native support for `.ipynb` files with a vertical cell stack (code, markdown, and raw cells).
-- **Persistent Python kernel**: Out-of-the-box virtualenv detection with persistent variables, statements, and live cell output captures.
-- **Kitty Graphics Protocol**: Inline rendering of image outputs (e.g., matplotlib figures) directly inside your terminal cells.
-- **Tree-sitter integration**: Syntax highlighting for `.rs`, `.py`, and `.js`/`.ts` files.
-- **LSP Support**: Inline diagnostics, hover documentation, fuzzy symbol pickers, and completions.
-- **Aesthetic Terminal Themes**: Inherits your terminal emulator's theme colors dynamically for the hardware cursor and renders UI elements via Ratatui.
-- **Git Gutter**: Instant visual indicators for added, modified, and removed lines.
-
+## Etymology
+Ettore Majorana was a renowned Italian physicist who was the first to propose that fermions could be their own antiparticles. 
+That's pretty neat! 
+I decided to name this repo after him as a result. 
 ---
 
-## Prerequisites
+## Installation
 
 To compile and run `majorana`, make sure you have the following:
 
@@ -34,10 +32,6 @@ To compile and run `majorana`, make sure you have the following:
    - Python: `ruff` (≥ 0.4, built-in LSP via `ruff server`)
    - Rust: `rust-analyzer`
    - JavaScript/TypeScript: `typescript-language-server`
-
----
-
-## Installation
 
 To build and install `majorana` from source:
 
