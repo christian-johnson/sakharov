@@ -553,6 +553,29 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.message = Some("Special buffer — nothing to save".into());
                 return;
             }
+            // format_on_save: try shell formatter first, then LSP.
+            if app.notebook.is_none() && app.config.editor.format_on_save {
+                if run_shell_formatter(app) {
+                    // Shell formatter saved+formatted the file; show result and return.
+                    if app.message.is_none() {
+                        app.message = Some(format!("Saved {}", app.buffer.display_name()));
+                    }
+                    return;
+                }
+                // No shell formatter; try LSP-based format-then-save.
+                let lang = app.current_language().map(|l| l.to_owned());
+                let path = app.buffer.path.clone();
+                if let (Some(lang), Some(path)) = (lang, path) {
+                    if !is_special_path(&path) && app.lsp.is_ready(&lang) {
+                        let tab_size = app.config.editor.tab_width;
+                        app.pending_format_save = true;
+                        if app.lsp.format_document(&lang, &path, tab_size, true) {
+                            return; // save happens when FormattingResult arrives
+                        }
+                        app.pending_format_save = false; // server doesn't support formatting
+                    }
+                }
+            }
             if app.notebook.is_some() {
                 // Flush any in-progress cell edits into nb.cells before serialising.
                 notebook::save_focused_cell(app);
@@ -1118,6 +1141,65 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::LspGotoImplementation => { lsp::lsp_request(app, LspRequestKind::Implementation); return; }
         Command::LspRequestCompletion => { lsp::lsp_request(app, LspRequestKind::Completion);     return; }
         Command::LspCodeActions      => { lsp::lsp_code_actions_request(app);                     return; }
+        Command::FormatDocument => {
+            if run_shell_formatter(app) {
+                return; // handled (success or failure message already set)
+            }
+            // No shell formatter configured — fall back to LSP.
+            let lang = match app.current_language() {
+                Some(l) => l.to_owned(),
+                None => {
+                    app.message = Some("No formatter configured for this file type".into());
+                    return;
+                }
+            };
+            let path = match app.buffer.path.clone() {
+                Some(p) => p,
+                None => {
+                    app.message = Some("Save the file before formatting".into());
+                    return;
+                }
+            };
+            if !app.lsp.is_ready(&lang) {
+                app.message = Some("No formatter configured (add [formatters.python] to config, or wait for LSP)".into());
+                return;
+            }
+            let tab_size = app.config.editor.tab_width;
+            if !app.lsp.format_document(&lang, &path, tab_size, true) {
+                app.message = Some("No formatter configured — add [formatters.<lang>] to your config".into());
+            }
+            return;
+        }
+        Command::OpenConfig => {
+            let path = match crate::config::config_file_path() {
+                Some(p) => p,
+                None => {
+                    app.message = Some("Could not determine config file path".into());
+                    return;
+                }
+            };
+            if !path.exists() {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&path, "");
+            }
+            lsp::open_file_at(app, &path, 0, 0);
+            return;
+        }
+        Command::ReloadConfig => {
+            match crate::config::Config::load() {
+                Ok(config) => {
+                    let mut keymap = crate::keymap::Keymap::default_bindings();
+                    keymap.apply_custom_bindings(&config.keys);
+                    app.config = config;
+                    app.keymap = keymap;
+                    app.message = Some("Config reloaded".into());
+                }
+                Err(e) => app.message = Some(format!("Config reload failed: {e}")),
+            }
+            return;
+        }
 
         // --- Editing (continued) ---
         Command::CommentRegion => {
@@ -1546,6 +1628,79 @@ fn open_file_external_picker(app: &mut App, cmd: &str) {
     }
 
     app.needs_clear = true;
+}
+
+// ---------------------------------------------------------------------------
+// Shell formatter
+// ---------------------------------------------------------------------------
+
+/// Run the configured shell formatter for the current buffer's language.
+///
+/// Flow: save buffer → run `command args... <file>` → reload formatted content.
+///
+/// Returns `true` if a formatter was configured and was attempted (the caller
+/// should not try anything else for this save/format cycle).
+/// Returns `false` if no formatter is configured for this language (caller
+/// should fall back to LSP or a plain save).
+fn run_shell_formatter(app: &mut App) -> bool {
+    let path = match app.buffer.path.clone() {
+        Some(p) => p,
+        None => return false,
+    };
+    if is_special_path(&path) {
+        return false;
+    }
+    let lang = match app.current_language() {
+        Some(l) => l.to_owned(),
+        None => return false,
+    };
+    let fmt = match app.config.formatters.get(&lang).cloned() {
+        Some(f) => f,
+        None => return false,
+    };
+
+    // Save current buffer content to disk first so the formatter sees it.
+    if let Err(e) = app.buffer.save(None) {
+        app.message = Some(format!("Could not save before formatting: {e}"));
+        return true;
+    }
+
+    let result = std::process::Command::new(&fmt.command)
+        .args(&fmt.args)
+        .arg(&path)
+        .output();
+
+    match result {
+        Ok(out) if out.status.success() => {
+            // Reload the formatter's output back into the buffer.
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    app.buffer.rope = ropey::Rope::from_str(&content);
+                    app.buffer.modified = false;
+                    recompute_highlights(app);
+                    lsp::lsp_did_change(app);
+                    app.git_diff = crate::git::diff_marks(&path);
+                    app.git_branch = crate::git::current_branch();
+                }
+                Err(e) => {
+                    app.message = Some(format!("Could not reload after format: {e}"));
+                }
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let msg = stderr.trim();
+            app.message = Some(if msg.is_empty() {
+                format!("Formatter exited with code {}", out.status.code().unwrap_or(-1))
+            } else {
+                msg.chars().take(200).collect()
+            });
+        }
+        Err(e) => {
+            app.message = Some(format!("Formatter '{}': {e}", fmt.command));
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------

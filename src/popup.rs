@@ -577,6 +577,10 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("lsp-goto-type-definition", "Go to type definition  [gy]"),
         ("lsp-goto-implementation", "Go to implementation  [gi]"),
         ("lsp-request-completion", "Request completions  [ctrl+space]"),
+        ("format-document", "Format buffer via language server  [:fmt]"),
+        // Config
+        ("open-config",   "Open config file in editor  [:config]"),
+        ("reload-config", "Reload config from disk  [:config-reload]"),
         // Buffers
         ("buffer-close",       "Close current buffer  [:bd]"),
         ("buffer-force-close", "Force-close current buffer (discard changes)  [:bd!]"),

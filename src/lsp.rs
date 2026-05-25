@@ -30,6 +30,7 @@ pub enum PendingKind {
     TypeDefinition,
     Implementation,
     CodeAction,
+    Formatting,
     /// Fire-and-forget server command — response is discarded.
     ExecuteCommand,
 }
@@ -237,6 +238,16 @@ impl LspClient {
             },
             "context": { "diagnostics": [] }
         }), PendingKind::CodeAction)
+    }
+
+    pub fn request_formatting(&mut self, uri: &str, tab_size: u32, insert_spaces: bool) -> u64 {
+        self.send_request("textDocument/formatting", json!({
+            "textDocument": { "uri": uri },
+            "options": {
+                "tabSize": tab_size,
+                "insertSpaces": insert_spaces,
+            }
+        }), PendingKind::Formatting)
     }
 
     pub fn execute_command(&mut self, command: &str, args: serde_json::Value) {

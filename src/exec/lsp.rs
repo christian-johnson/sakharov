@@ -220,6 +220,22 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                 jump_to_location(app, &locations[0]);
             }
         }
+        LspEvent::FormattingResult { edits } => {
+            if !edits.is_empty() {
+                if let Some(ref path) = app.buffer.path.clone() {
+                    let uri = path_to_uri(path);
+                    let fake_edit = serde_json::json!({ "changes": { uri: edits } });
+                    apply_workspace_edit(app, fake_edit);
+                }
+                // Sync the new buffer content back to the server so the next format
+                // request sees the already-formatted text, not the old pre-format version.
+                lsp_did_change(app);
+            }
+            if app.pending_format_save {
+                app.pending_format_save = false;
+                do_save(app);
+            }
+        }
         LspEvent::CodeActionsResult { actions } => {
             if actions.is_empty() {
                 app.message = Some("No code actions available".into());
@@ -459,6 +475,20 @@ fn apply_workspace_edit(app: &mut App, edit: Value) {
         }
     }
     super::recompute_highlights(app);
+}
+
+/// Perform a plain buffer save (no format step) — used by the format-on-save path.
+fn do_save(app: &mut App) {
+    match app.buffer.save(None) {
+        Ok(()) => {
+            app.message = Some(format!("Saved {}", app.buffer.display_name()));
+            if let Some(ref path) = app.buffer.path.clone() {
+                app.git_diff = crate::git::diff_marks(path);
+                app.git_branch = crate::git::current_branch();
+            }
+        }
+        Err(e) => app.message = Some(format!("Error: {e}")),
+    }
 }
 
 /// Extract the alphanumeric/underscore word ending at the cursor — used to

@@ -14,6 +14,11 @@ pub struct Config {
     /// Language server definitions, keyed by language id (e.g. "python", "rust").
     #[serde(default)]
     pub language_servers: HashMap<String, LanguageServerConfig>,
+    /// Shell formatters keyed by language id.
+    /// When configured, `:fmt` and `format_on_save` run this command on the file
+    /// instead of (and taking priority over) LSP-based formatting.
+    #[serde(default)]
+    pub formatters: HashMap<String, FormatterConfig>,
 }
 
 /// Custom key bindings config.
@@ -57,6 +62,20 @@ pub struct EditorConfig {
     /// If unset, the built-in fuzzy file list is used instead.
     #[serde(default)]
     pub file_picker: Option<String>,
+    /// Run the language server's formatter before each `:w` / `:wq` save.
+    #[serde(default)]
+    pub format_on_save: bool,
+}
+
+/// Configuration for a shell-based document formatter.
+#[derive(Debug, Deserialize, Clone)]
+pub struct FormatterConfig {
+    /// The formatter executable (must be on $PATH or an absolute path).
+    pub command: String,
+    /// Additional arguments passed before the filename.
+    /// Example: `["format"]` for `ruff format <file>`.
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 /// Configuration for a single language server.
@@ -76,7 +95,7 @@ pub struct LanguageServerConfig {
     /// the listed features; another server with empty features handles the rest.
     ///
     /// Known feature names: "completion", "hover", "definition", "references",
-    /// "type-definition", "implementation", "code-actions", "diagnostics".
+    /// "type-definition", "implementation", "code-actions", "diagnostics", "format".
     #[serde(default)]
     pub features: Vec<String>,
     /// Additional language servers for the same language, each with their own
@@ -154,6 +173,12 @@ fn deep_merge(base: toml::Value, over: toml::Value) -> toml::Value {
         // Non-table values: the override wins outright.
         (_, o) => o,
     }
+}
+
+/// Return the path that the user config file lives at (or should be created at).
+/// Same search order as `Config::load`, but never returns `None` when home is available.
+pub fn config_file_path() -> Option<PathBuf> {
+    config_path()
 }
 
 /// Return the path to the user config file.

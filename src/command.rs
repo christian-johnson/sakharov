@@ -167,6 +167,13 @@ pub enum Command {
     /// Toggle relative line numbers.
     ToggleRelativeLineNumbers,
 
+    /// Format the current buffer via the language server.
+    FormatDocument,
+    /// Open the user config file in the editor.
+    OpenConfig,
+    /// Reload the config file from disk without restarting.
+    ReloadConfig,
+
     // Code folding (plain text editor)
     /// Enter fold sub-mode (awaits a second key: a/A).
     EnterFoldMode,
@@ -284,6 +291,9 @@ impl Command {
             Command::ToggleGitGutter => "toggle-git-gutter",
             Command::ToggleLineNumbers => "toggle-line-numbers",
             Command::ToggleRelativeLineNumbers => "toggle-relative-line-numbers",
+            Command::FormatDocument => "format-document",
+            Command::OpenConfig => "open-config",
+            Command::ReloadConfig => "reload-config",
             Command::EnterFoldMode => "enter-fold-mode",
             Command::FoldToggle => "fold-toggle",
             Command::FoldToggleAll => "fold-toggle-all",
@@ -467,6 +477,10 @@ impl Command {
             "toggle-git-gutter" | "git-gutter" | "gutter" => Some(Command::ToggleGitGutter),
             "toggle-line-numbers" | "line-numbers" => Some(Command::ToggleLineNumbers),
             "toggle-relative-line-numbers" | "relative-line-numbers" => Some(Command::ToggleRelativeLineNumbers),
+
+            "format-document" | "format" | "fmt" => Some(Command::FormatDocument),
+            "open-config" | "config" => Some(Command::OpenConfig),
+            "reload-config" | "config-reload" => Some(Command::ReloadConfig),
 
             // Fold commands
             "enter-fold-mode" | "fold" => Some(Command::EnterFoldMode),

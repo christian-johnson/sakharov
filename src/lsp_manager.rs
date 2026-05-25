@@ -59,6 +59,8 @@ pub enum LspEvent {
     ReferencesResult { locations: Vec<LspLocation> },
     /// Code actions available at the cursor/selection position.
     CodeActionsResult { actions: Vec<serde_json::Value> },
+    /// Formatting result — apply these TextEdits to the buffer.
+    FormattingResult { edits: Vec<serde_json::Value> },
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +257,25 @@ impl LspManager {
         if let Some(idx) = self.server_idx_for_feature(language, "code-actions") {
             if let Some(servers) = self.servers.get_mut(language) {
                 servers[idx].client.request_code_actions(&uri, sl, sc, el, ec);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Send `textDocument/formatting` via the appropriate server.
+    /// Returns true if the request was dispatched.
+    pub fn format_document(
+        &mut self,
+        language: &str,
+        path: &std::path::Path,
+        tab_size: usize,
+        insert_spaces: bool,
+    ) -> bool {
+        let uri = path_to_uri(path);
+        if let Some(idx) = self.server_idx_for_feature(language, "format") {
+            if let Some(servers) = self.servers.get_mut(language) {
+                servers[idx].client.request_formatting(&uri, tab_size as u32, insert_spaces);
                 return true;
             }
         }
@@ -506,6 +527,10 @@ fn process_message(
                 PendingKind::CodeAction => {
                     let actions = result.as_array().cloned().unwrap_or_default();
                     Some(LspEvent::CodeActionsResult { actions })
+                }
+                PendingKind::Formatting => {
+                    let edits = result.as_array().cloned().unwrap_or_default();
+                    Some(LspEvent::FormattingResult { edits })
                 }
                 PendingKind::ExecuteCommand => None,
             }

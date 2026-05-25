@@ -144,6 +144,8 @@ pub struct App {
     pub last_logged_message: Option<String>,
     /// Persisted rope content for special buffers (currently only *scratch*).
     pub special_buffer_ropes: std::collections::HashMap<String, ropey::Rope>,
+    /// When true, the next `FormattingResult` event will also trigger a save.
+    pub pending_format_save: bool,
 }
 
 impl App {
@@ -288,6 +290,7 @@ impl App {
             },
             messages_log: Vec::new(),
             last_logged_message: None,
+            pending_format_save: false,
             special_buffer_ropes: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(

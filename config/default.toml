@@ -11,8 +11,20 @@ line_numbers = true
 relative_line_numbers = false
 scroll_off = 5
 git_gutter = true
+format_on_save = false
 # file_picker = "yazi --chooser-file=$MJ_PICKER_FILE"
 # file_picker = "find . -type f | fzf"
+
+# Shell formatters — run a CLI tool on the current file.
+# These take priority over LSP-based formatting (`:fmt`, format_on_save).
+# The command receives the file path as the last argument, e.g. `ruff format <file>`.
+#
+# [formatters.python]
+# command = "ruff"
+# args = ["format"]
+#
+# [formatters.rust]
+# command = "rustfmt"
 
 # Language servers — uncomment and adjust to match servers installed on your system.
 # majorana always uses the directory it is launched from as the workspace root, so run
@@ -33,7 +45,7 @@ git_gutter = true
 # [[language_servers.python.extra_servers]]
 # command = "ruff"
 # args = ["server"]
-# features = ["code-actions"]   # ruff wins for ga / code-actions requests
+# features = ["code-actions", "format"]   # ruff wins for ga / code-actions / :fmt
 #
 # [language_servers.rust]
 # command = "rust-analyzer"

@@ -119,6 +119,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                 app.buffer.remove_raw(pos - 1, pos);
                 app.selection = Selection::point(pos - 1);
                 exec::recompute_highlights(app);
+                exec::lsp_did_change(app);
             }
         }
         KeyCode::Delete => {
@@ -131,6 +132,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                     pos.min(app.buffer.rope.len_chars().saturating_sub(1)),
                 );
                 exec::recompute_highlights(app);
+                exec::lsp_did_change(app);
             }
         }
         KeyCode::Enter => {
@@ -151,6 +153,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                 app.selection = Selection::point(pos + 1 + ind_len);
             }
             exec::recompute_highlights(app);
+            exec::lsp_did_change(app);
         }
         KeyCode::Left => {
             app.selection = motion::move_left(&app.buffer.rope, app.selection, false);
@@ -172,6 +175,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             app.buffer.insert_raw(pos, "\t");
             app.selection = Selection::point(pos + 1);
             exec::recompute_highlights(app);
+            exec::lsp_did_change(app);
         }
         KeyCode::Null => {
             exec::execute(app, &Command::LspRequestCompletion);
@@ -193,6 +197,15 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             exec::lsp_did_change(app);
             if c == '.' || c == ':' {
                 exec::execute(app, &Command::LspRequestCompletion);
+            } else if c.is_alphanumeric() || c == '_' {
+                // Only open a new popup when one isn't already showing — subsequent
+                // keystrokes are handled by sync_completion_filter below.
+                let has_popup = app.popup.as_ref()
+                    .map(|p| p.on_confirm == crate::popup::PopupTarget::InsertText)
+                    .unwrap_or(false);
+                if !has_popup {
+                    exec::execute(app, &Command::LspRequestCompletion);
+                }
             }
         }
         _ => {}
