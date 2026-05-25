@@ -721,6 +721,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
 
+        Command::BufferNext => {
+            navigate_buffer(app, 1);
+            return;
+        }
+        Command::BufferPrev => {
+            navigate_buffer(app, -1);
+            return;
+        }
         Command::SwitchToScratch => {
             switch_to_special_buffer(app, "*scratch*");
             return;
@@ -1166,6 +1174,40 @@ fn normalize_cursor_folds_directional(app: &mut App, pre_exec_line: usize) {
         let vis_line = app.fold.normalize_line(line_idx);
         let new_pos = rope.line_to_char(vis_line);
         app.selection = Selection::point(new_pos);
+    }
+}
+
+/// Cycle through `open_buffers` by `delta` (+1 = next, -1 = prev).
+fn navigate_buffer(app: &mut App, delta: i32) {
+    let n = app.open_buffers.len();
+    if n <= 1 {
+        return;
+    }
+
+    let current_canon = if let Some((ref nb, _)) = app.notebook {
+        nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone())
+    } else if let Some(ref p) = app.buffer.path {
+        p.canonicalize().unwrap_or_else(|_| p.clone())
+    } else {
+        return;
+    };
+
+    let current_idx = app.open_buffers.iter().position(|p| {
+        p.canonicalize().unwrap_or_else(|_| p.clone()) == current_canon
+    });
+
+    let idx = match current_idx {
+        Some(i) => ((i as i32 + delta).rem_euclid(n as i32)) as usize,
+        None => 0,
+    };
+
+    let target = app.open_buffers[idx].clone();
+    if is_special_path(&target) {
+        switch_to_special_buffer(app, target.to_str().unwrap_or("*scratch*"));
+    } else if target.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+        open_as_notebook(app, &target);
+    } else {
+        lsp::open_file_at(app, &target, 0, 0);
     }
 }
 

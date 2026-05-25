@@ -26,6 +26,18 @@ pub enum LspRequestKind {
     Implementation,
 }
 
+/// Map an LspRequestKind to the feature name used in server config.
+fn request_feature(kind: LspRequestKind) -> &'static str {
+    match kind {
+        LspRequestKind::Completion     => "completion",
+        LspRequestKind::Hover          => "hover",
+        LspRequestKind::Definition     => "definition",
+        LspRequestKind::References     => "references",
+        LspRequestKind::TypeDefinition => "type-definition",
+        LspRequestKind::Implementation => "implementation",
+    }
+}
+
 /// A processed event from any language server.
 #[derive(Debug)]
 pub enum LspEvent {
@@ -84,14 +96,41 @@ pub struct LspLocation {
 }
 
 // ---------------------------------------------------------------------------
+// Internal server instance
+// ---------------------------------------------------------------------------
+
+struct ManagedServer {
+    client: LspClient,
+    /// Feature list. Empty = all features (general/primary server).
+    features: Vec<String>,
+    /// Command name stored for dedup in `ensure_server`.
+    command: String,
+}
+
+impl ManagedServer {
+    fn supports_feature(&self, feature: &str) -> bool {
+        self.features.is_empty() || self.features.iter().any(|f| f == feature)
+    }
+
+    fn has_specific_features(&self) -> bool {
+        !self.features.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LspManager
 // ---------------------------------------------------------------------------
 
 pub struct LspManager {
-    /// One server per language id (e.g. "python", "rust").
-    clients: HashMap<String, LspClient>,
+    /// Multiple servers per language id (primary first, then extra_servers).
+    servers: HashMap<String, Vec<ManagedServer>>,
     /// Diagnostics indexed by canonicalized path string.
+    /// When multiple servers report diagnostics for the same path, the last
+    /// received wins per-server slot (keyed as "path\x00idx").
+    /// The public `diagnostics` HashMap exposes the merged view keyed by plain path.
     pub diagnostics: HashMap<String, Vec<Diagnostic>>,
+    /// Internal per-server diagnostics: "path\x00server_idx" → items.
+    server_diagnostics: HashMap<String, Vec<Diagnostic>>,
     /// Open notebooks: notebook_uri → (code_cell_uris, current_notebook_version).
     notebook_state: HashMap<String, (Vec<String>, i32)>,
 }
@@ -99,81 +138,109 @@ pub struct LspManager {
 impl LspManager {
     pub fn new() -> Self {
         Self {
-            clients: HashMap::new(),
+            servers: HashMap::new(),
             diagnostics: HashMap::new(),
+            server_diagnostics: HashMap::new(),
             notebook_state: HashMap::new(),
         }
     }
 
-    /// Start a language server for `language` unless one is already running.
+    /// Start language server(s) for `language` unless they are already running.
+    /// Handles both the primary server and any `extra_servers` in the config.
     pub fn ensure_server(
         &mut self,
         language: &str,
         config: &LanguageServerConfig,
         root_path: Option<&std::path::Path>,
     ) {
-        if self.clients.contains_key(language) {
-            return;
+        // Collect all server specs: primary first, then extras.
+        let mut specs: Vec<(&str, &[String], Option<&serde_json::Value>, &[String])> = vec![
+            (&config.command, &config.args, config.init_options.as_ref(), &config.features),
+        ];
+        for extra in &config.extra_servers {
+            specs.push((&extra.command, &extra.args, extra.init_options.as_ref(), &extra.features));
         }
-        match LspClient::start(&config.command, &config.args) {
-            Ok(mut client) => {
-                let cwd = std::env::current_dir().ok();
-                // Workspace root for LSP (rootUri/workspaceFolders): prefer cwd
-                // so pyproject.toml, Cargo.toml, etc. are visible to the server.
-                let workspace_root = cwd.as_deref().or(root_path);
-                let root_uri = workspace_root
-                    .map(path_to_uri)
-                    .unwrap_or_else(|| "file:///".into());
 
-                // Venv/environment search root: prefer the file's own directory
-                // so a .venv sitting next to the file is found even when mj was
-                // launched from a different directory.
-                let venv_root = root_path.or(cwd.as_deref());
+        let cwd = std::env::current_dir().ok();
+        let workspace_root = cwd.as_deref().or(root_path);
+        let root_uri = workspace_root
+            .map(path_to_uri)
+            .unwrap_or_else(|| "file:///".into());
+        let venv_root = root_path.or(cwd.as_deref());
 
-                // Build initializationOptions: user config wins; fall back to
-                // auto-detected options (e.g. venv for Python).
-                let init_options = config.init_options.clone().or_else(|| {
-                    build_init_options(language, venv_root)
-                });
-
-                client.initialize(&root_uri, init_options.as_ref());
-                self.clients.insert(language.to_owned(), client);
+        for (command, args, init_options, features) in specs {
+            // Skip if already started.
+            let already_running = self.servers.get(language)
+                .map(|ss| ss.iter().any(|s| s.command == command))
+                .unwrap_or(false);
+            if already_running {
+                continue;
             }
-            Err(_) => {
-                // Server binary not installed or failed to start.
-                // majorana treats a missing LSP server as a soft degradation — no
-                // error displayed, the feature simply stays unavailable.
+
+            let init_opts = init_options.cloned().or_else(|| {
+                build_init_options(language, venv_root)
+            });
+
+            match LspClient::start(command, args) {
+                Ok(mut client) => {
+                    client.initialize(&root_uri, init_opts.as_ref());
+                    let server = ManagedServer {
+                        client,
+                        features: features.to_vec(),
+                        command: command.to_owned(),
+                    };
+                    self.servers
+                        .entry(language.to_owned())
+                        .or_default()
+                        .push(server);
+                }
+                Err(_) => {
+                    // Server binary not installed or failed to start — soft degradation.
+                }
             }
         }
     }
 
+    /// Send `textDocument/didOpen` to all initialized servers that don't already
+    /// have this document open.
     pub fn did_open(&mut self, language: &str, path: &std::path::Path, text: &str) {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized {
-                return;
+        let uri = path_to_uri(path);
+        if let Some(servers) = self.servers.get_mut(language) {
+            for server in servers.iter_mut() {
+                if server.client.initialized && !server.client.is_doc_open(&uri) {
+                    server.client.did_open(&uri, language, text);
+                }
             }
-            client.did_open(&path_to_uri(path), language, text);
         }
     }
 
+    /// Send `textDocument/didChange` to all initialized servers.
     pub fn did_change(&mut self, language: &str, path: &std::path::Path, text: &str) {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized {
-                return;
+        let uri = path_to_uri(path);
+        if let Some(servers) = self.servers.get_mut(language) {
+            for server in servers.iter_mut() {
+                if server.client.initialized {
+                    server.client.did_change(&uri, text);
+                }
             }
-            client.did_change(&path_to_uri(path), text);
         }
     }
 
+    /// Send `textDocument/didClose` to all servers that have this document open.
     pub fn did_close(&mut self, language: &str, path: &std::path::Path) {
-        if let Some(client) = self.clients.get_mut(language) {
-            client.did_close(&path_to_uri(path));
+        let uri = path_to_uri(path);
+        if let Some(servers) = self.servers.get_mut(language) {
+            for server in servers.iter_mut() {
+                if server.client.is_doc_open(&uri) {
+                    server.client.did_close(&uri);
+                }
+            }
         }
     }
 
     /// Request code actions for the given character range.
-    ///
-    /// Returns `false` if the server for `language` is not yet initialised.
+    /// Routes to the server that explicitly handles "code-actions", falling back
+    /// to the first all-features server.
     pub fn request_code_actions(
         &mut self,
         language: &str,
@@ -182,32 +249,30 @@ impl LspManager {
         start_char: usize,
         end_char: usize,
     ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized {
-                return false;
+        let uri = path_to_uri(path);
+        let (sl, sc) = char_to_lsp_pos(rope, start_char);
+        let (el, ec) = char_to_lsp_pos(rope, end_char);
+        if let Some(idx) = self.server_idx_for_feature(language, "code-actions") {
+            if let Some(servers) = self.servers.get_mut(language) {
+                servers[idx].client.request_code_actions(&uri, sl, sc, el, ec);
+                return true;
             }
-            let uri = path_to_uri(path);
-            let (sl, sc) = char_to_lsp_pos(rope, start_char);
-            let (el, ec) = char_to_lsp_pos(rope, end_char);
-            client.request_code_actions(&uri, sl, sc, el, ec);
-            return true;
         }
         false
     }
 
-    /// Send `workspace/executeCommand` to apply a code action command-side effect.
+    /// Send `workspace/executeCommand` via the server responsible for code-actions.
     pub fn execute_command(&mut self, language: &str, command: &str, args: serde_json::Value) {
-        if let Some(client) = self.clients.get_mut(language) {
-            if client.initialized {
-                client.execute_command(command, args);
+        if let Some(idx) = self.server_idx_for_feature(language, "code-actions") {
+            if let Some(servers) = self.servers.get_mut(language) {
+                if servers[idx].client.initialized {
+                    servers[idx].client.execute_command(command, args);
+                }
             }
         }
     }
 
-    /// Dispatch a position-based LSP request.
-    ///
-    /// Returns `false` if the server for `language` is not yet initialised,
-    /// so callers can show "try again in a moment" feedback.
+    /// Dispatch a position-based LSP request to the appropriate server.
     pub fn request(
         &mut self,
         kind: LspRequestKind,
@@ -216,75 +281,70 @@ impl LspManager {
         rope: &ropey::Rope,
         char_idx: usize,
     ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized {
-                return false;
+        let feature = request_feature(kind);
+        let uri = path_to_uri(path);
+        let (line, character) = char_to_lsp_pos(rope, char_idx);
+
+        if let Some(idx) = self.server_idx_for_feature(language, feature) {
+            if let Some(servers) = self.servers.get_mut(language) {
+                let _ = match kind {
+                    LspRequestKind::Completion    => servers[idx].client.request_completion(&uri, line, character),
+                    LspRequestKind::Hover         => servers[idx].client.request_hover(&uri, line, character),
+                    LspRequestKind::Definition    => servers[idx].client.request_definition(&uri, line, character),
+                    LspRequestKind::References    => servers[idx].client.request_references(&uri, line, character),
+                    LspRequestKind::TypeDefinition  => servers[idx].client.request_type_definition(&uri, line, character),
+                    LspRequestKind::Implementation  => servers[idx].client.request_implementation(&uri, line, character),
+                };
+                return true;
             }
-            let uri = path_to_uri(path);
-            let (line, character) = char_to_lsp_pos(rope, char_idx);
-            // All LspClient::request_* methods return a request id (u64) that
-            // is already tracked inside the client; discard it here.
-            let _req_id = match kind {
-                LspRequestKind::Completion    => client.request_completion(&uri, line, character),
-                LspRequestKind::Hover         => client.request_hover(&uri, line, character),
-                LspRequestKind::Definition    => client.request_definition(&uri, line, character),
-                LspRequestKind::References    => client.request_references(&uri, line, character),
-                LspRequestKind::TypeDefinition  => client.request_type_definition(&uri, line, character),
-                LspRequestKind::Implementation  => client.request_implementation(&uri, line, character),
-            };
-            return true;
         }
         false
     }
 
-    /// True if `path` has already been opened on the named server.
+    /// True if `path` has been opened on any server for `language`.
     pub fn is_doc_open(&self, language: &str, path: &std::path::Path) -> bool {
         let uri = path_to_uri(path);
-        self.clients
+        self.servers
             .get(language)
-            .map(|c| c.is_doc_open(&uri))
+            .map(|ss| ss.iter().any(|s| s.client.is_doc_open(&uri)))
             .unwrap_or(false)
     }
 
-    /// True if the named server advertised `notebookDocumentSync`.
+    /// True if any server for `language` advertised `notebookDocumentSync`.
     pub fn notebook_sync_supported(&self, language: &str) -> bool {
-        self.clients
+        self.servers
             .get(language)
-            .map(|c| c.supports_notebook_sync())
+            .map(|ss| ss.iter().any(|s| s.client.supports_notebook_sync()))
             .unwrap_or(false)
     }
 
-    /// Send `notebookDocument/didOpen` for the whole notebook.
-    /// Returns false if the server isn't initialised yet.
+    /// Send `notebookDocument/didOpen` via the first server supporting notebook sync.
     pub fn notebook_did_open(
         &mut self,
         language: &str,
         notebook_uri: &str,
         cells: &[NotebookCell],
     ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized {
-                return false;
-            }
-            let entry = self
-                .notebook_state
-                .entry(notebook_uri.to_owned())
-                .or_insert((vec![], 0));
+        let Some(idx) = self.notebook_client_idx(language) else { return false };
+        // Check initialized (immutable, released before mutable borrows below).
+        if !self.servers.get(language).map(|ss| ss[idx].client.initialized).unwrap_or(false) {
+            return false;
+        }
+        // Update notebook state — drop before borrowing servers mutably.
+        let version = {
+            let entry = self.notebook_state.entry(notebook_uri.to_owned()).or_insert((vec![], 0));
             entry.1 += 1;
-            let version = entry.1;
-            entry.0 = cells
-                .iter()
-                .filter(|c| c.kind == 2)
-                .map(|c| c.uri.clone())
-                .collect();
-            client.notebook_did_open(notebook_uri, version, cells);
+            entry.0 = cells.iter().filter(|c| c.kind == 2).map(|c| c.uri.clone()).collect();
+            entry.1
+        };
+        if let Some(servers) = self.servers.get_mut(language) {
+            servers[idx].client.notebook_did_open(notebook_uri, version, cells);
             return true;
         }
         false
     }
 
-    /// Send `notebookDocument/didChange` for one cell's text content.
-    /// Returns false if the server isn't initialised yet.
+    /// Send `notebookDocument/didChange` for one cell via the notebook-sync server.
     pub fn notebook_did_change_cell(
         &mut self,
         language: &str,
@@ -292,17 +352,17 @@ impl LspManager {
         cell_uri: &str,
         text: &str,
     ) -> bool {
-        if let Some(client) = self.clients.get_mut(language) {
-            if !client.initialized {
-                return false;
-            }
-            let entry = self
-                .notebook_state
-                .entry(notebook_uri.to_owned())
-                .or_insert((vec![], 0));
+        let Some(idx) = self.notebook_client_idx(language) else { return false };
+        if !self.servers.get(language).map(|ss| ss[idx].client.initialized).unwrap_or(false) {
+            return false;
+        }
+        let nb_version = {
+            let entry = self.notebook_state.entry(notebook_uri.to_owned()).or_insert((vec![], 0));
             entry.1 += 1;
-            let nb_version = entry.1;
-            client.notebook_did_change_cell(notebook_uri, nb_version, cell_uri, text);
+            entry.1
+        };
+        if let Some(servers) = self.servers.get_mut(language) {
+            servers[idx].client.notebook_did_change_cell(notebook_uri, nb_version, cell_uri, text);
             return true;
         }
         false
@@ -310,9 +370,13 @@ impl LspManager {
 
     /// Send `notebookDocument/didClose` and clear tracking state.
     pub fn notebook_did_close(&mut self, language: &str, notebook_uri: &str) {
-        if let Some((cell_uris, _)) = self.notebook_state.remove(notebook_uri) {
-            if let Some(client) = self.clients.get_mut(language) {
-                client.notebook_did_close(notebook_uri, &cell_uris);
+        // Remove returns owned cell_uris, releasing the borrow before we touch servers.
+        let cell_uris = self.notebook_state.remove(notebook_uri).map(|(uris, _)| uris);
+        if let Some(cell_uris) = cell_uris {
+            if let Some(idx) = self.notebook_client_idx(language) {
+                if let Some(servers) = self.servers.get_mut(language) {
+                    servers[idx].client.notebook_did_close(notebook_uri, &cell_uris);
+                }
             }
         }
     }
@@ -320,28 +384,77 @@ impl LspManager {
     /// Drain all pending server messages and return semantic events.
     pub fn poll(&mut self) -> Vec<LspEvent> {
         let mut events = Vec::new();
-        let languages: Vec<String> = self.clients.keys().cloned().collect();
+        let languages: Vec<String> = self.servers.keys().cloned().collect();
         for lang in languages {
-            // Collect raw messages first (separate borrow)
-            let msgs = {
-                let client = self.clients.get_mut(&lang).unwrap();
-                client.poll()
-            };
-            for msg in msgs {
-                let client = self.clients.get_mut(&lang).unwrap();
-                if let Some(evt) =
-                    process_message(client, &lang, msg, &mut self.diagnostics)
-                {
-                    events.push(evt);
+            let server_count = self.servers[&lang].len();
+            for idx in 0..server_count {
+                let msgs = {
+                    self.servers.get_mut(&lang).unwrap()[idx].client.poll()
+                };
+                for msg in msgs {
+                    let server = &mut self.servers.get_mut(&lang).unwrap()[idx];
+                    if let Some(evt) = process_message(
+                        &mut server.client,
+                        &lang,
+                        idx,
+                        msg,
+                        &mut self.diagnostics,
+                        &mut self.server_diagnostics,
+                    ) {
+                        events.push(evt);
+                    }
                 }
             }
         }
         events
     }
 
-    /// Return true if the named server is running and initialized.
+    /// True if any server for `language` is running and initialized.
     pub fn is_ready(&self, language: &str) -> bool {
-        self.clients.get(language).map(|c| c.initialized).unwrap_or(false)
+        self.servers
+            .get(language)
+            .map(|ss| ss.iter().any(|s| s.client.initialized))
+            .unwrap_or(false)
+    }
+
+    // ---------------------------------------------------------------------------
+    // Internal helpers
+    // ---------------------------------------------------------------------------
+
+    /// Return the index of the server to use for `feature`.
+    ///
+    /// Priority: a server with a non-empty feature list that includes `feature`
+    /// takes precedence over an all-features (empty list) server.
+    fn server_idx_for_feature(&self, language: &str, feature: &str) -> Option<usize> {
+        let servers = self.servers.get(language)?;
+        // First pass: specific-feature server wins.
+        for (i, s) in servers.iter().enumerate() {
+            if s.has_specific_features() && s.supports_feature(feature) && s.client.initialized {
+                return Some(i);
+            }
+        }
+        // Second pass: first all-features server.
+        for (i, s) in servers.iter().enumerate() {
+            if !s.has_specific_features() && s.client.initialized {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Return the index of the server used for notebook sync operations.
+    fn notebook_client_idx(&self, language: &str) -> Option<usize> {
+        let servers = self.servers.get(language)?;
+        // Prefer a server that supports notebook sync.
+        for (i, s) in servers.iter().enumerate() {
+            if s.client.initialized && s.client.supports_notebook_sync() {
+                return Some(i);
+            }
+        }
+        // Fall back to first initialized server.
+        servers.iter().enumerate()
+            .find(|(_, s)| s.client.initialized)
+            .map(|(i, _)| i)
     }
 }
 
@@ -352,8 +465,10 @@ impl LspManager {
 fn process_message(
     client: &mut LspClient,
     language: &str,
+    server_idx: usize,
     msg: ServerMessage,
     diagnostics: &mut HashMap<String, Vec<Diagnostic>>,
+    server_diagnostics: &mut HashMap<String, Vec<Diagnostic>>,
 ) -> Option<LspEvent> {
     match msg {
         ServerMessage::Response { id, result, error: _ } => {
@@ -402,10 +517,24 @@ fn process_message(
                 let path = uri_to_path(uri)?;
                 let path_str = path.to_string_lossy().to_string();
                 let items = parse_diagnostics(params.get("diagnostics")?);
-                diagnostics.insert(path_str, items.clone());
-                Some(LspEvent::Diagnostics { path, items })
+
+                // Store per-server diagnostics keyed by "path\x00server_idx".
+                let slot_key = format!("{path_str}\x00{server_idx}");
+                server_diagnostics.insert(slot_key, items.clone());
+
+                // Rebuild the merged view for this path (across all server slots).
+                let merged: Vec<Diagnostic> = server_diagnostics
+                    .iter()
+                    .filter(|(k, _)| {
+                        k.split('\x00').next().map(|p| p == path_str).unwrap_or(false)
+                    })
+                    .flat_map(|(_, diags)| diags.iter().cloned())
+                    .collect();
+                diagnostics.insert(path_str, merged.clone());
+
+                Some(LspEvent::Diagnostics { path, items: merged })
             } else {
-                None // Ignore other server notifications (window/logMessage etc.)
+                None
             }
         }
     }
@@ -433,7 +562,6 @@ fn parse_completion_result(val: &Value) -> Vec<CompletionItem> {
                 .get("detail")
                 .and_then(|d| d.as_str())
                 .map(str::to_owned);
-            // Prefer textEdit.newText, then insertText, then fall back to label.
             let insert_text = item
                 .get("textEdit")
                 .and_then(|te| te.get("newText"))
@@ -465,7 +593,6 @@ fn parse_hover_result(val: &Value) -> Option<String> {
             return Some(value.to_owned());
         }
     }
-    // MarkedString[]
     if let Some(arr) = contents.as_array() {
         let parts: Vec<&str> = arr
             .iter()
@@ -557,9 +684,6 @@ fn build_init_options(
 ) -> Option<serde_json::Value> {
     match language {
         "python" => {
-            // Find the best Python interpreter: project venv first, then the
-            // Python that's actually active in the user's shell (handles pyenv,
-            // conda, globally-installed packages, etc.).
             let python = root.and_then(detect_python_venv)
                 .or_else(detect_active_python);
 
@@ -570,8 +694,6 @@ fn build_init_options(
                     serde_json::json!(p.to_string_lossy().as_ref()),
                 );
             }
-            // Always tell Jedi where the project root is so it can resolve
-            // local modules even without an explicit venv.
             if let Some(root_path) = root {
                 jedi.insert(
                     "extra_paths".into(),
@@ -591,7 +713,6 @@ fn build_init_options(
     }
 }
 
-/// Walk `start` and its ancestors (up to 4 levels) looking for a venv.
 fn detect_python_venv(start: &std::path::Path) -> Option<std::path::PathBuf> {
     let candidates = ["bin/python3", "bin/python"];
     let venv_dirs = [".venv", "venv", ".env", "env"];
@@ -614,11 +735,6 @@ fn detect_python_venv(start: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Ask the current `python3` on PATH where its executable lives.
-/// Handles pyenv shims, conda envs, and any other non-venv setup where the
-/// user's packages are installed into whichever Python is active in the shell.
-///
-/// Capped at 2 seconds so a misconfigured/slow Python can't hang mj startup.
 fn detect_active_python() -> Option<std::path::PathBuf> {
     use std::sync::mpsc;
 
@@ -641,8 +757,6 @@ fn detect_active_python() -> Option<std::path::PathBuf> {
     if path.exists() { Some(path) } else { None }
 }
 
-/// Strip LSP snippet markers and return an owned String.
-/// Handles `${N:placeholder}`, `$N`, and `$0` tab-stop markers.
 fn strip_snippet_owned(s: &str) -> String {
     if !s.contains('$') {
         return s.to_owned();
@@ -656,16 +770,13 @@ fn strip_snippet_owned(s: &str) -> String {
         }
         match chars.peek() {
             Some('{') => {
-                // ${N:placeholder} or ${N} — emit the placeholder text only.
-                chars.next(); // consume '{'
-                // Skip until ':' or '}'
+                chars.next();
                 let mut found_colon = false;
                 for ch in chars.by_ref() {
                     if ch == ':' { found_colon = true; break; }
                     if ch == '}' { break; }
                 }
                 if found_colon {
-                    // Emit chars up to matching '}'
                     for ch in chars.by_ref() {
                         if ch == '}' { break; }
                         out.push(ch);
@@ -673,13 +784,11 @@ fn strip_snippet_owned(s: &str) -> String {
                 }
             }
             Some(c) if c.is_ascii_digit() || *c == '0' => {
-                // $N — consume the number, emit nothing.
                 while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
                     chars.next();
                 }
             }
             _ => {
-                // Lone '$' — keep it.
                 out.push('$');
             }
         }
@@ -689,27 +798,26 @@ fn strip_snippet_owned(s: &str) -> String {
 
 fn completion_kind_name(kind: u64) -> String {
     match kind {
-        1 => "text",
-        2 => "method",
-        3 => "fn",
-        4 => "constructor",
-        5 => "field",
-        6 => "var",
-        7 => "class",
-        8 => "interface",
-        9 => "module",
-        10 => "property",
+        1  => "text",
+        2  => "method",
+        3  => "fn",
+        4  => "ctor",
+        5  => "field",
+        6  => "var",
+        7  => "class",
+        8  => "iface",
+        9  => "mod",
+        10 => "prop",
         12 => "value",
         13 => "enum",
-        14 => "keyword",
-        15 => "snippet",
+        14 => "kw",
+        15 => "snip",
         17 => "file",
-        20 => "enum member",
+        20 => "enum↳",
         21 => "const",
         22 => "struct",
-        25 => "type param",
-        _ => "item",
+        25 => "tparam",
+        _  => "item",
     }
     .to_owned()
 }
-

@@ -1,5 +1,6 @@
 mod app;
 mod buffer;
+mod clipboard;
 mod command;
 mod config;
 mod exec;

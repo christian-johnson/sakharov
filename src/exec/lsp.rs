@@ -37,6 +37,30 @@ pub(super) fn lsp_code_actions_request(app: &mut App) {
 }
 
 pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
+    // For completion requests, fall back to buffer symbols when LSP isn't available.
+    if matches!(kind, LspRequestKind::Completion) {
+        let lang = app.current_language().unwrap_or("").to_owned();
+        let lsp_ready = !lang.is_empty() && app.lsp.is_ready(&lang);
+
+        if lsp_ready {
+            let path = match app.buffer.path.clone() {
+                Some(p) => p,
+                None => {
+                    show_buffer_completions(app);
+                    return;
+                }
+            };
+            let char_idx = app.selection.head;
+            let rope = app.buffer.rope.clone();
+            if !app.lsp.request(kind, &lang, &path, &rope, char_idx) {
+                show_buffer_completions(app);
+            }
+        } else {
+            show_buffer_completions(app);
+        }
+        return;
+    }
+
     let lang = match app.current_language() {
         Some(l) => l.to_owned(),
         None => {
@@ -57,6 +81,26 @@ pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
     if !app.lsp.request(kind, &lang, &path, &rope, char_idx) {
         app.message = Some("LSP server initializing — try again in a moment".into());
     }
+}
+
+/// Show a completion popup seeded with buffer symbols only (no LSP).
+pub(super) fn show_buffer_completions(app: &mut App) {
+    let lang = app.current_language().unwrap_or("").to_owned();
+    let symbols = crate::symbols::extract_symbols(&app.buffer.rope, &lang);
+    if symbols.is_empty() {
+        return;
+    }
+    let prefix = word_prefix_at_cursor(app);
+    let items: Vec<crate::popup::ListItem> = symbols
+        .iter()
+        .map(|s| crate::popup::ListItem {
+            label: s.name.clone(),
+            detail: None,
+            kind: Some(symbol_kind_badge(s.kind)),
+            payload: None,
+        })
+        .collect();
+    open_completion_popup(app, items, prefix);
 }
 
 /// Notify the LSP server of a buffer change (called after each Insert-mode edit).
@@ -122,8 +166,9 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             super::rebuild_diag_cache(app);
         }
         LspEvent::CompletionResult { items } => {
-            if app.mode == Mode::Insert && !items.is_empty() {
-                let popup_items: Vec<crate::popup::ListItem> = items
+            if app.mode == Mode::Insert {
+                // Convert LSP items.
+                let mut popup_items: Vec<crate::popup::ListItem> = items
                     .iter()
                     .map(|item| crate::popup::ListItem {
                         label: item.insert_text.clone().unwrap_or_else(|| item.label.clone()),
@@ -132,14 +177,27 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                         payload: None,
                     })
                     .collect();
-                // Seed filter with the word prefix before the cursor so amber
-                // highlighting is visible from the moment the popup opens.
-                let prefix = word_prefix_at_cursor(app);
-                let mut popup = crate::popup::Popup::completion(popup_items);
-                if let crate::popup::PopupContent::List(ref mut list) = popup.content {
-                    list.filter = prefix;
+
+                // Merge buffer symbols that aren't already covered by LSP results.
+                let lang = app.current_language().unwrap_or("").to_owned();
+                let symbols = crate::symbols::extract_symbols(&app.buffer.rope, &lang);
+                let lsp_labels: std::collections::HashSet<String> =
+                    popup_items.iter().map(|i| i.label.clone()).collect();
+                for sym in &symbols {
+                    if !lsp_labels.contains(&sym.name) {
+                        popup_items.push(crate::popup::ListItem {
+                            label: sym.name.clone(),
+                            detail: Some("buf".into()),
+                            kind: Some(symbol_kind_badge(sym.kind)),
+                            payload: None,
+                        });
+                    }
                 }
-                app.popup = Some(popup);
+
+                if !popup_items.is_empty() {
+                    let prefix = word_prefix_at_cursor(app);
+                    open_completion_popup(app, popup_items, prefix);
+                }
             }
         }
         LspEvent::HoverResult { content } => {
@@ -418,4 +476,30 @@ fn word_prefix_at_cursor(app: &crate::app::App) -> String {
         }
     }
     rope.slice(i..pos).to_string()
+}
+
+/// Open a completion popup with `items` and `prefix` as the initial filter.
+fn open_completion_popup(app: &mut crate::app::App, items: Vec<crate::popup::ListItem>, prefix: String) {
+    let mut popup = crate::popup::Popup::completion(items);
+    if let crate::popup::PopupContent::List(ref mut list) = popup.content {
+        list.filter = prefix;
+    }
+    app.popup = Some(popup);
+}
+
+/// Return the kind badge string for a tree-sitter symbol.
+/// Uses a short icon+text form so different symbol types are visually distinct.
+fn symbol_kind_badge(kind: &str) -> String {
+    match kind {
+        "fn"     => "λ fn",
+        "class"  => "○ class",
+        "struct" => "□ struct",
+        "enum"   => "◇ enum",
+        "trait"  => "◈ trait",
+        "const"  => "# const",
+        "impl"   => "⊕ impl",
+        "method" => "m mth",
+        _        => kind,
+    }
+    .to_owned()
 }

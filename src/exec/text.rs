@@ -4,6 +4,9 @@ pub(super) fn delete_selection(app: &mut App) {
     let start = app.selection.start();
     let end = app.selection.end();
     let del_end = (end + 1).min(app.buffer.rope.len_chars());
+    let text = app.buffer.rope.slice(start..del_end).to_string();
+    app.clipboard = text.clone();
+    crate::clipboard::write(&text);
     app.buffer.remove(start, del_end);
     let new_pos = start.min(app.buffer.rope.len_chars());
     app.selection = Selection::point(new_pos);
@@ -14,15 +17,18 @@ pub(super) fn delete_selection(app: &mut App) {
 pub(super) fn yank_selection(app: &mut App) {
     let start = app.selection.start();
     let end = (app.selection.end() + 1).min(app.buffer.rope.len_chars());
-    app.clipboard = app.buffer.rope.slice(start..end).to_string();
+    let text = app.buffer.rope.slice(start..end).to_string();
+    app.clipboard = text.clone();
+    crate::clipboard::write(&text);
     app.message = Some(format!("Yanked {} chars", end - start));
 }
 
 pub(super) fn paste_after(app: &mut App) {
-    let text = app.clipboard.clone();
+    let text = crate::clipboard::read().unwrap_or_else(|| app.clipboard.clone());
     if text.is_empty() {
         return;
     }
+    app.clipboard = text.clone();
     let pos = app.selection.head;
     let len = app.buffer.rope.len_chars();
     let insert_pos = if len > 0 { (pos + 1).min(len) } else { 0 };
@@ -33,10 +39,11 @@ pub(super) fn paste_after(app: &mut App) {
 }
 
 pub(super) fn paste_before(app: &mut App) {
-    let text = app.clipboard.clone();
+    let text = crate::clipboard::read().unwrap_or_else(|| app.clipboard.clone());
     if text.is_empty() {
         return;
     }
+    app.clipboard = text.clone();
     let pos = app.selection.head;
     app.buffer.insert(pos, &text);
     app.selection = Selection::point(pos);

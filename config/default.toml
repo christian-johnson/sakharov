@@ -21,9 +21,19 @@ git_gutter = true
 # For Python, majorana auto-detects a virtualenv (.venv, venv, .env, env) in the
 # workspace root and passes it to the language server automatically.
 #
+# Single server (simple):
 # [language_servers.python]
+# command = "pylsp"
+#
+# Multiplexed servers — pylsp for intelligence, ruff for code-actions:
+# [language_servers.python]
+# command = "pylsp"
+# # No features = handles everything pylsp doesn't specifically delegate.
+#
+# [[language_servers.python.extra_servers]]
 # command = "ruff"
 # args = ["server"]
+# features = ["code-actions"]   # ruff wins for ga / code-actions requests
 #
 # [language_servers.rust]
 # command = "rust-analyzer"

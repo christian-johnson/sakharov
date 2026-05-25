@@ -247,6 +247,10 @@ impl Keymap {
         // K → lsp-show-documentation (kept for muscle memory; gk is the canonical binding)
         normal.insert(KeyBinding::char('K'), vec![Command::LspShowDocumentation]);
 
+        // H / L → prev/next buffer (uppercase H and L are unbound motions, repurposed here)
+        normal.insert(KeyBinding::char('H'), vec![Command::BufferPrev]);
+        normal.insert(KeyBinding::char('L'), vec![Command::BufferNext]);
+
 
         normal.insert(KeyBinding::char('i'), vec![Command::EnterInsert]);
         normal.insert(KeyBinding::char('a'), vec![Command::EnterInsertAfter]);

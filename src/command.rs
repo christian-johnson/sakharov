@@ -76,6 +76,10 @@ pub enum Command {
     BufferClose,
     /// Close the current buffer unconditionally (discard unsaved changes).
     BufferForceClose,
+    /// Switch to the next buffer in the open-buffers list.
+    BufferNext,
+    /// Switch to the previous buffer in the open-buffers list.
+    BufferPrev,
     /// Switch to the persistent *scratch* buffer.
     SwitchToScratch,
     /// Switch to the *Messages* buffer showing the message log.
@@ -236,6 +240,8 @@ impl Command {
             Command::WriteQuit => "write-quit",
             Command::BufferClose => "buffer-close",
             Command::BufferForceClose => "buffer-force-close",
+            Command::BufferNext => "buffer-next",
+            Command::BufferPrev => "buffer-prev",
             Command::SwitchToScratch => "switch-to-scratch",
             Command::SwitchToMessages => "switch-to-messages",
             Command::Shell(_) => "shell",
@@ -395,6 +401,8 @@ impl Command {
             "write-quit"                 => Some(Command::WriteQuit),
             "buffer-close" | "bd"        => Some(Command::BufferClose),
             "buffer-force-close" | "bd!" => Some(Command::BufferForceClose),
+            "buffer-next" | "bn"         => Some(Command::BufferNext),
+            "buffer-prev" | "bp"         => Some(Command::BufferPrev),
             "switch-to-scratch" | "scratch" => Some(Command::SwitchToScratch),
             "switch-to-messages" | "messages" => Some(Command::SwitchToMessages),
 

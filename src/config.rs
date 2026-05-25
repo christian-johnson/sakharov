@@ -71,6 +71,44 @@ pub struct LanguageServerConfig {
     /// If absent, majorana auto-detects sensible defaults (e.g. venv for Python).
     #[serde(default)]
     pub init_options: Option<serde_json::Value>,
+    /// Which LSP features this server provides.
+    /// Empty (default) means all features. Non-empty restricts this server to only
+    /// the listed features; another server with empty features handles the rest.
+    ///
+    /// Known feature names: "completion", "hover", "definition", "references",
+    /// "type-definition", "implementation", "code-actions", "diagnostics".
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Additional language servers for the same language, each with their own
+    /// feature scope.  Useful for combining e.g. `pylsp` (completions, hover,
+    /// goto-definition) with `ruff` (code-actions, formatting).
+    ///
+    /// Example config:
+    /// ```toml
+    /// [language_servers.python]
+    /// command = "pylsp"
+    ///
+    /// [[language_servers.python.extra_servers]]
+    /// command = "ruff"
+    /// args = ["server"]
+    /// features = ["code-actions"]
+    /// ```
+    #[serde(default)]
+    pub extra_servers: Vec<ExtraServerConfig>,
+}
+
+/// Configuration for one additional server in a multiplexed setup.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExtraServerConfig {
+    /// The executable to run.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub init_options: Option<serde_json::Value>,
+    /// Feature scope — same semantics as `LanguageServerConfig::features`.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");

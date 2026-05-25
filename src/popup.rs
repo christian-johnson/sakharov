@@ -580,6 +580,8 @@ pub fn command_palette_items() -> Vec<ListItem> {
         // Buffers
         ("buffer-close",       "Close current buffer  [:bd]"),
         ("buffer-force-close", "Force-close current buffer (discard changes)  [:bd!]"),
+        ("buffer-next",        "Switch to next buffer  [L, :bn]"),
+        ("buffer-prev",        "Switch to previous buffer  [H, :bp]"),
         ("switch-to-scratch",  "Switch to *scratch* buffer  [:scratch]"),
         ("switch-to-messages", "Switch to *Messages* log buffer  [:messages]"),
         // UI
