@@ -66,9 +66,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
     match app.mode.clone() {
         Mode::Normal => {
-            let kb = KeyBinding::from(key);
-            if let Some(cmds) = app.keymap.lookup_normal(&kb).map(|v| v.to_vec()) {
-                exec::run_many(app, &cmds);
+            // Esc in Normal mode while a notebook is open (not full-screen overlay)
+            // toggles back to Notebook navigation — check before the keymap so the
+            // Esc→EnterNormal binding doesn't shadow it.
+            if key.code == KeyCode::Esc
+                && app.notebook.is_some()
+                && !app.notebook_focused_edit()
+            {
+                app.mode = Mode::Notebook;
+            } else {
+                let kb = KeyBinding::from(key);
+                if let Some(cmds) = app.keymap.lookup_normal(&kb).map(|v| v.to_vec()) {
+                    exec::run_many(app, &cmds);
+                }
             }
         }
         Mode::Select => {
@@ -120,6 +130,8 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                 app.selection = Selection::point(pos - 1);
                 exec::recompute_highlights(app);
                 exec::lsp_did_change(app);
+                // Shorter prefix may now match items, so allow popups again.
+                app.completion_suppressed_prefix = None;
             }
         }
         KeyCode::Delete => {
@@ -196,16 +208,32 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             exec::recompute_highlights(app);
             exec::lsp_did_change(app);
             if c == '.' || c == ':' {
+                // Trigger characters always fire a fresh completion request.
+                app.completion_suppressed_prefix = None;
                 exec::execute(app, &Command::LspRequestCompletion);
             } else if c.is_alphanumeric() || c == '_' {
-                // Only open a new popup when one isn't already showing — subsequent
-                // keystrokes are handled by sync_completion_filter below.
                 let has_popup = app.popup.as_ref()
                     .map(|p| p.on_confirm == crate::popup::PopupTarget::InsertText)
                     .unwrap_or(false);
                 if !has_popup {
-                    exec::execute(app, &Command::LspRequestCompletion);
+                    // Check whether the current prefix extends one that already
+                    // returned no matches — if so, more typing won't help.
+                    let suppressed = app.completion_suppressed_prefix.as_ref()
+                        .map(|sup| {
+                            let cur = crate::motion::word_prefix_at(
+                                &app.buffer.rope, app.selection.head,
+                            );
+                            cur.starts_with(sup.as_str())
+                        })
+                        .unwrap_or(false);
+                    if !suppressed {
+                        exec::execute(app, &Command::LspRequestCompletion);
+                    }
                 }
+            } else {
+                // Non-identifier char (space, punctuation, etc.) resets suppression
+                // so the next word starts fresh.
+                app.completion_suppressed_prefix = None;
             }
         }
         _ => {}
@@ -336,19 +364,7 @@ fn handle_search(app: &mut App, key: KeyEvent, forward: bool) {
 
 fn sync_completion_filter(app: &mut App) {
     let pos = app.selection.head;
-    let prefix: String = {
-        let rope = &app.buffer.rope;
-        let mut i = pos;
-        while i > 0 {
-            let c = rope.char(i - 1);
-            if c.is_alphanumeric() || c == '_' {
-                i -= 1;
-            } else {
-                break;
-            }
-        }
-        rope.slice(i..pos).to_string()
-    };
+    let prefix = crate::motion::word_prefix_at(&app.buffer.rope, pos);
 
     let dismiss = {
         let mut should_dismiss = false;
@@ -365,6 +381,9 @@ fn sync_completion_filter(app: &mut App) {
     };
 
     if dismiss {
+        // Record the prefix so we don't re-open a completion popup while the
+        // user keeps extending this word — more chars can only reduce results.
+        app.completion_suppressed_prefix = Some(prefix);
         app.popup = None;
     }
 }
@@ -477,19 +496,7 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
         }
         PopupTarget::InsertText => {
             let pos = app.selection.head;
-            let word_start = {
-                let rope = &app.buffer.rope;
-                let mut i = pos;
-                while i > 0 {
-                    let c = rope.char(i - 1);
-                    if c.is_alphanumeric() || c == '_' {
-                        i -= 1;
-                    } else {
-                        break;
-                    }
-                }
-                i
-            };
+            let word_start = crate::motion::word_start_at(&app.buffer.rope, pos);
             if word_start < pos {
                 app.buffer.remove(word_start, pos);
             }

@@ -96,7 +96,7 @@ pub(super) fn show_buffer_completions(app: &mut App) {
         .map(|s| crate::popup::ListItem {
             label: s.name.clone(),
             detail: None,
-            kind: Some(symbol_kind_badge(s.kind)),
+            kind: Some(symbol_kind_badge(s.kind, &app.config.ui.symbol_icons)),
             payload: None,
         })
         .collect();
@@ -188,7 +188,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                         popup_items.push(crate::popup::ListItem {
                             label: sym.name.clone(),
                             detail: Some("buf".into()),
-                            kind: Some(symbol_kind_badge(sym.kind)),
+                            kind: Some(symbol_kind_badge(sym.kind, &app.config.ui.symbol_icons)),
                             payload: None,
                         });
                     }
@@ -201,7 +201,11 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             }
         }
         LspEvent::HoverResult { content } => {
-            app.popup = Some(crate::popup::Popup::documentation("hover", &content));
+            if content.is_empty() {
+                app.message = Some("No documentation available".into());
+            } else {
+                app.popup = Some(crate::popup::Popup::documentation("hover", &content));
+            }
         }
         LspEvent::DefinitionResult { location } => {
             if let Some(loc) = location {
@@ -300,18 +304,13 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
 
     // If a notebook is open, tear it down cleanly before loading a plain file.
     if app.notebook.is_some() {
-        // Preserve the .ipynb path in the buffer list before clearing notebook state.
+        // Preserve the .ipynb path in the buffer list before stashing.
         if let Some((ref nb, _)) = app.notebook {
-            let nb_path = nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone());
-            if !app.open_buffers.iter().any(|p| {
-                p.canonicalize().unwrap_or_else(|_| p.clone()) == nb_path
-            }) {
-                app.open_buffers.push(nb_path);
-            }
+            let nb_path = nb.path.clone();
+            super::register_buffer(&mut app.open_buffers, &nb_path);
         }
-        super::notebook::notebook_lsp_close(app);
-        app.notebook = None;
-        app.notebook_cell_edit = None;
+        // Stash notebook state so edits survive if the user comes back.
+        super::notebook::stash_current_notebook(app);
         app.mode = crate::mode::Mode::Normal;
     }
 
@@ -360,13 +359,7 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     app.selection = Selection::point(char_idx);
     super::update_scroll(app);
 
-    // Canonicalize before dedup so relative vs absolute comparisons work correctly.
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !app.open_buffers.iter().any(|stored| {
-        stored.canonicalize().unwrap_or_else(|_| stored.clone()) == canon
-    }) {
-        app.open_buffers.push(canon);
-    }
+    super::register_buffer(&mut app.open_buffers, path);
 
     app.git_diff = crate::git::diff_marks(path);
     super::rebuild_diag_cache(app);
@@ -491,45 +484,27 @@ fn do_save(app: &mut App) {
     }
 }
 
-/// Extract the alphanumeric/underscore word ending at the cursor — used to
-/// pre-seed the completion popup filter so highlights are visible immediately.
 fn word_prefix_at_cursor(app: &crate::app::App) -> String {
-    let pos = app.selection.head;
-    let rope = &app.buffer.rope;
-    let mut i = pos;
-    while i > 0 {
-        let c = rope.char(i - 1);
-        if c.is_alphanumeric() || c == '_' {
-            i -= 1;
-        } else {
-            break;
-        }
-    }
-    rope.slice(i..pos).to_string()
+    crate::motion::word_prefix_at(&app.buffer.rope, app.selection.head)
 }
 
 /// Open a completion popup with `items` and `prefix` as the initial filter.
 fn open_completion_popup(app: &mut crate::app::App, items: Vec<crate::popup::ListItem>, prefix: String) {
     let mut popup = crate::popup::Popup::completion(items);
     if let crate::popup::PopupContent::List(ref mut list) = popup.content {
-        list.filter = prefix;
+        list.filter = prefix.clone();
+        // Don't flash an empty popup — if nothing matches the current prefix,
+        // record suppression and bail out rather than opening then immediately
+        // dismissing it (which causes the alternating show/hide flicker).
+        if !prefix.is_empty() && list.filtered_indices().is_empty() {
+            app.completion_suppressed_prefix = Some(prefix);
+            return;
+        }
     }
     app.popup = Some(popup);
 }
 
-/// Return the kind badge string for a tree-sitter symbol.
-/// Uses a short icon+text form so different symbol types are visually distinct.
-fn symbol_kind_badge(kind: &str) -> String {
-    match kind {
-        "fn"     => "λ fn",
-        "class"  => "○ class",
-        "struct" => "□ struct",
-        "enum"   => "◇ enum",
-        "trait"  => "◈ trait",
-        "const"  => "# const",
-        "impl"   => "⊕ impl",
-        "method" => "m mth",
-        _        => kind,
-    }
-    .to_owned()
+/// Return the kind badge string for a tree-sitter symbol, using the configured icons map.
+fn symbol_kind_badge(kind: &str, icons: &std::collections::HashMap<String, String>) -> String {
+    icons.get(kind).cloned().unwrap_or_else(|| kind.to_owned())
 }

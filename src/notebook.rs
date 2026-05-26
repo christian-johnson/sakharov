@@ -333,8 +333,9 @@ pub enum Output {
 #[derive(Clone)]
 pub struct MimeData {
     pub text_plain: Option<String>,
-    /// Decoded from base64.
-    pub image_png: Option<Vec<u8>>,
+    /// Decoded from base64.  Wrapped in Arc so passing it through each render
+    /// frame is O(1) (ref-count bump) rather than O(n) (full copy).
+    pub image_png: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +366,7 @@ fn decode_base64(v: &Value) -> Option<Vec<u8>> {
 
 fn parse_mime_data(data: &Value) -> MimeData {
     let text_plain = data.get("text/plain").map(join_source).filter(|s| !s.is_empty());
-    let image_png = data.get("image/png").and_then(decode_base64);
+    let image_png = data.get("image/png").and_then(decode_base64).map(std::sync::Arc::new);
     MimeData { text_plain, image_png }
 }
 
@@ -435,6 +436,30 @@ fn gen_id() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("{:016x}{:016x}", t as u64, n)
+}
+
+// ---------------------------------------------------------------------------
+// Virtual path / directory helpers (shared with exec and notebook_ui)
+// ---------------------------------------------------------------------------
+
+/// Resolve the parent directory of a notebook path, falling back to cwd.
+pub fn notebook_dir(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Build the virtual file path for a single notebook cell.
+/// Used for LSP document identity and for looking up diagnostics.
+pub fn cell_virtual_path(nb_path: &Path, lang: &str, idx: usize) -> PathBuf {
+    let ext = crate::lang::lang_to_ext(lang);
+    let stem = nb_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "notebook".into());
+    let dir = notebook_dir(nb_path);
+    dir.join(format!("{stem}__cell{idx}.{ext}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -621,7 +646,7 @@ impl Notebook {
                     if let Some(bytes) = &data.image_png {
                         d.insert(
                             "image/png".into(),
-                            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes.as_slice())),
                         );
                     }
                     serde_json::json!({ "output_type": "display_data", "data": d, "metadata": {} })
@@ -634,7 +659,7 @@ impl Notebook {
                     if let Some(bytes) = &data.image_png {
                         d.insert(
                             "image/png".into(),
-                            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes.as_slice())),
                         );
                     }
                     serde_json::json!({
@@ -742,7 +767,7 @@ impl Cell {
             self.outputs.push(Output::DisplayData {
                 data: MimeData {
                     text_plain: None,
-                    image_png: Some(image_bytes),
+                    image_png: Some(std::sync::Arc::new(image_bytes)),
                 },
             });
         }

@@ -512,7 +512,10 @@ fn process_message(
                     Some(LspEvent::CompletionResult { items })
                 }
                 PendingKind::Hover => {
-                    parse_hover_result(&result).map(|content| LspEvent::HoverResult { content })
+                    // Always emit an event so the caller can show feedback even
+                    // when the server returns null (no docs for this position).
+                    let content = parse_hover_result(&result).unwrap_or_default();
+                    Some(LspEvent::HoverResult { content })
                 }
                 PendingKind::Definition
                 | PendingKind::TypeDefinition

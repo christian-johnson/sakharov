@@ -12,8 +12,50 @@ relative_line_numbers = false
 scroll_off = 5
 git_gutter = true
 format_on_save = false
+max_undo = 200
+file_picker_max_files = 2000
+file_picker_max_depth = 10
 # file_picker = "yazi --chooser-file=$MJ_PICKER_FILE"
 # file_picker = "find . -type f | fzf"
+
+# UI / interaction settings.
+[ui]
+# Character alphabet for 2-char jump labels (gw mode).
+# List home-row keys first for best ergonomics; all 26 chars are usable.
+# For Dvorak: "aoeuhtns,qjkxbmwvz"
+jump_keys = "asdfghjklqwertyuiopzxcvbnm"
+
+# Maximum items shown at once in the completion / symbol-picker popup.
+completion_list_height = 15
+
+# Maximum lines shown in documentation / hover popups.
+doc_popup_height = 18
+
+# Badge labels shown next to each symbol kind in completion and symbol-picker
+# popups.  Override any entry to use a different icon or text.
+# Set a value to "" to hide the badge for that kind.
+[ui.symbol_icons]
+fn     = "λ fn"
+class  = "○ class"
+struct = "□ struct"
+enum   = "◇ enum"
+trait  = "◈ trait"
+const  = "# const"
+impl   = "⊕ impl"
+method = "m mth"
+var    = "= var"
+
+# Jupyter notebook settings.
+[notebook]
+# Terminal rows reserved per image output (Kitty graphics protocol).
+# Increase if images are clipped at the bottom; decrease for denser cell view.
+image_rows = 12
+
+# Maximum stdout/stderr lines shown per output block before "… N more lines".
+max_output_lines = 20
+
+# Maximum Python traceback lines shown for error outputs.
+max_traceback_lines = 5
 
 # Shell formatters — run a CLI tool on the current file.
 # These take priority over LSP-based formatting (`:fmt`, format_on_save).

@@ -47,19 +47,19 @@ pub(super) fn save_current_special_buffer(app: &mut App) {
 pub fn switch_to_special_buffer(app: &mut App, name: &str) {
     save_current_special_buffer(app);
 
-    // Tear down any open notebook.
+    // Stash any open notebook so edits are preserved if the user comes back.
     if app.notebook.is_some() {
-        notebook::notebook_lsp_close(app);
-        app.notebook = None;
-        app.notebook_cell_edit = None;
+        notebook::stash_current_notebook(app);
     }
 
-    // Close LSP for the current plain-text buffer.
-    if let (Some(ref lang), Some(ref old_path)) =
-        (app.lsp_language.clone(), app.buffer.path.clone())
-    {
-        if !is_special_path(old_path) {
-            app.lsp.did_close(lang, old_path);
+    // Close LSP for the current plain-text buffer (notebooks are handled above).
+    if app.notebook.is_none() {
+        if let (Some(ref lang), Some(ref old_path)) =
+            (app.lsp_language.clone(), app.buffer.path.clone())
+        {
+            if !is_special_path(old_path) {
+                app.lsp.did_close(lang, old_path);
+            }
         }
     }
 
@@ -365,7 +365,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::EnterJumpMode => {
             let positions =
                 jump::visible_word_starts(&app.buffer.rope, app.scroll_row, app.viewport_height);
-            app.jump_labels = jump::generate_labels(&positions);
+            let jump_keys: Vec<char> = app.config.ui.jump_keys.chars().collect();
+            app.jump_labels = jump::generate_labels(&positions, &jump_keys);
             app.jump_typed = String::new();
             app.popup = None;
             app.mode = Mode::Jump;
@@ -624,13 +625,6 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::Quit => {
-            if app.notebook_cell_edit.is_some() && app.notebook.is_some() {
-                app.message = Some(
-                    "Editing a cell — Ctrl+Enter or :close-cell to return, :discard-cell to abandon"
-                        .into(),
-                );
-                return;
-            }
             let modified = if let Some((ref nb, _)) = app.notebook {
                 nb.modified
             } else {
@@ -717,13 +711,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.lsp.did_close(lang, old_path);
             }
 
-            // Remove the closed buffer from the buffer list.
+            // Remove the closed buffer from the buffer list and any stash.
             if let Some(ref p) = path_to_remove {
                 let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
                 app.open_buffers.retain(|stored| {
                     let sc = stored.canonicalize().unwrap_or_else(|_| stored.clone());
                     sc != canon && stored != p
                 });
+                app.notebook_buffers.remove(&canon);
+                app.notebook_buffers.remove(p);
             }
 
             // Pick the next buffer: prefer real files over *Messages*, fall back to *scratch*.
@@ -808,7 +804,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             if let Some((ref nb, ref mut state)) = app.notebook {
                 let last = nb.cells.len().saturating_sub(1);
                 state.focused_cell = (state.focused_cell + 1).min(last);
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
+                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
             }
             notebook::load_focused_cell(app);
             app.mode = Mode::Notebook;
@@ -819,7 +815,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             notebook::save_focused_cell(app);
             if let Some((ref nb, ref mut state)) = app.notebook {
                 state.focused_cell = state.focused_cell.saturating_sub(1);
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
+                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
             }
             notebook::load_focused_cell(app);
             app.mode = Mode::Notebook;
@@ -838,13 +834,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
-        Command::NotebookEnterEdit | Command::NotebookExitEdit => {
-            return;
-        }
         Command::NotebookExecuteCell => {
             notebook::save_focused_cell(app);
             if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let nb_dir = notebook::notebook_dir(&nb.path.clone());
+                let nb_dir = crate::notebook::notebook_dir(&nb.path);
                 if nb.kernel.is_none()
                     || !nb.kernel.as_mut().map(|k| k.is_alive()).unwrap_or(false)
                 {
@@ -887,7 +880,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::NotebookRestartKernel => {
             if let Some((ref mut nb, _)) = app.notebook {
                 nb.kernel = None;
-                let nb_dir = notebook::notebook_dir(&nb.path.clone());
+                let nb_dir = crate::notebook::notebook_dir(&nb.path);
                 match nb.start_kernel(&nb_dir) {
                     Ok(found_venv) => {
                         app.message = Some(if found_venv {
@@ -932,7 +925,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.cells = cells;
                     nb.modified = true;
                     state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
                 }
                 notebook::load_focused_cell(app);
                 notebook::notebook_lsp_reopen(app);
@@ -957,7 +950,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.cells = cells;
                     nb.modified = true;
                     state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
                 }
                 notebook::load_focused_cell(app);
                 notebook::notebook_lsp_reopen(app);
@@ -981,7 +974,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 });
                 state.focused_cell = new_idx;
                 nb.modified = true;
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
+                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
             }
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
@@ -1001,7 +994,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     execution_count: None,
                 });
                 nb.modified = true;
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
+                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
             }
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
@@ -1017,9 +1010,13 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.modified = true;
                     state.focused_cell =
                         state.focused_cell.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope);
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
                 }
             }
+            // Arcs for deleted outputs are freed; clear Kitty cache so stale
+            // pointer keys are never reused.
+            let _ = crate::kitty::clear_images();
+            app.kitty_image_ids.clear();
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
             app.mode = Mode::Notebook;
@@ -1033,6 +1030,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.modified = true;
                 }
             }
+            let _ = crate::kitty::clear_images();
+            app.kitty_image_ids.clear();
             return;
         }
 
@@ -1067,7 +1066,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.mode = Mode::Normal;
             return;
         }
-        Command::NotebookCloseCellEdit | Command::NotebookDiscardCellEdit => {
+        Command::NotebookCloseCellEdit => {
             if let Some(ref mut session) = app.notebook_cell_edit {
                 session.focused_edit = false;
             }
@@ -1300,7 +1299,6 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
         app::CellEditSession,
         buffer::Buffer,
         highlight::Highlighter,
-        lang::lang_to_ext,
         notebook::Notebook,
         notebook_state::NotebookState,
     };
@@ -1308,17 +1306,25 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     // Save scratch content when leaving it.
     save_current_special_buffer(app);
 
-    // Tear down any existing notebook state.
+    // Stash or close whatever is currently open.
     if app.notebook.is_some() {
-        notebook::notebook_lsp_close(app);
-        app.notebook = None;
-        app.notebook_cell_edit = None;
-    }
-    // Close the currently-open plain file from LSP perspective.
-    if let (Some(ref lang), Some(ref old_path)) =
+        notebook::stash_current_notebook(app);
+    } else if let (Some(ref lang), Some(ref old_path)) =
         (app.lsp_language.clone(), app.buffer.path.clone())
     {
-        app.lsp.did_close(lang, old_path);
+        if !is_special_path(old_path) {
+            app.lsp.did_close(lang, old_path);
+        }
+    }
+
+    // Restore from stash if we've visited this notebook before (preserves unsaved edits).
+    if notebook::restore_stashed_notebook(app, path) {
+        register_buffer(&mut app.open_buffers, path);
+        app.message = Some(format!(
+            "Opened {}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+        ));
+        return;
     }
 
     let nb = match Notebook::from_path(path) {
@@ -1330,15 +1336,7 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     };
 
     let lang = nb.metadata.kernel_language.clone();
-    let ext = lang_to_ext(&lang);
-    let stem = nb.path.file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "notebook".into());
-    let dir = nb.path.parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let vpath = dir.join(format!("{stem}__cell0.{ext}"));
+    let vpath = crate::notebook::cell_virtual_path(&nb.path, &lang, 0);
 
     let mut buf = Buffer::new_empty();
     if let Some(cell) = nb.cells.first() {
@@ -1353,8 +1351,6 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
         focused_edit: false,
     });
 
-    let nb_path_canon = nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone());
-
     app.buffer = buf;
     app.notebook = Some((nb, NotebookState::new()));
     app.notebook_cell_edit = session;
@@ -1366,11 +1362,7 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     app.highlighter = Highlighter::new(Some(&vpath));
     recompute_highlights(app);
 
-    if !app.open_buffers.iter().any(|p| {
-        p.canonicalize().unwrap_or_else(|_| p.clone()) == nb_path_canon
-    }) {
-        app.open_buffers.push(nb_path_canon);
-    }
+    register_buffer(&mut app.open_buffers, path);
 
     app.message = Some(format!(
         "Opened {}",
@@ -1505,8 +1497,10 @@ fn open_file_picker_popup(app: &mut App) {
                 .unwrap_or_default()
         });
 
+    let max_files = app.config.editor.file_picker_max_files;
+    let max_depth = app.config.editor.file_picker_max_depth;
     let mut items: Vec<crate::popup::ListItem> = Vec::new();
-    collect_files(&root, &root, &mut items, 0);
+    collect_files(&root, &root, &mut items, 0, max_depth, max_files);
     items.sort_by(|a, b| a.label.cmp(&b.label));
 
     if items.is_empty() {
@@ -1523,10 +1517,10 @@ fn collect_files(
     dir: &std::path::Path,
     items: &mut Vec<crate::popup::ListItem>,
     depth: usize,
+    max_depth: usize,
+    max_files: usize,
 ) {
-    const MAX_DEPTH: usize = 10;
-    const MAX_FILES: usize = 2000;
-    if depth > MAX_DEPTH || items.len() >= MAX_FILES {
+    if depth > max_depth || items.len() >= max_files {
         return;
     }
 
@@ -1536,7 +1530,7 @@ fn collect_files(
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
-        if items.len() >= MAX_FILES {
+        if items.len() >= max_files {
             break;
         }
         let path = entry.path();
@@ -1554,7 +1548,7 @@ fn collect_files(
             ) {
                 continue;
             }
-            collect_files(base, &path, items, depth + 1);
+            collect_files(base, &path, items, depth + 1, max_depth, max_files);
         } else {
             let rel = path.strip_prefix(base).unwrap_or(&path);
             let label = rel.to_string_lossy().into_owned();
@@ -1701,6 +1695,20 @@ fn run_shell_formatter(app: &mut App) -> bool {
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------
+// Buffer list helpers
+// ---------------------------------------------------------------------------
+
+/// Append `path` to `open_buffers` if it is not already present (by canonical path).
+fn register_buffer(open_buffers: &mut Vec<std::path::PathBuf>, path: &std::path::Path) {
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !open_buffers.iter().any(|stored| {
+        stored.canonicalize().unwrap_or_else(|_| stored.clone()) == canon
+    }) {
+        open_buffers.push(canon);
+    }
 }
 
 // ---------------------------------------------------------------------------

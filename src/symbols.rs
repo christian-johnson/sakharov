@@ -10,40 +10,50 @@ pub struct Symbol {
 }
 
 /// Extract top-level symbols from `rope` using tree-sitter.
-/// Returns symbols sorted by line number.  Returns an empty vec for
-/// unsupported languages or when tree-sitter fails to parse.
+/// Returns symbols sorted by line number, deduplicated by name (first
+/// occurrence wins).  Returns an empty vec for unsupported languages or
+/// when tree-sitter fails to parse.
 pub fn extract_symbols(rope: &Rope, language: &str) -> Vec<Symbol> {
     let source = rope.to_string();
-    match language {
+    let mut syms = match language {
         "python" | "python3" => run(
             &source,
             tree_sitter_python::language(),
             // Each pattern corresponds to one entry in `kinds` by index.
             "(function_definition name: (identifier) @name)
-             (class_definition    name: (identifier) @name)",
-            &["fn", "class"],
+             (class_definition    name: (identifier) @name)
+             (assignment          left: (identifier) @name)",
+            &["fn", "class", "var"],
         ),
         "rust" => run(
             &source,
             tree_sitter_rust::language(),
-            "(function_item name: (identifier)      @name)
-             (struct_item   name: (type_identifier) @name)
-             (enum_item     name: (type_identifier) @name)
-             (trait_item    name: (type_identifier) @name)
-             (const_item    name: (identifier)      @name)
-             (impl_item     type: (type_identifier) @name)",
-            &["fn", "struct", "enum", "trait", "const", "impl"],
+            "(function_item   name: (identifier)      @name)
+             (struct_item     name: (type_identifier) @name)
+             (enum_item       name: (type_identifier) @name)
+             (trait_item      name: (type_identifier) @name)
+             (const_item      name: (identifier)      @name)
+             (impl_item       type: (type_identifier) @name)
+             (let_declaration pattern: (identifier)   @name)",
+            &["fn", "struct", "enum", "trait", "const", "impl", "var"],
         ),
         "javascript" | "js" => run(
             &source,
             tree_sitter_javascript::language(),
-            "(function_declaration name: (identifier)         @name)
-             (class_declaration    name: (identifier)         @name)
-             (method_definition    name: (property_identifier) @name)",
-            &["fn", "class", "method"],
+            "(function_declaration name: (identifier)          @name)
+             (class_declaration    name: (identifier)          @name)
+             (method_definition    name: (property_identifier) @name)
+             (lexical_declaration  (variable_declarator name: (identifier) @name))
+             (variable_declaration (variable_declarator name: (identifier) @name))",
+            &["fn", "class", "method", "var", "var"],
         ),
         _ => vec![],
-    }
+    };
+    // Deduplicate by name, keeping the first (lowest-line) occurrence so the
+    // completion list and symbol picker don't repeat the same identifier.
+    let mut seen = std::collections::HashSet::new();
+    syms.retain(|s| seen.insert(s.name.clone()));
+    syms
 }
 
 fn run(
@@ -116,13 +126,25 @@ mod tests {
         let code = "fn foo() {} \nstruct Bar; \nimpl Bar {}";
         let rope = ropey::Rope::from_str(code);
         let syms = extract_symbols(&rope, "rust");
-        assert_eq!(syms.len(), 3);
+        // Dedup by name: Bar appears as struct first, so impl Bar is dropped.
+        assert_eq!(syms.len(), 2);
         assert_eq!(syms[0].name, "foo");
         assert_eq!(syms[0].kind, "fn");
         assert_eq!(syms[1].name, "Bar");
         assert_eq!(syms[1].kind, "struct");
-        assert_eq!(syms[2].name, "Bar");
-        assert_eq!(syms[2].kind, "impl");
+    }
+
+    #[test]
+    fn test_rust_variables() {
+        let code = "fn foo() {\n    let x = 1;\n    let mut y = 2;\n    let x = 3;\n}";
+        let rope = ropey::Rope::from_str(code);
+        let syms = extract_symbols(&rope, "rust");
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foo"));
+        assert!(names.contains(&"x"));
+        assert!(names.contains(&"y"));
+        // Dedup: x is defined twice, only one entry.
+        assert_eq!(names.iter().filter(|&&n| n == "x").count(), 1);
     }
 
     #[test]

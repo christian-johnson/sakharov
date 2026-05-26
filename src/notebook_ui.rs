@@ -15,8 +15,6 @@ use crate::{
     notebook_state::NotebookState,
 };
 
-/// Number of terminal cell rows reserved for each image output.
-const IMAGE_ROWS: u16 = 12;
 
 /// Info about the focused cell that comes from `app.buffer`/`app.selection`.
 pub struct ActiveCellView<'a> {
@@ -37,7 +35,8 @@ pub struct ImageRequest {
     pub col: u16,
     pub row: u16,
     pub rows: u16,
-    pub png_data: Vec<u8>,
+    /// Shared reference to the raw PNG bytes — cloning this is O(1).
+    pub png_data: std::sync::Arc<Vec<u8>>,
 }
 
 /// Render the notebook view into the frame.
@@ -54,6 +53,7 @@ pub fn render(
     nb: &Notebook,
     active: &ActiveCellView<'_>,
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
+    nb_config: &crate::config::NotebookConfig,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let size = frame.area();
     if size.height < 3 {
@@ -68,7 +68,7 @@ pub fn render(
         height: size.height.saturating_sub(2),
     };
 
-    render_cells(frame, state, nb, active, lsp_diagnostics, content_area)
+    render_cells(frame, state, nb, active, lsp_diagnostics, content_area, nb_config)
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +82,7 @@ fn render_cells(
     active: &ActiveCellView<'_>,
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     area: Rect,
+    nb_config: &crate::config::NotebookConfig,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let mut image_requests = Vec::new();
     let mut current_row = area.top();
@@ -112,9 +113,9 @@ fn render_cells(
         let cell_height = if is_folded {
             3u16.min(remaining) // border-top + 1 summary line + border-bottom
         } else if is_focused {
-            focused_cell_display_height(active.rope, cell).min(remaining)
+            focused_cell_display_height(active.rope, cell, nb_config.image_rows).min(remaining)
         } else {
-            cell_display_height(cell).min(remaining)
+            cell_display_height(cell, nb_config.image_rows).min(remaining)
         };
 
         let cell_rect = Rect {
@@ -158,7 +159,7 @@ fn render_cells(
             } else {
                 let cursor_screen = render_cell_content(
                     frame, nb, cell, cell_idx, is_focused, inner, active,
-                    lsp_diagnostics, &mut image_requests, &mut shared_hl,
+                    lsp_diagnostics, &mut image_requests, &mut shared_hl, nb_config,
                 );
                 if is_focused {
                     focused_cell_screen_pos = cursor_screen;
@@ -191,16 +192,16 @@ fn render_cell_content(
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     image_requests: &mut Vec<ImageRequest>,
     highlighter: &mut Highlighter,
+    nb_config: &crate::config::NotebookConfig,
 ) -> Option<(u16, u16)> {
     // For the focused cell, use the live buffer rope; otherwise use stored source.
-    let rope_storage;
-    let (rope, cursor_char_idx, sel_range, scroll_row) = if is_focused {
+    let rope: &ropey::Rope = if is_focused { active.rope } else { &cell.source };
+    let (cursor_char_idx, sel_range, scroll_row) = if is_focused {
         let lo = active.cursor.min(active.sel_anchor);
         let hi = active.cursor.max(active.sel_anchor);
-        (active.rope, Some(active.cursor), (lo, hi), active.scroll_row)
+        (Some(active.cursor), (lo, hi), active.scroll_row)
     } else {
-        rope_storage = cell.source.clone();
-        (&rope_storage, None, (0usize, 0usize), 0usize)
+        (None, (0usize, 0usize), 0usize)
     };
 
     let source_text = rope.to_string();
@@ -219,16 +220,9 @@ fn render_cell_content(
     // Collect diagnostics for this cell's virtual path (e.g. notebook__cell0.py).
     // Format: (line_within_cell, col_start, col_end, severity).
     let cell_diag_ranges: Vec<(usize, usize, usize, DiagnosticSeverity)> = {
-        let lang = &nb.metadata.kernel_language;
-        let ext = lang_to_ext(lang);
-        let stem = nb.path.file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "notebook".into());
-        let dir = nb.path.parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let vpath = dir.join(format!("{stem}__cell{cell_idx}.{ext}"));
+        let vpath = crate::notebook::cell_virtual_path(
+            &nb.path, &nb.metadata.kernel_language, cell_idx,
+        );
         let key = vpath.to_string_lossy().to_string();
         lsp_diagnostics
             .get(&key)
@@ -308,7 +302,7 @@ fn render_cell_content(
             if current_row >= area.bottom() {
                 break;
             }
-            render_output(frame, output, area, &mut current_row, image_requests);
+            render_output(frame, output, area, &mut current_row, image_requests, nb_config);
         }
     }
 
@@ -374,28 +368,28 @@ fn render_folded_cell_summary_rope(
 // Cell height / colour helpers
 // ---------------------------------------------------------------------------
 
-pub fn cell_display_height(cell: &Cell) -> u16 {
+pub fn cell_display_height(cell: &Cell, image_rows: u16) -> u16 {
     // len_lines() is O(1) on a Rope; avoids the O(n) to_string() conversion.
     let source_lines = cell.source.len_lines().max(1) as u16;
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
-        1 + cell.outputs.iter().map(single_output_height_count).sum::<u16>()
+        1 + cell.outputs.iter().map(|o| single_output_height_count(o, image_rows)).sum::<u16>()
     } else {
         0
     };
     2 + source_lines + output_h // 2 = top border + bottom border
 }
 
-pub fn focused_cell_display_height(rope: &ropey::Rope, cell: &Cell) -> u16 {
+pub fn focused_cell_display_height(rope: &ropey::Rope, cell: &Cell, image_rows: u16) -> u16 {
     let source_lines = rope.len_lines().max(1) as u16;
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
-        1 + cell.outputs.iter().map(single_output_height_count).sum::<u16>()
+        1 + cell.outputs.iter().map(|o| single_output_height_count(o, image_rows)).sum::<u16>()
     } else {
         0
     };
     2 + source_lines + output_h
 }
 
-fn single_output_height_count(output: &Output) -> u16 {
+fn single_output_height_count(output: &Output, image_rows: u16) -> u16 {
     match output {
         Output::Stream { text, .. } => {
             let n = text.lines().count();
@@ -405,7 +399,7 @@ fn single_output_height_count(output: &Output) -> u16 {
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
             if data.image_png.is_some() {
-                IMAGE_ROWS
+                image_rows
             } else {
                 data.text_plain
                     .as_deref()
@@ -548,6 +542,7 @@ fn render_output(
     area: Rect,
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
+    nb_config: &crate::config::NotebookConfig,
 ) {
     match output {
         Output::Stream { name, text } => {
@@ -557,7 +552,7 @@ fn render_output(
                 Style::default()
             };
             let lines: Vec<&str> = text.lines().collect();
-            let max_lines = 20usize;
+            let max_lines = nb_config.max_output_lines;
             let to_show = lines.len().min(max_lines);
             for line in &lines[..to_show] {
                 if *current_row >= area.bottom() {
@@ -588,7 +583,7 @@ fn render_output(
         }
 
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-            render_mime_data(frame, data, area, current_row, image_requests);
+            render_mime_data(frame, data, area, current_row, image_requests, nb_config.image_rows);
         }
 
         Output::Error { ename, evalue, traceback } => {
@@ -603,7 +598,7 @@ fn render_output(
                 );
                 *current_row += 1;
             }
-            for tb_line in traceback.iter().take(5) {
+            for tb_line in traceback.iter().take(nb_config.max_traceback_lines) {
                 if *current_row >= area.bottom() {
                     break;
                 }
@@ -627,11 +622,12 @@ fn render_mime_data(
     area: Rect,
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
+    image_rows: u16,
 ) {
     if let Some(png) = &data.image_png {
-        // Reserve IMAGE_ROWS rows so the Kitty render can't overlap the next cell.
+        // Reserve `image_rows` rows so the Kitty render can't overlap the next cell.
         let available = area.bottom().saturating_sub(*current_row);
-        let reserved = IMAGE_ROWS.min(available);
+        let reserved = image_rows.min(available);
         if reserved > 0 {
             let image_top = *current_row;
             // Draw a dark placeholder block; Kitty will paint over it.

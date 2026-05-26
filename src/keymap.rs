@@ -282,6 +282,9 @@ impl Keymap {
         notebook.insert(KeyBinding::char('i'), vec![Command::EnterInsert]);
         notebook.insert(KeyBinding::char('v'), vec![Command::EnterNormal]);
 
+        // g-prefix: same goto-mode as normal editing (LSP goto-def, hover, etc.)
+        notebook.insert(KeyBinding::char('g'), vec![Command::EnterGotoMode]);
+
         // Cell management
         notebook.insert(KeyBinding::char('o'), vec![Command::NotebookNewCellBelow]);
         notebook.insert(KeyBinding::char('O'), vec![Command::NotebookNewCellAbove]);
@@ -320,12 +323,10 @@ impl Keymap {
         self.notebook.get(kb).map(Vec::as_slice)
     }
 
-    #[allow(dead_code)]
     pub fn set_normal(&mut self, kb: KeyBinding, cmds: Vec<Command>) {
         self.normal.insert(kb, cmds);
     }
 
-    #[allow(dead_code)]
     pub fn set_select(&mut self, kb: KeyBinding, cmds: Vec<Command>) {
         self.select.insert(kb, cmds);
     }
@@ -334,14 +335,14 @@ impl Keymap {
         for (key_str, cmd_str) in &keys.normal {
             if let Some(kb) = KeyBinding::parse(key_str) {
                 if let Some(cmd) = Command::parse(cmd_str) {
-                    self.normal.insert(kb, vec![cmd]);
+                    self.set_normal(kb, vec![cmd]);
                 }
             }
         }
         for (key_str, cmd_str) in &keys.select {
             if let Some(kb) = KeyBinding::parse(key_str) {
                 if let Some(cmd) = Command::parse(cmd_str) {
-                    self.select.insert(kb, vec![cmd]);
+                    self.set_select(kb, vec![cmd]);
                 }
             }
         }

@@ -1,12 +1,5 @@
 use ropey::Rope;
 
-/// Keys used for labels, ordered ergonomically (home row first).
-pub const JUMP_KEYS: &[char] = &[
-    'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l',
-    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p',
-    'z', 'x', 'c', 'v', 'b', 'n', 'm',
-];
-
 /// Collect char-index positions of every jump target in the visible row range.
 ///
 /// A jump target is defined as the first non-whitespace character after a run
@@ -35,16 +28,20 @@ pub fn visible_word_starts(rope: &Rope, scroll_row: usize, visible_rows: usize) 
     positions
 }
 
-/// Assign 2-char labels to positions (up to 27² = 729 targets).
-pub fn generate_labels(positions: &[usize]) -> Vec<(usize, String)> {
-    let k = JUMP_KEYS.len();
+/// Assign 2-char labels to positions using the given key alphabet.
+/// Supports up to `keys.len()²` targets (26 keys → 676 targets).
+pub fn generate_labels(positions: &[usize], keys: &[char]) -> Vec<(usize, String)> {
+    if keys.is_empty() {
+        return vec![];
+    }
+    let k = keys.len();
     positions
         .iter()
         .take(k * k)
         .enumerate()
         .map(|(i, &pos)| {
-            let first = JUMP_KEYS[i / k];
-            let second = JUMP_KEYS[i % k];
+            let first = keys[i / k];
+            let second = keys[i % k];
             (pos, format!("{first}{second}"))
         })
         .collect()

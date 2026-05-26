@@ -10,6 +10,10 @@ pub struct Config {
     pub theme: ThemeConfig,
     pub editor: EditorConfig,
     #[serde(default)]
+    pub ui: UiConfig,
+    #[serde(default)]
+    pub notebook: NotebookConfig,
+    #[serde(default)]
     pub keys: KeysConfig,
     /// Language server definitions, keyed by language id (e.g. "python", "rust").
     #[serde(default)]
@@ -65,6 +69,104 @@ pub struct EditorConfig {
     /// Run the language server's formatter before each `:w` / `:wq` save.
     #[serde(default)]
     pub format_on_save: bool,
+    /// Maximum undo steps kept per buffer. Oldest steps are evicted when the
+    /// limit is reached.
+    #[serde(default = "default_max_undo")]
+    pub max_undo: usize,
+    /// Maximum number of files indexed by the built-in file picker (Ctrl+O
+    /// without an external `file_picker` command configured).
+    #[serde(default = "default_file_picker_max_files")]
+    pub file_picker_max_files: usize,
+    /// Maximum directory depth explored by the built-in file picker.
+    #[serde(default = "default_file_picker_max_depth")]
+    pub file_picker_max_depth: usize,
+}
+
+fn default_max_undo() -> usize { 200 }
+fn default_file_picker_max_files() -> usize { 2000 }
+fn default_file_picker_max_depth() -> usize { 10 }
+
+/// UI / interaction configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct UiConfig {
+    /// Character alphabet used to generate 2-char jump labels (gw / `EnterJumpMode`).
+    /// The first characters are preferred for the closest targets, so put your
+    /// home-row keys first for best ergonomics.
+    #[serde(default = "default_jump_keys")]
+    pub jump_keys: String,
+    /// Maximum items visible in the completion / symbol-picker popup at once.
+    /// Increase if you have a tall terminal and want to see more candidates.
+    #[serde(default = "default_completion_list_height")]
+    pub completion_list_height: u16,
+    /// Maximum lines shown in documentation / hover popups.
+    #[serde(default = "default_doc_popup_height")]
+    pub doc_popup_height: u16,
+    /// Display label shown next to each symbol kind in the completion and
+    /// symbol-picker popups.  Override any key to change its badge.
+    ///
+    /// Known keys: fn, class, struct, enum, trait, const, impl, method, var.
+    /// Any unknown key falls back to the raw kind string.
+    #[serde(default = "default_symbol_icons")]
+    pub symbol_icons: HashMap<String, String>,
+}
+
+fn default_jump_keys() -> String {
+    "asdfghjklqwertyuiopzxcvbnm".into()
+}
+fn default_completion_list_height() -> u16 { 15 }
+fn default_doc_popup_height() -> u16 { 18 }
+fn default_symbol_icons() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("fn".into(),     "λ fn".into());
+    m.insert("class".into(),  "○ class".into());
+    m.insert("struct".into(), "□ struct".into());
+    m.insert("enum".into(),   "◇ enum".into());
+    m.insert("trait".into(),  "◈ trait".into());
+    m.insert("const".into(),  "# const".into());
+    m.insert("impl".into(),   "⊕ impl".into());
+    m.insert("method".into(), "m mth".into());
+    m.insert("var".into(),    "= var".into());
+    m
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            jump_keys: default_jump_keys(),
+            completion_list_height: default_completion_list_height(),
+            doc_popup_height: default_doc_popup_height(),
+            symbol_icons: default_symbol_icons(),
+        }
+    }
+}
+
+/// Notebook-specific configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct NotebookConfig {
+    /// Terminal rows reserved for each image output block (Kitty graphics protocol).
+    /// Increase if images are getting clipped; decrease to show more cells on screen.
+    #[serde(default = "default_image_rows")]
+    pub image_rows: u16,
+    /// Maximum stdout/stderr lines shown per output block before truncation.
+    #[serde(default = "default_max_output_lines")]
+    pub max_output_lines: usize,
+    /// Maximum Python traceback lines shown per error output.
+    #[serde(default = "default_max_traceback_lines")]
+    pub max_traceback_lines: usize,
+}
+
+fn default_image_rows() -> u16 { 12 }
+fn default_max_output_lines() -> usize { 20 }
+fn default_max_traceback_lines() -> usize { 5 }
+
+impl Default for NotebookConfig {
+    fn default() -> Self {
+        Self {
+            image_rows: default_image_rows(),
+            max_output_lines: default_max_output_lines(),
+            max_traceback_lines: default_max_traceback_lines(),
+        }
+    }
 }
 
 /// Configuration for a shell-based document formatter.

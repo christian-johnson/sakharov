@@ -9,7 +9,12 @@ use ratatui::{
 use crate::popup::{match_positions, KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize};
 
 /// Render a popup on top of the current frame.
-pub fn render(frame: &mut Frame, popup: &Popup, cursor_screen: Option<(u16, u16)>) {
+pub fn render(
+    frame: &mut Frame,
+    popup: &Popup,
+    cursor_screen: Option<(u16, u16)>,
+    ui_config: &crate::config::UiConfig,
+) {
     let term = frame.area();
     if term.width < 10 || term.height < 4 {
         return;
@@ -17,7 +22,7 @@ pub fn render(frame: &mut Frame, popup: &Popup, cursor_screen: Option<(u16, u16)
 
     let popup_width = compute_width(popup, term.width);
 
-    let popup_height = compute_height(popup);
+    let popup_height = compute_height(popup, ui_config);
 
     let popup_rect = compute_rect(popup, term, popup_width, popup_height, cursor_screen);
 
@@ -92,16 +97,16 @@ fn compute_width(popup: &Popup, term_width: u16) -> u16 {
     }
 }
 
-fn compute_height(popup: &Popup) -> u16 {
+fn compute_height(popup: &Popup, ui_config: &crate::config::UiConfig) -> u16 {
     match &popup.content {
         PopupContent::List(s) => {
             let filtered = s.filtered_indices().len();
-            let items_shown = filtered.min(15) as u16;
+            let items_shown = filtered.min(ui_config.completion_list_height as usize) as u16;
             // 2 borders + 1 filter row + 1 separator + items
             (2 + 1 + 1 + items_shown).min(22).max(5)
         }
         PopupContent::Text(s) => {
-            let lines_shown = s.lines.len().min(18) as u16;
+            let lines_shown = s.lines.len().min(ui_config.doc_popup_height as usize) as u16;
             (2 + lines_shown).max(4)
         }
         PopupContent::KeyHints(s) => (s.hints.len() as u16 + 2).max(3),

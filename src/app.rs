@@ -94,6 +94,11 @@ pub struct App {
     pub notebook: Option<(Notebook, NotebookState)>,
     /// Image draw requests collected by the last notebook render pass.
     pub pending_images: Vec<ImageRequest>,
+    /// Maps Arc-pointer-as-usize → Kitty image ID so pixel data is uploaded
+    /// only once.  Cleared whenever notebook outputs change structurally.
+    pub kitty_image_ids: std::collections::HashMap<usize, u32>,
+    /// Counter for assigning unique Kitty image IDs.
+    pub next_kitty_id: u32,
     /// Tracks which cell is loaded in `buffer` and whether the full-screen
     /// overlay is active. Always `Some` while a notebook is open.
     pub notebook_cell_edit: Option<CellEditSession>,
@@ -146,6 +151,16 @@ pub struct App {
     pub special_buffer_ropes: std::collections::HashMap<String, ropey::Rope>,
     /// When true, the next `FormattingResult` event will also trigger a save.
     pub pending_format_save: bool,
+    /// Word prefix at which the last completion popup was dismissed due to no
+    /// matches.  While the current prefix extends this value, we skip firing new
+    /// completion requests — typing more characters can only reduce results further.
+    /// Cleared on Backspace, non-identifier chars, and trigger chars (`.` / `:`).
+    pub completion_suppressed_prefix: Option<String>,
+    /// In-memory stash of notebooks that have been navigated away from.
+    /// Keyed by the canonicalized `.ipynb` path.  When the user navigates back
+    /// to a notebook, its state is restored from here rather than reloading from
+    /// disk, so unsaved edits are preserved across buffer switches.
+    pub notebook_buffers: std::collections::HashMap<std::path::PathBuf, (Notebook, NotebookState)>,
 }
 
 impl App {
@@ -266,6 +281,8 @@ impl App {
             keymap,
             notebook,
             pending_images: Vec::new(),
+            kitty_image_ids: std::collections::HashMap::new(),
+            next_kitty_id: 1,
             notebook_cell_edit,
             popup: None,
             lsp: LspManager::new(),
@@ -291,6 +308,8 @@ impl App {
             messages_log: Vec::new(),
             last_logged_message: None,
             pending_format_save: false,
+            completion_suppressed_prefix: None,
+            notebook_buffers: std::collections::HashMap::new(),
             special_buffer_ropes: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
@@ -324,6 +343,8 @@ pub fn run(path: Option<&str>) -> Result<()> {
         toml::from_str(include_str!("../config/default.toml"))
             .expect("default config must parse")
     });
+
+    crate::buffer::configure_max_undo(config.editor.max_undo);
 
     let mut app = App::new(path, config)?;
 
@@ -439,7 +460,7 @@ fn run_loop(
                             mode: &app.mode,
                         };
                         let (images, cursor_pos) =
-                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics);
+                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook);
                         app.pending_images = images;
                         nb_cursor = cursor_pos;
 
@@ -463,21 +484,37 @@ fn run_loop(
                     }
                 }
                 if let Some(ref popup) = app.popup {
-                    crate::popup_ui::render(f, popup, nb_cursor);
+                    crate::popup_ui::render(f, popup, nb_cursor, &app.config.ui);
                 }
             })?;
 
-            if !app.pending_images.is_empty() {
+            // Clear all existing Kitty placements so images that scrolled off
+            // screen (or were replaced) disappear.  q=2 in clear_images() ensures
+            // no OK response is sent back through stdin.
+            if !app.pending_images.is_empty() || !app.kitty_image_ids.is_empty() {
                 let _ = kitty::clear_images();
+            }
 
-                if app.popup.is_none() {
-                    let images = std::mem::take(&mut app.pending_images);
-                    for req in &images {
-                        let _ = kitty::render_image(req.col, req.row, req.rows, &req.png_data);
+            if !app.pending_images.is_empty() && app.popup.is_none() {
+                let images = std::mem::take(&mut app.pending_images);
+                for req in &images {
+                    // Use the Arc pointer as a stable identity key.  Safe
+                    // because we clear kitty_image_ids whenever outputs are
+                    // structurally mutated (cells deleted, outputs cleared).
+                    let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
+                    if let Some(&kid) = app.kitty_image_ids.get(&ptr_key) {
+                        // Pixel data already uploaded — re-place with tiny cmd.
+                        let _ = kitty::place_image(req.col, req.row, kid, req.rows);
+                    } else {
+                        // First render of this image — upload pixel data once.
+                        let kid = app.next_kitty_id;
+                        app.next_kitty_id = if app.next_kitty_id == u32::MAX { 1 } else { app.next_kitty_id + 1 };
+                        let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, &req.png_data);
+                        app.kitty_image_ids.insert(ptr_key, kid);
                     }
-                } else {
-                    app.pending_images.clear();
                 }
+            } else {
+                app.pending_images.clear();
             }
         } else {
             // Plain text editor or full-screen focused-cell overlay.
@@ -485,7 +522,7 @@ fn run_loop(
                 ui::render(f, app);
                 if let Some(ref popup) = app.popup {
                     let cursor_pos = ui::cursor_screen_pos(app, f.area());
-                    crate::popup_ui::render(f, popup, cursor_pos);
+                    crate::popup_ui::render(f, popup, cursor_pos, &app.config.ui);
                 }
             })?;
         }

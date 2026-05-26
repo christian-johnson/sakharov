@@ -96,8 +96,6 @@ pub enum Command {
     NotebookScrollUp,
 
     // Notebook editing
-    NotebookEnterEdit,
-    NotebookExitEdit,
     NotebookExecuteCell,
     NotebookExecuteAndAdvance,
     NotebookNewCellBelow,
@@ -118,8 +116,6 @@ pub enum Command {
     NotebookOpenCellEdit,
     /// Save cell content back to notebook and close the overlay.
     NotebookCloseCellEdit,
-    /// Abandon edits and close the overlay without writing back.
-    NotebookDiscardCellEdit,
 
     // Notebook
     /// Enter Notebook navigation mode (cell-level j/k/o/e/d bindings).
@@ -257,8 +253,6 @@ impl Command {
             Command::NotebookPrevCell => "notebook-prev-cell",
             Command::NotebookScrollDown => "notebook-scroll-down",
             Command::NotebookScrollUp => "notebook-scroll-up",
-            Command::NotebookEnterEdit => "notebook-enter-edit",
-            Command::NotebookExitEdit => "notebook-exit-edit",
             Command::NotebookExecuteCell => "notebook-execute-cell",
             Command::NotebookExecuteAndAdvance => "notebook-execute-and-advance",
             Command::NotebookNewCellBelow => "notebook-new-cell-below",
@@ -271,7 +265,6 @@ impl Command {
             Command::NotebookRedoStructural => "notebook-redo-structural",
             Command::NotebookOpenCellEdit => "notebook-open-cell-edit",
             Command::NotebookCloseCellEdit => "notebook-close-cell-edit",
-            Command::NotebookDiscardCellEdit => "notebook-discard-cell-edit",
             Command::EnterNotebook => "enter-notebook",
             Command::SearchForward => "search-forward",
             Command::SearchBackward => "search-backward",
@@ -421,8 +414,6 @@ impl Command {
             "notebook-prev-cell"             => Some(Command::NotebookPrevCell),
             "notebook-scroll-down"           => Some(Command::NotebookScrollDown),
             "notebook-scroll-up"             => Some(Command::NotebookScrollUp),
-            "notebook-enter-edit"            => Some(Command::NotebookEnterEdit),
-            "notebook-exit-edit"             => Some(Command::NotebookExitEdit),
             "notebook-execute-cell" | "run"  => Some(Command::NotebookExecuteCell),
             "notebook-execute-and-advance" | "run-next" => Some(Command::NotebookExecuteAndAdvance),
             "notebook-new-cell-below" | "new-cell" => Some(Command::NotebookNewCellBelow),
@@ -440,11 +431,9 @@ impl Command {
             "notebook-open-cell-edit" | "open-cell" | "edit-cell" => {
                 Some(Command::NotebookOpenCellEdit)
             }
-            "notebook-close-cell-edit" | "close-cell" => {
+            "notebook-close-cell-edit" | "close-cell"
+            | "notebook-discard-cell-edit" | "discard-cell" => {
                 Some(Command::NotebookCloseCellEdit)
-            }
-            "notebook-discard-cell-edit" | "discard-cell" => {
-                Some(Command::NotebookDiscardCellEdit)
             }
 
             // Notebook mode

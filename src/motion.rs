@@ -3,8 +3,24 @@ use ropey::Rope;
 use crate::selection::Selection;
 
 /// Returns true if `c` is a word character (alphanumeric or `_`).
-fn word_char(c: char) -> bool {
+pub(crate) fn word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Return the char index of the start of the word ending at `pos`.
+pub(crate) fn word_start_at(rope: &Rope, pos: usize) -> usize {
+    let mut i = pos;
+    while i > 0 {
+        let c = rope.char(i - 1);
+        if word_char(c) { i -= 1; } else { break; }
+    }
+    i
+}
+
+/// Return the word prefix (alphanumeric / `_` chars) immediately before `pos`.
+pub(crate) fn word_prefix_at(rope: &Rope, pos: usize) -> String {
+    let start = word_start_at(rope, pos);
+    rope.slice(start..pos).to_string()
 }
 
 /// Returns true if `c` is a WORD character (any non-whitespace).
