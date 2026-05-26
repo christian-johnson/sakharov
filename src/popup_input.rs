@@ -18,10 +18,70 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         return PopupAction::DismissPassthrough;
     }
 
-    // Completion popups (InsertText) are "soft": only navigation keys are
-    // captured.  Any other key dismisses the popup and falls through to normal
-    // handling so that typing into the buffer continues uninterrupted.
     let is_completion = popup.on_confirm == PopupTarget::InsertText;
+
+    // Completion popups use a passive → focused two-state model.
+    //
+    // Passive (default): the popup is a hint overlay; all keys fall through
+    // to insert mode so Enter inserts a newline, typed chars update the buffer,
+    // etc.  Press Tab to engage with the list.
+    //
+    // Focused (after Tab): navigation keys are captured.  Press Tab or Esc to
+    // dismiss and return to plain insert mode.
+    if is_completion {
+        if let PopupContent::List(ref mut list) = popup.content {
+            if list.focused {
+                return match key.code {
+                    // Tab or Esc → cancel, return to passive insert mode.
+                    KeyCode::Esc | KeyCode::Tab => {
+                        list.focused = false;
+                        PopupAction::Dismiss
+                    }
+                    // Plain Enter → confirm the selected item.
+                    KeyCode::Enter if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(item) = list.selected_item() {
+                            let text = item.payload.as_deref().unwrap_or(&item.label).to_owned();
+                            PopupAction::Confirm(text)
+                        } else {
+                            PopupAction::Dismiss
+                        }
+                    }
+                    // Navigation keys.
+                    KeyCode::Down => { list.move_down(); PopupAction::Continue }
+                    KeyCode::Up | KeyCode::BackTab => { list.move_up(); PopupAction::Continue }
+                    KeyCode::Char('j') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        list.move_down(); PopupAction::Continue
+                    }
+                    KeyCode::Char('k') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        list.move_up(); PopupAction::Continue
+                    }
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        list.move_down(); PopupAction::Continue
+                    }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        list.move_up(); PopupAction::Continue
+                    }
+                    // Any other key: deactivate popup and let the key reach insert mode.
+                    _ => {
+                        list.focused = false;
+                        PopupAction::ClosePassthrough
+                    }
+                };
+            } else {
+                // Passive mode.
+                return match key.code {
+                    // Tab → engage with the popup.
+                    KeyCode::Tab => {
+                        list.focused = true;
+                        PopupAction::Continue
+                    }
+                    // All other keys fall through so insert mode works normally.
+                    _ => PopupAction::DismissPassthrough,
+                };
+            }
+        }
+        return PopupAction::DismissPassthrough;
+    }
 
     // Two-phase list: ESC transitions typing → navigating; second ESC dismisses.
     if let PopupContent::List(ref mut s) = popup.content {
@@ -62,8 +122,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         KeyCode::Enter => match &popup.content {
             PopupContent::List(state) => {
                 if let Some(item) = state.selected_item() {
-                    // Return payload when present (navigate/location pickers),
-                    // otherwise fall back to the label (command palette, completion).
                     let text = item.payload.as_deref().unwrap_or(&item.label).to_owned();
                     PopupAction::Confirm(text)
                 } else {
@@ -107,38 +165,22 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         }
 
         KeyCode::Backspace => {
-            if is_completion {
-                // Let the backspace reach handle_insert to delete the character.
-                PopupAction::DismissPassthrough
-            } else {
-                if let PopupContent::List(ref mut s) = popup.content {
-                    s.pop_filter_char();
-                }
-                PopupAction::Continue
+            if let PopupContent::List(ref mut s) = popup.content {
+                s.pop_filter_char();
             }
+            PopupAction::Continue
         }
 
         KeyCode::Char(c)
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
-            if is_completion {
-                // Let the character reach handle_insert so the buffer updates.
-                PopupAction::DismissPassthrough
-            } else {
-                if let PopupContent::List(ref mut s) = popup.content {
-                    s.push_filter_char(c);
-                }
-                PopupAction::Continue
+            if let PopupContent::List(ref mut s) = popup.content {
+                s.push_filter_char(c);
             }
+            PopupAction::Continue
         }
 
-        _ => {
-            if is_completion {
-                PopupAction::DismissPassthrough
-            } else {
-                PopupAction::Continue
-            }
-        }
+        _ => PopupAction::Continue,
     }
 }

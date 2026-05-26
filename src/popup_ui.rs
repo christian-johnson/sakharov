@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::popup::{match_positions, KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize};
+use crate::popup::{match_positions, KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize, PopupTarget};
 
 /// Render a popup on top of the current frame.
 pub fn render(
@@ -170,8 +170,22 @@ fn render_list_popup(
     state: &crate::popup::ListState,
     rect: Rect,
 ) {
-    // Draw the border block.
-    let block = build_block(popup);
+    let is_focused_completion = popup.on_confirm == PopupTarget::InsertText && state.focused;
+
+    // Draw the border block — brighter border when the completion popup is focused.
+    let block = if is_focused_completion {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Rgb(80, 180, 255)))
+            .style(Style::default().bg(Color::Rgb(28, 28, 40)));
+        match &popup.title {
+            Some(t) => block.title(format!(" {t} ")),
+            None => block,
+        }
+    } else {
+        build_block(popup)
+    };
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -181,7 +195,8 @@ fn render_list_popup(
 
     let buf = frame.buffer_mut();
 
-    // Row 0: filter input "  > {filter}" or navigation hint
+    // Row 0: filter input "  > {filter}", navigation hint (two-phase / focused completion),
+    // or passive-completion hint.
     let filter_y = inner.top();
     {
         let mut x = inner.left();
@@ -191,8 +206,18 @@ fn render_list_popup(
                 .set_char(' ')
                 .set_style(Style::default().bg(Color::Rgb(28, 28, 40)));
         }
-        if state.navigating {
-            // Navigation mode: show a hint instead of the cursor
+        if is_focused_completion {
+            // Focused completion: navigation hint replaces the filter row.
+            let hint = "  \u{2191}\u{2193}/j/k navigate  \u{23ce} accept  Tab/Esc cancel";
+            for c in hint.chars() {
+                if x >= inner.right() { break; }
+                buf[(x, filter_y)]
+                    .set_char(c)
+                    .set_style(Style::default().fg(Color::Rgb(120, 160, 220)).bg(Color::Rgb(28, 28, 40)));
+                x += 1;
+            }
+        } else if state.navigating {
+            // Two-phase navigation mode: show a hint instead of the cursor
             let hint = format!("  j/k navigate · i to type · esc to close · {}", state.filter);
             for c in hint.chars() {
                 if x >= inner.right() { break; }
@@ -219,7 +244,7 @@ fn render_list_popup(
                     .set_style(Style::default().fg(Color::White).bg(Color::Rgb(28, 28, 40)));
                 x += 1;
             }
-            // Cursor block
+            // Cursor block (passive completion or command palette etc.)
             if x < inner.right() {
                 buf[(x, filter_y)]
                     .set_char(' ')

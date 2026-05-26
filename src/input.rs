@@ -35,6 +35,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 // fall through
             }
+            PopupAction::ClosePassthrough => {
+                // Always close (even for completion), then let the key fall through.
+                app.popup = None;
+                // fall through
+            }
             PopupAction::Confirm(text) => {
                 let target = app.popup.as_ref().map(|p| p.on_confirm.clone());
                 app.popup = None;

@@ -67,8 +67,10 @@ pub enum PopupAction {
     Continue,
     /// Popup closes, key is consumed.
     Dismiss,
-    /// Popup closes, key is NOT consumed (falls through to normal handler).
+    /// Popup stays alive (completion) or closes (other), key falls through to normal handler.
     DismissPassthrough,
+    /// Popup always closes immediately; key falls through to normal handler.
+    ClosePassthrough,
     /// Popup closes, caller should act on the payload.
     Confirm(String),
 }
@@ -87,6 +89,10 @@ pub struct ListState {
     /// True once the user has pressed ESC in a two_phase popup.
     /// In this mode printable keys navigate (j/k) instead of updating the filter.
     pub navigating: bool,
+    /// For completion (InsertText) popups: true once the user has pressed Tab
+    /// to explicitly engage with the list. In passive mode (focused=false) the
+    /// popup is a hint overlay and all keys fall through to insert mode.
+    pub focused: bool,
 }
 
 pub struct ListItem {
@@ -385,6 +391,7 @@ impl Popup {
                 selected: 0,
                 two_phase: false,
                 navigating: false,
+                focused: false,
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.55),
@@ -403,6 +410,7 @@ impl Popup {
                 selected: 0,
                 two_phase: false,
                 navigating: false,
+                focused: false,
             }),
             anchor: PopupAnchor::CursorBelow,
             width: PopupSize::Auto,
@@ -435,6 +443,7 @@ impl Popup {
                 selected: 0,
                 two_phase: false,
                 navigating: false,
+                focused: false,
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.65),
@@ -452,6 +461,7 @@ impl Popup {
                 selected: 0,
                 two_phase: true,
                 navigating: false,
+                focused: false,
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.75),
@@ -469,6 +479,7 @@ impl Popup {
                 selected: 0,
                 two_phase: false,
                 navigating: false,
+                focused: false,
             }),
             anchor: PopupAnchor::CursorBelow,
             width: PopupSize::FractionOfScreen(0.5),
