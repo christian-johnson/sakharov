@@ -19,12 +19,10 @@ __Until a version 1.0 is released, breaking changes and instability are to be ex
 [Screencast_20260527_121149.webm](https://github.com/user-attachments/assets/a767a1f7-6535-4f34-a0d3-0d5594fc00ba)
 This screenshot shows some of `majorana`'s features: a command palette with fuzzy matching, LSP documentation lookup & code actions, format-on-save, etc.
 
----
 ## Etymology
 Ettore Majorana was a renowned Italian physicist who was the first to propose that fermions could be their own antiparticles. 
 Neat stuff! 
 I decided to name this repo after him. 
----
 
 ## Installation
 
