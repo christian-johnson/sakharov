@@ -32,10 +32,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         if let PopupContent::List(ref mut list) = popup.content {
             if list.focused {
                 return match key.code {
-                    // Tab or Esc → cancel, return to passive insert mode.
-                    KeyCode::Esc | KeyCode::Tab => {
+                    // Esc → dismiss popup entirely.
+                    KeyCode::Esc => {
                         list.focused = false;
                         PopupAction::Dismiss
+                    }
+                    // Tab → back to passive mode; popup stays alive.
+                    KeyCode::Tab => {
+                        list.focused = false;
+                        PopupAction::Continue
                     }
                     // Plain Enter → confirm the selected item.
                     KeyCode::Enter if !key.modifiers.contains(KeyModifiers::CONTROL) => {

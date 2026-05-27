@@ -1,8 +1,7 @@
 use ratatui::{
-    buffer::Buffer as RatBuffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::{Block, BorderType, Borders, Widget},
+    widgets::{Block, BorderType, Borders},
     Frame,
 };
 
@@ -25,25 +24,6 @@ pub fn render(
     let popup_height = compute_height(popup, ui_config);
 
     let popup_rect = compute_rect(popup, term, popup_width, popup_height, cursor_screen);
-
-    // Draw shadow (offset 1,1, clipped to terminal).
-    let shadow_x = popup_rect.x.saturating_add(1).min(term.right().saturating_sub(1));
-    let shadow_y = popup_rect.y.saturating_add(1).min(term.bottom().saturating_sub(1));
-    let shadow_w = popup_rect
-        .width
-        .min(term.right().saturating_sub(shadow_x));
-    let shadow_h = popup_rect
-        .height
-        .min(term.bottom().saturating_sub(shadow_y));
-    if shadow_w > 0 && shadow_h > 0 {
-        let shadow_rect = Rect {
-            x: shadow_x,
-            y: shadow_y,
-            width: shadow_w,
-            height: shadow_h,
-        };
-        frame.render_widget(FilledRect { style: Style::default().bg(Color::Rgb(8, 8, 8)) }, shadow_rect);
-    }
 
     match &popup.content {
         PopupContent::List(state) => {
@@ -100,10 +80,16 @@ fn compute_width(popup: &Popup, term_width: u16) -> u16 {
 fn compute_height(popup: &Popup, ui_config: &crate::config::UiConfig) -> u16 {
     match &popup.content {
         PopupContent::List(s) => {
+            let is_completion = popup.on_confirm == PopupTarget::InsertText;
             let filtered = s.filtered_indices().len();
             let items_shown = filtered.min(ui_config.completion_list_height as usize) as u16;
-            // 2 borders + 1 filter row + 1 separator + items
-            (2 + 1 + 1 + items_shown).min(22).max(5)
+            if is_completion {
+                // 2 borders + items only (no filter row or separator)
+                (2 + items_shown).min(22).max(3)
+            } else {
+                // 2 borders + 1 filter row + 1 separator + items
+                (2 + 1 + 1 + items_shown).min(22).max(5)
+            }
         }
         PopupContent::Text(s) => {
             let lines_shown = s.lines.len().min(ui_config.doc_popup_height as usize) as u16;
@@ -195,89 +181,77 @@ fn render_list_popup(
 
     let buf = frame.buffer_mut();
 
-    // Row 0: filter input "  > {filter}", navigation hint (two-phase / focused completion),
-    // or passive-completion hint.
-    let filter_y = inner.top();
-    {
-        let mut x = inner.left();
-        // Clear row background
-        for col in inner.left()..inner.right() {
-            buf[(col, filter_y)]
-                .set_char(' ')
-                .set_style(Style::default().bg(Color::Rgb(28, 28, 40)));
+    // For non-completion popups: filter input row + separator.
+    // Completion popups show items directly — no header rows.
+    if !is_focused_completion && popup.on_confirm != PopupTarget::InsertText {
+        if inner.height == 0 {
+            return;
         }
-        if is_focused_completion {
-            // Focused completion: navigation hint replaces the filter row.
-            let hint = "  \u{2191}\u{2193}/j/k navigate  \u{23ce} accept  Tab/Esc cancel";
-            for c in hint.chars() {
-                if x >= inner.right() { break; }
-                buf[(x, filter_y)]
-                    .set_char(c)
-                    .set_style(Style::default().fg(Color::Rgb(120, 160, 220)).bg(Color::Rgb(28, 28, 40)));
-                x += 1;
-            }
-        } else if state.navigating {
-            // Two-phase navigation mode: show a hint instead of the cursor
-            let hint = format!("  j/k navigate · i to type · esc to close · {}", state.filter);
-            for c in hint.chars() {
-                if x >= inner.right() { break; }
-                buf[(x, filter_y)]
-                    .set_char(c)
-                    .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
-                x += 1;
-            }
-        } else {
-            let prefix = "> ";
-            // Draw prefix
-            for c in prefix.chars() {
-                if x >= inner.right() { break; }
-                buf[(x, filter_y)]
-                    .set_char(c)
-                    .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
-                x += 1;
-            }
-            // Draw filter text
-            for c in state.filter.chars() {
-                if x >= inner.right() { break; }
-                buf[(x, filter_y)]
-                    .set_char(c)
-                    .set_style(Style::default().fg(Color::White).bg(Color::Rgb(28, 28, 40)));
-                x += 1;
-            }
-            // Cursor block (passive completion or command palette etc.)
-            if x < inner.right() {
-                buf[(x, filter_y)]
+        let filter_y = inner.top();
+        {
+            let mut x = inner.left();
+            for col in inner.left()..inner.right() {
+                buf[(col, filter_y)]
                     .set_char(' ')
-                    .set_style(
-                        Style::default()
-                            .fg(Color::Rgb(28, 28, 40))
-                            .bg(Color::White)
-                            .add_modifier(Modifier::REVERSED),
-                    );
+                    .set_style(Style::default().bg(Color::Rgb(28, 28, 40)));
+            }
+            if state.navigating {
+                let hint = format!("  j/k navigate · i to type · esc to close · {}", state.filter);
+                for c in hint.chars() {
+                    if x >= inner.right() { break; }
+                    buf[(x, filter_y)]
+                        .set_char(c)
+                        .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
+                    x += 1;
+                }
+            } else {
+                let prefix = "> ";
+                for c in prefix.chars() {
+                    if x >= inner.right() { break; }
+                    buf[(x, filter_y)]
+                        .set_char(c)
+                        .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
+                    x += 1;
+                }
+                for c in state.filter.chars() {
+                    if x >= inner.right() { break; }
+                    buf[(x, filter_y)]
+                        .set_char(c)
+                        .set_style(Style::default().fg(Color::White).bg(Color::Rgb(28, 28, 40)));
+                    x += 1;
+                }
+                if x < inner.right() {
+                    buf[(x, filter_y)]
+                        .set_char(' ')
+                        .set_style(
+                            Style::default()
+                                .fg(Color::Rgb(28, 28, 40))
+                                .bg(Color::White)
+                                .add_modifier(Modifier::REVERSED),
+                        );
+                }
             }
         }
-    }
 
-    if inner.height < 2 {
-        return;
-    }
+        if inner.height < 2 {
+            return;
+        }
 
-    // Row 1: separator
-    let sep_y = inner.top() + 1;
-    {
+        let sep_y = inner.top() + 1;
         let sep_style = Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40));
         for col in inner.left()..inner.right() {
             buf[(col, sep_y)].set_char('\u{2500}').set_style(sep_style);
         }
+
+        if inner.height < 3 {
+            return;
+        }
     }
 
-    if inner.height < 3 {
-        return;
-    }
-
-    // Items area starts at row 2.
-    let items_top = inner.top() + 2;
-    let items_height = inner.height.saturating_sub(2);
+    // Items area: starts right at the top for completion, after header rows for others.
+    let is_completion = popup.on_confirm == PopupTarget::InsertText;
+    let items_top = if is_completion { inner.top() } else { inner.top() + 2 };
+    let items_height = if is_completion { inner.height } else { inner.height.saturating_sub(2) };
     let visible_rows = items_height as usize;
 
     let indices = state.filtered_indices();
@@ -605,20 +579,3 @@ fn build_block(popup: &Popup) -> Block<'static> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FilledRect widget — fills an area with a background colour
-// ---------------------------------------------------------------------------
-
-struct FilledRect {
-    style: Style,
-}
-
-impl Widget for FilledRect {
-    fn render(self, area: Rect, buf: &mut RatBuffer) {
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                buf[(x, y)].set_char(' ').set_style(self.style);
-            }
-        }
-    }
-}

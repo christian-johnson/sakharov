@@ -378,7 +378,9 @@ fn sync_completion_filter(app: &mut App) {
                 if let PopupContent::List(ref mut list) = popup.content {
                     list.filter = prefix.clone();
                     list.selected = 0;
-                    should_dismiss = !prefix.is_empty() && list.filtered_indices().is_empty();
+                    // Dismiss when there's nothing left to complete, or when
+                    // the current prefix matches no items.
+                    should_dismiss = prefix.is_empty() || list.filtered_indices().is_empty();
                 }
             }
         }
@@ -386,9 +388,12 @@ fn sync_completion_filter(app: &mut App) {
     };
 
     if dismiss {
-        // Record the prefix so we don't re-open a completion popup while the
-        // user keeps extending this word — more chars can only reduce results.
-        app.completion_suppressed_prefix = Some(prefix);
+        if !prefix.is_empty() {
+            // Only suppress future requests when a non-empty prefix returned no
+            // matches — an empty prefix means the user backspaced completely and
+            // should get fresh completions when they start typing again.
+            app.completion_suppressed_prefix = Some(prefix);
+        }
         app.popup = None;
     }
 }

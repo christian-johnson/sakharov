@@ -413,7 +413,7 @@ impl Popup {
                 focused: false,
             }),
             anchor: PopupAnchor::CursorBelow,
-            width: PopupSize::Auto,
+            width: PopupSize::FractionOfScreen(0.45),
             on_confirm: PopupTarget::InsertText,
         }
     }
