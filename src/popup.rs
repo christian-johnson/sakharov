@@ -604,6 +604,9 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("toggle-git-gutter",          "Toggle git gutter indicators  [:toggle-git-gutter]"),
         ("toggle-line-numbers",        "Toggle line numbers  [:toggle-line-numbers]"),
         ("toggle-relative-line-numbers", "Toggle relative line numbers  [:toggle-relative-line-numbers]"),
+        ("toggle-word-wrap",           "Toggle soft word-wrap  [:wrap]"),
+        ("scroll-cursor-center",       "Scroll cursor to centre  [gz]"),
+        ("kill-to-end-of-line",        "Kill to end of line  [ctrl+k]"),
         // Pickers
         ("open-file-picker",       "Open file  [ctrl+o, :e]"),
         ("open-buffer-picker",     "Switch buffer  [gb]"),

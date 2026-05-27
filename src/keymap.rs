@@ -265,6 +265,7 @@ impl Keymap {
         normal.insert(KeyBinding::char(':'), vec![Command::EnterCommandMode]);
         normal.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
         normal.insert(KeyBinding::ctrl('s'), vec![Command::Write]);
+        normal.insert(KeyBinding::ctrl('k'), vec![Command::KillToEndOfLine]);
 
         // --- Select-mode-only bindings ---
 

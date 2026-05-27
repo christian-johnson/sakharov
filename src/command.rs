@@ -183,6 +183,13 @@ pub enum Command {
     NotebookToggleFoldCell,
     /// Toggle all notebook cells: fold all if any are unfolded, else unfold all.
     NotebookToggleAllFolds,
+
+    /// Scroll viewport so the cursor line is vertically centred in the window.
+    ScrollCursorCenter,
+    /// Delete from the cursor to the end of the current line (kills to clipboard).
+    KillToEndOfLine,
+    /// Toggle soft word-wrap.
+    ToggleWordWrap,
 }
 
 impl Command {
@@ -292,6 +299,9 @@ impl Command {
             Command::FoldToggleAll => "fold-toggle-all",
             Command::NotebookToggleFoldCell => "notebook-toggle-fold-cell",
             Command::NotebookToggleAllFolds => "notebook-toggle-all-folds",
+            Command::ScrollCursorCenter => "scroll-cursor-center",
+            Command::KillToEndOfLine => "kill-to-end-of-line",
+            Command::ToggleWordWrap => "toggle-word-wrap",
         }
     }
 
@@ -479,6 +489,15 @@ impl Command {
             // Notebook fold commands
             "notebook-toggle-fold-cell" | "fold-cell" => Some(Command::NotebookToggleFoldCell),
             "notebook-toggle-all-folds" | "fold-all-cells" => Some(Command::NotebookToggleAllFolds),
+
+            // Scroll / view
+            "scroll-cursor-center" | "center" | "gz" => Some(Command::ScrollCursorCenter),
+
+            // Editing
+            "kill-to-end-of-line" | "kill-line" => Some(Command::KillToEndOfLine),
+
+            // Display
+            "toggle-word-wrap" | "word-wrap" | "wrap" => Some(Command::ToggleWordWrap),
 
             _ => None,
         }

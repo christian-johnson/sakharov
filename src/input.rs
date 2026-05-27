@@ -94,11 +94,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
         Mode::Insert => handle_insert(app, key),
         Mode::Command => handle_command(app, key),
-        Mode::Goto => handle_goto(app, key),
+        Mode::Goto { .. } => handle_goto(app, key),
         Mode::FindChar { dir, till } => handle_find_char(app, key, dir, till),
         Mode::Search { forward } => handle_search(app, key, forward),
         Mode::Notebook => handle_notebook_mode(app, key),
-        Mode::Jump => handle_jump(app, key),
+        Mode::Jump { .. } => handle_jump(app, key),
         Mode::Fold => handle_fold(app, key),
     }
 
@@ -201,6 +201,25 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 if c == ' ' {
                     exec::execute(app, &Command::LspRequestCompletion);
+                } else if c == 'k' {
+                    // Kill to end of line (Emacs-style), staying in Insert mode.
+                    let pos = app.selection.head;
+                    let rope = &app.buffer.rope;
+                    if rope.len_chars() > 0 {
+                        let eol = motion::move_line_end(rope, Selection::point(pos), false).head;
+                        if pos <= eol {
+                            begin_insert_edit(app);
+                            let del_end = (eol + 1).min(app.buffer.rope.len_chars());
+                            let text = app.buffer.rope.slice(pos..del_end).to_string();
+                            app.clipboard = text.clone();
+                            crate::clipboard::write(&text);
+                            app.buffer.remove_raw(pos, del_end);
+                            app.selection = Selection::point(pos);
+                            exec::recompute_highlights(app);
+                            exec::lsp_did_change(app);
+                        }
+                    }
+                    exec::update_scroll(app);
                 }
                 return;
             }
@@ -282,8 +301,11 @@ fn handle_command(app: &mut App, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 fn handle_goto(app: &mut App, key: KeyEvent) {
-    app.mode = Mode::Normal;
-    let extend = false;
+    // Capture whether we entered goto mode from Select (so motions extend).
+    let extend = matches!(app.mode, Mode::Goto { extend: true });
+    // Transition back to the appropriate mode before dispatching.
+    app.mode = if extend { Mode::Select } else { Mode::Normal };
+
     match key.code {
         KeyCode::Char('g') => {
             app.selection = motion::goto_file_start(&app.buffer.rope, app.selection, extend);
@@ -298,6 +320,7 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
         KeyCode::Char('l') => {
             app.selection = motion::move_line_end(&app.buffer.rope, app.selection, extend);
         }
+        KeyCode::Char('z') => exec::execute(app, &Command::ScrollCursorCenter),
         KeyCode::Char('d') => exec::execute(app, &Command::LspGotoDefinition),
         KeyCode::Char('r') => exec::execute(app, &Command::LspGotoReferences),
         KeyCode::Char('y') => exec::execute(app, &Command::LspGotoTypeDefinition),
@@ -460,9 +483,10 @@ fn handle_fold(app: &mut App, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 fn handle_jump(app: &mut App, key: KeyEvent) {
+    let extend = matches!(app.mode, Mode::Jump { extend: true });
     match key.code {
         KeyCode::Esc => {
-            app.mode = Mode::Normal;
+            app.mode = if extend { Mode::Select } else { Mode::Normal };
             app.jump_labels.clear();
             app.jump_typed.clear();
         }
@@ -470,10 +494,15 @@ fn handle_jump(app: &mut App, key: KeyEvent) {
             app.jump_typed.push(c);
             let typed = app.jump_typed.clone();
 
-            // Exact match → jump and return to Normal.
+            // Exact match → jump, extending selection if we came from Select mode.
             if let Some(&(pos, _)) = app.jump_labels.iter().find(|(_, l)| *l == typed) {
-                app.selection = Selection::point(pos);
-                app.mode = Mode::Normal;
+                if extend {
+                    app.selection = Selection::new(app.selection.anchor, pos);
+                    app.mode = Mode::Select;
+                } else {
+                    app.selection = Selection::point(pos);
+                    app.mode = Mode::Normal;
+                }
                 app.jump_labels.clear();
                 app.jump_typed.clear();
                 exec::update_scroll(app);
@@ -482,7 +511,7 @@ fn handle_jump(app: &mut App, key: KeyEvent) {
 
             // No label starts with the typed prefix → cancel.
             if !app.jump_labels.iter().any(|(_, l)| l.starts_with(typed.as_str())) {
-                app.mode = Mode::Normal;
+                app.mode = if extend { Mode::Select } else { Mode::Normal };
                 app.jump_labels.clear();
                 app.jump_typed.clear();
             }

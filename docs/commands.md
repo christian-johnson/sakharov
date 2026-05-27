@@ -127,6 +127,7 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 |---------|-------------|-------------|
 | `page-down` | `ctrl+d`, `PgDn` | Scroll half a page down (cursor moves with viewport) |
 | `page-up` | `ctrl+u`, `PgUp` | Scroll half a page up (cursor moves with viewport) |
+| `scroll-cursor-center` | `gz` (via Goto mode) | Scroll viewport so the cursor line is vertically centred |
 
 ## LSP
 
@@ -140,6 +141,12 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 | `lsp-goto-implementation` | `gi` (via Goto mode) | Jump to the implementation of the symbol |
 | `lsp-request-completion` | `ctrl+space` | Manually trigger completion suggestions |
 
+## Editing
+
+| Command | Default Key | Description |
+|---------|-------------|-------------|
+| `kill-to-end-of-line` | `ctrl+k` | Delete from cursor to end of line; killed text goes to clipboard |
+
 ## Popup / UI
 
 | Command | Default Key | Description |
@@ -148,6 +155,7 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 | `toggle-git-gutter` | — | Toggle visibility of the git gutter indicator column |
 | `toggle-line-numbers` | — | Toggle line number display |
 | `toggle-relative-line-numbers` | — | Toggle relative line numbers (shows distance from current line) |
+| `toggle-word-wrap` | — | Toggle soft word-wrap (`:wrap` / `:word-wrap`) |
 
 ## Code Folding (plain-text editor)
 

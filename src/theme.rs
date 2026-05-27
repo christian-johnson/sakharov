@@ -73,9 +73,9 @@ pub fn mode_color(mode: &Mode) -> Color {
         Mode::Insert => Color::Green,
         Mode::Select => Color::Yellow,
         Mode::Command => Color::Cyan,
-        Mode::Goto | Mode::FindChar { .. } | Mode::Search { .. } => Color::Magenta,
+        Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. } => Color::Magenta,
         Mode::Notebook => Color::Cyan,
-        Mode::Jump => Color::Rgb(255, 160, 0),
+        Mode::Jump { .. } => Color::Rgb(255, 160, 0),
         Mode::Fold => Color::Rgb(255, 160, 50),
     }
 }

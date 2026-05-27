@@ -51,6 +51,87 @@ pub fn render(frame: &mut Frame, app: &App) {
 // Lines area
 // ---------------------------------------------------------------------------
 
+/// Number of visual rows a logical line occupies when soft-wrapped to `text_width` columns.
+/// Returns 1 when `text_width == 0` (degenerate) or wrapping is not active.
+pub(crate) fn visual_line_height(
+    rope: &ropey::Rope,
+    line_idx: usize,
+    text_width: usize,
+    tab_width: usize,
+) -> usize {
+    if text_width == 0 || line_idx >= rope.len_lines() {
+        return 1;
+    }
+    let line = rope.line(line_idx);
+    let mut col = 0usize;
+    let mut rows = 1usize;
+    for c in line.chars() {
+        if c == '\n' || c == '\r' {
+            break;
+        }
+        let w = if c == '\t' {
+            tab_width.saturating_sub(col % tab_width).max(1)
+        } else {
+            c.width().unwrap_or(1)
+        };
+        col += w;
+        if col >= text_width {
+            rows += 1;
+            col = 0;
+        }
+    }
+    rows
+}
+
+/// A single visible screen row: either a normal line sub-row or a fold indicator.
+struct VisRow {
+    line_idx: usize,
+    /// `Some(end)` → this row is a fold indicator hiding lines `line_idx+1..=end`.
+    fold_end: Option<usize>,
+    /// Which wrapped sub-row of `line_idx` this is (0 = first, always 0 without wrapping).
+    sub_row: usize,
+}
+
+/// Build the list of visible screen rows, honouring folds and optional word-wrap.
+fn build_vis_rows(
+    fold: &crate::fold::FoldState,
+    rope: &ropey::Rope,
+    scroll_row: usize,
+    visible_rows: usize,
+    total_lines: usize,
+    word_wrap: bool,
+    text_width: usize,
+    tab_width: usize,
+) -> Vec<VisRow> {
+    let mut rows: Vec<VisRow> = Vec::with_capacity(visible_rows);
+    let mut line = scroll_row;
+
+    while rows.len() < visible_rows && line < total_lines {
+        if fold.is_hidden(line) {
+            line += 1;
+            continue;
+        }
+        if let Some(fold_end) = fold.fold_end_at(line) {
+            rows.push(VisRow { line_idx: line, fold_end: Some(fold_end), sub_row: 0 });
+            line = fold_end + 1;
+        } else {
+            let height = if word_wrap && text_width > 0 {
+                visual_line_height(rope, line, text_width, tab_width)
+            } else {
+                1
+            };
+            for sub in 0..height {
+                if rows.len() >= visible_rows {
+                    break;
+                }
+                rows.push(VisRow { line_idx: line, fold_end: None, sub_row: sub });
+            }
+            line += 1;
+        }
+    }
+    rows
+}
+
 fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     // Git gutter is 1 char wide (only for regular files, not notebooks).
     let git_col: u16 = if app.config.editor.git_gutter && app.notebook.is_none() { 1 } else { 0 };
@@ -61,12 +142,14 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let right_gutter: u16 = if has_diags { 1 } else { 0 };
     let text_width = area.width.saturating_sub(gutter_width + right_gutter) as usize;
     let visible_rows = area.height as usize;
+    let word_wrap = app.config.editor.word_wrap;
 
     let diag_by_line = &app.diag_by_line;
 
     let rope = &app.buffer.rope;
     let total_lines = rope.len_lines();
     let scroll_row = app.scroll_row;
+    let tab_width = app.config.editor.tab_width;
 
     let spans = &app.highlight_spans;
 
@@ -74,12 +157,20 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let sel_end = app.selection.end();
     let cursor_pos = app.selection.head;
 
-    // Build the fold-aware list of visible entries once.
-    let visible_entries = app.fold.visible_entries(scroll_row, visible_rows, total_lines);
+    // Build the fold+wrap-aware list of visible rows.
+    let vis_rows = build_vis_rows(
+        &app.fold, rope, scroll_row, visible_rows, total_lines,
+        word_wrap, text_width, tab_width,
+    );
 
     let mut cells: Vec<(char, Style)> = Vec::with_capacity(text_width + 8);
 
-    for (row, &(line_idx, fold_end_opt)) in visible_entries.iter().enumerate() {
+    for (row, vis) in vis_rows.iter().enumerate() {
+        let line_idx = vis.line_idx;
+        let fold_end_opt = vis.fold_end;
+        let sub_row = vis.sub_row;
+        let is_continuation = sub_row > 0;
+
         let y = area.top() + row as u16;
 
         // --- Gutter ---
@@ -91,8 +182,10 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             if git_col > 0 {
                 let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
                 if fold_end_opt.is_some() {
-                    // Fold indicator: show arrow in the git column, overriding the git mark.
                     buf[(gx, y)].set_char('▶').set_style(arrow_style);
+                } else if is_continuation {
+                    // Wrap continuation: blank git column.
+                    buf[(gx, y)].set_char(' ').set_style(Style::default().fg(Color::DarkGray));
                 } else {
                     let (mark_ch, mark_color) = match app.git_diff.get(&line_idx) {
                         Some(GutterMark::Added)    => ('+', Color::Green),
@@ -108,37 +201,43 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             // Line number column (5 chars).
             if line_num_width > 0 && line_idx < total_lines {
-                let line_num_str = if app.config.editor.relative_line_numbers {
-                    let cursor_line = rope
-                        .char_to_line(app.selection.head.min(rope.len_chars()));
-                    if line_idx == cursor_line {
-                        format!("{:4} ", line_idx + 1)
-                    } else {
-                        let dist = (line_idx as isize - cursor_line as isize).unsigned_abs();
-                        format!("{:4} ", dist)
-                    }
-                } else {
-                    format!("{:4} ", line_idx + 1)
-                };
                 let num_style = Style::default().fg(Color::DarkGray);
-
-                if fold_end_opt.is_some() && git_col == 0 && line_num_width >= 2 {
-                    // No git column: fold arrow occupies the leftmost char of the line
-                    // number area; the rest of the number renders in its normal gray style.
-                    let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
-                    buf[(gx, y)].set_char('▶').set_style(arrow_style);
-                    gx += 1;
-                    // Skip the first char of line_num_str so the total width stays the same.
-                    for c in line_num_str.chars().skip(1) {
+                if is_continuation {
+                    // Wrap continuation: blank line number area.
+                    for _ in 0..line_num_width {
                         if gx >= area.left() + gutter_width { break; }
-                        buf[(gx, y)].set_char(c).set_style(num_style);
+                        buf[(gx, y)].set_char(' ').set_style(num_style);
                         gx += 1;
                     }
                 } else {
-                    for c in line_num_str.chars() {
-                        if gx >= area.left() + gutter_width { break; }
-                        buf[(gx, y)].set_char(c).set_style(num_style);
+                    let line_num_str = if app.config.editor.relative_line_numbers {
+                        let cursor_line = rope
+                            .char_to_line(app.selection.head.min(rope.len_chars()));
+                        if line_idx == cursor_line {
+                            format!("{:4} ", line_idx + 1)
+                        } else {
+                            let dist = (line_idx as isize - cursor_line as isize).unsigned_abs();
+                            format!("{:4} ", dist)
+                        }
+                    } else {
+                        format!("{:4} ", line_idx + 1)
+                    };
+
+                    if fold_end_opt.is_some() && git_col == 0 && line_num_width >= 2 {
+                        let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+                        buf[(gx, y)].set_char('▶').set_style(arrow_style);
                         gx += 1;
+                        for c in line_num_str.chars().skip(1) {
+                            if gx >= area.left() + gutter_width { break; }
+                            buf[(gx, y)].set_char(c).set_style(num_style);
+                            gx += 1;
+                        }
+                    } else {
+                        for c in line_num_str.chars() {
+                            if gx >= area.left() + gutter_width { break; }
+                            buf[(gx, y)].set_char(c).set_style(num_style);
+                            gx += 1;
+                        }
                     }
                 }
             } else if line_num_width > 0 {
@@ -170,36 +269,47 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
         // When this row is a fold indicator, reserve space for the fold badge.
         let fold_badge: Option<String> = fold_end_opt.map(|end| {
-            let hidden = end - line_idx; // hidden lines (not counting the visible first)
+            let hidden = end - line_idx;
             format!("  ▶ {} lines", hidden)
         });
         let badge_len = fold_badge.as_ref().map(|b| b.chars().count()).unwrap_or(0);
         let content_width = text_width.saturating_sub(badge_len);
 
+        // `effective_skip`: the first display column that is visible on this screen row.
+        //   - No wrap: app.scroll_col (horizontal scroll offset)
+        //   - Wrap sub-row N: N * text_width
+        let effective_skip = if word_wrap { sub_row * text_width } else { app.scroll_col };
+        // The visible display-column window is [effective_skip, effective_skip + content_width).
+
         cells.clear();
-        let mut col_offset = 0usize;
-        let tab_width = app.config.editor.tab_width;
+        let mut col_offset = 0usize; // display col from start of line
 
         for char_off in 0..line_len {
             let char_idx = line_start_char + char_off;
             let c = line_str.char(char_off);
 
-            // Skip if before scroll col
-            if col_offset < app.scroll_col {
-                let w = char_display_width(c, col_offset, tab_width);
+            if c == '\n' || c == '\r' {
+                if char_idx == cursor_pos && col_offset >= effective_skip && col_offset < effective_skip + content_width {
+                    cells.push((' ', theme::cursor_style(&app.mode)));
+                }
+                break;
+            }
+
+            let w = char_display_width(c, col_offset, tab_width);
+
+            // Skip characters that end entirely before the visible window.
+            if col_offset + w <= effective_skip {
                 col_offset += w;
                 continue;
             }
-
-            // Past visible width (leave room for fold badge when present)
-            if col_offset - app.scroll_col >= content_width {
+            // Stop characters that start at or past the visible window's right edge.
+            if col_offset >= effective_skip + content_width {
                 break;
             }
 
             // Determine base style from highlights
             let base_style = highlight::style_at(spans, char_idx);
 
-            // Apply selection or cursor overlay.
             let style = if char_idx == cursor_pos {
                 theme::cursor_style(&app.mode)
             } else if char_idx >= sel_start && char_idx <= sel_end && sel_start != sel_end {
@@ -233,22 +343,16 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 style
             };
 
-            if c == '\n' || c == '\r' {
-                if char_idx == cursor_pos {
-                    let cs = theme::cursor_style(&app.mode);
-                    cells.push((' ', cs));
+            if c == '\t' {
+                // Render only the portion of the tab that falls in the visible window.
+                let tab_end = col_offset + w;
+                let render_start = col_offset.max(effective_skip);
+                let render_end = tab_end.min(effective_skip + content_width);
+                for _ in render_start..render_end {
+                    cells.push((' ', style));
                 }
-                break;
-            } else if c == '\t' {
-                let w = tab_stop(col_offset, tab_width);
-                for i in 0..w {
-                    if col_offset - app.scroll_col + i < content_width {
-                        cells.push((' ', style));
-                    }
-                }
-                col_offset += w;
+                col_offset = tab_end;
             } else {
-                let w = c.width().unwrap_or(1);
                 cells.push((c, style));
                 col_offset += w;
             }
@@ -259,13 +363,12 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
             let count_style = Style::default().fg(Color::DarkGray);
             for (i, c) in badge.chars().enumerate() {
-                // "  ▶ " = first 4 chars in orange, rest in gray
                 let style = if i < 4 { arrow_style } else { count_style };
                 cells.push((c, style));
             }
-        } else {
-            // Jump label overlay — only on normal (non-fold) lines.
-            if app.mode == crate::mode::Mode::Jump && !app.jump_labels.is_empty() {
+        } else if !is_continuation {
+            // Jump label overlay — only on first sub-row (non-fold) lines.
+            if matches!(app.mode, crate::mode::Mode::Jump { .. }) && !app.jump_labels.is_empty() {
                 let typed_len = app.jump_typed.len();
                 let jump_pending = Style::default()
                     .fg(Color::Black)
@@ -295,10 +398,10 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                         }
                         col
                     };
-                    if display_col < app.scroll_col {
+                    if display_col < effective_skip {
                         continue;
                     }
-                    let cell_idx = display_col - app.scroll_col;
+                    let cell_idx = display_col - effective_skip;
                     for (j, lc) in label.chars().enumerate() {
                         let idx = cell_idx + j;
                         if idx >= cells.len() {
@@ -314,8 +417,8 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
         let line_widget = LineWidget { cells: &cells };
         frame.render_widget(line_widget, text_area);
 
-        // Right diagnostic gutter marker (only on non-fold lines).
-        if right_gutter > 0 && line_idx < total_lines && fold_end_opt.is_none() {
+        // Right diagnostic gutter marker (only on non-fold, non-continuation rows).
+        if right_gutter > 0 && line_idx < total_lines && fold_end_opt.is_none() && !is_continuation {
             let rx = area.right() - 1;
             let buf = frame.buffer_mut();
             if let Some(line_diags) = diag_by_line.get(&line_idx) {
@@ -356,31 +459,54 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
         return None;
     }
 
-    // Find the visible row of this line using fold-aware entry list.
     let total_lines = rope.len_lines();
-    let entries = app.fold.visible_entries(app.scroll_row, lines_area.height as usize, total_lines);
-    let screen_row = entries.iter().position(|&(l, _)| l == line_idx)?;
+    let word_wrap = app.config.editor.word_wrap;
+    let tab_width = app.config.editor.tab_width;
+    let has_diags = !app.diag_by_line.is_empty();
+    let right_gutter: u16 = if has_diags { 1 } else { 0 };
+    let text_width = lines_area.width.saturating_sub(gutter_width + right_gutter) as usize;
 
     let line_start = rope.line_to_char(line_idx);
     let line_str = rope.line(line_idx);
     let cursor_off = head - line_start;
-    let tab_width = app.config.editor.tab_width;
 
-    let mut col: usize = 0;
+    // Compute total display column from the start of this logical line.
+    let mut total_col: usize = 0;
     for i in 0..cursor_off {
         let c = line_str.char(i);
-        col += if c == '\t' { tab_stop(col, tab_width) } else { c.width().unwrap_or(1) };
+        total_col += if c == '\t' { tab_stop(total_col, tab_width) } else { c.width().unwrap_or(1) };
     }
 
-    let text_col = col.saturating_sub(app.scroll_col);
-    let text_width = lines_area.width.saturating_sub(gutter_width) as usize;
-    if text_col >= text_width {
-        return None;
-    }
+    if word_wrap && text_width > 0 {
+        // With wrapping: find the screen row by walking the visible entry list.
+        let vis_rows = build_vis_rows(
+            &app.fold, rope, app.scroll_row, lines_area.height as usize,
+            total_lines, true, text_width, tab_width,
+        );
+        let cursor_sub_row = total_col / text_width;
+        let col_in_sub_row = total_col % text_width;
 
-    let screen_x = lines_area.left() + gutter_width + text_col as u16;
-    let screen_y = lines_area.top() + screen_row as u16;
-    Some((screen_x, screen_y))
+        let screen_row = vis_rows.iter().position(|v| {
+            v.line_idx == line_idx && v.fold_end.is_none() && v.sub_row == cursor_sub_row
+        })?;
+
+        let screen_x = lines_area.left() + gutter_width + col_in_sub_row as u16;
+        let screen_y = lines_area.top() + screen_row as u16;
+        Some((screen_x, screen_y))
+    } else {
+        // Without wrapping: use fold-aware entry list.
+        let entries = app.fold.visible_entries(app.scroll_row, lines_area.height as usize, total_lines);
+        let screen_row = entries.iter().position(|&(l, _)| l == line_idx)?;
+
+        let text_col = total_col.saturating_sub(app.scroll_col);
+        if text_col >= text_width {
+            return None;
+        }
+
+        let screen_x = lines_area.left() + gutter_width + text_col as u16;
+        let screen_y = lines_area.top() + screen_row as u16;
+        Some((screen_x, screen_y))
+    }
 }
 
 fn char_display_width(c: char, col: usize, tab_width: usize) -> usize {
@@ -483,7 +609,7 @@ pub fn render_command_nb(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_command(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
-        Mode::Jump => {
+        Mode::Jump { .. } => {
             if app.jump_typed.is_empty() {
                 "Jump: type label chars...".to_string()
             } else {

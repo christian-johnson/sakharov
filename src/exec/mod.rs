@@ -336,7 +336,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         // --- Sub-mode entries ---
         Command::EnterGotoMode => {
-            app.mode = Mode::Goto;
+            let extend = app.mode == Mode::Select;
+            app.mode = Mode::Goto { extend };
             let lsp_active = app.current_language()
                 .map(|l| app.lsp.is_ready(l))
                 .unwrap_or(false);
@@ -345,6 +346,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 ("e".into(), "go to file end".into()),
                 ("h".into(), "go to line first non-whitespace".into()),
                 ("l".into(), "go to line end".into()),
+                ("z".into(), "scroll cursor to centre".into()),
                 ("w".into(), "jump to label in view".into()),
                 ("b".into(), "buffer picker".into()),
                 ("s".into(), "symbol picker".into()),
@@ -363,13 +365,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::EnterJumpMode => {
+            let extend = app.mode == Mode::Select;
             let positions =
                 jump::visible_word_starts(&app.buffer.rope, app.scroll_row, app.viewport_height);
             let jump_keys: Vec<char> = app.config.ui.jump_keys.chars().collect();
             app.jump_labels = jump::generate_labels(&positions, &jump_keys);
             app.jump_typed = String::new();
             app.popup = None;
-            app.mode = Mode::Jump;
+            app.mode = Mode::Jump { extend };
             return;
         }
         Command::FindCharForward => {
@@ -1207,6 +1210,43 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.mode = Mode::Normal;
             }
         }
+
+        Command::KillToEndOfLine => {
+            let pos = app.selection.head;
+            if app.buffer.rope.len_chars() > 0 {
+                let eol = motion::move_line_end(&app.buffer.rope, Selection::point(pos), false).head;
+                if pos <= eol {
+                    app.selection = Selection::new(pos, eol);
+                    text::delete_selection(app);
+                }
+            }
+            if app.mode == Mode::Select {
+                app.mode = Mode::Normal;
+            }
+            return;
+        }
+
+        Command::ScrollCursorCenter => {
+            let rope = &app.buffer.rope;
+            let cursor_line = if rope.len_chars() > 0 {
+                rope.char_to_line(app.selection.head.min(rope.len_chars()))
+            } else {
+                0
+            };
+            let half = (app.viewport_height / 2).max(1);
+            app.scroll_row = cursor_line.saturating_sub(half);
+            app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
+            return;
+        }
+
+        Command::ToggleWordWrap => {
+            app.config.editor.word_wrap = !app.config.editor.word_wrap;
+            // Disable horizontal scroll when wrapping.
+            if app.config.editor.word_wrap {
+                app.scroll_col = 0;
+            }
+            return;
+        }
     }
 
     // If a motion landed the cursor inside a hidden fold, snap out direction-aware.
@@ -1410,6 +1450,7 @@ pub fn update_scroll(app: &mut App) {
     let git_col = if app.config.editor.git_gutter && app.notebook.is_none() { 1usize } else { 0 };
     let gutter_width = if app.config.editor.line_numbers { 5 + git_col } else { git_col };
     let visible_cols = app.viewport_width.saturating_sub(gutter_width);
+    let word_wrap = app.config.editor.word_wrap;
 
     let rope = &app.buffer.rope;
     if rope.len_chars() == 0 {
@@ -1425,29 +1466,46 @@ pub fn update_scroll(app: &mut App) {
     let line_idx = rope.char_to_line(pos);
     let total_lines = rope.len_lines();
     let scroll_off = app.config.editor.scroll_off;
+    let tab_width = app.config.editor.tab_width;
 
     // Normalize scroll_row so it never points inside a hidden fold region.
     app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
 
-    // Vertical — fold-aware.
-    // Count visible rows from scroll_row to cursor.
-    let vdist = app.fold.visible_row_count(app.scroll_row, line_idx, total_lines);
+    // Vertical — fold+wrap-aware row count from scroll_row to cursor line.
+    let vdist = if word_wrap {
+        wrap_visible_row_count(app, app.scroll_row, line_idx, visible_cols, tab_width)
+    } else {
+        app.fold.visible_row_count(app.scroll_row, line_idx, total_lines)
+    };
 
     if vdist < scroll_off || app.scroll_row > line_idx {
         // Cursor too close to top (or above scroll area): scroll up.
         let desired = scroll_off.min(line_idx);
-        app.scroll_row = app.fold.scroll_row_for_cursor(line_idx, desired);
+        app.scroll_row = if word_wrap {
+            wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
+        } else {
+            app.fold.scroll_row_for_cursor(line_idx, desired)
+        };
     } else if vdist + scroll_off >= visible_rows {
         // Cursor too close to bottom: scroll down.
         let desired = visible_rows.saturating_sub(scroll_off + 1);
-        app.scroll_row = app.fold.scroll_row_for_cursor(line_idx, desired);
+        app.scroll_row = if word_wrap {
+            wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
+        } else {
+            app.fold.scroll_row_for_cursor(line_idx, desired)
+        };
+    }
+
+    if word_wrap {
+        // No horizontal scrolling when wrapping.
+        app.scroll_col = 0;
+        return;
     }
 
     // Horizontal — accurate display-column calculation (handles tabs)
     let line_start = rope.line_to_char(line_idx);
     let line_str = rope.line(line_idx);
     let cursor_off = pos - line_start;
-    let tab_width = app.config.editor.tab_width;
     let mut display_col: usize = 0;
     for i in 0..cursor_off {
         let c = line_str.char(i);
@@ -1464,6 +1522,66 @@ pub fn update_scroll(app: &mut App) {
     if display_col >= app.scroll_col + visible_cols {
         app.scroll_col = display_col.saturating_sub(visible_cols) + 1;
     }
+}
+
+/// Count visual rows from `from` (inclusive) to `to` (exclusive), accounting
+/// for folds and word-wrap.  `text_width` is the number of display columns
+/// available for text (viewport minus gutter).
+fn wrap_visible_row_count(
+    app: &App,
+    from: usize,
+    to: usize,
+    text_width: usize,
+    tab_width: usize,
+) -> usize {
+    let rope = &app.buffer.rope;
+    let total_lines = rope.len_lines();
+    let mut count = 0;
+    let mut line = from;
+    while line < to && line < total_lines {
+        if app.fold.is_hidden(line) {
+            line += 1;
+            continue;
+        }
+        if let Some(end) = app.fold.fold_end_at(line) {
+            count += 1;
+            line = end + 1;
+        } else {
+            count += crate::ui::visual_line_height(rope, line, text_width, tab_width);
+            line += 1;
+        }
+    }
+    count
+}
+
+/// Walk backward from `cursor_line` by `desired_vrows` visual rows (fold+wrap
+/// aware) and return the resulting scroll_row.
+fn wrap_scroll_row_for_cursor(
+    fold: &crate::fold::FoldState,
+    rope: &ropey::Rope,
+    cursor_line: usize,
+    desired_vrows: usize,
+    text_width: usize,
+    tab_width: usize,
+) -> usize {
+    let mut line = cursor_line;
+    let mut remaining = desired_vrows;
+
+    while remaining > 0 && line > 0 {
+        line -= 1;
+        if let Some(start) = fold.fold_start_hiding(line) {
+            line = start;
+        }
+        let height = if fold.is_hidden(line) {
+            0
+        } else if fold.fold_end_at(line).is_some() {
+            1
+        } else {
+            crate::ui::visual_line_height(rope, line, text_width, tab_width)
+        };
+        remaining = remaining.saturating_sub(height);
+    }
+    line
 }
 
 fn unicode_display_width(c: char) -> usize {

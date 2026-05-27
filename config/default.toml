@@ -10,6 +10,7 @@ tab_width = 4
 line_numbers = true
 relative_line_numbers = false
 scroll_off = 5
+word_wrap = false
 git_gutter = true
 format_on_save = false
 max_undo = 200

@@ -69,6 +69,9 @@ pub struct EditorConfig {
     /// Run the language server's formatter before each `:w` / `:wq` save.
     #[serde(default)]
     pub format_on_save: bool,
+    /// Soft-wrap long lines to the window width instead of scrolling horizontally.
+    #[serde(default)]
+    pub word_wrap: bool,
     /// Maximum undo steps kept per buffer. Oldest steps are evicted when the
     /// limit is reached.
     #[serde(default = "default_max_undo")]

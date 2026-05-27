@@ -17,7 +17,8 @@ pub enum Mode {
     /// Bottom command line, ':' prefix.
     Command,
     /// Waiting for second key after 'g'.
-    Goto,
+    /// `extend` is true when entered from Select mode — motions extend the selection.
+    Goto { extend: bool },
     /// Waiting for target char after f/t/F/T.
     FindChar { dir: FindDir, till: bool },
     /// Buffer search — typing builds the query; Enter confirms, Esc cancels.
@@ -25,7 +26,8 @@ pub enum Mode {
     /// Notebook cell-navigation mode — j/k move between cells, o/e/d etc.
     Notebook,
     /// Label-jump mode — visible word starts are labelled; type label to jump.
-    Jump,
+    /// `extend` is true when entered from Select mode — the jump extends the selection.
+    Jump { extend: bool },
     /// Waiting for second key after 'z' (fold operations).
     Fold,
 }
@@ -38,11 +40,11 @@ impl Mode {
             Mode::Insert => "INS",
             Mode::Select => "SEL",
             Mode::Command => "CMD",
-            Mode::Goto => "GTO",
+            Mode::Goto { .. } => "GTO",
             Mode::FindChar { .. } => "FND",
             Mode::Search { .. } => "SRC",
             Mode::Notebook => "NB ",
-            Mode::Jump => "JMP",
+            Mode::Jump { .. } => "JMP",
             Mode::Fold => "FLD",
         }
     }
