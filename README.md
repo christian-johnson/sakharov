@@ -1,15 +1,16 @@
 # majorana 
 
-`majorana` (pronounced __my-your-on-uh__) is a lightweight text editor heavily inspired by Helix.
-It steals many of Helix's features (noun->verb modal editing; minimal configuration), while adding a few additional pieces for data science support, namely:
+`majorana` (pronounced __my-your-on-uh__) is a lightweight text editor written in Rust, heavily inspired by Helix.
+It steals many of Helix's features (noun->verb modal editing; minimal configuration), while adding a few additional components for data science support, namely:
 - Native Jupyter notebook interface
-- Notebook LSP support
-- Compatible with Kitty graphics protocol
+- LSP support in notebooks
+- Kitty graphics protocol integration
 
-This means you can use Jupyter notebooks with the full customizability and power of a TUI text editor. 
+The goal is to use Jupyter notebooks with the full customizability and power of a TUI text editor. 
+This project is focused on Python notebooks - other kernels (e.g. R) could theoretically be added in the future, but it's not a high priority. 
 
 There are other projects in the same vein out there (e.g. Euporie, ...) but I have never been fully happy with any of them.
-Along came LLMs and the ability to build a custom text editor, so here we are.
+Then along came LLMs and the ability to build a custom text editor, so here we are.
 
 __AI disclosure: This application was entirely vibe-coded, mostly with Claude Sonnet 4.6. It is almost certain to have numerous bugs and missing features as a result.__
 __Until a version 1.0 is released, breaking changes and instability are to be expected.__
@@ -17,8 +18,8 @@ __Until a version 1.0 is released, breaking changes and instability are to be ex
 ---
 ## Etymology
 Ettore Majorana was a renowned Italian physicist who was the first to propose that fermions could be their own antiparticles. 
-That's pretty neat! 
-I decided to name this repo after him as a result. 
+Neat stuff! 
+I decided to name this repo after him. 
 ---
 
 ## Installation
@@ -26,10 +27,11 @@ I decided to name this repo after him as a result.
 To compile and run `majorana`, make sure you have the following:
 
 1. **Rust Toolchain**: `cargo` and `rustc` (Edition 2021).
-2. **Python 3**: For running Jupyter notebook cells. Make sure you have python installed. It is highly recommended to have `ipykernel` or `jupyter` installed in your project virtual environments.
-3. **Kitty Terminal (Optional)**: Needed if you want to view rich graphical outputs (like plots and images) inside notebooks using the Kitty graphics protocol.
-4. **Language Servers (Optional)**:
-   - Python: `ruff` (≥ 0.4, built-in LSP via `ruff server`)
+2. **Git**: for cloning this repo
+3. **Terminal with Kitty graphics support (optional)**: Needed if you want to view rich graphical outputs (like plots and images) inside notebooks.
+I've tested this with WezTerm, but Kitty and Ghostty should work. Alacritty doesn't support images so it won't work.  
+4. **Language Servers (optional but recommended)**:
+   - Python: `ruff` and `pylsp`. Recommend installing `pylsp` via `uv tool install python-language-server`. 
    - Rust: `rust-analyzer`
    - JavaScript/TypeScript: `typescript-language-server`
 
@@ -116,7 +118,7 @@ mj my_notebook.ipynb
 
 ### Notebook Mode
 
-Activated automatically for `.ipynb` files, or by pressing `n` in Normal mode. In Notebook mode, there are two distinct sub-modes: **Navigate Mode** (operating on cells) and **Edit Mode** (editing code inside a cell).
+Activated automatically for `.ipynb` files, or by pressing `ESC` from Normal mode. In Notebook mode, there are two distinct sub-modes: **Navigate Mode** (operating on cells) and **Edit Mode** (editing code inside a cell).
 
 #### Cell Navigate Mode (Keybindings)
 
@@ -142,7 +144,7 @@ Activated automatically for `.ipynb` files, or by pressing `n` in Normal mode. I
 
 ## Configuration
 
-`majorana` reads configuration from `~/.config/majorana/config.toml`. The user configuration is deep-merged on top of built-in defaults.
+`majorana` reads configuration from `~/.config/majorana/config.toml`, which supersede the built-in defaults.
 
 ### Default Options
 
@@ -191,6 +193,8 @@ foreground = "#e6b450"
 
 [editor]
 relative_line_numbers = true
+# If you want to use, say, yazi instead of the built-in file picker
+file_picker = "yazi --chooser-file=$MJ_PICKER_FILE"
 
 # Custom key bindings
 [keys.normal]
@@ -211,8 +215,17 @@ To enable Python LSP support with [ruff](https://docs.astral.sh/ruff/), add a `[
 # ~/.config/majorana/config.toml
 
 [language_servers.python]
+command = "pylsp"
+
+[[language_servers.python.extra_servers]]
 command = "ruff"
 args = ["server"]
+features = ["format", "code-actions", "diagnostics"]   # ruff wins for ga / code-actions requests
+
+[formatters.python]
+command = "ruff"
+args=["format"]
+
 ```
 
 For Rust and JavaScript/TypeScript:
