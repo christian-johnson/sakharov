@@ -16,7 +16,9 @@ __AI disclosure: This application was entirely vibe-coded, mostly with Claude So
 __Until a version 1.0 is released, breaking changes and instability are to be expected.__
 
 ## Screenshots
+
 [Screencast_20260527_121149.webm](https://github.com/user-attachments/assets/a767a1f7-6535-4f34-a0d3-0d5594fc00ba)
+
 This screenshot shows some of `majorana`'s features: a command palette with fuzzy matching, LSP documentation lookup & code actions, format-on-save, etc.
 
 ## Etymology
