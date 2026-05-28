@@ -9,11 +9,11 @@ It steals many of Helix's features (noun->verb modal editing; minimal configurat
 The goal is to use Jupyter notebooks with the full customizability and power of a TUI text editor. 
 This project is focused on Python notebooks - other kernels (e.g. R) could theoretically be added in the future, but it's not a high priority. 
 
-There are other projects in the same vein out there (e.g. Euporie, ...) but I have never been fully happy with any of them.
+There are other projects in the same vein out there (e.g. [Euporie](https://github.com/joouha/euporie), [Marimo](https://marimo.io)...) but I have never been fully happy with any of them for my own parochial reasons.
 Then along came LLMs and the ability to build a custom text editor, so here we are.
 
-__AI disclosure: This application was entirely vibe-coded, mostly with Claude Sonnet 4.6. It is almost certain to have numerous bugs and missing features as a result.__
-__Until a version 1.0 is released, breaking changes and instability are to be expected.__
+__AI disclosure: This application was entirely vibe-coded, mostly with Claude Sonnet 4.6 and Claude Opus 4.7. It is almost certain to have numerous bugs and missing features as a result.__
+__Until a version 1.0 is released, breaking changes and instability are to be expected...__
 
 ## Screenshots
 
