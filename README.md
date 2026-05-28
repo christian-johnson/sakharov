@@ -17,9 +17,15 @@ __Until a version 1.0 is released, breaking changes and instability are to be ex
 
 ## Screenshots
 
+### Command palette
 [Screencast_20260527_121149.webm](https://github.com/user-attachments/assets/a767a1f7-6535-4f34-a0d3-0d5594fc00ba)
 
 This screenshot shows some of `sakharov`'s features: a command palette with fuzzy matching, LSP documentation lookup & code actions, format-on-save, etc.
+
+### Notebook support
+[Screencast_20260528_132140.webm](https://github.com/user-attachments/assets/c387bc15-58f5-41a0-a5b8-61cf26603771)
+
+`.ipynb` files are supported, with image outputs and LSP functionality.
 
 ## Etymology
 Andrei Sakharov was a Soviet physicist and human rights activist.
