@@ -28,8 +28,8 @@ This screenshot shows some of `sakharov`'s features: a command palette with fuzz
 `.ipynb` files are supported, with image outputs and LSP functionality.
 
 ## Etymology
-Andrei Sakharov was a Soviet physicist and human rights activist.
-Despite his accomplishments, I have found that he is a relatively unknown figure, at least in the West.
+[Andrei Sakharov](https://en.wikipedia.org/wiki/Andrei_Sakharov) was a Soviet physicist and human rights activist.
+Despite his many accomplishments, I have found that he is a relatively unknown figure, at least in the West.
 Therefore, I decided to name this project in his honor. 
 
 ## Installation
@@ -49,8 +49,8 @@ To build and install `sakharov` from source:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/christian-johnson/text-editor.git
-   cd text-editor
+   git clone https://github.com/christian-johnson/sakharov.git
+   cd sakharov
    ```
 2. Build the release binary:
    ```bash
@@ -67,7 +67,17 @@ sv my_script.py
 sv my_notebook.ipynb
 ```
 
----
+## Roadmap
+
+Features I plan on adding in the near future include:
+- Better Markdown support (section folding, etc)
+- More syntax highlighting language support
+- A more comprehensive theming approach
+- Select-around-thing functionality via `tree-sitter`
+- Code breadcrumbs
+- More UI eye candy (e.g. customizable modelines)
+
+I don't plan on adding a version control interface (I use `lazygit` for this) or a more robust file explorer (I use `yazi` for this).
 
 ## Modes & Keybindings
 
