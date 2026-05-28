@@ -521,8 +521,12 @@ fn run_loop(
 
             // Clear visible placements so images that scrolled off screen
             // (or were replaced) disappear.  q=2 suppresses OK responses.
+            // Always clear in notebook mode so that cell-output clears take
+            // effect even when kitty_image_ids was just emptied by the command.
             if app.graphics_terminal.supports_graphics()
-                && (!app.pending_images.is_empty() || !app.kitty_image_ids.is_empty())
+                && (app.notebook.is_some()
+                    || !app.pending_images.is_empty()
+                    || !app.kitty_image_ids.is_empty())
             {
                 let _ = kitty::clear_images();
             }

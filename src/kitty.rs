@@ -95,3 +95,15 @@ pub fn clear_images() -> Result<()> {
     stdout.flush()?;
     Ok(())
 }
+
+/// Delete placements for specific image IDs, then send a catch-all delete.
+/// More reliable than clear_images() alone on terminals with partial a=d support.
+pub fn delete_images(ids: &[u32]) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    for &id in ids {
+        write!(stdout, "\x1b_Ga=d,i={id},q=2\x1b\\")?;
+    }
+    write!(stdout, "\x1b_Ga=d,q=2\x1b\\")?;
+    stdout.flush()?;
+    Ok(())
+}

@@ -323,28 +323,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "majorana"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "crossterm",
- "dirs",
- "libc",
- "ratatui",
- "ropey",
- "serde",
- "serde_json",
- "toml",
- "tree-sitter",
- "tree-sitter-highlight",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "unicode-width 0.2.0",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -519,6 +497,28 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "sakharov"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "crossterm",
+ "dirs",
+ "libc",
+ "ratatui",
+ "ropey",
+ "serde",
+ "serde_json",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-highlight",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "unicode-width 0.2.0",
+]
 
 [[package]]
 name = "scopeguard"

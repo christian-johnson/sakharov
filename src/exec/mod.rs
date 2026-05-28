@@ -1028,15 +1028,32 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::NotebookClearOutputs => {
+            // Collect the Kitty IDs for this cell's images before dropping them,
+            // then delete those specific placements.  Using per-ID deletion
+            // (a=d,i=N) is more reliable than the catch-all a=d across terminals.
             if let Some((ref mut nb, ref state)) = app.notebook {
                 let idx = state.focused_cell;
                 if idx < nb.cells.len() {
+                    if app.graphics_terminal.supports_graphics() {
+                        use crate::notebook::Output;
+                        let ids: Vec<u32> = nb.cells[idx].outputs.iter()
+                            .filter_map(|o| {
+                                let png = match o {
+                                    Output::DisplayData { data } => data.image_png.as_ref(),
+                                    Output::ExecuteResult { data, .. } => data.image_png.as_ref(),
+                                    _ => None,
+                                }?;
+                                let ptr_key = std::sync::Arc::as_ptr(png) as usize;
+                                let kid = app.kitty_image_ids.remove(&ptr_key)?;
+                                Some(kid)
+                            })
+                            .collect();
+                        let _ = crate::kitty::delete_images(&ids);
+                    }
                     nb.cells[idx].outputs.clear();
                     nb.modified = true;
                 }
             }
-            let _ = crate::kitty::clear_images();
-            app.kitty_image_ids.clear();
             return;
         }
 

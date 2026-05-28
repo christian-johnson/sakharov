@@ -1,6 +1,6 @@
-# majorana 
+# `sakharov` 
 
-`majorana` (pronounced __my-your-on-uh__) is a lightweight text editor written in Rust, heavily inspired by Helix.
+`sakharov` (pronounced __sack-uh-rov__) is a lightweight text editor written in Rust, heavily inspired by Helix.
 It steals many of Helix's features (noun->verb modal editing; minimal configuration), while adding a few additional components for data science support, namely:
 - Native Jupyter notebook interface
 - LSP support in notebooks
@@ -19,16 +19,16 @@ __Until a version 1.0 is released, breaking changes and instability are to be ex
 
 [Screencast_20260527_121149.webm](https://github.com/user-attachments/assets/a767a1f7-6535-4f34-a0d3-0d5594fc00ba)
 
-This screenshot shows some of `majorana`'s features: a command palette with fuzzy matching, LSP documentation lookup & code actions, format-on-save, etc.
+This screenshot shows some of `sakharov`'s features: a command palette with fuzzy matching, LSP documentation lookup & code actions, format-on-save, etc.
 
 ## Etymology
-Ettore Majorana was a renowned Italian physicist who was the first to propose that fermions could be their own antiparticles. 
-Neat stuff! 
-I decided to name this repo after him. 
+Andrei Sakharov was a Soviet physicist and human rights activist.
+Despite his accomplishments, I have found that he is a relatively unknown figure, at least in the West.
+Therefore, I decided to name this project in his honor. 
 
 ## Installation
 
-To compile and run `majorana`, make sure you have the following:
+To compile and run `sakharov`, make sure you have the following:
 
 1. **Rust Toolchain**: `cargo` and `rustc` (Edition 2021).
 2. **Git**: for cloning this repo
@@ -39,7 +39,7 @@ I've tested this with WezTerm, but Kitty and Ghostty should work. Alacritty does
    - Rust: `rust-analyzer`
    - JavaScript/TypeScript: `typescript-language-server`
 
-To build and install `majorana` from source:
+To build and install `sakharov` from source:
 
 1. Clone the repository:
    ```bash
@@ -52,20 +52,20 @@ To build and install `majorana` from source:
    ```
 3. Copy the compiled binary to your path:
    ```bash
-   cp target/release/mj ~/.local/bin/  # Or any directory on your $PATH
+   cp target/release/sv ~/.local/bin/  # Or any directory on your $PATH
    ```
 
-To run `majorana`, simply pass a file path:
+To run `sakharov`, simply pass a file path:
 ```bash
-mj my_script.py
-mj my_notebook.ipynb
+sv my_script.py
+sv my_notebook.ipynb
 ```
 
 ---
 
 ## Modes & Keybindings
 
-`majorana` uses Helix-style selection-first editing. Most actions operate on the current selection. In Normal mode, the selection is collapsed to a single-character "point" cursor.
+`sakharov` uses Helix-style selection-first editing. Most actions operate on the current selection. In Normal mode, the selection is collapsed to a single-character "point" cursor.
 
 ### Normal & Select Modes
 
@@ -148,7 +148,7 @@ Activated automatically for `.ipynb` files, or by pressing `ESC` from Normal mod
 
 ## Configuration
 
-`majorana` reads configuration from `~/.config/majorana/config.toml`, which supersede the built-in defaults.
+`sakharov` reads configuration from `~/.config/sakharov/config.toml`, which supersede the built-in defaults.
 
 ### Default Options
 
@@ -185,10 +185,10 @@ git_gutter = true
 
 ### Example Keybinding Configuration
 
-If you want to customize your keys (for example, mapping `J` and `K` to page down/page up instead of cell navigation or default bindings), add `[keys.normal]` and `[keys.select]` sections to `~/.config/majorana/config.toml`:
+If you want to customize your keys (for example, mapping `J` and `K` to page down/page up instead of cell navigation or default bindings), add `[keys.normal]` and `[keys.select]` sections to `~/.config/sakharov/config.toml`:
 
 ```toml
-# ~/.config/majorana/config.toml
+# ~/.config/sakharov/config.toml
 
 [theme]
 # Use custom theme colors
@@ -213,10 +213,10 @@ file_picker = "yazi --chooser-file=$MJ_PICKER_FILE"
 
 ### Example Language Server Configuration
 
-To enable Python LSP support with [ruff](https://docs.astral.sh/ruff/), add a `[language_servers.python]` section. Run `majorana` from your project root so it can find your virtualenv automatically.
+To enable Python LSP support with [ruff](https://docs.astral.sh/ruff/), add a `[language_servers.python]` section. Run `sakharov` from your project root so it can find your virtualenv automatically.
 
 ```toml
-# ~/.config/majorana/config.toml
+# ~/.config/sakharov/config.toml
 
 [language_servers.python]
 command = "pylsp"
