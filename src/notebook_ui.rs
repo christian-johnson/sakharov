@@ -28,6 +28,11 @@ pub struct ActiveCellView<'a> {
     pub scroll_row: usize,
     /// Current editor mode — determines cursor highlight style.
     pub mode: &'a Mode,
+    /// Jump-mode labels to overlay on the cell source (`app.jump_labels`).
+    /// Empty slice when not in Jump mode.
+    pub jump_labels: &'a [(usize, String)],
+    /// Characters typed so far in Jump mode (`app.jump_typed`).
+    pub jump_typed: &'a str,
 }
 
 /// A request to render a PNG image via the Kitty graphics protocol.
@@ -35,6 +40,9 @@ pub struct ImageRequest {
     pub col: u16,
     pub row: u16,
     pub rows: u16,
+    /// Explicit column width passed as `c=` in the protocol.  Required for
+    /// WezTerm, which doesn't auto-compute width from aspect ratio like Kitty.
+    pub cols: u16,
     /// Shared reference to the raw PNG bytes — cloning this is O(1).
     pub png_data: std::sync::Arc<Vec<u8>>,
 }
@@ -54,6 +62,7 @@ pub fn render(
     active: &ActiveCellView<'_>,
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     nb_config: &crate::config::NotebookConfig,
+    cell_pixel_size: Option<(u16, u16)>,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let size = frame.area();
     if size.height < 3 {
@@ -68,13 +77,14 @@ pub fn render(
         height: size.height.saturating_sub(2),
     };
 
-    render_cells(frame, state, nb, active, lsp_diagnostics, content_area, nb_config)
+    render_cells(frame, state, nb, active, lsp_diagnostics, content_area, nb_config, cell_pixel_size)
 }
 
 // ---------------------------------------------------------------------------
 // Cell rendering
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn render_cells(
     frame: &mut Frame,
     state: &NotebookState,
@@ -83,6 +93,7 @@ fn render_cells(
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     area: Rect,
     nb_config: &crate::config::NotebookConfig,
+    cell_pixel_size: Option<(u16, u16)>,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let mut image_requests = Vec::new();
     let mut current_row = area.top();
@@ -108,14 +119,16 @@ fn render_cells(
 
         let is_focused = cell_idx == state.focused_cell;
         let is_folded = state.is_cell_folded(cell_idx);
+        // Inner column width available for cell content (subtract left+right borders).
+        let inner_cols = area.width.saturating_sub(2).max(4);
         // Folded cells always get the compact height regardless of focus.
         // For the focused non-folded cell, use the live buffer rope height.
         let cell_height = if is_folded {
             3u16.min(remaining) // border-top + 1 summary line + border-bottom
         } else if is_focused {
-            focused_cell_display_height(active.rope, cell, nb_config.image_rows).min(remaining)
+            focused_cell_display_height(active.rope, cell, nb_config.image_rows, cell_pixel_size, inner_cols).min(remaining)
         } else {
-            cell_display_height(cell, nb_config.image_rows).min(remaining)
+            cell_display_height(cell, nb_config.image_rows, cell_pixel_size, inner_cols).min(remaining)
         };
 
         let cell_rect = Rect {
@@ -160,6 +173,7 @@ fn render_cells(
                 let cursor_screen = render_cell_content(
                     frame, nb, cell, cell_idx, is_focused, inner, active,
                     lsp_diagnostics, &mut image_requests, &mut shared_hl, nb_config,
+                    cell_pixel_size,
                 );
                 if is_focused {
                     focused_cell_screen_pos = cursor_screen;
@@ -193,6 +207,7 @@ fn render_cell_content(
     image_requests: &mut Vec<ImageRequest>,
     highlighter: &mut Highlighter,
     nb_config: &crate::config::NotebookConfig,
+    cell_pixel_size: Option<(u16, u16)>,
 ) -> Option<(u16, u16)> {
     // For the focused cell, use the live buffer rope; otherwise use stored source.
     let rope: &ropey::Rope = if is_focused { active.rope } else { &cell.source };
@@ -241,6 +256,9 @@ fn render_cell_content(
         highlight_spans: &highlight_spans,
         is_code: cell.cell_type == CellType::Code,
         diag_ranges: &cell_diag_ranges,
+        // Only overlay jump labels on the focused cell.
+        jump_labels: if is_focused { active.jump_labels } else { &[] },
+        jump_typed: if is_focused { active.jump_typed } else { "" },
     };
 
     let mut current_row = area.top();
@@ -302,7 +320,7 @@ fn render_cell_content(
             if current_row >= area.bottom() {
                 break;
             }
-            render_output(frame, output, area, &mut current_row, image_requests, nb_config);
+            render_output(frame, output, area, &mut current_row, image_requests, nb_config, cell_pixel_size);
         }
     }
 
@@ -368,28 +386,85 @@ fn render_folded_cell_summary_rope(
 // Cell height / colour helpers
 // ---------------------------------------------------------------------------
 
-pub fn cell_display_height(cell: &Cell, image_rows: u16) -> u16 {
+/// Compute how many terminal rows an image should occupy.
+///
+/// The image's *natural* terminal size is `png_w / cell_w` cols × `png_h / cell_h` rows —
+/// a 1:1 mapping of PNG pixels to terminal pixels.  If the image fits within
+/// `available_cols`, it is displayed at that natural (smaller) size.  If it is
+/// wider than `available_cols`, it is scaled down to fill the available width,
+/// preserving aspect ratio.  The result is always capped at `max_image_rows`.
+///
+/// This means small figures (small figsize) show small, while large figures
+/// scale down to fill the available width — `available_cols` is a ceiling, not
+/// a target.
+pub fn compute_image_rows(
+    png_w: u32,
+    png_h: u32,
+    available_cols: u16,
+    cell_pixel_size: Option<(u16, u16)>,
+    max_image_rows: u16,
+) -> u16 {
+    let (cell_h, cell_w) = cell_pixel_size.unwrap_or((18, 9));
+
+    // Natural terminal dimensions at 1:1 PNG-pixel-to-terminal-pixel mapping.
+    let natural_cols = png_w / cell_w as u32;
+    let natural_rows = png_h / cell_h as u32;
+
+    let rows: u64 = if natural_cols <= available_cols as u32 {
+        // Image fits within the available width — use its natural height.
+        natural_rows as u64
+    } else {
+        // Image is wider than available — scale down to fit, preserving aspect ratio.
+        // rows = available_cols × cell_w_px × png_h / (png_w × cell_h_px)
+        (available_cols as u64 * cell_w as u64 * png_h as u64)
+            / (png_w as u64 * cell_h as u64)
+    };
+
+    (rows as u16).max(2).min(max_image_rows)
+}
+
+pub fn cell_display_height(
+    cell: &Cell,
+    max_image_rows: u16,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+) -> u16 {
     // len_lines() is O(1) on a Rope; avoids the O(n) to_string() conversion.
     let source_lines = cell.source.len_lines().max(1) as u16;
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
-        1 + cell.outputs.iter().map(|o| single_output_height_count(o, image_rows)).sum::<u16>()
+        1 + cell.outputs.iter()
+            .map(|o| single_output_height_count(o, max_image_rows, cell_pixel_size, available_cols))
+            .sum::<u16>()
     } else {
         0
     };
     2 + source_lines + output_h // 2 = top border + bottom border
 }
 
-pub fn focused_cell_display_height(rope: &ropey::Rope, cell: &Cell, image_rows: u16) -> u16 {
+pub fn focused_cell_display_height(
+    rope: &ropey::Rope,
+    cell: &Cell,
+    max_image_rows: u16,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+) -> u16 {
     let source_lines = rope.len_lines().max(1) as u16;
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
-        1 + cell.outputs.iter().map(|o| single_output_height_count(o, image_rows)).sum::<u16>()
+        1 + cell.outputs.iter()
+            .map(|o| single_output_height_count(o, max_image_rows, cell_pixel_size, available_cols))
+            .sum::<u16>()
     } else {
         0
     };
     2 + source_lines + output_h
 }
 
-fn single_output_height_count(output: &Output, image_rows: u16) -> u16 {
+fn single_output_height_count(
+    output: &Output,
+    max_image_rows: u16,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+) -> u16 {
     match output {
         Output::Stream { text, .. } => {
             let n = text.lines().count();
@@ -398,8 +473,12 @@ fn single_output_height_count(output: &Output, image_rows: u16) -> u16 {
             (shown + extra).max(1) as u16
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-            if data.image_png.is_some() {
-                image_rows
+            if let Some(png) = &data.image_png {
+                if let Some((pw, ph)) = png_pixel_size(png) {
+                    compute_image_rows(pw, ph, available_cols, cell_pixel_size, max_image_rows)
+                } else {
+                    max_image_rows
+                }
             } else {
                 data.text_plain
                     .as_deref()
@@ -443,6 +522,9 @@ struct SourceLineCtx<'a> {
     is_code: bool,
     /// Diagnostic ranges for this cell: (line_within_cell, col_start, col_end, severity).
     diag_ranges: &'a [(usize, usize, usize, DiagnosticSeverity)],
+    /// Jump-mode labels to overlay on the focused cell's source lines.
+    jump_labels: &'a [(usize, String)],
+    jump_typed: &'a str,
 }
 
 fn render_source_line(
@@ -480,6 +562,7 @@ fn render_source_line(
     let has_selection = sel_lo != sel_hi;
 
     let mut x = content_area.x;
+    let line_len = line.chars().count();
     let buf = frame.buffer_mut();
 
     for (char_off, c) in line.chars().enumerate() {
@@ -527,11 +610,41 @@ fn render_source_line(
 
     // Cursor past end-of-line (empty line or cursor at newline position).
     if let Some(cp) = ctx.cursor_pos {
-        let line_len = line.chars().count();
         if cp == line_start_char + line_len && x < content_area.right() {
-            frame.buffer_mut()[(x, area.y)]
-                .set_char(' ')
-                .set_style(cursor_style);
+            buf[(x, area.y)].set_char(' ').set_style(cursor_style);
+        }
+    }
+
+    // Jump label overlay — paint over already-rendered characters.
+    if !ctx.jump_labels.is_empty() {
+        let typed_len = ctx.jump_typed.len();
+        let jump_pending = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Rgb(255, 160, 0))
+            .add_modifier(Modifier::BOLD);
+        let jump_confirmed = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD);
+        for (pos, label) in ctx.jump_labels {
+            if !label.starts_with(ctx.jump_typed) {
+                continue;
+            }
+            if *pos < line_start_char {
+                continue;
+            }
+            let char_off = pos - line_start_char;
+            if char_off >= line_len {
+                continue;
+            }
+            for (i, lc) in label.chars().enumerate() {
+                let col = content_x + (char_off + i) as u16;
+                if col >= content_area.right() {
+                    break;
+                }
+                let style = if i < typed_len { jump_confirmed } else { jump_pending };
+                buf[(col, area.y)].set_char(lc).set_style(style);
+            }
         }
     }
 }
@@ -543,6 +656,7 @@ fn render_output(
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
     nb_config: &crate::config::NotebookConfig,
+    cell_pixel_size: Option<(u16, u16)>,
 ) {
     match output {
         Output::Stream { name, text } => {
@@ -583,7 +697,7 @@ fn render_output(
         }
 
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-            render_mime_data(frame, data, area, current_row, image_requests, nb_config.image_rows);
+            render_mime_data(frame, data, area, current_row, image_requests, nb_config.image_rows, cell_pixel_size);
         }
 
         Output::Error { ename, evalue, traceback } => {
@@ -616,6 +730,34 @@ fn render_output(
     }
 }
 
+/// Read pixel dimensions from a PNG header (bytes 16-23 of the file).
+/// Returns None if the slice is too short or reports zero dimensions.
+fn png_pixel_size(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 24 {
+        return None;
+    }
+    let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+    let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+    if w > 0 && h > 0 { Some((w, h)) } else { None }
+}
+
+/// Compute how many terminal columns a `rows`-tall image will occupy.
+///
+/// Kitty scales the image to exactly `rows` terminal rows in height, then
+/// determines the width from the image's aspect ratio and the actual terminal
+/// cell pixel dimensions.  We replicate that calculation so the dark placeholder
+/// drawn by ratatui matches the image footprint exactly.
+///
+/// Formula: cols = rows × cell_h_px × png_w / (png_h × cell_w_px)
+///
+/// Falls back to a 2:1 cell ratio when actual pixel dimensions are unavailable.
+fn estimated_image_cols(png_w: u32, png_h: u32, rows: u16, cell_pixel_size: Option<(u16, u16)>) -> u16 {
+    let (cell_h, cell_w) = cell_pixel_size.unwrap_or((18, 9));
+    let cols = (rows as u64) * (cell_h as u64) * (png_w as u64)
+        / ((png_h as u64) * (cell_w as u64));
+    cols.clamp(4, 512) as u16
+}
+
 fn render_mime_data(
     frame: &mut Frame,
     data: &MimeData,
@@ -623,16 +765,37 @@ fn render_mime_data(
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
     image_rows: u16,
+    cell_pixel_size: Option<(u16, u16)>,
 ) {
     if let Some(png) = &data.image_png {
-        // Reserve `image_rows` rows so the Kitty render can't overlap the next cell.
         let available = area.bottom().saturating_sub(*current_row);
-        let reserved = image_rows.min(available);
+        // Compute rows from image aspect ratio so the display height scales with
+        // figsize.  image_rows acts as a cap, not a fixed height.
+        let natural_rows = if let Some((pw, ph)) = png_pixel_size(png) {
+            compute_image_rows(pw, ph, area.width, cell_pixel_size, image_rows)
+        } else {
+            image_rows
+        };
+        let reserved = natural_rows.min(available);
         if reserved > 0 {
             let image_top = *current_row;
+
+            // Placeholder width = the same column count Kitty will use so the
+            // dark background matches the rendered image footprint exactly.
+            let placeholder_cols = if let Some((pw, ph)) = png_pixel_size(png) {
+                estimated_image_cols(pw, ph, reserved, cell_pixel_size).min(area.width)
+            } else {
+                area.width
+            };
+
             // Draw a dark placeholder block; Kitty will paint over it.
             for r in 0..reserved {
-                let row_area = single_row(area, image_top + r);
+                let row_area = Rect {
+                    x: area.x,
+                    y: image_top + r,
+                    width: placeholder_cols,
+                    height: 1,
+                };
                 let label = if r == 0 { "  ▸ image ".to_string() } else { String::new() };
                 frame.render_widget(
                     SingleLineWidget {
@@ -648,6 +811,7 @@ fn render_mime_data(
                 col: area.x,
                 row: image_top,
                 rows: reserved,
+                cols: placeholder_cols,
                 png_data: png.clone(),
             });
             *current_row += reserved;

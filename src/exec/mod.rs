@@ -807,7 +807,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             if let Some((ref nb, ref mut state)) = app.notebook {
                 let last = nb.cells.len().saturating_sub(1);
                 state.focused_cell = (state.focused_cell + 1).min(last);
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
+                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
             }
             notebook::load_focused_cell(app);
             app.mode = Mode::Notebook;
@@ -818,7 +818,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             notebook::save_focused_cell(app);
             if let Some((ref nb, ref mut state)) = app.notebook {
                 state.focused_cell = state.focused_cell.saturating_sub(1);
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
+                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
             }
             notebook::load_focused_cell(app);
             app.mode = Mode::Notebook;
@@ -878,6 +878,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 }
                 state.executing_cell = None;
             }
+            // Outputs just changed — old Arc pointers are freed and new ones
+            // may reuse the same addresses.  Clear the Kitty ID cache so the
+            // next render always uploads fresh pixel data for the new outputs.
+            app.kitty_image_ids.clear();
             return;
         }
         Command::NotebookRestartKernel => {
@@ -928,7 +932,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.cells = cells;
                     nb.modified = true;
                     state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
                 }
                 notebook::load_focused_cell(app);
                 notebook::notebook_lsp_reopen(app);
@@ -953,7 +957,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.cells = cells;
                     nb.modified = true;
                     state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
                 }
                 notebook::load_focused_cell(app);
                 notebook::notebook_lsp_reopen(app);
@@ -977,7 +981,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 });
                 state.focused_cell = new_idx;
                 nb.modified = true;
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
+                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
             }
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
@@ -997,7 +1001,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     execution_count: None,
                 });
                 nb.modified = true;
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
+                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
             }
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
@@ -1013,11 +1017,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.modified = true;
                     state.focused_cell =
                         state.focused_cell.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows);
+                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
                 }
             }
-            // Arcs for deleted outputs are freed; clear Kitty cache so stale
-            // pointer keys are never reused.
             let _ = crate::kitty::clear_images();
             app.kitty_image_ids.clear();
             notebook::load_focused_cell(app);
@@ -1093,6 +1095,13 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::EnterNotebook => {
             if app.notebook.is_some() {
                 app.mode = Mode::Notebook;
+            } else if app.buffer.path.as_ref()
+                .and_then(|p| p.extension())
+                .and_then(|e| e.to_str()) == Some("ipynb")
+            {
+                if let Some(path) = app.buffer.path.clone() {
+                    open_as_notebook(app, &path);
+                }
             }
             return;
         }

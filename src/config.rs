@@ -158,7 +158,7 @@ pub struct NotebookConfig {
     pub max_traceback_lines: usize,
 }
 
-fn default_image_rows() -> u16 { 12 }
+fn default_image_rows() -> u16 { 40 }
 fn default_max_output_lines() -> usize { 20 }
 fn default_max_traceback_lines() -> usize { 5 }
 

@@ -95,10 +95,21 @@ pub struct App {
     /// Image draw requests collected by the last notebook render pass.
     pub pending_images: Vec<ImageRequest>,
     /// Maps Arc-pointer-as-usize → Kitty image ID so pixel data is uploaded
-    /// only once.  Cleared whenever notebook outputs change structurally.
+    /// only once per image.  Must be cleared whenever outputs change or the
+    /// terminal is resized (Kitty evicts pixel cache on resize).
     pub kitty_image_ids: std::collections::HashMap<usize, u32>,
-    /// Counter for assigning unique Kitty image IDs.
+    /// Counter for assigning unique Kitty image IDs (wraps at u32::MAX).
     pub next_kitty_id: u32,
+    /// Terminal size at the last frame images were uploaded.  Used to detect
+    /// resizes that invalidate Kitty's pixel cache.
+    pub kitty_last_size: (u16, u16),
+    /// Actual terminal cell pixel dimensions `(cell_h_px, cell_w_px)` queried
+    /// from the OS via TIOCGWINSZ.  Used to size image placeholders precisely
+    /// so they match what Kitty renders.  `None` until first successful query.
+    pub cell_pixel_size: Option<(u16, u16)>,
+    /// Which terminal graphics backend is available (Kitty, WezTerm, or none).
+    /// Detected once at startup from environment variables.
+    pub graphics_terminal: kitty::GraphicsTerminal,
     /// Tracks which cell is loaded in `buffer` and whether the full-screen
     /// overlay is active. Always `Some` while a notebook is open.
     pub notebook_cell_edit: Option<CellEditSession>,
@@ -283,6 +294,9 @@ impl App {
             pending_images: Vec::new(),
             kitty_image_ids: std::collections::HashMap::new(),
             next_kitty_id: 1,
+            kitty_last_size: (0, 0),
+            cell_pixel_size: None,
+            graphics_terminal: kitty::GraphicsTerminal::detect(),
             notebook_cell_edit,
             popup: None,
             lsp: LspManager::new(),
@@ -413,6 +427,13 @@ fn run_loop(
             app.viewport_height = size.height.saturating_sub(2) as usize;
             app.viewport_width = size.width as usize;
         }
+        // Query actual terminal cell pixel dimensions (TIOCGWINSZ).
+        // Used to size image placeholders to match Kitty's rendering exactly.
+        if let Ok(ws) = crossterm::terminal::window_size() {
+            if ws.columns > 0 && ws.rows > 0 && ws.width > 0 && ws.height > 0 {
+                app.cell_pixel_size = Some((ws.height / ws.rows, ws.width / ws.columns));
+            }
+        }
         crate::exec::update_scroll(app);
 
         // Recompute syntax highlights and fold ranges at most once per frame.
@@ -458,9 +479,11 @@ fn run_loop(
                             sel_anchor: app.selection.anchor,
                             scroll_row: app.scroll_row,
                             mode: &app.mode,
+                            jump_labels: &app.jump_labels,
+                            jump_typed: &app.jump_typed,
                         };
                         let (images, cursor_pos) =
-                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook);
+                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook, app.cell_pixel_size);
                         app.pending_images = images;
                         nb_cursor = cursor_pos;
 
@@ -488,28 +511,37 @@ fn run_loop(
                 }
             })?;
 
-            // Clear all existing Kitty placements so images that scrolled off
-            // screen (or were replaced) disappear.  q=2 in clear_images() ensures
-            // no OK response is sent back through stdin.
-            if !app.pending_images.is_empty() || !app.kitty_image_ids.is_empty() {
+            // If the terminal was resized, Kitty evicts its pixel cache, so
+            // any cached image IDs are invalid — flush them before placing.
+            let cur_size = (app.viewport_width as u16, app.viewport_height as u16);
+            if cur_size != app.kitty_last_size {
+                app.kitty_image_ids.clear();
+                app.kitty_last_size = cur_size;
+            }
+
+            // Clear visible placements so images that scrolled off screen
+            // (or were replaced) disappear.  q=2 suppresses OK responses.
+            if app.graphics_terminal.supports_graphics()
+                && (!app.pending_images.is_empty() || !app.kitty_image_ids.is_empty())
+            {
                 let _ = kitty::clear_images();
             }
 
-            if !app.pending_images.is_empty() && app.popup.is_none() {
+            if app.graphics_terminal.supports_graphics()
+                && !app.pending_images.is_empty()
+                && app.popup.is_none()
+            {
                 let images = std::mem::take(&mut app.pending_images);
                 for req in &images {
-                    // Use the Arc pointer as a stable identity key.  Safe
-                    // because we clear kitty_image_ids whenever outputs are
-                    // structurally mutated (cells deleted, outputs cleared).
                     let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
                     if let Some(&kid) = app.kitty_image_ids.get(&ptr_key) {
-                        // Pixel data already uploaded — re-place with tiny cmd.
-                        let _ = kitty::place_image(req.col, req.row, kid, req.rows);
+                        // Pixel data already cached in the terminal — re-place cheaply.
+                        let _ = kitty::place_image(req.col, req.row, kid, req.rows, req.cols);
                     } else {
-                        // First render of this image — upload pixel data once.
+                        // First time seeing this image — upload pixel data once.
                         let kid = app.next_kitty_id;
                         app.next_kitty_id = if app.next_kitty_id == u32::MAX { 1 } else { app.next_kitty_id + 1 };
-                        let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, &req.png_data);
+                        let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, &req.png_data);
                         app.kitty_image_ids.insert(ptr_key, kid);
                     }
                 }

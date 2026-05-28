@@ -5,7 +5,7 @@
 A from-scratch TUI text editor written in Rust, built for personal use.
 Invoked as `mj [file]`. Binary at `target/debug/mj` (or `target/release/mj`).
 
-## Current status — Phase 2 complete
+## Current status — Phase 3 complete
 
 ### Phase 1 (plain text editor) — complete
 - Helix-style (selection-first) modal editing: Normal, Insert, Select modes
@@ -19,6 +19,11 @@ Invoked as `mj [file]`. Binary at `target/debug/mj` (or `target/release/mj`).
 - Block cursor (white in Normal, cyan in Insert); hardware cursor positioned via `frame.set_cursor_position`
 - Ctrl+S saves; Ctrl+C shows quit hint
 - Config at `~/.config/majorana/config.toml` (theme colours, tab width, line numbers, scroll_off)
+- `/` and `?` incremental search, `n/N` cycle matches
+- `gw` jump mode (2-char labels over visible word starts)
+- Code folding (`zc/zo/za`), git gutter marks, word wrap toggle
+- Multiple buffers + buffer picker (`<space>b`), clipboard integration
+- Auto-indent on Enter, format-on-save (`:fmt` or configurable)
 
 ### Phase 2 (Jupyter notebooks) — complete
 - Opens `.ipynb` files automatically in notebook mode
@@ -37,15 +42,29 @@ Invoked as `mj [file]`. Binary at `target/debug/mj` (or `target/release/mj`).
 - Kernel status shown in status bar: `[idle]` / `[busy]` / `[dead]` / `[no kernel]`
 - `o/O` new cell below/above, `d` delete cell, `x` clear outputs
 - Saves back to valid nbformat 4 JSON (`:w`)
-- **Kitty graphics protocol** — image outputs reserved as `IMAGE_ROWS=12` row blocks; `r=N` Kitty param prevents overflow into adjacent cells
+- **Kitty/WezTerm graphics** — matplotlib figures captured automatically via Agg backend; displayed
+  using the Kitty graphics protocol with aspect-ratio-correct sizing. Image height scales naturally
+  with `figsize`; `image_rows` in config acts as a cap (default 40). Terminal detection via env
+  vars; images suppressed in unsupporting terminals.
+- **`gw` jump mode works inside notebook cells** — labels overlaid on the focused cell
 - All notebook commands accessible via `:` (e.g. `:run`, `:restart-kernel`, `:notebook-next-cell`)
 
+### Phase 3 (LSP) — complete
+- JSON-RPC client over stdio (`lsp.rs` / `lsp_manager.rs`)
+- Language server lifecycle: spawn, initialize, shutdown
+- **LSP multiplexing** — multiple servers per language (e.g. `pylsp` for intelligence + `ruff` for code actions/format)
+- Incremental document sync (`textDocument/didOpen`, `didChange`, `didClose`)
+- Diagnostics inline (underline) + status bar count
+- Completions — passive popup (typing) + focused mode (Tab to navigate, Enter to confirm)
+- Hover float (`K`)
+- Go-to-definition (`gd`), references
+- Code actions (`ga`)
+- Formatting (`gf` / `:fmt`, format-on-save option)
+- **Notebook LSP** — `notebookDocument/didOpen` sync; virtual cell paths for per-cell diagnostics and completions
+
 ### Known rough edges / not yet implemented
-- No search (`/` and `?`)
-- No LSP (Phase 3)
-- No multiple buffers / split panes
+- No split panes
 - Kernel interrupt (SIGINT) is best-effort with synchronous execution — for truly stuck cells, `:restart-kernel`
-- No rich output capture from execution (matplotlib figures etc. require kernel-protocol display_data hooks)
 - Highlight recompute is whole-buffer on every keystroke (fine for now)
 - Gutter overflows at >9999 lines (cosmetic)
 

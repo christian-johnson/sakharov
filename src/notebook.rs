@@ -14,7 +14,23 @@ const RUNNER_SCRIPT: &str = r#"
 import sys, json, io, traceback, base64
 
 _ns = {'__name__': '__main__'}
-_inline_matplotlib = False
+
+# At startup, try to configure matplotlib with the Agg (non-interactive) backend
+# so that plt.show() captures figures without requiring %matplotlib inline.
+_capture_matplotlib = False
+try:
+    import matplotlib as _mpl
+    try:
+        _mpl.use('Agg', force=True)
+    except TypeError:
+        _mpl.use('Agg')
+    import matplotlib.pyplot as _plt_global
+    _capture_matplotlib = True
+    # We capture figures via savefig(); make show() a no-op so it doesn't
+    # emit "FigureCanvasAgg is non-interactive" warnings on every plt.show() call.
+    _plt_global.show = lambda **kw: None
+except Exception:
+    pass
 
 sys.stdout.write('__KI_READY__\n')
 sys.stdout.flush()
@@ -35,26 +51,22 @@ while True:
         if stripped.startswith('%matplotlib'):
             parts = stripped.split()
             backend = parts[1] if len(parts) > 1 else 'inline'
-            if backend == 'inline':
-                _inline_matplotlib = True
-                try:
-                    import matplotlib as _mpl
+            try:
+                import matplotlib as _mpl
+                if backend in ('inline', 'agg', 'Agg'):
                     try:
                         _mpl.use('Agg', force=True)
                     except TypeError:
                         _mpl.use('Agg')
-                except Exception:
-                    pass
-            else:
-                _inline_matplotlib = False
-                try:
-                    import matplotlib as _mpl
+                    _capture_matplotlib = True
+                else:
                     try:
                         _mpl.use(backend, force=True)
                     except TypeError:
                         _mpl.use(backend)
-                except Exception:
-                    pass
+                    _capture_matplotlib = False
+            except Exception:
+                pass
         elif stripped.startswith('%') or stripped.startswith('!'):
             pass  # other magics/shell escapes ignored
         else:
@@ -68,16 +80,19 @@ while True:
     try:
         if code.strip():
             exec(compile(code, '<cell>', 'exec'), _ns)
-        if _inline_matplotlib:
+        if _capture_matplotlib:
             try:
                 import matplotlib.pyplot as _plt
-                for _num in _plt.get_fignums():
+                fignums = _plt.get_fignums()
+                for _num in fignums:
                     _fig = _plt.figure(_num)
                     _buf = io.BytesIO()
-                    _fig.savefig(_buf, format='png', bbox_inches='tight', dpi=150)
+                    # No bbox_inches='tight' — preserve the figsize aspect ratio exactly.
+                    _fig.savefig(_buf, format='png', dpi=150)
                     _buf.seek(0)
                     images.append(base64.b64encode(_buf.read()).decode('ascii'))
-                _plt.close('all')
+                if fignums:
+                    _plt.close('all')
             except Exception:
                 pass
     except SystemExit:

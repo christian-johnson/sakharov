@@ -48,9 +48,10 @@ var    = "= var"
 
 # Jupyter notebook settings.
 [notebook]
-# Terminal rows reserved per image output (Kitty graphics protocol).
-# Increase if images are clipped at the bottom; decrease for denser cell view.
-image_rows = 12
+# Maximum terminal rows an image output may occupy.
+# The actual height is computed from the image aspect ratio and cell width;
+# this value caps it so one large figure doesn't fill the entire screen.
+image_rows = 40
 
 # Maximum stdout/stderr lines shown per output block before "… N more lines".
 max_output_lines = 20

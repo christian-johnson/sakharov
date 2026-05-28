@@ -66,6 +66,8 @@ impl NotebookState {
         viewport_height: usize,
         active_rope: &ropey::Rope,
         image_rows: u16,
+        cell_pixel_size: Option<(u16, u16)>,
+        available_cols: u16,
     ) {
         let num_cells = cells.len();
         if num_cells == 0 || viewport_height == 0 {
@@ -80,11 +82,15 @@ impl NotebookState {
         let mut cell_heights = Vec::with_capacity(num_cells);
         for (idx, cell) in cells.iter().enumerate() {
             let h = if idx == focused {
-                crate::notebook_ui::focused_cell_display_height(active_rope, cell, image_rows) as usize
+                crate::notebook_ui::focused_cell_display_height(
+                    active_rope, cell, image_rows, cell_pixel_size, available_cols,
+                ) as usize
             } else if self.is_cell_folded(idx) {
                 3usize // top border + 1 summary line + bottom border
             } else {
-                crate::notebook_ui::cell_display_height(cell, image_rows) as usize
+                crate::notebook_ui::cell_display_height(
+                    cell, image_rows, cell_pixel_size, available_cols,
+                ) as usize
             };
             cell_heights.push(h);
         }
@@ -197,35 +203,35 @@ mod tests {
         // Viewport height = 15.
         // 1. Initial state: focused = 0, scroll_cell = 0.
         state.focused_cell = 0;
-        state.ensure_focused_visible(&cells, 15, &active_rope, 12);
+        state.ensure_focused_visible(&cells, 15, &active_rope, 12, None, 80);
         assert_eq!(state.scroll_cell, 0);
 
         // 2. Focus cell 1.
         state.focused_cell = 1;
         let active_rope1 = Rope::from_str("l1\nl2\nl3\nl4");
-        state.ensure_focused_visible(&cells, 15, &active_rope1, 12);
+        state.ensure_focused_visible(&cells, 15, &active_rope1, 12, None, 80);
         assert_eq!(state.scroll_cell, 0);
 
         // 3. Focus cell 2.
         state.focused_cell = 2;
         let active_rope2 = Rope::from_str("l1\nl2");
-        state.ensure_focused_visible(&cells, 15, &active_rope2, 12);
+        state.ensure_focused_visible(&cells, 15, &active_rope2, 12, None, 80);
         assert_eq!(state.scroll_cell, 1);
 
         // 4. Focus cell 3.
         state.focused_cell = 3;
         let active_rope3 = Rope::from_str("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8");
-        state.ensure_focused_visible(&cells, 15, &active_rope3, 12);
+        state.ensure_focused_visible(&cells, 15, &active_rope3, 12, None, 80);
         assert_eq!(state.scroll_cell, 2);
 
         // 5. Test Rule 2: Cell longer than viewport height (focused_h >= viewport_height).
-        state.ensure_focused_visible(&cells, 8, &active_rope3, 12);
+        state.ensure_focused_visible(&cells, 8, &active_rope3, 12, None, 80);
         assert_eq!(state.scroll_cell, 3);
 
         // 6. Test Rule 1: focused_cell < scroll_cell (scrolling up).
         state.focused_cell = 1;
         state.scroll_cell = 3;
-        state.ensure_focused_visible(&cells, 15, &active_rope1, 12);
+        state.ensure_focused_visible(&cells, 15, &active_rope1, 12, None, 80);
         assert_eq!(state.scroll_cell, 1);
     }
 }

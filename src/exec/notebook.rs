@@ -88,7 +88,6 @@ pub fn load_focused_cell(app: &mut App) {
 pub fn stash_current_notebook(app: &mut App) {
     save_focused_cell(app);
     notebook_lsp_close(app);
-    // Remove visible Kitty images and invalidate ID cache before leaving.
     let _ = crate::kitty::clear_images();
     app.kitty_image_ids.clear();
     if let Some((nb, state)) = app.notebook.take() {

@@ -299,6 +299,12 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
         return;
     }
 
+    // Redirect .ipynb files to the notebook loader.
+    if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+        super::open_as_notebook(app, path);
+        return;
+    }
+
     // Save scratch content when leaving it.
     super::save_current_special_buffer(app);
 

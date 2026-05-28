@@ -125,6 +125,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 fn handle_insert(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
+            // Always clear any popup (e.g. completion) when leaving Insert mode.
+            // The popup logic keeps it alive through DismissPassthrough so normal
+            // typing still works, but an explicit Esc should always dismiss it.
+            app.popup = None;
             exec::execute(app, &Command::EnterNormal);
         }
         KeyCode::Backspace => {
