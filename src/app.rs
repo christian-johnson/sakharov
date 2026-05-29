@@ -199,7 +199,7 @@ impl App {
             match Notebook::from_path(std::path::Path::new(p)) {
                 Ok(nb) => Some((nb, NotebookState::new())),
                 Err(e) => {
-                    eprintln!("mj: failed to load notebook: {e}");
+                    eprintln!("sv: failed to load notebook: {e}");
                     None
                 }
             }
@@ -353,7 +353,7 @@ pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str>
 /// Set up terminal, run the event loop, then restore terminal.
 pub fn run(path: Option<&str>) -> Result<()> {
     let config = Config::load().unwrap_or_else(|e| {
-        eprintln!("mj: config error: {e} — using built-in defaults");
+        eprintln!("sv: config error: {e} — using built-in defaults");
         toml::from_str(include_str!("../config/default.toml"))
             .expect("default config must parse")
     });
@@ -589,6 +589,7 @@ fn run_loop(
         }
 
         crate::exec::process_lsp_events(app);
+        crate::exec::process_kernel_events(app);
 
         // Append any new minibuffer message to the *Messages* log.
         if app.message.as_deref() != app.last_logged_message.as_deref() {

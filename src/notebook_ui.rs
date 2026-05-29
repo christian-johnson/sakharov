@@ -238,7 +238,7 @@ fn render_cell_content(
         let vpath = crate::notebook::cell_virtual_path(
             &nb.path, &nb.metadata.kernel_language, cell_idx,
         );
-        let key = vpath.to_string_lossy().to_string();
+        let key = crate::lsp::diagnostic_key(&vpath);
         lsp_diagnostics
             .get(&key)
             .map(|diags| {
@@ -491,10 +491,12 @@ fn single_output_height_count(
 }
 
 /// Returns the border colour reflecting the cell's execution state.
-/// Blue = not yet run, Green = success, Red = errored, Yellow = running.
+/// Dark blue = not yet run, bright blue = running, Green = success, Red = errored.
 fn cell_border_color(cell: &Cell, executing_cell: Option<usize>, cell_idx: usize) -> Color {
     if executing_cell == Some(cell_idx) {
-        return Color::Yellow;
+        // Bright blue while the cell streams output, distinct from the dim blue
+        // of an un-run cell.
+        return Color::LightBlue;
     }
     if cell.outputs.iter().any(|o| matches!(o, Output::Error { .. })) {
         return Color::Red;

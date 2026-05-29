@@ -568,7 +568,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
 
     // Diagnostic counts for the current file (split by severity for coloring).
     let (diag_errors, diag_warnings) = if let Some(ref path) = app.buffer.path {
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = crate::lsp::diagnostic_key(path);
         if let Some(diags) = app.lsp.diagnostics.get(&path_str) {
             let e = diags.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
             let w = diags.iter().filter(|d| d.severity == DiagnosticSeverity::Warning).count();

@@ -59,9 +59,9 @@ pub struct EditorConfig {
     /// Shell command to invoke as an external file picker (e.g. yazi, fzf).
     ///
     /// The command receives two environment variables:
-    ///   MJ_PICKER_FILE  — path to a temp file; write the chosen path there
+    ///   SV_PICKER_FILE  — path to a temp file; write the chosen path there
     ///                     (alternative to stdout, preferred for TUI pickers)
-    ///   MJ_CURRENT_DIR  — directory of the currently open file
+    ///   SV_CURRENT_DIR  — directory of the currently open file
     ///
     /// If unset, the built-in fuzzy file list is used instead.
     #[serde(default)]
@@ -192,7 +192,7 @@ pub struct LanguageServerConfig {
     #[serde(default)]
     pub args: Vec<String>,
     /// Server-specific `initializationOptions` (arbitrary JSON).
-    /// If absent, majorana auto-detects sensible defaults (e.g. venv for Python).
+    /// If absent, sakharov auto-detects sensible defaults (e.g. venv for Python).
     #[serde(default)]
     pub init_options: Option<serde_json::Value>,
     /// Which LSP features this server provides.
@@ -238,7 +238,7 @@ pub struct ExtraServerConfig {
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 impl Config {
-    /// Load config from `~/.config/majorana/config.toml`.
+    /// Load config from `~/.config/sakharov/config.toml`.
     ///
     /// The user file is deep-merged on top of the compiled-in defaults, so a
     /// partial config (e.g. only `[language_servers]`) works without repeating
@@ -289,21 +289,21 @@ pub fn config_file_path() -> Option<PathBuf> {
 /// Return the path to the user config file.
 ///
 /// Search order:
-/// 1. `$XDG_CONFIG_HOME/majorana/config.toml`
-/// 2. `~/.config/majorana/config.toml`  (preferred on all platforms)
-/// 3. `dirs::config_dir()/majorana/config.toml`  (macOS: ~/Library/Application Support)
+/// 1. `$XDG_CONFIG_HOME/sakharov/config.toml`
+/// 2. `~/.config/sakharov/config.toml`  (preferred on all platforms)
+/// 3. `dirs::config_dir()/sakharov/config.toml`  (macOS: ~/Library/Application Support)
 fn config_path() -> Option<PathBuf> {
     // Explicit XDG override wins.
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(xdg).join("majorana").join("config.toml"));
+        return Some(PathBuf::from(xdg).join("sakharov").join("config.toml"));
     }
     // ~/.config is the standard location for CLI tools on all platforms.
     if let Some(home) = dirs::home_dir() {
-        let xdg_default = home.join(".config").join("majorana").join("config.toml");
+        let xdg_default = home.join(".config").join("sakharov").join("config.toml");
         if xdg_default.exists() {
             return Some(xdg_default);
         }
     }
     // Fallback to the platform-native location (~/Library/Application Support on macOS).
-    dirs::config_dir().map(|d| d.join("majorana").join("config.toml"))
+    dirs::config_dir().map(|d| d.join("sakharov").join("config.toml"))
 }

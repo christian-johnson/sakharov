@@ -839,6 +839,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::NotebookExecuteCell => {
             notebook::save_focused_cell(app);
+            // One cell at a time: the persistent kernel is a single REPL.
+            let busy = app.notebook.as_ref()
+                .map(|(_, state)| state.executing_cell.is_some())
+                .unwrap_or(false);
+            if busy {
+                app.message = Some("Kernel busy — wait or :interrupt-kernel".into());
+                return;
+            }
             if let Some((ref mut nb, ref mut state)) = app.notebook {
                 let nb_dir = crate::notebook::notebook_dir(&nb.path);
                 if nb.kernel.is_none()
@@ -859,34 +867,34 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     }
                 }
                 let idx = state.focused_cell;
-                state.executing_cell = Some(idx);
-                if let Some(ref mut session) = nb.kernel {
-                    if idx < nb.cells.len() {
-                        match nb.cells[idx].execute(session) {
+                if idx < nb.cells.len() {
+                    let code = nb.cells[idx].source.to_string();
+                    nb.cells[idx].outputs.clear();
+                    if let Some(ref mut session) = nb.kernel {
+                        // Fire-and-forget: output streams back via process_kernel_events.
+                        match session.start_execution(&code) {
                             Ok(()) => {
-                                let count = nb.cells[idx].execution_count.unwrap_or(0);
-                                app.message =
-                                    Some(format!("Cell [{}] done  In [{}]", idx + 1, count));
+                                state.executing_cell = Some(idx);
+                                nb.modified = true;
+                                app.message = Some(format!("Running cell [{}]…", idx + 1));
                             }
                             Err(e) => {
                                 app.message = Some(format!("Kernel error: {e}"));
                                 nb.kernel = None;
                             }
                         }
-                        nb.modified = true;
                     }
                 }
-                state.executing_cell = None;
             }
-            // Outputs just changed — old Arc pointers are freed and new ones
-            // may reuse the same addresses.  Clear the Kitty ID cache so the
-            // next render always uploads fresh pixel data for the new outputs.
+            // Old output image Arcs were just freed; drop their Kitty cache
+            // entries so freshly-streamed images upload cleanly.
             app.kitty_image_ids.clear();
             return;
         }
         Command::NotebookRestartKernel => {
-            if let Some((ref mut nb, _)) = app.notebook {
+            if let Some((ref mut nb, ref mut state)) = app.notebook {
                 nb.kernel = None;
+                state.executing_cell = None;
                 let nb_dir = crate::notebook::notebook_dir(&nb.path);
                 match nb.start_kernel(&nb_dir) {
                     Ok(found_venv) => {
@@ -1449,12 +1457,73 @@ pub fn recompute_highlights(app: &mut App) {
     app.highlights_dirty = true;
 }
 
+/// Drain streamed output from the running kernel and apply it to the executing
+/// cell. Called once per frame so outputs (incl. live progress bars) appear as
+/// they are produced rather than only when the cell finishes.
+pub fn process_kernel_events(app: &mut App) {
+    use crate::notebook::{append_stream, push_error_output, KernelMessage, KernelStatus, MimeData, Output};
+
+    let mut refresh_images = false;
+    if let Some((ref mut nb, ref mut state)) = app.notebook {
+        let Some(idx) = state.executing_cell else { return };
+        let msgs = match nb.kernel.as_mut() {
+            Some(k) => k.poll(),
+            None => {
+                state.executing_cell = None;
+                return;
+            }
+        };
+        if msgs.is_empty() {
+            return;
+        }
+        for msg in msgs {
+            if idx >= nb.cells.len() {
+                break;
+            }
+            match msg {
+                KernelMessage::Stream { name, text } => {
+                    append_stream(&mut nb.cells[idx].outputs, &name, &text);
+                }
+                KernelMessage::Image { png } => {
+                    nb.cells[idx].outputs.push(Output::DisplayData {
+                        data: MimeData { text_plain: None, image_png: Some(std::sync::Arc::new(png)) },
+                    });
+                    refresh_images = true;
+                }
+                KernelMessage::Error { traceback } => {
+                    push_error_output(&mut nb.cells[idx].outputs, &traceback);
+                }
+                KernelMessage::Done => {
+                    if let Some(ref mut k) = nb.kernel {
+                        k.execution_count += 1;
+                        k.status = KernelStatus::Idle;
+                        nb.cells[idx].execution_count = Some(k.execution_count);
+                    }
+                    state.executing_cell = None;
+                    nb.modified = true;
+                    refresh_images = true;
+                }
+                KernelMessage::Dead => {
+                    if let Some(ref mut k) = nb.kernel {
+                        k.status = KernelStatus::Dead;
+                    }
+                    state.executing_cell = None;
+                    refresh_images = true;
+                }
+            }
+        }
+    }
+    if refresh_images {
+        app.kitty_image_ids.clear();
+    }
+}
+
 /// Rebuild the per-line diagnostic cache for the current buffer.
 /// Call this after diagnostics change or after switching files.
 pub fn rebuild_diag_cache(app: &mut App) {
     app.diag_by_line.clear();
     if let Some(ref path) = app.buffer.path {
-        let key = path.to_string_lossy().to_string();
+        let key = crate::lsp::diagnostic_key(path);
         if let Some(diags) = app.lsp.diagnostics.get(&key) {
             for d in diags {
                 app.diag_by_line
@@ -1705,18 +1774,18 @@ fn collect_files(
 /// Suspend the TUI, run an external picker command, then resume.
 ///
 /// The command receives:
-///   MJ_PICKER_FILE  — path to a temp file; write the chosen file path there
+///   SV_PICKER_FILE  — path to a temp file; write the chosen file path there
 ///                     (preferred for TUI pickers like yazi that own the screen)
-///   MJ_CURRENT_DIR  — directory of the currently open buffer
+///   SV_CURRENT_DIR  — directory of the currently open buffer
 ///
-/// If MJ_PICKER_FILE is non-empty after the command exits, that path is used.
+/// If SV_PICKER_FILE is non-empty after the command exits, that path is used.
 /// Otherwise the command's stdout is used (works well with fzf).
 fn open_file_external_picker(app: &mut App, cmd: &str) {
     use crossterm::{execute, terminal};
     use std::io::{self, Write};
 
     let tmp_path = std::env::temp_dir()
-        .join(format!("mj-picker-{}.txt", std::process::id()));
+        .join(format!("sv-picker-{}.txt", std::process::id()));
 
     let current_dir = app.buffer.path.as_deref()
         .and_then(|p| p.parent())
@@ -1733,8 +1802,8 @@ fn open_file_external_picker(app: &mut App, cmd: &str) {
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
-        .env("MJ_PICKER_FILE", &tmp_path)
-        .env("MJ_CURRENT_DIR", &current_dir)
+        .env("SV_PICKER_FILE", &tmp_path)
+        .env("SV_CURRENT_DIR", &current_dir)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())

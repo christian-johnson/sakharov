@@ -35,7 +35,7 @@ fn main() {
     let path = args.get(1).map(String::as_str);
 
     if let Err(e) = app::run(path) {
-        eprintln!("mj: {e}");
+        eprintln!("sv: {e}");
         process::exit(1);
     }
 }

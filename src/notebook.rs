@@ -1,5 +1,6 @@
 use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -10,10 +11,23 @@ use serde_json::Value;
 // Kernel runner script
 // ---------------------------------------------------------------------------
 
+// The runner streams output as it is produced: stdout/stderr are replaced with
+// forwarders that emit one JSON message per write, so the editor can render
+// progress bars (tqdm etc.) live instead of waiting for the cell to finish.
+// Message shapes (one compact JSON object per line on real stdout):
+//   {"t":"stream","name":"stdout"|"stderr","text":...}
+//   {"t":"image","data":<base64 png>}
+//   {"t":"error","text":<traceback>}
+//   {"t":"done"}
 const RUNNER_SCRIPT: &str = r#"
 import sys, json, io, traceback, base64
 
 _ns = {'__name__': '__main__'}
+_real_stdout = sys.stdout
+
+def _emit(obj):
+    _real_stdout.write(json.dumps(obj) + '\n')
+    _real_stdout.flush()
 
 # At startup, try to configure matplotlib with the Agg (non-interactive) backend
 # so that plt.show() captures figures without requiring %matplotlib inline.
@@ -32,8 +46,20 @@ try:
 except Exception:
     pass
 
-sys.stdout.write('__KI_READY__\n')
-sys.stdout.flush()
+class _Fwd(io.TextIOBase):
+    def __init__(self, name):
+        self._name = name
+    def writable(self):
+        return True
+    def write(self, s):
+        if s:
+            _emit({'t': 'stream', 'name': self._name, 'text': s})
+        return len(s)
+    def flush(self):
+        pass
+
+_real_stdout.write('__KI_READY__\n')
+_real_stdout.flush()
 
 while True:
     lines = []
@@ -42,6 +68,8 @@ while True:
         if s == '__KI_CODE_END__':
             break
         lines.append(s)
+    else:
+        break  # stdin closed — kernel shutting down
 
     # Handle IPython-style line magics. Only %matplotlib is processed;
     # everything else starting with % or ! is silently dropped for now.
@@ -73,10 +101,8 @@ while True:
             code_lines.append(line)
 
     code = '\n'.join(code_lines)
-    _out, _err, _exc = io.StringIO(), io.StringIO(), None
-    images = []
 
-    sys.stdout, sys.stderr = _out, _err
+    sys.stdout, sys.stderr = _Fwd('stdout'), _Fwd('stderr')
     try:
         if code.strip():
             exec(compile(code, '<cell>', 'exec'), _ns)
@@ -90,7 +116,7 @@ while True:
                     # No bbox_inches='tight' — preserve the figsize aspect ratio exactly.
                     _fig.savefig(_buf, format='png', dpi=150)
                     _buf.seek(0)
-                    images.append(base64.b64encode(_buf.read()).decode('ascii'))
+                    _emit({'t': 'image', 'data': base64.b64encode(_buf.read()).decode('ascii')})
                 if fignums:
                     _plt.close('all')
             except Exception:
@@ -98,18 +124,11 @@ while True:
     except SystemExit:
         pass
     except BaseException:
-        _exc = traceback.format_exc()
+        _emit({'t': 'error', 'text': traceback.format_exc()})
     finally:
-        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+        sys.stdout, sys.stderr = _real_stdout, sys.__stderr__
 
-    sys.stdout.write(json.dumps({
-        'stdout': _out.getvalue(),
-        'stderr': _err.getvalue(),
-        'error': _exc,
-        'images': images,
-    }) + '\n')
-    sys.stdout.write('__KI_OUTPUT_END__\n')
-    sys.stdout.flush()
+    _emit({'t': 'done'})
 "#;
 
 // ---------------------------------------------------------------------------
@@ -123,29 +142,35 @@ pub enum KernelStatus {
     Dead,
 }
 
-pub struct KernelOutput {
-    pub stdout: String,
-    pub stderr: String,
-    /// Full traceback string if an exception occurred.
-    pub error: Option<String>,
-    /// PNG images captured from matplotlib figures (only when %matplotlib inline is active).
-    pub images: Vec<Vec<u8>>,
+/// One incremental message from a running cell, produced by the kernel reader
+/// thread and drained on the main thread via [`KernelSession::poll`].
+pub enum KernelMessage {
+    /// A chunk of stdout/stderr text, emitted as the cell produces it.
+    Stream { name: String, text: String },
+    /// A captured matplotlib figure (decoded PNG bytes).
+    Image { png: Vec<u8> },
+    /// An uncaught exception traceback.
+    Error { traceback: String },
+    /// The cell finished executing.
+    Done,
+    /// The kernel process exited / closed its stdout.
+    Dead,
 }
 
 pub struct KernelSession {
     child: std::process::Child,
     stdin: std::io::BufWriter<std::process::ChildStdin>,
-    stdout: std::io::BufReader<std::process::ChildStdout>,
+    /// Messages from the background reader thread (drained by `poll`).
+    rx: Receiver<KernelMessage>,
     pub execution_count: u32,
     pub status: KernelStatus,
-    #[allow(dead_code)]
-    pub python_executable: String,
 }
 
 impl KernelSession {
     /// Spawn a persistent Python kernel running the runner script.
     ///
-    /// Blocks until the kernel prints `__KI_READY__` on stdout.
+    /// Blocks until the kernel prints `__KI_READY__`, then hands stdout to a
+    /// background reader thread so cell execution never blocks the UI.
     pub fn new(python: &str, notebook_dir: &Path) -> Result<Self> {
         use std::process::{Command, Stdio};
 
@@ -171,7 +196,7 @@ impl KernelSession {
         let stdin = std::io::BufWriter::new(stdin);
         let mut stdout = std::io::BufReader::new(stdout_raw);
 
-        // Wait for __KI_READY__
+        // Wait for __KI_READY__ (synchronous one-time startup handshake).
         let mut buf = String::new();
         let mut attempts = 0usize;
         loop {
@@ -191,84 +216,40 @@ impl KernelSession {
             attempts += 1;
         }
 
+        // Hand the (already-buffered) reader to a background thread.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || reader_thread(stdout, tx));
+
         Ok(Self {
             child,
             stdin,
-            stdout,
+            rx,
             execution_count: 0,
             status: KernelStatus::Idle,
-            python_executable: python.to_owned(),
         })
     }
 
-    /// Send `code` to the kernel and collect its output.
-    pub fn execute_code(&mut self, code: &str) -> Result<KernelOutput> {
-        self.status = KernelStatus::Busy;
-
-        // Write each line, then the sentinel.
+    /// Send `code` to the kernel and return immediately. Output arrives later
+    /// as [`KernelMessage`]s via [`poll`](Self::poll); the kernel marks itself
+    /// busy until a `Done` message is observed.
+    pub fn start_execution(&mut self, code: &str) -> Result<()> {
         for line in code.lines() {
             self.stdin.write_all(line.as_bytes())?;
             self.stdin.write_all(b"\n")?;
         }
         self.stdin.write_all(b"__KI_CODE_END__\n")?;
         self.stdin.flush()?;
+        self.status = KernelStatus::Busy;
+        Ok(())
+    }
 
-        // Collect output lines until __KI_OUTPUT_END__.
-        let mut payload_line = String::new();
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            let n = self
-                .stdout
-                .read_line(&mut buf)
-                .context("reading kernel output")?;
-            if n == 0 {
-                self.status = KernelStatus::Dead;
-                anyhow::bail!("kernel process closed stdout unexpectedly");
-            }
-            let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
-            if trimmed == "__KI_OUTPUT_END__" {
-                break;
-            }
-            payload_line = trimmed.to_owned();
+    /// Non-blocking drain of all messages the reader thread has queued.
+    pub fn poll(&mut self) -> Vec<KernelMessage> {
+        let mut msgs = Vec::new();
+        while let Ok(msg) = self.rx.try_recv() {
+            msgs.push(msg);
         }
-
-        self.execution_count += 1;
-        self.status = KernelStatus::Idle;
-
-        // Parse the JSON payload.
-        let v: serde_json::Value =
-            serde_json::from_str(&payload_line).context("parsing kernel output JSON")?;
-
-        let stdout = v
-            .get("stdout")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_owned();
-        let stderr = v
-            .get("stderr")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_owned();
-        let error = v
-            .get("error")
-            .and_then(|s| s.as_str())
-            .map(str::to_owned);
-        let images: Vec<Vec<u8>> = v
-            .get("images")
-            .and_then(|arr| arr.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|img| {
-                        img.as_str().and_then(|s| {
-                            base64::engine::general_purpose::STANDARD.decode(s).ok()
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(KernelOutput { stdout, stderr, error, images })
+        msgs
     }
 
     /// Send SIGINT to the child process (Unix/macOS).
@@ -286,8 +267,60 @@ impl KernelSession {
 
 impl Drop for KernelSession {
     fn drop(&mut self) {
+        // Killing the child closes its stdout, so the reader thread sees EOF
+        // and exits on its own.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Background thread: parse one JSON message per line from the kernel and
+/// forward it to the session. Exits (sending `Dead`) when stdout closes.
+fn reader_thread(
+    mut reader: std::io::BufReader<std::process::ChildStdout>,
+    tx: std::sync::mpsc::Sender<KernelMessage>,
+) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => {
+                let _ = tx.send(KernelMessage::Dead);
+                return;
+            }
+            Ok(_) => {}
+        }
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Lines that aren't our framed JSON (e.g. raw output from a subprocess
+        // the cell spawned) are skipped rather than crashing the stream.
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let msg = match v.get("t").and_then(|t| t.as_str()) {
+            Some("stream") => KernelMessage::Stream {
+                name: v.get("name").and_then(|n| n.as_str()).unwrap_or("stdout").to_owned(),
+                text: v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_owned(),
+            },
+            Some("image") => {
+                match v.get("data").and_then(|d| d.as_str())
+                    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+                {
+                    Some(png) => KernelMessage::Image { png },
+                    None => continue,
+                }
+            }
+            Some("error") => KernelMessage::Error {
+                traceback: v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_owned(),
+            },
+            Some("done") => KernelMessage::Done,
+            _ => continue,
+        };
+        if tx.send(msg).is_err() {
+            return; // session dropped
+        }
     }
 }
 
@@ -738,54 +771,48 @@ impl Notebook {
 }
 
 // ---------------------------------------------------------------------------
-// Cell execution
+// Output helpers (used by the async streaming-execution handler)
 // ---------------------------------------------------------------------------
 
-impl Cell {
-    /// Execute the cell source using a persistent kernel session and populate outputs.
-    pub fn execute(&mut self, session: &mut KernelSession) -> Result<()> {
-        self.outputs.clear();
-        let source = self.source.to_string();
-        let out = session.execute_code(&source)?;
-        self.execution_count = Some(session.execution_count);
-        if !out.stdout.is_empty() {
-            self.outputs.push(Output::Stream {
-                name: "stdout".into(),
-                text: out.stdout,
-            });
-        }
-        if !out.stderr.is_empty() {
-            self.outputs.push(Output::Stream {
-                name: "stderr".into(),
-                text: out.stderr,
-            });
-        }
-        if let Some(tb) = out.error {
-            let lines: Vec<String> = tb.lines().map(str::to_owned).collect();
-            // Last non-empty line is typically "ExceptionType: message".
-            let last = lines
-                .iter()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .cloned()
-                .unwrap_or_default();
-            let (ename, evalue) = last
-                .split_once(": ")
-                .unwrap_or((&last, ""));
-            self.outputs.push(Output::Error {
-                ename: ename.to_owned(),
-                evalue: evalue.to_owned(),
-                traceback: lines,
-            });
-        }
-        for image_bytes in out.images {
-            self.outputs.push(Output::DisplayData {
-                data: MimeData {
-                    text_plain: None,
-                    image_png: Some(std::sync::Arc::new(image_bytes)),
-                },
-            });
-        }
-        Ok(())
+/// Append a streamed stdout/stderr chunk to `outputs`, merging into the
+/// trailing stream of the same name and honouring carriage returns so that
+/// in-place progress bars (tqdm) render as a single updating line.
+pub fn append_stream(outputs: &mut Vec<Output>, name: &str, chunk: &str) {
+    let merge = matches!(outputs.last(), Some(Output::Stream { name: n, .. }) if n == name);
+    if !merge {
+        outputs.push(Output::Stream { name: name.to_owned(), text: String::new() });
     }
+    if let Some(Output::Stream { text, .. }) = outputs.last_mut() {
+        let mut chars = chunk.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                // CR not part of CRLF: return to start of the current line so
+                // the next writes overwrite it.
+                '\r' if chars.peek() != Some(&'\n') => {
+                    let line_start = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                    text.truncate(line_start);
+                }
+                '\r' => {} // CRLF — drop the CR, the '\n' handles the newline
+                c => text.push(c),
+            }
+        }
+    }
+}
+
+/// Push an `Error` output parsed from a Python traceback string.
+pub fn push_error_output(outputs: &mut Vec<Output>, traceback: &str) {
+    let lines: Vec<String> = traceback.lines().map(str::to_owned).collect();
+    // Last non-empty line is typically "ExceptionType: message".
+    let last = lines
+        .iter()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .cloned()
+        .unwrap_or_default();
+    let (ename, evalue) = last.split_once(": ").unwrap_or((&last, ""));
+    outputs.push(Output::Error {
+        ename: ename.to_owned(),
+        evalue: evalue.to_owned(),
+        traceback: lines,
+    });
 }

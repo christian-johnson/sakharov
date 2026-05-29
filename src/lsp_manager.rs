@@ -170,6 +170,21 @@ impl LspManager {
             .unwrap_or_else(|| "file:///".into());
         let venv_root = root_path.or(cwd.as_deref());
 
+        // Python intelligence (jedi) resolves imports against an interpreter's
+        // environment. We require the project's own virtualenv — discovered by
+        // walking up from the file's location — and never fall back to the
+        // system interpreter. With no venv there is nothing useful to resolve
+        // against, so we don't start the Python server at all (no autocomplete
+        // is better than autocomplete against the wrong environment).
+        let py_venv = if language == "python" {
+            match venv_root.and_then(detect_python_venv) {
+                Some(p) => Some(p),
+                None => return,
+            }
+        } else {
+            None
+        };
+
         for (command, args, init_options, features) in specs {
             // Skip if already started.
             let already_running = self.servers.get(language)
@@ -180,7 +195,7 @@ impl LspManager {
             }
 
             let init_opts = init_options.cloned().or_else(|| {
-                build_init_options(language, venv_root)
+                build_init_options(language, venv_root, py_venv.as_deref())
             });
 
             match LspClient::start(command, args) {
@@ -706,17 +721,18 @@ fn parse_diagnostics(val: &Value) -> Vec<Diagnostic> {
 }
 
 /// Build server-specific initializationOptions for known servers.
+///
+/// `venv_python` is the project virtualenv interpreter discovered by
+/// [`detect_python_venv`]; it is the only environment jedi is pointed at.
 fn build_init_options(
     language: &str,
     root: Option<&std::path::Path>,
+    venv_python: Option<&std::path::Path>,
 ) -> Option<serde_json::Value> {
     match language {
         "python" => {
-            let python = root.and_then(detect_python_venv)
-                .or_else(detect_active_python);
-
             let mut jedi: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-            if let Some(ref p) = python {
+            if let Some(p) = venv_python {
                 jedi.insert(
                     "environment".into(),
                     serde_json::json!(p.to_string_lossy().as_ref()),
@@ -741,48 +757,26 @@ fn build_init_options(
     }
 }
 
+/// Find a project virtualenv interpreter by walking up the directory tree from
+/// `start` (the file's own location). Returns the path to the venv's `python`
+/// binary, or `None` if no `.venv`/`venv`/`.env`/`env` exists in any ancestor.
 fn detect_python_venv(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let candidates = ["bin/python3", "bin/python"];
+    let candidates = ["bin/python3", "bin/python", "Scripts/python.exe"];
     let venv_dirs = [".venv", "venv", ".env", "env"];
 
-    let mut dir = start.to_path_buf();
-    for _ in 0..4 {
+    let mut dir = Some(start.to_path_buf());
+    while let Some(d) = dir {
         for venv in &venv_dirs {
             for bin in &candidates {
-                let python = dir.join(venv).join(bin);
-                if python.exists() {
+                let python = d.join(venv).join(bin);
+                if python.is_file() {
                     return Some(python);
                 }
             }
         }
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => break,
-        }
+        dir = d.parent().map(|p| p.to_path_buf());
     }
     None
-}
-
-fn detect_active_python() -> Option<std::path::PathBuf> {
-    use std::sync::mpsc;
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = std::process::Command::new("python3")
-            .args(["-c", "import sys; print(sys.executable)"])
-            .output();
-        let _ = tx.send(result);
-    });
-
-    let out = rx
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    if path.exists() { Some(path) } else { None }
 }
 
 fn strip_snippet_owned(s: &str) -> String {

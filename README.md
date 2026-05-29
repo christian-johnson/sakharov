@@ -232,7 +232,7 @@ foreground = "#e6b450"
 [editor]
 relative_line_numbers = true
 # If you want to use, say, yazi instead of the built-in file picker
-file_picker = "yazi --chooser-file=$MJ_PICKER_FILE"
+file_picker = "yazi --chooser-file=$SV_PICKER_FILE"
 
 # Custom key bindings
 [keys.normal]

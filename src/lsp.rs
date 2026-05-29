@@ -474,8 +474,10 @@ fn parse_message(val: Value) -> Option<ServerMessage> {
 // Position helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a filesystem path to an LSP `file://` URI.
-pub fn path_to_uri(path: &std::path::Path) -> String {
+/// Resolve a path to the absolute, canonicalized form used as a document's LSP
+/// identity.  Falls back to the plain absolute path when the file does not exist
+/// on disk (e.g. virtual notebook-cell paths), so the result is still stable.
+pub fn resolve_path(path: &std::path::Path) -> std::path::PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -483,8 +485,22 @@ pub fn path_to_uri(path: &std::path::Path) -> String {
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
             .join(path)
     };
-    let resolved = abs.canonicalize().unwrap_or(abs);
-    format!("file://{}", resolved.display())
+    abs.canonicalize().unwrap_or(abs)
+}
+
+/// Convert a filesystem path to an LSP `file://` URI.
+pub fn path_to_uri(path: &std::path::Path) -> String {
+    format!("file://{}", resolve_path(path).display())
+}
+
+/// String key under which diagnostics for `path` are stored.
+///
+/// Diagnostics arrive keyed by the URI the server echoes back, which is the
+/// output of [`path_to_uri`].  Readers must resolve their local path the same
+/// way or the lookup silently misses (the cause of diagnostics not showing for
+/// files/notebooks opened via a relative path).
+pub fn diagnostic_key(path: &std::path::Path) -> String {
+    resolve_path(path).to_string_lossy().into_owned()
 }
 
 pub fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
@@ -505,4 +521,47 @@ pub fn lsp_pos_to_char(rope: &ropey::Rope, line: usize, character: usize) -> usi
         return rope.len_chars();
     }
     (rope.line_to_char(line) + character).min(rope.len_chars())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The key readers compute (`diagnostic_key`) must equal the key the store
+    /// side derives from the server-echoed URI (`uri_to_path(path_to_uri(p))`),
+    /// otherwise diagnostics lookups silently miss.  This must hold whether the
+    /// path is given relative or absolute, and for virtual cell paths that do
+    /// not exist on disk.
+    fn store_key(path: &std::path::Path) -> String {
+        uri_to_path(&path_to_uri(path))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn diagnostic_key_matches_store_for_existing_file() {
+        let dir = std::env::temp_dir().join("sv_lsp_key_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("real.py");
+        std::fs::write(&file, "x = 1\n").unwrap();
+        assert_eq!(diagnostic_key(&file), store_key(&file));
+    }
+
+    #[test]
+    fn diagnostic_key_resolves_relative_to_absolute() {
+        // A relative path must resolve to the same key as its absolute form,
+        // so `sv foo.py` and an absolute open of the same file agree.
+        let cwd = std::env::current_dir().unwrap();
+        let rel = std::path::Path::new("Cargo.toml");
+        assert_eq!(diagnostic_key(rel), diagnostic_key(&cwd.join("Cargo.toml")));
+    }
+
+    #[test]
+    fn diagnostic_key_matches_store_for_virtual_cell_path() {
+        // Virtual notebook-cell paths never exist on disk; the key must still
+        // round-trip through the URI transform.
+        let vpath = std::env::temp_dir().join("sv_nb__cell0.py");
+        assert_eq!(diagnostic_key(&vpath), store_key(&vpath));
+    }
 }
