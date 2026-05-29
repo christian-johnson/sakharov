@@ -25,7 +25,7 @@ This screenshot shows some of `sakharov`'s features: a command palette with fuzz
 ### Notebook support
 [Screencast_20260528_132140.webm](https://github.com/user-attachments/assets/c387bc15-58f5-41a0-a5b8-61cf26603771)
 
-`.ipynb` files are supported, with image outputs and LSP functionality.
+`.ipynb` files are supported, with image outputs LSP functionality, and cell/code folding. 
 
 ## Etymology
 [Andrei Sakharov](https://en.wikipedia.org/wiki/Andrei_Sakharov) was a Soviet physicist and human rights activist.
@@ -66,6 +66,24 @@ To run `sakharov`, simply pass a file path:
 sv my_script.py
 sv my_notebook.ipynb
 ```
+
+## Uninstallation
+
+To completely remove `sakharov` from your system, do the following:
+
+- Remove the binary:
+```
+rm ~/.local/bin/sv
+```
+- Remove the config file:
+```
+rm -rf ~/.config/sakharov
+```
+- And remove the code:
+```
+rm -rf /path/to/sakharov/
+```
+That's it!
 
 ## Roadmap
 
