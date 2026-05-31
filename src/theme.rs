@@ -57,6 +57,19 @@ pub fn style_for_highlight(index: usize) -> Style {
         22 => Style::default().fg(Color::White),                                         // variable
         23 => Style::default().fg(Color::Red),                                           // variable.builtin
         24 => Style::default().fg(Color::White),                                         // variable.parameter
+        // --- Markdown markup (see highlight::MD_* constants) ---
+        crate::highlight::MD_HEADING_1 => Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        crate::highlight::MD_HEADING_2 => Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
+        crate::highlight::MD_HEADING_3 => Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+        crate::highlight::MD_HEADING_4 => Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+        crate::highlight::MD_HEADING_5 => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        crate::highlight::MD_HEADING_6 => Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+        crate::highlight::MD_BOLD => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        crate::highlight::MD_ITALIC => Style::default().add_modifier(Modifier::ITALIC),
+        crate::highlight::MD_RAW => Style::default().fg(Color::Green),
+        crate::highlight::MD_LINK => Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
+        crate::highlight::MD_QUOTE => Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        crate::highlight::MD_LIST => Style::default().fg(Color::Yellow),
         _ => Style::default(),
     }
 }

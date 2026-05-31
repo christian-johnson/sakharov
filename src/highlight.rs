@@ -30,7 +30,37 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
     "variable",
     "variable.builtin",
     "variable.parameter",
+    // --- Markdown / markup (indices 25.. — see the MD_* constants below) ---
+    "markup.heading.1",
+    "markup.heading.2",
+    "markup.heading.3",
+    "markup.heading.4",
+    "markup.heading.5",
+    "markup.heading.6",
+    "markup.bold",
+    "markup.italic",
+    "markup.raw",
+    "markup.link",
+    "markup.quote",
+    "markup.list",
 ];
+
+// Highlight indices for the markdown markup names appended to `HIGHLIGHT_NAMES`.
+// These are emitted directly by the custom markdown highlighter (`crate::markdown`),
+// which does not use tree-sitter. Keep them in sync with the array order above and
+// with the match arms in `theme::style_for_highlight`.
+pub const MD_HEADING_1: usize = 25;
+pub const MD_HEADING_2: usize = 26;
+pub const MD_HEADING_3: usize = 27;
+pub const MD_HEADING_4: usize = 28;
+pub const MD_HEADING_5: usize = 29;
+pub const MD_HEADING_6: usize = 30;
+pub const MD_BOLD: usize = 31;
+pub const MD_ITALIC: usize = 32;
+pub const MD_RAW: usize = 33;
+pub const MD_LINK: usize = 34;
+pub const MD_QUOTE: usize = 35;
+pub const MD_LIST: usize = 36;
 
 /// A highlighted span: (char_start, char_end, highlight_index).
 pub type Span = (usize, usize, usize);
@@ -58,6 +88,9 @@ impl Language {
 /// Syntax highlighter wrapping tree-sitter.
 pub struct Highlighter {
     pub language: Option<Language>,
+    /// True when the open file is Markdown (`.md`/`.qmd`). Markdown is highlighted
+    /// and folded by the custom, non-tree-sitter `crate::markdown` module.
+    pub markdown: bool,
     config: Option<HighlightConfiguration>,
     /// Reused across calls — avoids allocating a new Parser on every highlight pass.
     ts_highlighter: TsHighlighter,
@@ -73,7 +106,12 @@ impl Highlighter {
 
         let config = language.and_then(|lang| build_config(lang).ok());
 
-        Self { language, config, ts_highlighter: TsHighlighter::new() }
+        Self {
+            language,
+            markdown: crate::markdown::is_markdown(path),
+            config,
+            ts_highlighter: TsHighlighter::new(),
+        }
     }
 
     /// Update the language based on a new path.
@@ -84,9 +122,22 @@ impl Highlighter {
             .and_then(|e| e.to_str())
             .and_then(Language::from_extension);
 
+        self.markdown = crate::markdown::is_markdown(path);
         if language != self.language {
             self.language = language;
             self.config = language.and_then(|lang| build_config(lang).ok());
+        }
+    }
+
+    /// Compute the foldable line ranges for the current buffer contents.
+    /// Routes to the markdown section/fence folder or the tree-sitter folder.
+    pub fn fold_ranges(&self, rope: &Rope) -> Vec<crate::fold::FoldRange> {
+        if self.markdown {
+            crate::markdown::fold_ranges(rope)
+        } else if let Some(lang) = self.language {
+            crate::fold::compute_fold_ranges(rope, lang)
+        } else {
+            Vec::new()
         }
     }
 
@@ -95,6 +146,9 @@ impl Highlighter {
     /// Returns a list of `(char_start, char_end, highlight_index)` triples.
     /// Takes `&mut self` so the internal tree-sitter parser can be reused.
     pub fn highlight(&mut self, rope: &Rope) -> Result<Vec<Span>> {
+        if self.markdown {
+            return Ok(crate::markdown::highlight(rope));
+        }
         let config = match &self.config {
             Some(c) => c,
             None => return Ok(Vec::new()),

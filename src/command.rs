@@ -37,6 +37,10 @@ pub enum Command {
     ChangeSelection,
     /// Toggle comment/uncomment on the selected lines.
     CommentRegion,
+    /// Indent the selected lines by one indentation unit.
+    IndentRegion,
+    /// Dedent the selected lines by one indentation unit.
+    DedentRegion,
     YankSelection,
     PasteAfter,
     PasteBefore,
@@ -224,6 +228,8 @@ impl Command {
             Command::DeleteSelection => "delete-selection",
             Command::ChangeSelection => "change-selection",
             Command::CommentRegion => "comment-region",
+            Command::IndentRegion => "indent-region",
+            Command::DedentRegion => "dedent-region",
             Command::YankSelection => "yank-selection",
             Command::PasteAfter => "paste-after",
             Command::PasteBefore => "paste-before",
@@ -394,6 +400,8 @@ impl Command {
             "delete-selection" | "delete" => Some(Command::DeleteSelection),
             "change-selection" | "change" => Some(Command::ChangeSelection),
             "comment-region" | "comment" => Some(Command::CommentRegion),
+            "indent-region" | "indent" => Some(Command::IndentRegion),
+            "dedent-region" | "dedent" => Some(Command::DedentRegion),
             "yank-selection"   | "yank"   => Some(Command::YankSelection),
             "paste-after"      | "paste"  => Some(Command::PasteAfter),
             "paste-before"               => Some(Command::PasteBefore),

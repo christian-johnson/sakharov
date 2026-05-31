@@ -1,8 +1,21 @@
 use ropey::Rope;
 
+/// The indentation unit a fresh indent should insert, per editor config.
+///
+/// With `expand_tabs` (the default) this is `tab_width` spaces, so the editor
+/// never writes a literal tab; otherwise it is a single tab character.
+pub fn unit(expand_tabs: bool, tab_width: usize) -> String {
+    if expand_tabs {
+        " ".repeat(tab_width.max(1))
+    } else {
+        "\t".to_string()
+    }
+}
+
 /// Detect the indentation unit in use by scanning the first 200 lines.
 /// Returns a tab character if tabs are found first, otherwise the smallest
 /// non-zero run of spaces seen (defaulting to 4 spaces if nothing is found).
+#[allow(dead_code)]
 pub fn detect_unit(rope: &Rope) -> String {
     let mut min_spaces: Option<usize> = None;
     for line_idx in 0..rope.len_lines().min(200) {
@@ -38,9 +51,11 @@ fn is_indent_trigger(line: &str) -> bool {
 
 /// Compute the indentation string to insert after a newline at `pos`.
 ///
-/// Used by both Enter (insert mode) and `o` (open line below).
-/// The returned string does NOT include the newline itself.
-pub fn for_new_line(rope: &Rope, pos: usize) -> String {
+/// Used by both Enter (insert mode) and `o` (open line below). `unit` is the
+/// extra indentation added after an indent trigger (`:`/`{`/`(`/`[`), supplied
+/// by the caller from editor config (see [`unit`]). The returned string does
+/// NOT include the newline itself.
+pub fn for_new_line(rope: &Rope, pos: usize, unit: &str) -> String {
     if rope.len_chars() == 0 {
         return String::new();
     }
@@ -56,7 +71,6 @@ pub fn for_new_line(rope: &Rope, pos: usize) -> String {
     let content_before_cursor: String = line.chars().take(cursor_off).collect();
 
     if is_indent_trigger(&content_before_cursor) {
-        let unit = detect_unit(rope);
         format!("{base}{unit}")
     } else {
         base

@@ -7,6 +7,10 @@ line_numbers = "#45475a"
 
 [editor]
 tab_width = 4
+# When true (default), the Tab key and all auto-indentation insert `tab_width`
+# spaces — the editor never writes a literal tab character. Set to false to
+# indent with real tabs instead.
+expand_tabs = true
 line_numbers = true
 relative_line_numbers = false
 scroll_off = 5

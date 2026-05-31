@@ -236,6 +236,10 @@ impl Keymap {
         normal.insert(KeyBinding::ctrl('g'), vec![Command::GrepProject]);
         normal.insert(KeyBinding::ctrl('o'), vec![Command::OpenFilePicker]);
 
+        // Ctrl+> / Ctrl+< → indent / dedent the selected lines (both Normal and Select)
+        both!(KeyBinding::ctrl('>'), Command::IndentRegion);
+        both!(KeyBinding::ctrl('<'), Command::DedentRegion);
+
         // Space opens command palette (both Normal and Select)
         let space = KeyBinding { code: KeyCode::Char(' '), modifiers: KeyModifiers::NONE };
         normal.insert(space.clone(), vec![Command::OpenCommandPalette]);

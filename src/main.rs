@@ -15,6 +15,7 @@ mod kitty;
 mod lang;
 mod lsp;
 mod lsp_manager;
+mod markdown;
 mod mode;
 mod motion;
 mod notebook;

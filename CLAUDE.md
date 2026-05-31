@@ -14,16 +14,39 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - `o/O` open line, `i/a/I/A` insert variants, `v` select mode, `x` select line, `%` select all
 - `:` command line — every `Command` variant is accessible by name (see `docs/commands.md`)
 - Tree-sitter syntax highlighting: `.rs`, `.py`, `.js`
+- Markdown (`.md`/`.markdown`/`.qmd`): custom (non-tree-sitter) highlighting in `markdown.rs` —
+  per-level header colours, **bold**/*italic*, inline `code`/fenced blocks, links, blockquotes,
+  list markers — plus header-section + code-fence folding (same `zc/zo/za` interface)
 - Scroll with configurable `scroll_off`; horizontal scroll tracks cursor correctly
 - Status bar: mode indicator (colour-coded), filename, modified flag, line:col, scroll %
 - Block cursor (white in Normal, cyan in Insert); hardware cursor positioned via `frame.set_cursor_position`
 - Ctrl+S saves; Ctrl+C shows quit hint
-- Config at `~/.config/sakharov/config.toml` (theme colours, tab width, line numbers, scroll_off)
+- Config at `~/.config/sakharov/config.toml` — deep-merged over compiled-in `config/default.toml`.
+  Search order: `$XDG_CONFIG_HOME`, then `~/.config`, then platform-native `dirs::config_dir()`.
+  Covers theme colours, `tab_width`, `expand_tabs`, line numbers (absolute + relative), `scroll_off`, `git_gutter`,
+  `word_wrap`, `max_undo`, format-on-save, file-picker limits/external command, UI popup sizing +
+  `jump_keys` + `symbol_icons`, notebook (`image_rows`/output caps), `[language_servers]`, `[formatters]`
 - `/` and `?` incremental search, `n/N` cycle matches
 - `gw` jump mode (2-char labels over visible word starts)
 - Code folding (`zc/zo/za`), git gutter marks, word wrap toggle
-- Multiple buffers + buffer picker (`<space>b`), clipboard integration
+- Multiple buffers (`H`/`L` cycle prev/next), clipboard integration
 - Auto-indent on Enter, format-on-save (`:fmt` or configurable)
+- `indent-region` (`Ctrl+>`) / `dedent-region` (`Ctrl+<`) shift the selected lines by one indent unit
+- **Spaces, never tabs, by default** — Tab key and all auto-indent insert `tab_width` spaces.
+  `editor.expand_tabs` (default `true`) controls this; set `false` to indent with real tabs.
+  Indent unit comes from `indent::unit(expand_tabs, tab_width)`
+- **Fuzzy pickers / telescope-style popups** (see `popup*.rs`):
+  - **Space** — command palette (all named commands, filterable)
+  - **Ctrl+O** — file picker (built-in fuzzy file list, or an external picker like yazi/fzf
+    via the `file_picker` config command; built-in is bounded by `file_picker_max_files`/`max_depth`)
+  - **Ctrl+F** — grep current buffer; **Ctrl+G** — grep project (ripgrep/grep). Both are two-phase
+    popups: type to filter, ESC to switch to `j/k` navigation, Enter to jump
+  - `gb` buffer picker, `gs` symbol picker (tree-sitter symbols), `gD` diagnostic picker
+- **Special buffers**: `*scratch*` (`:scratch`) and `*Messages*` (`:messages`, the message log).
+  Scratch contents are stashed across buffer switches; `:bd` skips back to a real file when possible
+- **Goto sub-mode** (`g` prefix): `gg`/`ge` file start/end, `gh`/`gl` line first-non-ws / end,
+  `gd` definition, `gr` references, `gy` type-definition, `gi` implementation, `ga` code-actions,
+  `gk` documentation, `gw` jump, `gc` comment-region, `gz` center cursor, `gs`/`gb`/`gD` pickers
 
 ### Phase 2 (Jupyter notebooks) — complete
 - Opens `.ipynb` files automatically in notebook mode
@@ -61,14 +84,18 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 ### Phase 3 (LSP) — complete
 - JSON-RPC client over stdio (`lsp.rs` / `lsp_manager.rs`)
 - Language server lifecycle: spawn, initialize, shutdown
-- **LSP multiplexing** — multiple servers per language (e.g. `pylsp` for intelligence + `ruff` for code actions/format)
+- **LSP multiplexing** — multiple servers per language, with per-server feature scoping
+  (e.g. `pylsp` for intelligence + `ruff server` for code-actions/format). Configured via
+  `[language_servers.<lang>]` + nested `[[language_servers.<lang>.extra_servers]]`; each server's
+  `features` list (`completion`/`hover`/`definition`/`references`/`type-definition`/`implementation`/`code-actions`/`diagnostics`/`format`) routes requests
 - Incremental document sync (`textDocument/didOpen`, `didChange`, `didClose`)
-- Diagnostics inline (underline) + status bar count
+- Diagnostics inline (underline) + status bar count; diagnostic picker (`gD`)
 - Completions — passive popup (typing) + focused mode (Tab to navigate, Enter to confirm)
-- Hover float (`K`)
-- Go-to-definition (`gd`), references
+- Hover float (`K` / `gk`)
+- Go-to-definition (`gd`), references (`gr`), type-definition (`gy`), implementation (`gi`)
 - Code actions (`ga`)
-- Formatting (`gf` / `:fmt`, format-on-save option)
+- Formatting (`gf` / `:fmt`, format-on-save option). Shell formatters via `[formatters.<lang>]`
+  take priority over LSP formatting when configured
 - **Notebook LSP** — `notebookDocument/didOpen` sync; virtual cell paths for per-cell diagnostics and completions.
   Notebook-aware servers (e.g. `pylsp`) see the whole notebook, so completions/diagnostics resolve **cross-cell**
   (an `import` in one cell is visible to every later cell).
@@ -113,11 +140,16 @@ src/
                         Separate notebook_navigate / notebook_edit maps
   input.rs            — Thin key dispatch; notebook mode + popups take priority
   motion.rs           — Pure motion functions: (Rope, Selection, extend) → Selection
-  indent.rs           — Auto-indent computation on Enter / open-line
+  indent.rs           — Auto-indent computation on Enter / open-line; indent::unit()
+                        gives the configured indent string (spaces unless expand_tabs=false)
   fold.rs             — tree-sitter-driven fold ranges for the plain-text editor
+  markdown.rs         — custom Markdown (.md/.markdown/.qmd) highlighter + section/fence
+                        folding; produces the same Vec<Span> / Vec<FoldRange> (no tree-sitter)
   jump.rs             — `gw` label-jump: generate 2-char labels over word starts
-  highlight.rs        — tree-sitter-highlight integration; produces Vec<Span>
-  theme.rs            — highlight index → ratatui Style; terminal color queries
+  highlight.rs        — tree-sitter-highlight integration; produces Vec<Span>.
+                        Highlighter dispatches to markdown.rs for .md/.qmd (highlight + fold_ranges).
+                        MD_* highlight-index constants (markup names appended to HIGHLIGHT_NAMES)
+  theme.rs            — highlight index → ratatui Style (incl. MD_* markup); terminal color queries
   lang.rs             — language id ↔ file extension mapping
   symbols.rs          — tree-sitter symbol extraction (buffer completions, picker)
   clipboard.rs        — system clipboard integration (OSC 52 / external command)

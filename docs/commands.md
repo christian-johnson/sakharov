@@ -50,6 +50,8 @@ These commands enter a sub-mode that awaits a second key.
 | Command | Default Key | Description |
 |---------|-------------|-------------|
 | `comment-region` | `gc` (via Goto mode) | Toggle comment/uncomment for the current selection or line |
+| `indent-region` | `Ctrl+>` | Indent the selected lines by one indentation unit (alias `:indent`) |
+| `dedent-region` | `Ctrl+<` | Dedent the selected lines by one indentation unit (alias `:dedent`) |
 | `delete-selection` | `d` | Delete the current selection |
 | `change-selection` | `c` | Delete the current selection and enter Insert mode |
 | `yank-selection` | `y` | Copy the current selection to the clipboard |

@@ -49,6 +49,11 @@ pub struct ThemeConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct EditorConfig {
     pub tab_width: usize,
+    /// When true (default), the Tab key and all auto-indentation insert
+    /// `tab_width` spaces instead of a literal tab character — the editor never
+    /// writes a `\t` of its own. Set to false to indent with real tab characters.
+    #[serde(default = "default_expand_tabs")]
+    pub expand_tabs: bool,
     pub line_numbers: bool,
     pub relative_line_numbers: bool,
     /// Lines to keep visible above/below cursor.
@@ -85,6 +90,7 @@ pub struct EditorConfig {
     pub file_picker_max_depth: usize,
 }
 
+fn default_expand_tabs() -> bool { true }
 fn default_max_undo() -> usize { 200 }
 fn default_file_picker_max_files() -> usize { 2000 }
 fn default_file_picker_max_depth() -> usize { 10 }

@@ -159,16 +159,17 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             begin_insert_edit(app);
             let pos = app.selection.head;
+            let unit = crate::indent::unit(app.config.editor.expand_tabs, app.config.editor.tab_width);
             if crate::indent::is_bracket_pair(&app.buffer.rope, pos) {
                 // {|} → {\n    |\n} : expand bracket pair onto three lines.
-                let inner = crate::indent::for_new_line(&app.buffer.rope, pos);
+                let inner = crate::indent::for_new_line(&app.buffer.rope, pos, &unit);
                 let base = crate::indent::for_line_above(&app.buffer.rope, pos);
                 let inner_len = inner.chars().count();
                 let to_insert = format!("\n{inner}\n{base}");
                 app.buffer.insert_raw(pos, &to_insert);
                 app.selection = Selection::point(pos + 1 + inner_len);
             } else {
-                let ind = crate::indent::for_new_line(&app.buffer.rope, pos);
+                let ind = crate::indent::for_new_line(&app.buffer.rope, pos, &unit);
                 let ind_len = ind.chars().count();
                 app.buffer.insert_raw(pos, &format!("\n{ind}"));
                 app.selection = Selection::point(pos + 1 + ind_len);
@@ -193,8 +194,9 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => {
             begin_insert_edit(app);
             let pos = app.selection.head;
-            app.buffer.insert_raw(pos, "\t");
-            app.selection = Selection::point(pos + 1);
+            let unit = crate::indent::unit(app.config.editor.expand_tabs, app.config.editor.tab_width);
+            app.buffer.insert_raw(pos, &unit);
+            app.selection = Selection::point(pos + unit.chars().count());
             exec::recompute_highlights(app);
             exec::lsp_did_change(app);
         }

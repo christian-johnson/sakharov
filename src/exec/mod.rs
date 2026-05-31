@@ -1244,6 +1244,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.mode = Mode::Normal;
             }
         }
+        Command::IndentRegion => text::indent_region(app),
+        Command::DedentRegion => text::dedent_region(app),
 
         Command::KillToEndOfLine => {
             let pos = app.selection.head;

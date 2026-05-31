@@ -247,9 +247,7 @@ impl App {
         let mut highlighter = Highlighter::new(buffer.path.as_deref());
         let highlight_spans = highlighter.highlight(&buffer.rope).unwrap_or_default();
         // Compute fold ranges immediately so folding works before the first edit.
-        let initial_fold_ranges = highlighter.language
-            .map(|lang| crate::fold::compute_fold_ranges(&buffer.rope, lang))
-            .unwrap_or_default();
+        let initial_fold_ranges = highlighter.fold_ranges(&buffer.rope);
 
         let initial_mode = if notebook.is_some() { Mode::Notebook } else { Mode::Normal };
 
@@ -444,18 +442,12 @@ fn run_loop(
                 .highlighter
                 .highlight(&app.buffer.rope)
                 .unwrap_or_default();
-            // Recompute foldable ranges from the updated syntax tree.
-            if let Some(lang) = app.highlighter.language {
-                app.fold.ranges =
-                    crate::fold::compute_fold_ranges(&app.buffer.rope, lang);
-                // Discard any stored folds whose start lines no longer exist.
-                let valid: std::collections::BTreeSet<usize> =
-                    app.fold.ranges.iter().map(|&(s, _)| s).collect();
-                app.fold.folded.retain(|s| valid.contains(s));
-            } else {
-                app.fold.ranges.clear();
-                app.fold.folded.clear();
-            }
+            // Recompute foldable ranges (tree-sitter or markdown) from the update.
+            app.fold.ranges = app.highlighter.fold_ranges(&app.buffer.rope);
+            // Discard any stored folds whose start lines no longer exist.
+            let valid: std::collections::BTreeSet<usize> =
+                app.fold.ranges.iter().map(|&(s, _)| s).collect();
+            app.fold.folded.retain(|s| valid.contains(s));
         }
 
         // After an external program (file picker etc.) suspends and resumes the
