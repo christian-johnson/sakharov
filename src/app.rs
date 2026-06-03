@@ -28,6 +28,50 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// Termination-signal handling
+// ---------------------------------------------------------------------------
+
+/// Set by the signal handler to the number of a received catchable termination
+/// signal (SIGTERM/SIGHUP/SIGINT), or 0 when none.  The run loop polls this and
+/// shuts down gracefully — restoring the terminal and flushing recovery — which
+/// the process otherwise can't do for these signals (and can never do for the
+/// uncatchable SIGKILL).
+static PENDING_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Signal handler: async-signal-safe — performs only an atomic store.
+#[cfg(unix)]
+extern "C" fn handle_term_signal(sig: libc::c_int) {
+    PENDING_SIGNAL.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Install handlers for the catchable termination signals.  SIGKILL and SIGSTOP
+/// cannot be caught and are intentionally not listed.
+#[cfg(unix)]
+fn install_signal_handlers() {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction =
+            handle_term_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = 0;
+        for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            libc::sigaction(sig, &action, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn install_signal_handlers() {}
+
+/// The pending termination signal, if one has been received.
+fn pending_signal() -> Option<i32> {
+    match PENDING_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        s => Some(s),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Search state
 // ---------------------------------------------------------------------------
 
@@ -432,9 +476,32 @@ pub fn run(path: Option<&str>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Catch terminating signals so we can restore the terminal and flush unsaved
+    // work before dying (pkill/kill/SIGHUP on window close). SIGKILL is exempt.
+    install_signal_handlers();
+
     let result = run_loop(&mut terminal, &mut app);
 
+    // On a termination signal (which may have surfaced as an EINTR error from
+    // the event poll, hence handling it here rather than only in the loop),
+    // persist the latest unsaved edits before tearing anything down.  The
+    // recovery files are kept — a signal kill is an unclean exit.
+    let signal = pending_signal();
+    if signal.is_some() {
+        crate::recovery::flush_now(&mut app);
+    }
+
     restore_terminal()?;
+
+    // Re-raise the signal with the default disposition so the exit status
+    // correctly reflects it (and SIGHUP propagates as expected).
+    #[cfg(unix)]
+    if let Some(sig) = signal {
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
 
     result
 }
@@ -618,6 +685,12 @@ fn run_loop(
                 app.messages_log.push(msg.clone());
                 app.last_logged_message = app.message.clone();
             }
+        }
+
+        // A catchable termination signal was received: break promptly. run()
+        // flushes recovery, restores the terminal, and re-raises the signal.
+        if pending_signal().is_some() {
+            break;
         }
 
         if app.should_quit {

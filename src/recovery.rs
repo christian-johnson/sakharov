@@ -126,6 +126,17 @@ impl Recovery {
 /// Flush dirty buffers to recovery files, throttled to `FLUSH_INTERVAL`.
 /// Also removes recovery files for buffers that are no longer dirty.
 pub fn tick(app: &mut App) {
+    flush(app, false);
+}
+
+/// Flush immediately, bypassing the debounce.  Used on signal-driven shutdown
+/// so the latest unsaved edits are persisted (the recovery files are kept, not
+/// cleaned up — this is an *unclean* exit, so there is something to recover).
+pub fn flush_now(app: &mut App) {
+    flush(app, true);
+}
+
+fn flush(app: &mut App, force: bool) {
     if !app.recovery.enabled {
         return;
     }
@@ -134,9 +145,11 @@ pub fn tick(app: &mut App) {
         None => return,
     };
     let now = Instant::now();
-    if let Some(last) = app.recovery.last_flush {
-        if now.duration_since(last) < FLUSH_INTERVAL {
-            return;
+    if !force {
+        if let Some(last) = app.recovery.last_flush {
+            if now.duration_since(last) < FLUSH_INTERVAL {
+                return;
+            }
         }
     }
     app.recovery.last_flush = Some(now);
