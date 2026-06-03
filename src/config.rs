@@ -88,12 +88,20 @@ pub struct EditorConfig {
     /// Maximum directory depth explored by the built-in file picker.
     #[serde(default = "default_file_picker_max_depth")]
     pub file_picker_max_depth: usize,
+    /// Periodically persist unsaved buffer contents to a private recovery file
+    /// (`$XDG_STATE_HOME/sakharov/recovery/`, owner-only `0600`) so they can be
+    /// restored after a crash or kill.  The recovery file is deleted on a clean
+    /// save and on a clean quit, so it only lingers when something went wrong.
+    /// Set to false to disable recovery entirely (e.g. for sensitive trees).
+    #[serde(default = "default_crash_recovery")]
+    pub crash_recovery: bool,
 }
 
 fn default_expand_tabs() -> bool { true }
 fn default_max_undo() -> usize { 200 }
 fn default_file_picker_max_files() -> usize { 2000 }
 fn default_file_picker_max_depth() -> usize { 10 }
+fn default_crash_recovery() -> bool { true }
 
 /// UI / interaction configuration.
 #[derive(Debug, Deserialize, Clone)]
@@ -117,6 +125,37 @@ pub struct UiConfig {
     /// Any unknown key falls back to the raw kind string.
     #[serde(default = "default_symbol_icons")]
     pub symbol_icons: HashMap<String, String>,
+    /// How the command palette remembers recently-used commands, floating them
+    /// toward the top:
+    ///   "session" — kept in memory only, reset each launch (default).
+    ///   "global"  — persisted to `$XDG_STATE_HOME/sakharov/command_history.json`
+    ///               and restored across restarts.
+    ///   "off"     — no recency weighting; alphabetical-within-tier as before.
+    /// Recency only ever breaks ties between matches of equal fuzzy-match
+    /// quality, so a better match always still wins.
+    #[serde(default = "default_command_history")]
+    pub command_history: String,
+}
+
+fn default_command_history() -> String { "session".into() }
+
+/// Parsed form of `ui.command_history`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandHistoryMode {
+    Off,
+    Session,
+    Global,
+}
+
+impl CommandHistoryMode {
+    /// Parse the config string, defaulting to `Session` for unknown values.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "none" => CommandHistoryMode::Off,
+            "global" | "persist" | "persistent" => CommandHistoryMode::Global,
+            _ => CommandHistoryMode::Session,
+        }
+    }
 }
 
 fn default_jump_keys() -> String {
@@ -145,6 +184,7 @@ impl Default for UiConfig {
             completion_list_height: default_completion_list_height(),
             doc_popup_height: default_doc_popup_height(),
             symbol_icons: default_symbol_icons(),
+            command_history: default_command_history(),
         }
     }
 }
@@ -313,3 +353,42 @@ fn config_path() -> Option<PathBuf> {
     // Fallback to the platform-native location (~/Library/Application Support on macOS).
     dirs::config_dir().map(|d| d.join("sakharov").join("config.toml"))
 }
+
+/// Return (creating if necessary) the per-user state directory for sakharov,
+/// used for non-config runtime state: crash-recovery files and the command
+/// history.  Search order mirrors `config_path`:
+///   1. `$XDG_STATE_HOME/sakharov`
+///   2. `dirs::state_dir()/sakharov`  (Linux: ~/.local/state)
+///   3. `dirs::data_dir()/sakharov`   (fallback for platforms without a state dir)
+///
+/// The directory is created with `0700` permissions on Unix so its contents
+/// (which may include unsaved buffer text) are not readable by other users.
+/// Returns `None` if no suitable base directory exists or creation fails.
+pub fn state_dir() -> Option<PathBuf> {
+    let base = if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
+        PathBuf::from(xdg)
+    } else {
+        dirs::state_dir().or_else(dirs::data_dir)?
+    };
+    let dir = base.join("sakharov");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("sv: could not create state dir {}: {e}", dir.display());
+        return None;
+    }
+    restrict_dir_permissions(&dir);
+    Some(dir)
+}
+
+/// Tighten a directory to owner-only (`0700`) on Unix.  No-op elsewhere.
+#[cfg(unix)]
+pub fn restrict_dir_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        perms.set_mode(0o700);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn restrict_dir_permissions(_path: &std::path::Path) {}

@@ -557,8 +557,15 @@ impl Notebook {
     pub fn from_path(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading notebook {}", path.display()))?;
+        Self::from_json_str(path, &raw)
+    }
+
+    /// Parse a notebook from an in-memory nbformat JSON string, associating it
+    /// with `path`.  Shared by `from_path` (disk) and crash recovery (recovery
+    /// file).  The returned notebook has `modified = false` and no kernel.
+    pub fn from_json_str(path: &Path, raw: &str) -> Result<Self> {
         let json: Value =
-            serde_json::from_str(&raw).context("parsing notebook JSON")?;
+            serde_json::from_str(raw).context("parsing notebook JSON")?;
 
         // Kernel language
         let kernel_language = json
@@ -637,6 +644,17 @@ impl Notebook {
 
     /// Serialise the notebook back to `self.path` as valid nbformat 4 JSON.
     pub fn save(&mut self) -> Result<()> {
+        let serialised = self.to_nbformat_string()?;
+        std::fs::write(&self.path, serialised)
+            .with_context(|| format!("writing notebook {}", self.path.display()))?;
+        self.modified = false;
+        Ok(())
+    }
+
+    /// Serialise the in-memory notebook to an nbformat-4 JSON string, preserving
+    /// the on-disk notebook-level metadata (nbformat, kernelspec, …).  Shared by
+    /// `save` (writes to disk) and crash recovery (writes to a recovery file).
+    pub fn to_nbformat_string(&self) -> Result<String> {
         // Serialise source as array of lines; each line ends with '\n' except the last.
         let serialise_source = |rope: &Rope| -> Value {
             let text = rope.to_string();
@@ -761,12 +779,7 @@ impl Notebook {
 
         json["cells"] = Value::Array(new_cells);
 
-        let serialised =
-            serde_json::to_string_pretty(&json).context("serialising notebook JSON")?;
-        std::fs::write(&self.path, serialised)
-            .with_context(|| format!("writing notebook {}", self.path.display()))?;
-        self.modified = false;
-        Ok(())
+        serde_json::to_string_pretty(&json).context("serialising notebook JSON")
     }
 }
 

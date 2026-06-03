@@ -24,8 +24,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Config at `~/.config/sakharov/config.toml` — deep-merged over compiled-in `config/default.toml`.
   Search order: `$XDG_CONFIG_HOME`, then `~/.config`, then platform-native `dirs::config_dir()`.
   Covers theme colours, `tab_width`, `expand_tabs`, line numbers (absolute + relative), `scroll_off`, `git_gutter`,
-  `word_wrap`, `max_undo`, format-on-save, file-picker limits/external command, UI popup sizing +
-  `jump_keys` + `symbol_icons`, notebook (`image_rows`/output caps), `[language_servers]`, `[formatters]`
+  `word_wrap`, `max_undo`, `crash_recovery`, format-on-save, file-picker limits/external command, UI popup sizing +
+  `jump_keys` + `symbol_icons` + `command_history`, notebook (`image_rows`/output caps), `[language_servers]`, `[formatters]`
 - `/` and `?` incremental search, `n/N` cycle matches
 - `gw` jump mode (2-char labels over visible word starts)
 - Code folding (`zc/zo/za`), git gutter marks, word wrap toggle
@@ -42,8 +42,17 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   - **Ctrl+F** — grep current buffer; **Ctrl+G** — grep project (ripgrep/grep). Both are two-phase
     popups: type to filter, ESC to switch to `j/k` navigation, Enter to jump
   - `gb` buffer picker, `gs` symbol picker (tree-sitter symbols), `gD` diagnostic picker
+  - Command palette floats recently-used commands toward the top (recency is a
+    tiebreaker only — better fuzzy match always wins). `ui.command_history` =
+    `session` (default, in-memory) / `global` (persisted to state dir) / `off`. See `history.rs`
 - **Special buffers**: `*scratch*` (`:scratch`) and `*Messages*` (`:messages`, the message log).
   Scratch contents are stashed across buffer switches; `:bd` skips back to a real file when possible
+- **Crash recovery** (`recovery.rs`): while a buffer has unsaved edits, its contents are
+  periodically flushed (debounced, atomic, `0600`) to `$XDG_STATE_HOME/sakharov/recovery/`
+  keyed by a path hash (literal `scratch` for the scratch buffer). Removed on clean save/quit,
+  so a leftover file means an unclean exit → prompt to Restore/Discard on reopen. Covers files,
+  scratch, and notebooks. `editor.crash_recovery = false` disables it. Shared state dir helper:
+  `config::state_dir()`
 - **Goto sub-mode** (`g` prefix): `gg`/`ge` file start/end, `gh`/`gl` line first-non-ws / end,
   `gd` definition, `gr` references, `gy` type-definition, `gi` implementation, `ga` code-actions,
   `gk` documentation, `gw` jump, `gc` comment-region, `gz` center cursor, `gs`/`gb`/`gD` pickers
@@ -154,7 +163,11 @@ src/
   symbols.rs          — tree-sitter symbol extraction (buffer completions, picker)
   clipboard.rs        — system clipboard integration (OSC 52 / external command)
   git.rs              — git gutter diff marks + current branch
-  config.rs           — TOML config load + deep-merge over compiled-in defaults
+  config.rs           — TOML config load + deep-merge over compiled-in defaults;
+                        state_dir() helper for runtime state (recovery + history)
+  recovery.rs         — crash recovery: debounced atomic 0600 flush of unsaved
+                        buffers to the state dir, startup scan + Restore/Discard prompt
+  history.rs          — command-palette recency history (session/global/off)
   lsp.rs              — JSON-RPC client over stdio: one LspClient per server,
                         request/notification builders, path↔uri + diagnostic_key
   lsp_manager.rs      — LspManager: multiple servers per language, feature routing,

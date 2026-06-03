@@ -163,7 +163,7 @@ opened by a relative or absolute path.
 
 | Command | Default Key | Description |
 |---------|-------------|-------------|
-| `open-command-palette` | `Space` | Open fuzzy-searchable command palette (`:palette`, `:commands`) |
+| `open-command-palette` | `Space` | Open fuzzy-searchable command palette (`:palette`, `:commands`). Recently-used commands float toward the top — see *Command history* below |
 | `open-buffer-picker` | — | Fuzzy picker over open buffers (`:buffers`) |
 | `open-symbol-picker` | — | Fuzzy picker over tree-sitter symbols in the buffer (`:symbols`) |
 | `open-diagnostic-picker` | — | Fuzzy picker over all LSP diagnostics (`:diagnostics`) |
@@ -173,6 +173,33 @@ opened by a relative or absolute path.
 | `toggle-line-numbers` | — | Toggle line number display |
 | `toggle-relative-line-numbers` | — | Toggle relative line numbers (shows distance from current line) |
 | `toggle-word-wrap` | — | Toggle soft word-wrap (`:wrap` / `:word-wrap`) |
+
+### Command history (palette recency)
+
+The command palette remembers commands you invoke (via the palette or the `:`
+command line — never plain keystroke motions) and floats recent ones toward the
+top. Recency is a **tiebreaker only**: a better fuzzy match always still wins, so
+recency only reorders matches of equal match quality, and orders the list when the
+filter is empty. Configure with `ui.command_history` in `config.toml`:
+
+| Value | Behaviour |
+|-------|-----------|
+| `"session"` (default) | Recency kept in memory only, reset each launch. Nothing written to disk. |
+| `"global"` | Persisted to `$XDG_STATE_HOME/sakharov/command_history.json` and restored across restarts. |
+| `"off"` | No recency weighting (alphabetical-within-tier, as before). |
+
+## Persistence & crash recovery
+
+While a buffer has unsaved edits, its contents are periodically flushed to a
+private recovery file under `$XDG_STATE_HOME/sakharov/recovery/` (owner-only
+`0600`, written atomically). The file is removed on a clean save and on a clean
+quit, so it only lingers after a crash or kill. Covered buffers: plain-text
+files, the scratch buffer, and notebooks (`.ipynb`).
+
+When you reopen a file (or the editor itself) and a recovery file exists whose
+contents differ from what's on disk, sakharov prompts you to **Restore** the
+unsaved contents or **Discard** them. Disable the whole feature by setting
+`editor.crash_recovery = false` in `config.toml`.
 
 ## Code Folding (plain-text editor)
 

@@ -290,6 +290,7 @@ fn handle_command(app: &mut App, key: KeyEvent) {
             app.command_buf.clear();
             app.mode = Mode::Normal;
             if let Some(cmd) = Command::parse(&input) {
+                crate::history::record(app, cmd.name());
                 exec::execute(app, &cmd);
             } else {
                 app.message = Some(format!("Unknown command: {input}"));
@@ -534,6 +535,7 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
     match target {
         PopupTarget::ExecuteCommand => {
             if let Some(cmd) = Command::parse(&text) {
+                crate::history::record(app, cmd.name());
                 exec::execute(app, &cmd);
             } else {
                 app.message = Some(format!("Unknown command: {text}"));
@@ -555,6 +557,9 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
             if let Ok(idx) = text.parse::<usize>() {
                 exec::apply_code_action(app, idx);
             }
+        }
+        PopupTarget::RestoreRecovery => {
+            crate::recovery::handle_choice(app, &text);
         }
         PopupTarget::Navigate => {
             let parts: Vec<&str> = text.splitn(3, '\0').collect();

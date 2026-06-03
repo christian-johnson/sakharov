@@ -172,6 +172,17 @@ pub struct App {
     /// to a notebook, its state is restored from here rather than reloading from
     /// disk, so unsaved edits are preserved across buffer switches.
     pub notebook_buffers: std::collections::HashMap<std::path::PathBuf, (Notebook, NotebookState)>,
+    /// Crash-recovery bookkeeping (recovery dir, debounce, written-file index).
+    pub recovery: crate::recovery::Recovery,
+    /// Recovery prompts queued at startup / on open, shown one at a time.
+    pub pending_recoveries: std::collections::VecDeque<crate::recovery::PendingRecovery>,
+    /// The recovery currently shown in the prompt popup, awaiting a choice.
+    pub active_recovery: Option<crate::recovery::PendingRecovery>,
+    /// Most-recently-used command names for the palette (front = most recent).
+    /// Empty / unused when `ui.command_history = "off"`.
+    pub command_history: std::collections::VecDeque<String>,
+    /// Parsed `ui.command_history` mode (off / session / global).
+    pub command_history_mode: crate::config::CommandHistoryMode,
 }
 
 impl App {
@@ -273,6 +284,11 @@ impl App {
         let mut keymap = Keymap::default_bindings();
         keymap.apply_custom_bindings(&config.keys);
 
+        let recovery = crate::recovery::Recovery::new(config.editor.crash_recovery);
+        let command_history_mode =
+            crate::config::CommandHistoryMode::parse(&config.ui.command_history);
+        let command_history = crate::history::load(command_history_mode);
+
         Ok(Self {
             buffer,
             selection: Selection::point(0),
@@ -322,6 +338,11 @@ impl App {
             pending_format_save: false,
             completion_suppressed_prefix: None,
             notebook_buffers: std::collections::HashMap::new(),
+            recovery,
+            pending_recoveries: std::collections::VecDeque::new(),
+            active_recovery: None,
+            command_history,
+            command_history_mode,
             special_buffer_ropes: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
@@ -393,8 +414,13 @@ pub fn run(path: Option<&str>) -> Result<()> {
         }
     }
 
+    // Surface any unsaved buffers recoverable from a previous unclean exit.
+    crate::recovery::startup_scan(&mut app);
+
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
+        // Best-effort: persist the latest recovery snapshot before unwinding.
+        crate::recovery::flush_panic_snapshot();
         let _ = restore_terminal();
         original_hook(info);
     }));
@@ -583,6 +609,9 @@ fn run_loop(
         crate::exec::process_lsp_events(app);
         crate::exec::process_kernel_events(app);
 
+        // Debounced crash-recovery flush of any unsaved buffers.
+        crate::recovery::tick(app);
+
         // Append any new minibuffer message to the *Messages* log.
         if app.message.as_deref() != app.last_logged_message.as_deref() {
             if let Some(ref msg) = app.message {
@@ -592,6 +621,8 @@ fn run_loop(
         }
 
         if app.should_quit {
+            // Clean exit — nothing to recover next time.
+            crate::recovery::cleanup_on_quit(app);
             break;
         }
     }

@@ -372,6 +372,9 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
 
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     app.message = Some(format!("Opened {} (line {})", name, line + 1));
+
+    // If a recovery file from a previous crash exists for this path, offer it.
+    crate::recovery::offer_on_open(app, path);
 }
 
 /// Apply a code action selected from the popup.

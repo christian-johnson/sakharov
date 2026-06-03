@@ -1,5 +1,5 @@
 mod lsp;
-mod notebook;
+pub(crate) mod notebook;
 mod search;
 mod text;
 
@@ -24,7 +24,7 @@ use crate::{
 // Special buffers
 // ---------------------------------------------------------------------------
 
-const SCRATCH_INTRO: &str = "\
+pub(crate) const SCRATCH_INTRO: &str = "\
 ;; This buffer is for notes you don't want to save.\n\
 ;; Use it for scratch text.\n";
 
@@ -139,8 +139,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         // --- Popup / UI ---
         Command::OpenCommandPalette => {
+            let recency = crate::history::recency_map(app);
             app.popup = Some(crate::popup::Popup::command_palette(
                 crate::popup::command_palette_items(),
+                recency,
             ));
             return;
         }
@@ -1444,6 +1446,9 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
         "Opened {}",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
     ));
+
+    // Offer to restore unsaved cells from a previous crash, if any.
+    crate::recovery::offer_on_open(app, path);
 }
 
 /// Execute a slice of commands in order.

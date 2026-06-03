@@ -20,6 +20,11 @@ format_on_save = false
 max_undo = 200
 file_picker_max_files = 2000
 file_picker_max_depth = 10
+# Periodically save unsaved buffer contents to a private recovery file under
+# $XDG_STATE_HOME/sakharov/recovery (owner-only, 0600) so they can be restored
+# after a crash or kill. The file is removed on a clean save and clean quit, so
+# it only lingers when something went wrong. Set false to disable entirely.
+crash_recovery = true
 # file_picker = "yazi --chooser-file=$SV_PICKER_FILE"
 # file_picker = "find . -type f | fzf"
 
@@ -35,6 +40,14 @@ completion_list_height = 15
 
 # Maximum lines shown in documentation / hover popups.
 doc_popup_height = 18
+
+# How the command palette remembers recently-used commands and floats them up:
+#   "session" — kept in memory only, reset each launch (default)
+#   "global"  — persisted to $XDG_STATE_HOME/sakharov/command_history.json
+#   "off"     — no recency weighting
+# Recency only breaks ties between equally-good fuzzy matches, so a better match
+# always still wins.
+command_history = "session"
 
 # Badge labels shown next to each symbol kind in completion and symbol-picker
 # popups.  Override any entry to use a different icon or text.

@@ -59,6 +59,8 @@ pub enum PopupTarget {
     Navigate,
     /// Apply the code action whose index is encoded in the confirmed item's payload.
     ApplyCodeAction,
+    /// Resolve a crash-recovery prompt. Payload is "restore" or "discard".
+    RestoreRecovery,
 }
 
 /// Returned by popup input handling.
@@ -93,6 +95,11 @@ pub struct ListState {
     /// to explicitly engage with the list. In passive mode (focused=false) the
     /// popup is a hint overlay and all keys fall through to insert mode.
     pub focused: bool,
+    /// Optional command-name → recency rank (0 = most recent).  Populated only
+    /// by the command palette; empty for every other popup.  Used as a
+    /// tiebreaker between matches of equal fuzzy-match quality (recent first),
+    /// and to order the list when the filter is empty.
+    pub recency: std::collections::HashMap<String, usize>,
 }
 
 pub struct ListItem {
@@ -144,7 +151,18 @@ impl ListState {
     /// as the user types.
     pub fn filtered_indices(&self) -> Vec<usize> {
         if self.filter.is_empty() {
-            return (0..self.items.len()).collect();
+            // With recency tracking, float recently-used items to the top in
+            // recency order; everything else keeps its original order below.
+            if self.recency.is_empty() {
+                return (0..self.items.len()).collect();
+            }
+            let mut idx: Vec<usize> = (0..self.items.len()).collect();
+            idx.sort_by(|&a, &b| {
+                self.recency_rank(a)
+                    .cmp(&self.recency_rank(b))
+                    .then(a.cmp(&b))
+            });
+            return idx;
         }
 
         let mut scored: Vec<(usize, u32)> = self
@@ -156,18 +174,32 @@ impl ListState {
             })
             .collect();
 
-        // Primary sort: score (lower = better match).
-        // Secondary sort: alphabetical within each tier for a stable, predictable list.
+        // Primary sort: match quality (lower tier = better).  Conservative
+        // recency policy: quality always wins, so recency only breaks ties
+        // *within* a tier (recent first), falling back to alphabetical when
+        // there is no recency signal — keeping the list stable as you type.
         scored.sort_by(|&(ai, a_score), &(bi, b_score)| {
-            a_score.cmp(&b_score).then_with(|| {
-                self.items[ai]
-                    .label
-                    .to_ascii_lowercase()
-                    .cmp(&self.items[bi].label.to_ascii_lowercase())
-            })
+            a_score
+                .cmp(&b_score)
+                .then_with(|| self.recency_rank(ai).cmp(&self.recency_rank(bi)))
+                .then_with(|| {
+                    self.items[ai]
+                        .label
+                        .to_ascii_lowercase()
+                        .cmp(&self.items[bi].label.to_ascii_lowercase())
+                })
         });
 
         scored.into_iter().map(|(i, _)| i).collect()
+    }
+
+    /// Recency rank of item `i` (0 = most recent). Items with no recorded use
+    /// sort after all recorded ones via `usize::MAX`.
+    fn recency_rank(&self, i: usize) -> usize {
+        self.recency
+            .get(&self.items[i].label)
+            .copied()
+            .unwrap_or(usize::MAX)
     }
 
     /// The item at `self.selected` in the filtered set.
@@ -382,7 +414,12 @@ pub struct KeyHintsState {
 
 impl Popup {
     /// Fuzzy-filterable command list, confirms by executing a command.
-    pub fn command_palette(items: Vec<ListItem>) -> Self {
+    /// `recency` maps command names to a recency rank (0 = most recent); pass an
+    /// empty map to disable recency weighting.
+    pub fn command_palette(
+        items: Vec<ListItem>,
+        recency: std::collections::HashMap<String, usize>,
+    ) -> Self {
         Self {
             title: Some("command palette".into()),
             content: PopupContent::List(ListState {
@@ -392,10 +429,44 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                recency,
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.55),
             on_confirm: PopupTarget::ExecuteCommand,
+        }
+    }
+
+    /// Two-choice crash-recovery prompt (Restore / Discard).
+    pub fn recovery_prompt(title: String) -> Self {
+        let items = vec![
+            ListItem {
+                label: "Restore unsaved changes".into(),
+                detail: Some("Load the recovered contents into the buffer".into()),
+                kind: None,
+                payload: Some("restore".into()),
+            },
+            ListItem {
+                label: "Discard recovered contents".into(),
+                detail: Some("Delete the recovery file and keep the on-disk version".into()),
+                kind: None,
+                payload: Some("discard".into()),
+            },
+        ];
+        Self {
+            title: Some(title),
+            content: PopupContent::List(ListState {
+                items,
+                filter: String::new(),
+                selected: 0,
+                two_phase: false,
+                navigating: false,
+                focused: false,
+                recency: std::collections::HashMap::new(),
+            }),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.55),
+            on_confirm: PopupTarget::RestoreRecovery,
         }
     }
 
@@ -411,6 +482,7 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::CursorBelow,
             width: PopupSize::FractionOfScreen(0.45),
@@ -444,6 +516,7 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.65),
@@ -462,6 +535,7 @@ impl Popup {
                 two_phase: true,
                 navigating: false,
                 focused: false,
+                recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.75),
@@ -480,6 +554,7 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::CursorBelow,
             width: PopupSize::FractionOfScreen(0.5),
@@ -667,5 +742,49 @@ mod tests {
         // Highlight positions for "write quit" against label "write-quit" should be non-empty.
         let pos = match_positions("write-quit", "write quit");
         assert!(pos.is_some() && !pos.unwrap().is_empty());
+    }
+
+    fn list(items: &[&str], filter: &str, recency: &[(&str, usize)]) -> ListState {
+        ListState {
+            items: items.iter().map(|l| item(l, "")).collect(),
+            filter: filter.into(),
+            selected: 0,
+            two_phase: false,
+            navigating: false,
+            focused: false,
+            recency: recency.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        }
+    }
+
+    #[test]
+    fn empty_filter_floats_recent_first() {
+        // gamma (rank 0) then alpha (rank 1), then beta (no recency) in source order.
+        let s = list(&["alpha", "beta", "gamma"], "", &[("gamma", 0), ("alpha", 1)]);
+        assert_eq!(s.filtered_indices(), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn empty_filter_without_recency_keeps_source_order() {
+        let s = list(&["alpha", "beta", "gamma"], "", &[]);
+        assert_eq!(s.filtered_indices(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn recency_breaks_ties_within_a_tier() {
+        // Both are substring matches for "open" (same tier); the more recent one wins.
+        let s = list(
+            &["buffer-open", "file-open"],
+            "open",
+            &[("file-open", 0)],
+        );
+        assert_eq!(s.filtered_indices()[0], 1, "recent same-tier match first");
+    }
+
+    #[test]
+    fn better_match_beats_more_recent_weaker_match() {
+        // "goto-x" is a prefix match (tier 1) for "go"; "g-o" only a subsequence
+        // (tier 4).  Even though the subsequence item is most recent, quality wins.
+        let s = list(&["goto-x", "g-o"], "go", &[("g-o", 0)]);
+        assert_eq!(s.filtered_indices()[0], 0, "prefix match beats recent subsequence");
     }
 }
