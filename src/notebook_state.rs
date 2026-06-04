@@ -185,6 +185,7 @@ mod tests {
             source: Rope::from_str(lines),
             outputs: vec![],
             execution_count: None,
+            rendered: false,
         }
     }
 

@@ -27,6 +27,7 @@ mod popup_input;
 mod popup_ui;
 mod recovery;
 mod selection;
+mod spinner;
 mod symbols;
 mod theme;
 mod ui;

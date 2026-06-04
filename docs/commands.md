@@ -257,6 +257,8 @@ in Notebook Navigate mode.
 | `notebook-new-cell-above` | `O` | — | Insert a new code cell above the focused cell |
 | `notebook-delete-cell` | `d` | — | Delete the focused cell |
 | `notebook-clear-outputs` | `x` | — | Clear the focused cell's outputs |
+| `notebook-cell-to-markdown` | `m` | `:cell-md`, `:to-markdown` | Convert the focused cell to a Markdown cell |
+| `notebook-cell-to-code` | `y` | `:cell-code`, `:to-code` | Convert the focused cell to a code cell |
 | `notebook-undo-structural` | `u` | — | Undo the last add/delete-cell change |
 | `notebook-redo-structural` | `U` | — | Redo the last undone structural change |
 
@@ -264,7 +266,7 @@ in Notebook Navigate mode.
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `notebook-execute-cell` | `e` | `:run` | Execute the focused cell in the persistent kernel |
+| `notebook-execute-cell` | `e` | `:run` | Execute the focused cell. Code cells run in the kernel; Markdown cells render to their formatted view |
 | `notebook-execute-and-advance` | `E` | `:run-next` | Execute the focused cell, then focus the next |
 | `notebook-restart-kernel` | `ctrl+r` | `:restart-kernel`, `:kernel-restart` | Kill and restart the kernel (clears all state) |
 | `notebook-interrupt-kernel` | — | `:interrupt-kernel`, `:kernel-interrupt` | Send SIGINT to the running kernel |

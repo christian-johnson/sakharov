@@ -211,12 +211,21 @@ fn render_cell_content(
 ) -> Option<(u16, u16)> {
     // For the focused cell, use the live buffer rope; otherwise use stored source.
     let rope: &ropey::Rope = if is_focused { active.rope } else { &cell.source };
-    let (cursor_char_idx, sel_range, scroll_row) = if is_focused {
+
+    // A Markdown cell shows its formatted (highlighted) view when `rendered`,
+    // except while it's the focused cell being actively edited (i.e. we've
+    // dropped out of Notebook navigation into an edit sub-mode) — then we show
+    // the raw source so the markup is editable.
+    let editing_this = is_focused && !matches!(active.mode, Mode::Notebook);
+    let show_markdown = cell.cell_type == CellType::Markdown && cell.rendered && !editing_this;
+
+    // Suppress the cursor/selection in the rendered markdown view.
+    let (cursor_char_idx, sel_range, scroll_row) = if is_focused && !show_markdown {
         let lo = active.cursor.min(active.sel_anchor);
         let hi = active.cursor.max(active.sel_anchor);
         (Some(active.cursor), (lo, hi), active.scroll_row)
     } else {
-        (None, (0usize, 0usize), 0usize)
+        (None, (0usize, 0usize), if is_focused { active.scroll_row } else { 0 })
     };
 
     let source_text = rope.to_string();
@@ -228,6 +237,8 @@ fn render_cell_content(
 
     let highlight_spans = if cell.cell_type == CellType::Code {
         highlighter.highlight(rope).unwrap_or_default()
+    } else if show_markdown {
+        crate::markdown::highlight(rope)
     } else {
         vec![]
     };
@@ -254,7 +265,7 @@ fn render_cell_content(
         sel_range,
         mode: active.mode,
         highlight_spans: &highlight_spans,
-        is_code: cell.cell_type == CellType::Code,
+        use_highlight: cell.cell_type == CellType::Code || show_markdown,
         diag_ranges: &cell_diag_ranges,
         // Only overlay jump labels on the focused cell.
         jump_labels: if is_focused { active.jump_labels } else { &[] },
@@ -521,7 +532,9 @@ struct SourceLineCtx<'a> {
     sel_range: (usize, usize),
     mode: &'a Mode,
     highlight_spans: &'a [(usize, usize, usize)],
-    is_code: bool,
+    /// When true, render characters with their highlight spans (code cells, and
+    /// rendered markdown cells); when false, render as plain gray source text.
+    use_highlight: bool,
     /// Diagnostic ranges for this cell: (line_within_cell, col_start, col_end, severity).
     diag_ranges: &'a [(usize, usize, usize, DiagnosticSeverity)],
     /// Jump-mode labels to overlay on the focused cell's source lines.
@@ -572,7 +585,7 @@ fn render_source_line(
             break;
         }
         let char_idx = line_start_char + char_off;
-        let base_style = if ctx.is_code {
+        let base_style = if ctx.use_highlight {
             highlight::style_at(ctx.highlight_spans, char_idx)
         } else {
             Style::default().fg(Color::Gray)
@@ -857,6 +870,7 @@ pub fn render_notebook_status(
     kernel_status: Option<&KernelStatus>,
     area: Rect,
     mode_label: &str,
+    spinner: Option<char>,
 ) {
     let mode_style = match mode_label {
         "INS" => Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
@@ -877,10 +891,14 @@ pub fn render_notebook_status(
         nb.cells.len().max(1)
     );
     let kernel_indicator = match kernel_status {
-        Some(KernelStatus::Idle) => " [idle]",
-        Some(KernelStatus::Busy) => " [busy]",
-        Some(KernelStatus::Dead) => " [dead]",
-        None => " [no kernel]",
+        Some(KernelStatus::Idle) => " [idle]".to_string(),
+        // While busy, swap in the live spinner glyph for the static label.
+        Some(KernelStatus::Busy) => match spinner {
+            Some(g) => format!(" [{g} busy]"),
+            None => " [busy]".to_string(),
+        },
+        Some(KernelStatus::Dead) => " [dead]".to_string(),
+        None => " [no kernel]".to_string(),
     };
     let right = format!("{cell_pos}{kernel_indicator}");
 
@@ -964,8 +982,9 @@ impl Widget for NotebookStatusWidget {
             x += 1;
         }
 
-        // Right-aligned cell position.
-        let right_width = self.right.len() as u16;
+        // Right-aligned cell position.  Count chars, not bytes — the spinner
+        // glyph is multi-byte and would otherwise overshoot the alignment.
+        let right_width = self.right.chars().count() as u16;
         if area.right() >= right_width {
             let rx = area.right() - right_width;
             let mut rx2 = rx;

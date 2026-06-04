@@ -841,6 +841,22 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::NotebookExecuteCell => {
             notebook::save_focused_cell(app);
+            // "Executing" a Markdown cell just formats it: flip to the rendered
+            // view and return to navigation (no kernel involvement).
+            let is_markdown = app.notebook.as_ref().and_then(|(nb, state)| {
+                nb.cells.get(state.focused_cell).map(|c| c.cell_type == CellType::Markdown)
+            }).unwrap_or(false);
+            if is_markdown {
+                if let Some((ref mut nb, ref state)) = app.notebook {
+                    let idx = state.focused_cell;
+                    if idx < nb.cells.len() {
+                        nb.cells[idx].rendered = true;
+                    }
+                }
+                app.mode = Mode::Notebook;
+                app.message = Some("Rendered markdown".into());
+                return;
+            }
             // One cell at a time: the persistent kernel is a single REPL.
             let busy = app.notebook.as_ref()
                 .map(|(_, state)| state.executing_cell.is_some())
@@ -988,6 +1004,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     source: Rope::new(),
                     outputs: vec![],
                     execution_count: None,
+                    rendered: false,
                 });
                 state.focused_cell = new_idx;
                 nb.modified = true;
@@ -1009,6 +1026,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     source: Rope::new(),
                     outputs: vec![],
                     execution_count: None,
+                    rendered: false,
                 });
                 nb.modified = true;
                 state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
@@ -1064,6 +1082,39 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.modified = true;
                 }
             }
+            return;
+        }
+        Command::NotebookCellToMarkdown | Command::NotebookCellToCode => {
+            let to_markdown = matches!(cmd, Command::NotebookCellToMarkdown);
+            notebook::save_focused_cell(app);
+            notebook::push_cell_snapshot(app);
+            if let Some((ref mut nb, ref state)) = app.notebook {
+                let idx = state.focused_cell;
+                if idx < nb.cells.len() {
+                    let cell = &mut nb.cells[idx];
+                    cell.cell_type = if to_markdown {
+                        CellType::Markdown
+                    } else {
+                        CellType::Code
+                    };
+                    // Outputs / execution counts only belong to code cells.
+                    cell.outputs.clear();
+                    cell.execution_count = None;
+                    // Show the source for editing; the user re-runs to render.
+                    cell.rendered = false;
+                    nb.modified = true;
+                }
+            }
+            // The cell's LSP language id changed (python ↔ markdown) and its
+            // virtual document must be reopened under the new language.
+            notebook::load_focused_cell(app);
+            notebook::notebook_lsp_reopen(app);
+            app.mode = Mode::Notebook;
+            app.message = Some(if to_markdown {
+                "Cell → markdown".into()
+            } else {
+                "Cell → code".into()
+            });
             return;
         }
 
@@ -1570,32 +1621,86 @@ pub fn update_scroll(app: &mut App) {
     let scroll_off = app.config.editor.scroll_off;
     let tab_width = app.config.editor.tab_width;
 
-    // Normalize scroll_row so it never points inside a hidden fold region.
-    app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
+    if app.notebook.is_some() && !app.notebook_focused_edit() {
+        // In Notebook navigation mode, cell-level scrolling is driven by the
+        // command handlers (`j`/`k`, scroll-up/down) — don't auto-snap here, or
+        // we'd fight an explicit scroll away from the focused cell.
+        if app.mode == Mode::Notebook {
+            return;
+        }
+        // Editing within the focused cell.  The cell is in `app.buffer`, but it
+        // does not fill the viewport: cells above it (and its own top border)
+        // push its content downward.  We first keep the focused cell visible at
+        // the cell granularity, then scroll *within* the cell so the cursor
+        // stays inside the rows actually available below that offset — the same
+        // text-buffer behaviour you'd expect, rather than letting the cursor
+        // slide off the bottom of the screen.
+        let image_rows = app.config.notebook.image_rows;
+        let cell_px = app.cell_pixel_size;
+        let avail_cols = app.viewport_width.saturating_sub(2) as u16;
+        let mut new_scroll_row = app.scroll_row;
+        if let Some((nb, state)) = app.notebook.as_mut() {
+            state.ensure_focused_visible(
+                &nb.cells, visible_rows, rope, image_rows, cell_px, avail_cols,
+            );
+            let focused = state.focused_cell.min(nb.cells.len().saturating_sub(1));
+            // Rows consumed above the focused cell's content: each fully-shown
+            // preceding cell plus the 1-row inter-cell gap, then the focused
+            // cell's own top border.
+            let mut content_top = 0usize;
+            for idx in state.scroll_cell..focused {
+                let h = if state.is_cell_folded(idx) {
+                    3
+                } else {
+                    crate::notebook_ui::cell_display_height(
+                        &nb.cells[idx], image_rows, cell_px, avail_cols,
+                    ) as usize
+                };
+                content_top += h + 1;
+            }
+            content_top += 1; // top border of the focused cell
 
-    // Vertical — fold+wrap-aware row count from scroll_row to cursor line.
-    let vdist = if word_wrap {
-        wrap_visible_row_count(app, app.scroll_row, line_idx, visible_cols, tab_width)
+            let avail = visible_rows.saturating_sub(content_top).max(1);
+            let so = scroll_off.min(avail.saturating_sub(1) / 2);
+            if line_idx < new_scroll_row + so || new_scroll_row > line_idx {
+                new_scroll_row = line_idx.saturating_sub(so);
+            } else if line_idx + so + 1 > new_scroll_row + avail {
+                new_scroll_row = (line_idx + so + 1).saturating_sub(avail);
+            }
+            let max_scroll = total_lines.saturating_sub(1);
+            if new_scroll_row > max_scroll {
+                new_scroll_row = max_scroll;
+            }
+        }
+        app.scroll_row = new_scroll_row;
     } else {
-        app.fold.visible_row_count(app.scroll_row, line_idx, total_lines)
-    };
+        // Normalize scroll_row so it never points inside a hidden fold region.
+        app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
 
-    if vdist < scroll_off || app.scroll_row > line_idx {
-        // Cursor too close to top (or above scroll area): scroll up.
-        let desired = scroll_off.min(line_idx);
-        app.scroll_row = if word_wrap {
-            wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
+        // Vertical — fold+wrap-aware row count from scroll_row to cursor line.
+        let vdist = if word_wrap {
+            wrap_visible_row_count(app, app.scroll_row, line_idx, visible_cols, tab_width)
         } else {
-            app.fold.scroll_row_for_cursor(line_idx, desired)
+            app.fold.visible_row_count(app.scroll_row, line_idx, total_lines)
         };
-    } else if vdist + scroll_off >= visible_rows {
-        // Cursor too close to bottom: scroll down.
-        let desired = visible_rows.saturating_sub(scroll_off + 1);
-        app.scroll_row = if word_wrap {
-            wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
-        } else {
-            app.fold.scroll_row_for_cursor(line_idx, desired)
-        };
+
+        if vdist < scroll_off || app.scroll_row > line_idx {
+            // Cursor too close to top (or above scroll area): scroll up.
+            let desired = scroll_off.min(line_idx);
+            app.scroll_row = if word_wrap {
+                wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
+            } else {
+                app.fold.scroll_row_for_cursor(line_idx, desired)
+            };
+        } else if vdist + scroll_off >= visible_rows {
+            // Cursor too close to bottom: scroll down.
+            let desired = visible_rows.saturating_sub(scroll_off + 1);
+            app.scroll_row = if word_wrap {
+                wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
+            } else {
+                app.fold.scroll_row_for_cursor(line_idx, desired)
+            };
+        }
     }
 
     if word_wrap {

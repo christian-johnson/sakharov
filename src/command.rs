@@ -106,6 +106,10 @@ pub enum Command {
     NotebookNewCellAbove,
     NotebookDeleteCell,
     NotebookClearOutputs,
+    /// Convert the focused cell to a Markdown cell.
+    NotebookCellToMarkdown,
+    /// Convert the focused cell to a code cell.
+    NotebookCellToCode,
 
     // Kernel lifecycle
     NotebookRestartKernel,
@@ -272,6 +276,8 @@ impl Command {
             Command::NotebookNewCellAbove => "notebook-new-cell-above",
             Command::NotebookDeleteCell => "notebook-delete-cell",
             Command::NotebookClearOutputs => "notebook-clear-outputs",
+            Command::NotebookCellToMarkdown => "notebook-cell-to-markdown",
+            Command::NotebookCellToCode => "notebook-cell-to-code",
             Command::NotebookRestartKernel => "notebook-restart-kernel",
             Command::NotebookInterruptKernel => "notebook-interrupt-kernel",
             Command::NotebookUndoStructural => "notebook-undo-structural",
@@ -438,6 +444,12 @@ impl Command {
             "notebook-new-cell-above"        => Some(Command::NotebookNewCellAbove),
             "notebook-delete-cell"           => Some(Command::NotebookDeleteCell),
             "notebook-clear-outputs"         => Some(Command::NotebookClearOutputs),
+            "notebook-cell-to-markdown" | "cell-md" | "to-markdown" => {
+                Some(Command::NotebookCellToMarkdown)
+            }
+            "notebook-cell-to-code" | "cell-code" | "to-code" => {
+                Some(Command::NotebookCellToCode)
+            }
             "notebook-restart-kernel" | "restart-kernel" | "kernel-restart" => {
                 Some(Command::NotebookRestartKernel)
             }

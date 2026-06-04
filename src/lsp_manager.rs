@@ -445,6 +445,17 @@ impl LspManager {
         events
     }
 
+    /// True if any server has an in-flight request awaiting a reply.  Drives the
+    /// status-bar spinner; deliberately scoped to pending requests (not the
+    /// initialization handshake) so a server that fails to initialize can't pin
+    /// the spinner on forever.
+    pub fn has_pending_requests(&self) -> bool {
+        self.servers
+            .values()
+            .flatten()
+            .any(|s| !s.client.pending.is_empty())
+    }
+
     /// True if any server for `language` is running and initialized.
     pub fn is_ready(&self, language: &str) -> bool {
         self.servers

@@ -590,6 +590,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         diag_errors,
         diag_warnings,
         position,
+        spinner: app.spinner.glyph(),
     };
     frame.render_widget(status_widget, area);
 }
@@ -684,6 +685,8 @@ struct StatusWidget {
     diag_warnings: usize,
     /// Right-aligned position text e.g. "  42:10  23%"
     position: String,
+    /// Braille spinner glyph shown while a background task runs; `None` when idle.
+    spinner: Option<char>,
 }
 
 impl Widget for StatusWidget {
@@ -736,6 +739,12 @@ impl Widget for StatusWidget {
         if self.diag_errors > 0 {
             let s = format!("  ●{}", self.diag_errors);
             segments.push((s, Style::default().bg(Color::DarkGray).fg(Color::Red)));
+        }
+        if let Some(g) = self.spinner {
+            segments.push((
+                format!("  {g}"),
+                Style::default().bg(Color::DarkGray).fg(Color::Cyan),
+            ));
         }
 
         let total_right: u16 = segments.iter()

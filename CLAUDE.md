@@ -18,7 +18,11 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   per-level header colours, **bold**/*italic*, inline `code`/fenced blocks, links, blockquotes,
   list markers — plus header-section + code-fence folding (same `zc/zo/za` interface)
 - Scroll with configurable `scroll_off`; horizontal scroll tracks cursor correctly
-- Status bar: mode indicator (colour-coded), filename, modified flag, line:col, scroll %
+- Status bar: mode indicator (colour-coded), filename, modified flag, line:col, scroll %.
+  A "boiling" Braille spinner (`spinner.rs`) appears while a background task runs (a notebook
+  cell executing, an in-flight LSP request) — it flips one random dot of an 8-dot Braille cell
+  per tick rather than cycling fixed frames. Advanced once per frame from the run loop via
+  `Spinner::update(background_active)`; rendered in both the editor and notebook status bars
 - Block cursor (white in Normal, cyan in Insert); hardware cursor positioned via `frame.set_cursor_position`
 - Ctrl+S saves; Ctrl+C shows quit hint
 - Config at `~/.config/sakharov/config.toml` — deep-merged over compiled-in `config/default.toml`.
@@ -77,6 +81,18 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
     stays responsive while a cell runs. Only one cell runs at a time (a second `:run` reports "Kernel busy")
   - `notebook::append_stream` applies carriage-return line discipline so `\r`-overwrite bars show one updating line
 - `e` / `:run` — execute focused cell; `E` / `:run-next` — execute and advance
+- **Markdown cells** render like a regular Jupyter notebook: a markdown cell shows its
+  formatted view (same highlighter as `.md` documents, via `markdown::highlight`) when
+  `Cell.rendered` is set. `e`/`:run` (or Ctrl+Enter) on a markdown cell "renders" it
+  (`rendered = true`, no kernel involvement); entering an edit sub-mode reveals the source
+  (`rendered = false`). `m` / `:cell-md` converts a cell to markdown, `y` / `:cell-code`
+  back to code (clears outputs + reopens the cell's LSP doc under the new language id).
+  `Cell.rendered` is runtime-only (not serialised); cells load from disk rendered
+- **Rich display / LaTeX** — the kernel runner evaluates a cell's trailing bare expression
+  (like Jupyter's `execute_result`) and prefers a rich repr: `_repr_latex_` is rasterised to
+  PNG via matplotlib mathtext and shown through the normal image pipeline (so SymPy output
+  renders as math), then `_repr_png_`, then `repr()`. Requires matplotlib + a graphics
+  terminal for the LaTeX→image path; otherwise the text repr is shown
 - `Ctrl+R` / `:restart-kernel` — kill and restart kernel (clears all state)
 - `:interrupt-kernel` — send SIGINT to the running kernel; the streaming read loop surfaces the resulting
   `KeyboardInterrupt` and returns the cell to idle (now effective, not best-effort)
@@ -161,6 +177,7 @@ src/
   theme.rs            — highlight index → ratatui Style (incl. MD_* markup); terminal color queries
   lang.rs             — language id ↔ file extension mapping
   symbols.rs          — tree-sitter symbol extraction (buffer completions, picker)
+  spinner.rs          — "boiling" Braille status-bar spinner (random-dot-flip animation)
   clipboard.rs        — system clipboard integration (OSC 52 / external command)
   git.rs              — git gutter diff marks + current branch
   config.rs           — TOML config load + deep-merge over compiled-in defaults;
@@ -196,8 +213,16 @@ docs/
 - When adding a new `Command` variant: add to `parse()`, add to `exec::execute()`, add a row to `docs/commands.md`
 - Insert-mode edits use `buffer.insert_raw` / `buffer.remove_raw` (no per-keystroke undo snapshot).
   `begin_insert_edit()` in `input.rs` snapshots once per Insert session; `EnterNormal` in `exec/mod.rs` resets the flag.
-- `update_scroll_to_fit` in `app.rs` is the authoritative scroll function (has terminal size).
-  `exec::update_scroll` is a lightweight post-command nudge.
+- `exec::update_scroll` is the authoritative scroll function; the run loop calls it once per
+  frame (after refreshing `viewport_height`/`viewport_width`) so scroll always reflects the
+  current terminal size. It has two paths: the plain-editor fold/wrap-aware path, and a
+  **notebook editing path** (when a notebook is open, not in the full-screen overlay, and the
+  mode is an edit sub-mode — not `Notebook` navigation). The notebook path runs
+  `ensure_focused_visible` to keep the focused cell on-screen at cell granularity, then scrolls
+  *within* the focused cell (`app.scroll_row`) using the rows actually available below the
+  cell's content-top offset (preceding cells + gaps + top border), so the cursor tracks like a
+  text buffer instead of sliding off the bottom. In `Notebook` navigation mode it returns early
+  and lets the `j`/`k`/scroll command handlers drive `scroll_cell`.
 - **LSP document identity**: a document's URI is `lsp::path_to_uri(path)` (absolute +
   canonicalized, with a plain-absolute fallback for nonexistent virtual cell paths).
   Diagnostics arrive keyed by the URI the server echoes back, so any code looking up

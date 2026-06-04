@@ -227,6 +227,9 @@ pub struct App {
     pub command_history: std::collections::VecDeque<String>,
     /// Parsed `ui.command_history` mode (off / session / global).
     pub command_history_mode: crate::config::CommandHistoryMode,
+    /// "Boiling" Braille spinner shown in the status bar during background work
+    /// (cell execution, in-flight LSP requests).  Advanced once per frame.
+    pub spinner: crate::spinner::Spinner,
 }
 
 impl App {
@@ -387,6 +390,7 @@ impl App {
             active_recovery: None,
             command_history,
             command_history_mode,
+            spinner: crate::spinner::Spinner::default(),
             special_buffer_ropes: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
@@ -552,9 +556,13 @@ fn run_loop(
 
         if app.notebook.is_some() && !app.notebook_focused_edit() {
             // Notebook multi-cell view — the focused cell is in app.buffer.
+            // Lifted out of the draw closure so we can restore the hardware
+            // cursor to it *after* the Kitty image flush (which moves the
+            // terminal cursor to each image's origin and would otherwise leave
+            // the block cursor sitting on top of an image).
+            let mut nb_cursor: Option<(u16, u16)> = None;
             terminal.draw(|f| {
                 let size = f.area();
-                let mut nb_cursor: Option<(u16, u16)> = None;
 
                 if size.height >= 3 {
                     if let Some((ref nb, ref state)) = app.notebook {
@@ -587,6 +595,7 @@ fn run_loop(
                         let ks = nb.kernel.as_ref().map(|k| &k.status);
                         crate::notebook_ui::render_notebook_status(
                             f, nb, state, ks, status_area, app.mode.label(),
+                            app.spinner.glyph(),
                         );
                         ui::render_command_nb(f, app, cmd_area);
                     }
@@ -634,6 +643,18 @@ fn run_loop(
                         app.kitty_image_ids.insert(ptr_key, kid);
                     }
                 }
+
+                // Placing images moved the terminal cursor to the last image's
+                // origin; put it back where ratatui drew the text cursor so the
+                // block cursor doesn't appear stuck on an image.  (When the
+                // focused cell has no visible cursor — e.g. a rendered markdown
+                // cell — nb_cursor is None and ratatui already hid the cursor.)
+                if let Some((cx, cy)) = nb_cursor {
+                    use std::io::Write;
+                    let mut out = io::stdout();
+                    let _ = write!(out, "\x1b[{};{}H", cy + 1, cx + 1);
+                    let _ = out.flush();
+                }
             } else {
                 app.pending_images.clear();
             }
@@ -675,6 +696,16 @@ fn run_loop(
 
         crate::exec::process_lsp_events(app);
         crate::exec::process_kernel_events(app);
+
+        // Advance the status-bar spinner.  It's "active" whenever a notebook
+        // cell is executing or an LSP request is in flight.
+        let background_active = app
+            .notebook
+            .as_ref()
+            .map(|(_, state)| state.executing_cell.is_some())
+            .unwrap_or(false)
+            || app.lsp.has_pending_requests();
+        app.spinner.update(background_active);
 
         // Debounced crash-recovery flush of any unsaved buffers.
         crate::recovery::tick(app);

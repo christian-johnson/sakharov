@@ -296,6 +296,10 @@ impl Keymap {
         notebook.insert(KeyBinding::char('d'), vec![Command::NotebookDeleteCell]);
         notebook.insert(KeyBinding::char('x'), vec![Command::NotebookClearOutputs]);
 
+        // Cell type (Jupyter-style: m → markdown, y → code)
+        notebook.insert(KeyBinding::char('m'), vec![Command::NotebookCellToMarkdown]);
+        notebook.insert(KeyBinding::char('y'), vec![Command::NotebookCellToCode]);
+
         // Execution
         notebook.insert(KeyBinding::char('e'), vec![Command::NotebookExecuteCell]);
         notebook.insert(KeyBinding::char('E'), vec![Command::NotebookExecuteAndAdvance]);

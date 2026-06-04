@@ -455,6 +455,17 @@ fn handle_notebook_mode(app: &mut App, key: KeyEvent) {
             }
             exec::lsp_did_change(app);
         }
+        // Dropping into any edit sub-mode on a rendered Markdown cell reveals its
+        // source so the markup is editable; re-running the cell re-renders it.
+        if was_notebook && app.mode != Mode::Notebook {
+            if let Some((ref mut nb, ref state)) = app.notebook {
+                if let Some(cell) = nb.cells.get_mut(state.focused_cell) {
+                    if cell.cell_type == crate::notebook::CellType::Markdown {
+                        cell.rendered = false;
+                    }
+                }
+            }
+        }
     }
 }
 

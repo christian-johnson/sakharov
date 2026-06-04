@@ -20,7 +20,7 @@ use serde_json::Value;
 //   {"t":"error","text":<traceback>}
 //   {"t":"done"}
 const RUNNER_SCRIPT: &str = r#"
-import sys, json, io, traceback, base64
+import sys, json, io, traceback, base64, ast
 
 _ns = {'__name__': '__main__'}
 _real_stdout = sys.stdout
@@ -28,6 +28,63 @@ _real_stdout = sys.stdout
 def _emit(obj):
     _real_stdout.write(json.dumps(obj) + '\n')
     _real_stdout.flush()
+
+def _emit_png_bytes(raw):
+    _emit({'t': 'image', 'data': base64.b64encode(raw).decode('ascii')})
+
+# Rasterise a LaTeX string (e.g. SymPy's _repr_latex_) to a PNG via matplotlib's
+# mathtext engine, then emit it through the normal image channel.  mathtext
+# supports a wide subset of LaTeX (fractions, powers, sqrt, greek, sums…), which
+# covers typical SymPy output.  Returns True on success; the caller falls back
+# to a plain-text repr when this returns False (no matplotlib, or unsupported
+# markup).
+def _emit_latex(latex):
+    if not _capture_matplotlib:
+        return False
+    try:
+        import matplotlib.pyplot as _plt
+        s = latex.strip()
+        # Strip surrounding $ / $$ delimiters and \displaystyle (unsupported).
+        while s.startswith('$'):
+            s = s[1:]
+        while s.endswith('$'):
+            s = s[:-1]
+        s = s.replace('\\displaystyle', '').strip()
+        if not s:
+            return False
+        expr = '$' + s + '$'
+        _fig = _plt.figure()
+        _fig.patch.set_facecolor('white')
+        _fig.text(0.5, 0.5, expr, fontsize=18, ha='center', va='center', color='black')
+        _buf = io.BytesIO()
+        _fig.savefig(_buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        _plt.close(_fig)
+        _buf.seek(0)
+        _emit_png_bytes(_buf.read())
+        return True
+    except Exception:
+        return False
+
+# Display the value of a cell's trailing expression, preferring rich reprs
+# (LaTeX → PNG, then _repr_png_) and falling back to repr().
+def _display_result(obj):
+    try:
+        m = getattr(obj, '_repr_latex_', None)
+        latex = m() if callable(m) else None
+    except Exception:
+        latex = None
+    if latex and _emit_latex(latex):
+        return
+    try:
+        m = getattr(obj, '_repr_png_', None)
+        png = m() if callable(m) else None
+        if png:
+            raw = png if isinstance(png, (bytes, bytearray)) else base64.b64decode(png)
+            _emit_png_bytes(raw)
+            return
+    except Exception:
+        pass
+    _emit({'t': 'stream', 'name': 'stdout', 'text': repr(obj) + '\n'})
 
 # At startup, try to configure matplotlib with the Agg (non-interactive) backend
 # so that plt.show() captures figures without requiring %matplotlib inline.
@@ -105,7 +162,19 @@ while True:
     sys.stdout, sys.stderr = _Fwd('stdout'), _Fwd('stderr')
     try:
         if code.strip():
-            exec(compile(code, '<cell>', 'exec'), _ns)
+            # Split off a trailing bare expression so its value can be displayed
+            # (rich repr if available), mirroring Jupyter's execute_result.
+            _parsed = ast.parse(code, '<cell>', 'exec')
+            _last_expr = None
+            if _parsed.body and isinstance(_parsed.body[-1], ast.Expr):
+                _last_expr = _parsed.body.pop()
+            if _parsed.body:
+                exec(compile(_parsed, '<cell>', 'exec'), _ns)
+            if _last_expr is not None:
+                _expr_ast = ast.fix_missing_locations(ast.Expression(_last_expr.value))
+                _value = eval(compile(_expr_ast, '<cell>', 'eval'), _ns)
+                if _value is not None:
+                    _display_result(_value)
         if _capture_matplotlib:
             try:
                 import matplotlib.pyplot as _plt
@@ -349,6 +418,11 @@ pub struct Cell {
     pub source: Rope,
     pub outputs: Vec<Output>,
     pub execution_count: Option<u32>,
+    /// Runtime-only display state for Markdown cells: `true` shows the formatted
+    /// (highlighted) view, `false` shows the editable source.  Toggled by
+    /// "executing" a markdown cell (render) vs. entering edit (source).  Not
+    /// serialised — nbformat has no equivalent field.
+    pub rendered: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -615,12 +689,16 @@ impl Notebook {
                 .map(|arr| arr.iter().filter_map(parse_output).collect())
                 .unwrap_or_default();
 
+            // Markdown cells open in their formatted (rendered) view, like a
+            // freshly-opened notebook in Jupyter.
+            let rendered = cell_type == CellType::Markdown;
             cells.push(Cell {
                 id,
                 cell_type,
                 source,
                 outputs,
                 execution_count,
+                rendered,
             });
         }
 
