@@ -198,6 +198,8 @@ pub enum Command {
     KillToEndOfLine,
     /// Toggle soft word-wrap.
     ToggleWordWrap,
+    /// Show the welcome / dashboard screen.
+    ShowDashboard,
 }
 
 impl Command {
@@ -314,6 +316,7 @@ impl Command {
             Command::ScrollCursorCenter => "scroll-cursor-center",
             Command::KillToEndOfLine => "kill-to-end-of-line",
             Command::ToggleWordWrap => "toggle-word-wrap",
+            Command::ShowDashboard => "show-dashboard",
         }
     }
 
@@ -518,6 +521,9 @@ impl Command {
 
             // Display
             "toggle-word-wrap" | "word-wrap" | "wrap" => Some(Command::ToggleWordWrap),
+
+            // Dashboard
+            "show-dashboard" | "dashboard" | "home" | "splash" => Some(Command::ShowDashboard),
 
             _ => None,
         }

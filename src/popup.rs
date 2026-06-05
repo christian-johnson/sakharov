@@ -693,6 +693,8 @@ pub fn command_palette_items() -> Vec<ListItem> {
         // Notebook folding
         ("notebook-toggle-fold-cell",  "Toggle cell fold  [z]"),
         ("notebook-toggle-all-folds",  "Toggle all cell folds  [Z]"),
+        // Dashboard
+        ("show-dashboard", "Show the welcome / dashboard screen  [:dashboard]"),
     ];
     entries
         .iter()

@@ -1332,6 +1332,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
+        Command::ShowDashboard => {
+            app.show_splash = true;
+            return;
+        }
     }
 
     // If a motion landed the cursor inside a hidden fold, snap out direction-aware.

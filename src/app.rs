@@ -230,6 +230,9 @@ pub struct App {
     /// "Boiling" Braille spinner shown in the status bar during background work
     /// (cell execution, in-flight LSP requests).  Advanced once per frame.
     pub spinner: crate::spinner::Spinner,
+    /// True when the welcome/splash screen should be shown instead of the editor.
+    /// Set on launch with no file argument; cleared on the first keypress.
+    pub show_splash: bool,
 }
 
 impl App {
@@ -391,6 +394,7 @@ impl App {
             command_history,
             command_history_mode,
             spinner: crate::spinner::Spinner::default(),
+            show_splash: path.is_none(),
             special_buffer_ropes: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
@@ -550,7 +554,40 @@ fn run_loop(
             let _ = terminal.clear();
         }
 
-        if app.notebook.is_some() && !app.notebook_focused_edit() {
+        if app.show_splash {
+            terminal.draw(|f| {
+                let size = f.area();
+                // In command mode the user is typing a command — show the
+                // command input bar at the bottom and shrink the splash area.
+                let in_cmd = matches!(app.mode, crate::mode::Mode::Command);
+                let splash_area = if in_cmd {
+                    ratatui::layout::Rect {
+                        x: size.x,
+                        y: size.y,
+                        width: size.width,
+                        height: size.height.saturating_sub(1),
+                    }
+                } else {
+                    size
+                };
+                crate::splash::render(f, splash_area, app);
+                if in_cmd {
+                    let cmd_area = ratatui::layout::Rect {
+                        x: size.x,
+                        y: size.y + size.height.saturating_sub(1),
+                        width: size.width,
+                        height: 1,
+                    };
+                    // render_command_nb is the pub alias for render_command.
+                    crate::ui::render_command_nb(f, app, cmd_area);
+                }
+                // If a popup was opened from the dashboard (e.g. file picker),
+                // render it on top of the splash background.
+                if let Some(ref popup) = app.popup {
+                    crate::popup_ui::render(f, popup, None, &app.config.ui);
+                }
+            })?;
+        } else if app.notebook.is_some() && !app.notebook_focused_edit() {
             // Notebook multi-cell view — the focused cell is in app.buffer.
             // Lifted out of the draw closure so we can restore the hardware
             // cursor to it *after* the Kitty image flush (which moves the

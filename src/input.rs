@@ -12,8 +12,49 @@ use crate::{
     selection::Selection,
 };
 
+/// Returns true if executing this command should keep the dashboard alive.
+/// Popup-opening commands and the command-line entry key are considered
+/// "non-committing": if the user opens and then ESCs from a picker / the
+/// command line without actually doing anything, they return to the dashboard.
+fn is_splash_preserving(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::OpenFilePicker
+            | Command::OpenCommandPalette
+            | Command::GrepBuffer
+            | Command::GrepProject
+            | Command::OpenBufferPicker
+            | Command::OpenSymbolPicker
+            | Command::OpenDiagnosticPicker
+            | Command::EnterCommandMode
+    )
+}
+
 /// Dispatch a key event to the appropriate handler based on the current mode.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    // Splash dismissal logic:
+    //   • Skip entirely when a popup is open — the key goes to the popup handler,
+    //     and ESCing out should bring the dashboard back, not land in the editor.
+    //   • Skip when in Command mode — the key goes to the command-line handler.
+    //     Pressing Esc in the command line (without running anything) should
+    //     return to the dashboard; actually running a command clears show_splash
+    //     inside handle_command.
+    //   • For Normal / Select mode keys: preserve the splash for "non-committing"
+    //     actions (popup openers, EnterCommandMode); clear it for everything else.
+    if app.show_splash
+        && app.popup.is_none()
+        && matches!(app.mode, Mode::Normal | Mode::Select)
+    {
+        let kb = crate::keymap::KeyBinding::from(key);
+        let preserves = app
+            .keymap
+            .lookup_normal(&kb)
+            .map_or(false, |cmds| cmds.iter().any(is_splash_preserving));
+        if !preserves {
+            app.show_splash = false;
+        }
+    }
+
     app.message = None;
 
     let had_completion_popup = app.popup.as_ref()
@@ -291,8 +332,12 @@ fn handle_command(app: &mut App, key: KeyEvent) {
             app.mode = Mode::Normal;
             if let Some(cmd) = Command::parse(&input) {
                 crate::history::record(app, cmd.name());
+                // Executing any command from the command line counts as a commit —
+                // dismiss the splash unless the command itself re-opens it.
+                app.show_splash = false;
                 exec::execute(app, &cmd);
-            } else {
+            } else if !input.is_empty() {
+                app.show_splash = false;
                 app.message = Some(format!("Unknown command: {input}"));
             }
         }
@@ -543,6 +588,10 @@ fn handle_jump(app: &mut App, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
+    // A confirmed action (file opened, command run, navigation) is a "commit" —
+    // dismiss the splash so the user lands in the editor, not back at the dashboard.
+    app.show_splash = false;
+
     match target {
         PopupTarget::ExecuteCommand => {
             if let Some(cmd) = Command::parse(&text) {

@@ -340,6 +340,17 @@ impl Keymap {
         self.select.insert(kb, cmds);
     }
 
+    /// Reverse-lookup: find the first normal-mode key binding for a command name
+    /// and return it formatted as a human-readable hint (e.g. "C-o", "SPC").
+    pub fn hint_for_command(&self, cmd_name: &str) -> Option<String> {
+        for (kb, cmds) in &self.normal {
+            if cmds.iter().any(|c| c.name() == cmd_name) {
+                return Some(format_key_binding(kb));
+            }
+        }
+        None
+    }
+
     pub fn apply_custom_bindings(&mut self, keys: &crate::config::KeysConfig) {
         for (key_str, cmd_str) in &keys.normal {
             if let Some(kb) = KeyBinding::parse(key_str) {
@@ -355,6 +366,39 @@ impl Keymap {
                 }
             }
         }
+    }
+}
+
+/// Format a key binding as a short human-readable hint, e.g. "C-o", "SPC", "Enter".
+pub fn format_key_binding(kb: &KeyBinding) -> String {
+    let ctrl = kb.modifiers.contains(KeyModifiers::CONTROL);
+    let alt  = kb.modifiers.contains(KeyModifiers::ALT);
+
+    let key = match &kb.code {
+        KeyCode::Char(' ')  => "SPC".to_string(),
+        KeyCode::Char(c)    => c.to_string(),
+        KeyCode::Enter      => "Enter".to_string(),
+        KeyCode::Esc        => "Esc".to_string(),
+        KeyCode::Backspace  => "BS".to_string(),
+        KeyCode::Tab        => "Tab".to_string(),
+        KeyCode::Delete     => "Del".to_string(),
+        KeyCode::Up         => "Up".to_string(),
+        KeyCode::Down       => "Down".to_string(),
+        KeyCode::Left       => "Left".to_string(),
+        KeyCode::Right      => "Right".to_string(),
+        KeyCode::PageUp     => "PgUp".to_string(),
+        KeyCode::PageDown   => "PgDn".to_string(),
+        KeyCode::Home       => "Home".to_string(),
+        KeyCode::End        => "End".to_string(),
+        KeyCode::F(n)       => format!("F{}", n),
+        _                   => "?".to_string(),
+    };
+
+    match (ctrl, alt) {
+        (true,  true)  => format!("C-M-{}", key),
+        (true,  false) => format!("C-{}", key),
+        (false, true)  => format!("M-{}", key),
+        (false, false) => key,
     }
 }
 
