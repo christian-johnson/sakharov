@@ -18,18 +18,59 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   per-level header colours, **bold**/*italic*, inline `code`/fenced blocks, links, blockquotes,
   list markers — plus header-section + code-fence folding (same `zc/zo/za` interface)
 - Scroll with configurable `scroll_off`; horizontal scroll tracks cursor correctly
-- Status bar: mode indicator (colour-coded), filename, modified flag, line:col, scroll %.
+- **Status line** (`statusline.rs`) — a single starship-style renderer shared by the plain
+  editor and the notebook view. Layout is config-driven: `[statusline] left/right` (and
+  `[statusline.notebook] left/right`) are ordered lists of module names, packed left /
+  flush-right with automatic per-module padding. An unknown name renders as literal text
+  (usable as a custom separator, e.g. `"│"`). Call sites build a `statusline::Ctx` and call
+  `statusline::render(frame, area, ctx, left, right, separator, styles)`.
+
+  **Available modules** (all aliases are interchangeable):
+
+  | Module | Aliases | Renders | Visibility |
+  |--------|---------|---------|------------|
+  | `mode` | — | Coloured chip: `NOR` `INS` `SEL` `CMD` `NB` … | always |
+  | `file` | `filename` | Filename + ` [+]` when unsaved | always |
+  | `git` | `branch`, `git_branch` | ` branch-name` | hidden outside git repo |
+  | `diagnostics` | `diag` | `●N` errors (red) · `◆N` warnings (yellow) | hidden when zero |
+  | `position` | `pos` | `line:col` (1-based) | always |
+  | `scroll` | `scroll_percent` | `N%` through file | always |
+  | `spinner` | — | Animated Braille glyph (cyan) | hidden when idle |
+  | `cell` | `cell_position` | `current/total` cell index | notebook only |
+  | `kernel` | — | `[idle]` / `[⠿ busy]` / `[dead]` / `[no kernel]` | notebook only |
+
+  `kernel` folds the live spinner into itself when busy; no need for both `kernel` and
+  `spinner` in the notebook layout. `cell` and `kernel` produce nothing in the plain editor.
+
+  **Separator / powerline** — `separator = ">"` (or `"/"`, `"\\"`, `"round"`) activates
+  powerline mode: filled transition glyphs (Nerd Fonts required) tinted with adjacent module
+  background colors. Any other non-empty string is printed literally between modules.
+
+  **Per-module colors** — `[statusline.styles]` maps module names to `#rrggbb` hex strings.
+  In powerline mode these are background colors (fg auto-chosen for contrast); in literal
+  mode they override the foreground (text) color.
+
+  **Per-mode colors** — `[theme.modes]` maps mode names (`normal`, `insert`, `select`,
+  `command`, `notebook`, `goto`, `jump`, `fold`) to `#rrggbb` hex strings, overriding the
+  default ANSI color for that mode's chip, cursor, and powerline tint.
+
   A "boiling" Braille spinner (`spinner.rs`) appears while a background task runs (a notebook
   cell executing, an in-flight LSP request) — it flips one random dot of an 8-dot Braille cell
   per tick rather than cycling fixed frames. Advanced once per frame from the run loop via
-  `Spinner::update(background_active)`; rendered in both the editor and notebook status bars
+  `Spinner::update(background_active)`; surfaced via the `spinner` module (and folded into the
+  `kernel` module's `[⠿ busy]` indicator)
 - Block cursor (white in Normal, cyan in Insert); hardware cursor positioned via `frame.set_cursor_position`
 - Ctrl+S saves; Ctrl+C shows quit hint
 - Config at `~/.config/sakharov/config.toml` — deep-merged over compiled-in `config/default.toml`.
   Search order: `$XDG_CONFIG_HOME`, then `~/.config`, then platform-native `dirs::config_dir()`.
-  Covers theme colours, `tab_width`, `expand_tabs`, line numbers (absolute + relative), `scroll_off`, `git_gutter`,
-  `word_wrap`, `max_undo`, `crash_recovery`, format-on-save, file-picker limits/external command, UI popup sizing +
-  `jump_keys` + `symbol_icons` + `command_history`, notebook (`image_rows`/output caps), `[language_servers]`, `[formatters]`
+  Covers theme colours + `[theme.modes]` per-mode chip/cursor colors, `tab_width`, `expand_tabs`,
+  line numbers (absolute + relative), `scroll_off`, `git_gutter`, `word_wrap`, `max_undo`,
+  `crash_recovery`, format-on-save, file-picker limits/external command, UI popup sizing +
+  `jump_keys` + `symbol_icons` + `command_history`, `[statusline]` modeline layout (left/right
+  module lists, `separator`, `[statusline.styles]` color overrides, separate notebook variant),
+  notebook (`image_rows`/output caps), `[language_servers]`, `[formatters]`.
+  **Config loading is infallible** — any syntax error or type mismatch in the user file is
+  reported to stderr and the built-in defaults are used instead.
 - `/` and `?` incremental search, `n/N` cycle matches
 - `gw` jump mode (2-char labels over visible word starts)
 - Code folding (`zc/zo/za`), git gutter marks, word wrap toggle
@@ -178,6 +219,8 @@ src/
   lang.rs             — language id ↔ file extension mapping
   symbols.rs          — tree-sitter symbol extraction (buffer completions, picker)
   spinner.rs          — "boiling" Braille status-bar spinner (random-dot-flip animation)
+  statusline.rs       — starship-style status line: config-driven module lists (left/right),
+                        shared by the plain editor + notebook view (Ctx + render)
   clipboard.rs        — system clipboard integration (OSC 52 / external command)
   git.rs              — git gutter diff marks + current branch
   config.rs           — TOML config load + deep-merge over compiled-in defaults;

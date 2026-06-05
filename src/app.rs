@@ -419,11 +419,7 @@ pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str>
 
 /// Set up terminal, run the event loop, then restore terminal.
 pub fn run(path: Option<&str>) -> Result<()> {
-    let config = Config::load().unwrap_or_else(|e| {
-        eprintln!("sv: config error: {e} — using built-in defaults");
-        toml::from_str(include_str!("../config/default.toml"))
-            .expect("default config must parse")
-    });
+    let config = Config::load();
 
     crate::buffer::configure_max_undo(config.editor.max_undo);
 
@@ -572,6 +568,7 @@ fn run_loop(
                             sel_anchor: app.selection.anchor,
                             scroll_row: app.scroll_row,
                             mode: &app.mode,
+                            mode_colors: &app.config.theme.modes,
                             jump_labels: &app.jump_labels,
                             jump_typed: &app.jump_typed,
                         };
@@ -592,10 +589,59 @@ fn run_loop(
                             width: size.width,
                             height: 1,
                         };
-                        let ks = nb.kernel.as_ref().map(|k| &k.status);
-                        crate::notebook_ui::render_notebook_status(
-                            f, nb, state, ks, status_area, app.mode.label(),
-                            app.spinner.glyph(),
+                        let kernel = match nb.kernel.as_ref().map(|k| &k.status) {
+                            Some(crate::notebook::KernelStatus::Idle) => crate::statusline::KernelView::Idle,
+                            Some(crate::notebook::KernelStatus::Busy) => crate::statusline::KernelView::Busy,
+                            Some(crate::notebook::KernelStatus::Dead) => crate::statusline::KernelView::Dead,
+                            None => crate::statusline::KernelView::None,
+                        };
+
+                        // Diagnostics summed across all cells' virtual paths.
+                        let (mut diag_errors, mut diag_warnings) = (0usize, 0usize);
+                        for idx in 0..nb.cells.len() {
+                            let vpath = crate::notebook::cell_virtual_path(
+                                &nb.path, &nb.metadata.kernel_language, idx,
+                            );
+                            if let Some(diags) = app.lsp.diagnostics.get(&crate::lsp::diagnostic_key(&vpath)) {
+                                use crate::lsp_manager::DiagnosticSeverity;
+                                diag_errors += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
+                                diag_warnings += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Warning).count();
+                            }
+                        }
+
+                        // Focused-cell cursor position (for the position/scroll modules).
+                        let rope = &app.buffer.rope;
+                        let cpos = app.selection.head.min(rope.len_chars());
+                        let line_idx = if rope.len_chars() == 0 { 0 } else { rope.char_to_line(cpos) };
+                        let line_start = if rope.len_chars() == 0 { 0 } else { rope.line_to_char(line_idx) };
+                        let total_lines = rope.len_lines().max(1);
+
+                        let filename = nb.path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("notebook.ipynb")
+                            .to_string();
+
+                        let ctx = crate::statusline::Ctx {
+                            mode_label: app.mode.label().to_string(),
+                            mode_color: crate::theme::mode_color(&app.mode, &app.config.theme.modes),
+                            filename,
+                            modified: nb.modified,
+                            branch: app.git_branch.clone(),
+                            diag_errors,
+                            diag_warnings,
+                            line: line_idx + 1,
+                            col: cpos.saturating_sub(line_start) + 1,
+                            scroll_pct: (line_idx * 100) / total_lines,
+                            spinner: app.spinner.glyph(),
+                            cell: Some((state.focused_cell + 1, nb.cells.len().max(1))),
+                            kernel: Some(kernel),
+                        };
+                        crate::statusline::render(
+                            f, status_area, &ctx,
+                            &app.config.statusline.notebook.left,
+                            &app.config.statusline.notebook.right,
+                            &app.config.statusline.separator,
+                            &app.config.statusline.styles,
                         );
                         ui::render_command_nb(f, app, cmd_area);
                     }
@@ -672,7 +718,7 @@ fn run_loop(
         // Only write cursor-shape OSC sequences when the mode actually changes.
         if app.last_rendered_mode.as_ref() != Some(&app.mode) {
             app.last_rendered_mode = Some(app.mode.clone());
-            set_cursor_shape(&app.mode);
+            set_cursor_shape(&app.mode, &app.config.theme.modes);
         }
 
         // Block up to 16 ms for the first event (≈60 fps idle rate).
@@ -747,11 +793,11 @@ fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
-fn set_cursor_shape(mode: &Mode) {
+fn set_cursor_shape(mode: &Mode, colors: &crate::config::ModeColorsConfig) {
     use crossterm::cursor::SetCursorStyle;
     use std::io::Write;
     let _ = execute!(io::stdout(), SetCursorStyle::SteadyBlock);
-    if let Some(color_spec) = crate::theme::color_to_osc_spec(crate::theme::mode_color(mode)) {
+    if let Some(color_spec) = crate::theme::color_to_osc_spec(crate::theme::mode_color(mode, colors)) {
         let mut stdout = io::stdout();
         let _ = write!(stdout, "\x1b]12;{}\x07", color_spec);
         let _ = stdout.flush();

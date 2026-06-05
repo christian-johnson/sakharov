@@ -1,7 +1,21 @@
-use anyhow::Result;
+use ratatui::style::Color;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Parse a `#rrggbb` hex color string into a ratatui [`Color`].
+/// Returns `None` for empty strings and unrecognised formats.
+pub(crate) fn parse_hex_color(s: &str) -> Option<Color> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() == 6 {
+        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+        Some(Color::Rgb(r, g, b))
+    } else {
+        None
+    }
+}
 
 /// Top-level configuration structure.
 #[derive(Debug, Deserialize, Clone)]
@@ -11,6 +25,8 @@ pub struct Config {
     pub editor: EditorConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub statusline: StatuslineConfig,
     #[serde(default)]
     pub notebook: NotebookConfig,
     #[serde(default)]
@@ -35,6 +51,36 @@ pub struct KeysConfig {
 }
 
 /// Theme color configuration (hex strings).
+/// Per-mode color overrides.  Each field is a `#rrggbb` hex string; an empty
+/// string (the default) falls back to the built-in ANSI color for that mode.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModeColorsConfig {
+    /// Normal / navigation mode.  Default: ANSI Blue.
+    #[serde(default)]
+    pub normal: String,
+    /// Insert (text-entry) mode.  Default: ANSI Green.
+    #[serde(default)]
+    pub insert: String,
+    /// Visual / Select mode.  Default: ANSI Yellow.
+    #[serde(default)]
+    pub select: String,
+    /// `:` command-line mode.  Default: ANSI Cyan.
+    #[serde(default)]
+    pub command: String,
+    /// Notebook navigation mode.  Default: ANSI Cyan.
+    #[serde(default)]
+    pub notebook: String,
+    /// `g` Goto / `/` Search / `f` FindChar sub-modes.  Default: ANSI Magenta.
+    #[serde(default)]
+    pub goto: String,
+    /// `gw` jump-label mode.  Default: orange `#ffa000`.
+    #[serde(default)]
+    pub jump: String,
+    /// `z` fold sub-mode.  Default: light orange `#ffb060`.
+    #[serde(default)]
+    pub fold: String,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct ThemeConfig {
@@ -43,6 +89,10 @@ pub struct ThemeConfig {
     pub cursor: String,
     pub selection: String,
     pub line_numbers: String,
+    /// Per-mode chip / cursor colors.  Each entry is optional; unset entries
+    /// use the built-in ANSI fallback for that mode.
+    #[serde(default)]
+    pub modes: ModeColorsConfig,
 }
 
 /// Editor behaviour configuration.
@@ -189,6 +239,81 @@ impl Default for UiConfig {
     }
 }
 
+/// Starship-style status line layout.  `left` and `right` are ordered lists of
+/// module names; a name that isn't a known module is rendered as literal text
+/// (handy as a custom separator).  Known modules: `mode`, `file`, `git`,
+/// `diagnostics`, `position`, `scroll`, `spinner`, `cell`, `kernel`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct StatuslineConfig {
+    #[serde(default = "default_statusline_left")]
+    pub left: Vec<String>,
+    #[serde(default = "default_statusline_right")]
+    pub right: Vec<String>,
+    /// Layout used while a notebook is open (the multi-cell view).
+    #[serde(default)]
+    pub notebook: NotebookStatuslineConfig,
+    /// String inserted between adjacent modules.  Default `""` relies on each
+    /// module's own padding (a single leading/trailing space) for visual
+    /// separation.  Try `">"`, `"|"`, `"/"`, or `"\\"` for a powerline-inspired
+    /// look; `" | "` for a spaced pipe.
+    #[serde(default)]
+    pub separator: String,
+    /// Per-module foreground color overrides.  Keys are module names (e.g.
+    /// `"file"`, `"git"`, `"mode"`); values are `#rrggbb` hex strings.
+    ///
+    /// Example:
+    /// ```toml
+    /// [statusline.styles]
+    /// file = "#50fa7b"
+    /// git  = "#bd93f9"
+    /// ```
+    #[serde(default)]
+    pub styles: HashMap<String, String>,
+}
+
+/// Status line layout for the notebook view.
+#[derive(Debug, Deserialize, Clone)]
+pub struct NotebookStatuslineConfig {
+    #[serde(default = "default_nb_statusline_left")]
+    pub left: Vec<String>,
+    #[serde(default = "default_nb_statusline_right")]
+    pub right: Vec<String>,
+}
+
+fn default_statusline_left() -> Vec<String> {
+    vec!["mode".into(), "git".into(), "file".into()]
+}
+fn default_statusline_right() -> Vec<String> {
+    vec!["diagnostics".into(), "spinner".into(), "position".into(), "scroll".into()]
+}
+fn default_nb_statusline_left() -> Vec<String> {
+    vec!["mode".into(), "file".into()]
+}
+fn default_nb_statusline_right() -> Vec<String> {
+    vec!["diagnostics".into(), "cell".into(), "kernel".into()]
+}
+
+impl Default for StatuslineConfig {
+    fn default() -> Self {
+        Self {
+            left: default_statusline_left(),
+            right: default_statusline_right(),
+            notebook: NotebookStatuslineConfig::default(),
+            separator: String::new(),
+            styles: HashMap::new(),
+        }
+    }
+}
+
+impl Default for NotebookStatuslineConfig {
+    fn default() -> Self {
+        Self {
+            left: default_nb_statusline_left(),
+            right: default_nb_statusline_right(),
+        }
+    }
+}
+
 /// Notebook-specific configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct NotebookConfig {
@@ -284,26 +409,72 @@ pub struct ExtraServerConfig {
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 impl Config {
-    /// Load config from `~/.config/sakharov/config.toml`.
-    ///
-    /// The user file is deep-merged on top of the compiled-in defaults, so a
-    /// partial config (e.g. only `[language_servers]`) works without repeating
-    /// all theme/editor values.
-    pub fn load() -> Result<Self> {
-        let mut base: toml::Value = toml::from_str(DEFAULT_CONFIG)?;
+    /// Load config from `~/.config/sakharov/config.toml`, deep-merged over the
+    /// compiled-in defaults.  **Never fails**: any problem reading or parsing
+    /// the user file is reported to stderr and the built-in defaults are used
+    /// instead, so the editor always starts in a known-good state.
+    pub fn load() -> Self {
+        // The compiled-in defaults must always be valid — treat any failure as
+        // a programming error rather than a runtime error.
+        let default_val: toml::Value = toml::from_str(DEFAULT_CONFIG)
+            .expect("BUG: compiled-in default.toml is invalid TOML");
+        let default_cfg: Self = default_val
+            .clone()
+            .try_into()
+            .expect("BUG: compiled-in default.toml failed to deserialize");
 
-        if let Some(p) = config_path() {
-            if p.exists() {
-                let text = std::fs::read_to_string(&p)?;
-                let user: toml::Value = toml::from_str(&text)?;
-                base = deep_merge(base, user);
+        let path = match config_path() {
+            Some(p) if p.exists() => p,
+            _ => return default_cfg,
+        };
+
+        // Read the file.
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "sv: warning: cannot read config {}: {e} — using built-in defaults",
+                    path.display()
+                );
+                return default_cfg;
+            }
+        };
+
+        // Parse as TOML.  A syntax error here is the most common user mistake.
+        let user_val: toml::Value = match toml::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "sv: warning: config {}: {e} — using built-in defaults",
+                    path.display()
+                );
+                return default_cfg;
+            }
+        };
+
+        // Deep-merge over defaults then deserialize.  A type mismatch (e.g.
+        // `tab_width = "four"`) surfaces here.
+        let merged_val = deep_merge(default_val, user_val);
+        let merged_str = match toml::to_string(&merged_val) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "sv: warning: config {}: serialization error: {e} — using built-in defaults",
+                    path.display()
+                );
+                return default_cfg;
+            }
+        };
+        match toml::from_str(&merged_str) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!(
+                    "sv: warning: config {}: {e} — using built-in defaults",
+                    path.display()
+                );
+                default_cfg
             }
         }
-
-        // Serialize back to string then re-parse; this lets serde drive the
-        // final struct construction cleanly without a custom Deserializer impl.
-        let merged = toml::to_string(&base)?;
-        Ok(toml::from_str(&merged)?)
     }
 }
 
@@ -392,3 +563,32 @@ pub fn restrict_dir_permissions(path: &std::path::Path) {
 
 #[cfg(not(unix))]
 pub fn restrict_dir_permissions(_path: &std::path::Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The compiled-in default config must always parse into `Config`, including
+    /// the `[statusline]` section.
+    #[test]
+    fn default_config_parses() {
+        let cfg: Config = toml::from_str(DEFAULT_CONFIG).expect("default.toml parses");
+        assert_eq!(cfg.statusline.left, vec!["mode", "git", "file"]);
+        assert!(cfg.statusline.right.contains(&"diagnostics".to_string()));
+        assert_eq!(cfg.statusline.notebook.right, vec!["diagnostics", "cell", "kernel"]);
+    }
+
+    /// A partial user `[statusline]` override replaces only the keys it sets and
+    /// deep-merges the rest from defaults.
+    #[test]
+    fn statusline_partial_override_merges() {
+        let base: toml::Value = toml::from_str(DEFAULT_CONFIG).unwrap();
+        let user: toml::Value = toml::from_str("[statusline]\nleft = [\"mode\"]\n").unwrap();
+        let merged = deep_merge(base, user);
+        let cfg: Config = merged.try_into().unwrap();
+        assert_eq!(cfg.statusline.left, vec!["mode"]);
+        // right + notebook untouched by the override.
+        assert!(cfg.statusline.right.contains(&"position".to_string()));
+        assert_eq!(cfg.statusline.notebook.left, vec!["mode", "file"]);
+    }
+}

@@ -79,23 +79,40 @@ pub fn selection_style() -> Style {
     Style::default().fg(Color::Black).bg(Color::Blue)
 }
 
-/// Get the theme color associated with a given mode.
-pub fn mode_color(mode: &Mode) -> Color {
+/// Resolve the color for a given mode, consulting per-mode overrides from
+/// `colors` first and falling back to built-in ANSI colors.
+pub fn mode_color(mode: &Mode, colors: &crate::config::ModeColorsConfig) -> Color {
+    let hex = match mode {
+        Mode::Normal                                                        => &colors.normal,
+        Mode::Insert                                                        => &colors.insert,
+        Mode::Select                                                        => &colors.select,
+        Mode::Command                                                       => &colors.command,
+        Mode::Notebook                                                      => &colors.notebook,
+        Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. }    => &colors.goto,
+        Mode::Jump { .. }                                                   => &colors.jump,
+        Mode::Fold                                                          => &colors.fold,
+    };
+    if !hex.is_empty() {
+        if let Some(c) = crate::config::parse_hex_color(hex) {
+            return c;
+        }
+    }
     match mode {
-        Mode::Normal => Color::Blue,
-        Mode::Insert => Color::Green,
-        Mode::Select => Color::Yellow,
-        Mode::Command => Color::Cyan,
-        Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. } => Color::Magenta,
-        Mode::Notebook => Color::Cyan,
-        Mode::Jump { .. } => Color::Rgb(255, 160, 0),
-        Mode::Fold => Color::Rgb(255, 160, 50),
+        Mode::Normal                                                        => Color::Blue,
+        Mode::Insert                                                        => Color::Green,
+        Mode::Select                                                        => Color::Yellow,
+        Mode::Command                                                       => Color::Cyan,
+        Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. }    => Color::Magenta,
+        Mode::Notebook                                                      => Color::Cyan,
+        Mode::Jump { .. }                                                   => Color::Rgb(255, 160, 0),
+        Mode::Fold                                                          => Color::Rgb(255, 160, 50),
     }
 }
 
-/// Style for the cursor block.
-pub fn cursor_style(mode: &Mode) -> Style {
-    Style::default().fg(Color::Black).bg(mode_color(mode))
+/// Style for the cursor block — background is the mode color, foreground is
+/// always black (the cursor cell inverts the character's own colors).
+pub fn cursor_style(mode: &Mode, colors: &crate::config::ModeColorsConfig) -> Style {
+    Style::default().fg(Color::Black).bg(mode_color(mode, colors))
 }
 
 use std::collections::HashMap;

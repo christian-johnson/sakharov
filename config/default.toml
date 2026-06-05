@@ -5,6 +5,20 @@ cursor = "#f5e0dc"
 selection = "#313244"
 line_numbers = "#45475a"
 
+# Per-mode colors for the status-line chip and the hardware cursor.
+# Each entry is a #rrggbb hex string.  Omit (or leave empty) to use the
+# built-in ANSI fallback for that mode.
+#
+# [theme.modes]
+# normal   = "#5277c3"   # ANSI Blue  (default)
+# insert   = "#26a641"   # ANSI Green (default)
+# select   = "#cdad00"   # ANSI Yellow (default)
+# command  = "#0fb8c9"   # ANSI Cyan  (default)
+# notebook = "#0fb8c9"   # ANSI Cyan  (default)
+# goto     = "#9141ac"   # ANSI Magenta (default, covers g/f/? sub-modes)
+# jump     = "#ffa000"   # orange     (default)
+# fold     = "#ffb060"   # light orange (default)
+
 [editor]
 tab_width = 4
 # When true (default), the Tab key and all auto-indentation insert `tab_width`
@@ -62,6 +76,88 @@ const  = "# const"
 impl   = "⊕ impl"
 method = "m mth"
 var    = "= var"
+
+# ─── Status line (modeline) ──────────────────────────────────────────────────
+#
+# Layout is driven by two ordered lists of module names:
+#   left  — packed from the left edge
+#   right — flush to the right edge
+#
+# Each module is automatically padded with a leading and trailing space.
+# Any name that isn't a known module is rendered as literal text — handy for
+# custom separators, e.g.  left = ["mode", "│", "git", "file"]
+#
+# ┌─────────────┬──────────────────────────────────────┬────────────────────┐
+# │ Name(s)     │ Renders as                           │ Visibility         │
+# ├─────────────┼──────────────────────────────────────┼────────────────────┤
+# │ mode        │ Coloured chip: NOR INS SEL CMD …     │ always             │
+# │ file        │ filename  [+] when unsaved           │ always             │
+# │ filename    │   (alias for file)                   │                    │
+# │ git         │  branch-name (Nerd Font icon)       │ hidden outside repo│
+# │ branch      │   (alias for git)                    │                    │
+# │ git_branch  │   (alias for git)                    │                    │
+# │ diagnostics │ ●N errors (red)  ◆N warnings (yel.) │ hidden when both=0 │
+# │ diag        │   (alias for diagnostics)            │                    │
+# │ position    │ line:col  (1-based)                  │ always             │
+# │ pos         │   (alias for position)               │                    │
+# │ scroll      │ N% through the file                  │ always             │
+# │ scroll_pct  │   (alias for scroll)                 │                    │
+# │ spinner     │ Animated Braille glyph (cyan)        │ hidden when idle   │
+# │ cell        │ current/total cell index             │ notebook only      │
+# │ cell_pos    │   (alias for cell)                   │                    │
+# │ kernel      │ [idle] / [⠿ busy] / [dead] /        │ notebook only      │
+# │             │   [no kernel]                        │                    │
+# └─────────────┴──────────────────────────────────────┴────────────────────┘
+#
+# Note: `kernel` folds the live spinner into itself when busy, showing
+# "[⠿ busy]" rather than "[busy]".  In the notebook layout there is no need
+# to include both `spinner` and `kernel` — `kernel` covers both states.
+#
+# A separate [statusline.notebook] section overrides the layout when a
+# notebook (.ipynb) file is open.  `cell` and `kernel` are notebook-only
+# modules and produce nothing in the plain editor, so they are safe to leave
+# in the shared lists without harm.
+#
+# ── separator ────────────────────────────────────────────────────────────────
+#
+# Controls what appears between adjacent modules.
+#
+#   Powerline mode — filled transition glyphs (requires Nerd Fonts):
+#     ">"     — solid arrow  ► / ◄  (classic powerline look)
+#     "/"     — upper diagonal slant  (catppuccin / tokyonight style)
+#     "\"     — lower diagonal slant  (reverse of above)
+#     "round" — half-circle bubble
+#
+#   Literal mode — text printed verbatim between modules:
+#     "|"  " | "  "·"  etc.
+#
+#   Default: "" (empty) — relies on each module's own padding; no extra glyph.
+#
+# ── [statusline.styles] ──────────────────────────────────────────────────────
+#
+# Per-module colour overrides.  Key = module name, value = #rrggbb hex string.
+#
+#   Powerline mode : each entry sets the module's *background* colour;
+#                    foreground is auto-chosen for contrast (black or white).
+#   Literal mode   : each entry sets the module's *foreground* (text) colour.
+#
+# Example — a dracula-flavoured powerline bar:
+#   [statusline]
+#   separator = ">"
+#   [statusline.styles]
+#   mode = "#ff79c6"
+#   git  = "#6272a4"
+#   file = "#44475a"
+#
+[statusline]
+left  = ["mode", "git", "file"]
+right = ["diagnostics", "spinner", "position", "scroll"]
+# separator = ">"   # uncomment for powerline arrows (needs Nerd Fonts)
+
+# Layout used while a notebook (.ipynb) is open.
+[statusline.notebook]
+left  = ["mode", "file"]
+right = ["diagnostics", "cell", "kernel"]
 
 # Jupyter notebook settings.
 [notebook]

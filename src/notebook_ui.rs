@@ -11,7 +11,7 @@ use crate::{
     lang::lang_to_ext,
     lsp_manager::{Diagnostic, DiagnosticSeverity},
     mode::Mode,
-    notebook::{Cell, CellType, KernelStatus, MimeData, Notebook, Output},
+    notebook::{Cell, CellType, MimeData, Notebook, Output},
     notebook_state::NotebookState,
 };
 
@@ -28,6 +28,8 @@ pub struct ActiveCellView<'a> {
     pub scroll_row: usize,
     /// Current editor mode — determines cursor highlight style.
     pub mode: &'a Mode,
+    /// Per-mode color overrides from the loaded config.
+    pub mode_colors: &'a crate::config::ModeColorsConfig,
     /// Jump-mode labels to overlay on the cell source (`app.jump_labels`).
     /// Empty slice when not in Jump mode.
     pub jump_labels: &'a [(usize, String)],
@@ -264,6 +266,7 @@ fn render_cell_content(
         cursor_pos: cursor_char_idx,
         sel_range,
         mode: active.mode,
+        mode_colors: active.mode_colors,
         highlight_spans: &highlight_spans,
         use_highlight: cell.cell_type == CellType::Code || show_markdown,
         diag_ranges: &cell_diag_ranges,
@@ -531,6 +534,7 @@ struct SourceLineCtx<'a> {
     cursor_pos: Option<usize>,
     sel_range: (usize, usize),
     mode: &'a Mode,
+    mode_colors: &'a crate::config::ModeColorsConfig,
     highlight_spans: &'a [(usize, usize, usize)],
     /// When true, render characters with their highlight spans (code cells, and
     /// rendered markdown cells); when false, render as plain gray source text.
@@ -571,7 +575,7 @@ fn render_source_line(
         return;
     }
     let content_area = Rect { x: content_x, y: area.y, width: content_width, height: 1 };
-    let cursor_style = crate::theme::cursor_style(ctx.mode);
+    let cursor_style = crate::theme::cursor_style(ctx.mode, ctx.mode_colors);
     let selection_style = Style::default().bg(Color::Rgb(60, 80, 120)).fg(Color::White);
     let (sel_lo, sel_hi) = ctx.sel_range;
     let has_selection = sel_lo != sel_hi;
@@ -859,61 +863,6 @@ fn single_row(area: Rect, row: u16) -> Rect {
 }
 
 // ---------------------------------------------------------------------------
-// Notebook status bar / command line (called from ui.rs helpers)
-// ---------------------------------------------------------------------------
-
-/// Render the notebook status bar.
-pub fn render_notebook_status(
-    frame: &mut Frame,
-    nb: &Notebook,
-    state: &NotebookState,
-    kernel_status: Option<&KernelStatus>,
-    area: Rect,
-    mode_label: &str,
-    spinner: Option<char>,
-) {
-    let mode_style = match mode_label {
-        "INS" => Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
-        "SEL" => Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
-        "NOR" => Style::default().fg(Color::Black).bg(Color::Blue).add_modifier(Modifier::BOLD),
-        _ => Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
-    };
-
-    let filename = nb
-        .path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("notebook.ipynb");
-    let modified = if nb.modified { " [+]" } else { "" };
-    let cell_pos = format!(
-        "{}/{}",
-        state.focused_cell + 1,
-        nb.cells.len().max(1)
-    );
-    let kernel_indicator = match kernel_status {
-        Some(KernelStatus::Idle) => " [idle]".to_string(),
-        // While busy, swap in the live spinner glyph for the static label.
-        Some(KernelStatus::Busy) => match spinner {
-            Some(g) => format!(" [{g} busy]"),
-            None => " [busy]".to_string(),
-        },
-        Some(KernelStatus::Dead) => " [dead]".to_string(),
-        None => " [no kernel]".to_string(),
-    };
-    let right = format!("{cell_pos}{kernel_indicator}");
-
-    frame.render_widget(
-        NotebookStatusWidget {
-            mode_label: format!(" {mode_label} "),
-            mode_style,
-            filename: format!("  {filename}{modified}  "),
-            right,
-        },
-        area,
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Custom widgets
 // ---------------------------------------------------------------------------
 
@@ -938,63 +887,6 @@ impl Widget for SingleLineWidget {
             }
             buf[(x, y)].set_char(c).set_style(self.style);
             x += 1;
-        }
-    }
-}
-
-struct NotebookStatusWidget {
-    mode_label: String,
-    mode_style: Style,
-    filename: String,
-    right: String,
-}
-
-impl Widget for NotebookStatusWidget {
-    fn render(self, area: Rect, buf: &mut RatBuffer) {
-        if area.height == 0 {
-            return;
-        }
-        let y = area.top();
-        let bg_style = Style::default().bg(Color::DarkGray).fg(Color::White);
-
-        // Fill background.
-        for col in area.left()..area.right() {
-            buf[(col, y)].set_char(' ').set_style(bg_style);
-        }
-
-        let mut x = area.left();
-
-        // Mode label.
-        for c in self.mode_label.chars() {
-            if x >= area.right() {
-                break;
-            }
-            buf[(x, y)].set_char(c).set_style(self.mode_style);
-            x += 1;
-        }
-
-        // Filename.
-        for c in self.filename.chars() {
-            if x >= area.right() {
-                break;
-            }
-            buf[(x, y)].set_char(c).set_style(bg_style);
-            x += 1;
-        }
-
-        // Right-aligned cell position.  Count chars, not bytes — the spinner
-        // glyph is multi-byte and would otherwise overshoot the alignment.
-        let right_width = self.right.chars().count() as u16;
-        if area.right() >= right_width {
-            let rx = area.right() - right_width;
-            let mut rx2 = rx;
-            for c in self.right.chars() {
-                if rx2 >= area.right() {
-                    break;
-                }
-                buf[(rx2, y)].set_char(c).set_style(bg_style);
-                rx2 += 1;
-            }
         }
     }
 }

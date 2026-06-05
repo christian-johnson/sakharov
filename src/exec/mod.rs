@@ -1277,16 +1277,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::ReloadConfig => {
-            match crate::config::Config::load() {
-                Ok(config) => {
-                    let mut keymap = crate::keymap::Keymap::default_bindings();
-                    keymap.apply_custom_bindings(&config.keys);
-                    app.config = config;
-                    app.keymap = keymap;
-                    app.message = Some("Config reloaded".into());
-                }
-                Err(e) => app.message = Some(format!("Config reload failed: {e}")),
-            }
+            let config = crate::config::Config::load();
+            let mut keymap = crate::keymap::Keymap::default_bindings();
+            keymap.apply_custom_bindings(&config.keys);
+            app.config = config;
+            app.keymap = keymap;
+            app.message = Some("Config reloaded".into());
             return;
         }
 
@@ -2048,7 +2044,7 @@ mod tests {
 
     #[test]
     fn test_exec_clamping_behavior() {
-        let config = Config::load().expect("failed to load config");
+        let config = Config::load();
         let mut app = App::new(None, config).unwrap();
 
         app.buffer.rope = Rope::from_str("hello\nworld\n");
@@ -2067,7 +2063,7 @@ mod tests {
 
     #[test]
     fn test_delete_selection_clamping() {
-        let config = Config::load().expect("failed to load config");
+        let config = Config::load();
         let mut app = App::new(None, config).unwrap();
         app.buffer.rope = Rope::from_str("abc");
         app.selection = Selection::new(0, 2);

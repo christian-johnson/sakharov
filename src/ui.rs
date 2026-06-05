@@ -290,7 +290,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             if c == '\n' || c == '\r' {
                 if char_idx == cursor_pos && col_offset >= effective_skip && col_offset < effective_skip + content_width {
-                    cells.push((' ', theme::cursor_style(&app.mode)));
+                    cells.push((' ', theme::cursor_style(&app.mode, &app.config.theme.modes)));
                 }
                 break;
             }
@@ -311,7 +311,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             let base_style = highlight::style_at(spans, char_idx);
 
             let style = if char_idx == cursor_pos {
-                theme::cursor_style(&app.mode)
+                theme::cursor_style(&app.mode, &app.config.theme.modes)
             } else if char_idx >= sel_start && char_idx <= sel_end && sel_start != sel_end {
                 theme::selection_style()
             } else {
@@ -526,26 +526,16 @@ fn tab_stop(col: usize, tab_width: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let mode_label = app.mode.label();
-    let mode_style = Style::default()
-        .fg(Color::Black)
-        .bg(theme::mode_color(&app.mode))
-        .add_modifier(Modifier::BOLD);
-
     // When in a cell-edit overlay, show the notebook + cell context instead of
-    // the virtual buffer path. Ctrl+Enter hint keeps the affordance visible.
-    let (filename, modified) = if let Some(ref session) = app.notebook_cell_edit {
+    // the virtual buffer path.
+    let filename = if let Some(ref session) = app.notebook_cell_edit {
         let nb_name = session.notebook_path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("notebook");
         let ext = lang_to_ext(&session.language);
-        let m = if app.buffer.modified { " [+]" } else { "" };
-        (
-            format!("{nb_name}  ·  cell [{}].{ext}", session.cell_index + 1),
-            m.to_string(),
-        )
+        format!("{nb_name}  ·  cell [{}].{ext}", session.cell_index + 1)
     } else {
-        (app.buffer.display_name(), if app.buffer.modified { " [+]".into() } else { String::new() })
+        app.buffer.display_name()
     };
 
     let rope = &app.buffer.rope;
@@ -561,7 +551,6 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         rope.line_to_char(line_idx)
     };
     let col = cursor_pos.saturating_sub(line_start) + 1;
-    let line_num = line_idx + 1;
 
     let total_lines = rope.len_lines().max(1);
     let scroll_pct = (line_idx * 100) / total_lines;
@@ -580,19 +569,30 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         (0, 0)
     };
 
-    let position = format!("  {}:{}  {}%", line_num, col, scroll_pct);
-
-    let status_widget = StatusWidget {
-        mode_label: format!(" {mode_label} "),
-        mode_style,
+    let ctx = crate::statusline::Ctx {
+        mode_label: app.mode.label().to_string(),
+        mode_color: theme::mode_color(&app.mode, &app.config.theme.modes),
+        filename,
+        modified: app.buffer.modified,
         branch: app.git_branch.clone(),
-        filename: format!(" {filename}{modified} "),
         diag_errors,
         diag_warnings,
-        position,
+        line: line_idx + 1,
+        col,
+        scroll_pct,
         spinner: app.spinner.glyph(),
+        cell: None,
+        kernel: None,
     };
-    frame.render_widget(status_widget, area);
+    crate::statusline::render(
+        frame,
+        area,
+        &ctx,
+        &app.config.statusline.left,
+        &app.config.statusline.right,
+        &app.config.statusline.separator,
+        &app.config.statusline.styles,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -671,95 +671,6 @@ impl Widget for LineWidget<'_> {
             let w = c.width().unwrap_or(1) as u16;
             buf[(x, area.top())].set_char(*c).set_style(*style);
             x += w;
-        }
-    }
-}
-
-struct StatusWidget {
-    mode_label: String,
-    mode_style: Style,
-    /// Git branch name (e.g. "main").
-    branch: Option<String>,
-    filename: String,
-    diag_errors: usize,
-    diag_warnings: usize,
-    /// Right-aligned position text e.g. "  42:10  23%"
-    position: String,
-    /// Braille spinner glyph shown while a background task runs; `None` when idle.
-    spinner: Option<char>,
-}
-
-impl Widget for StatusWidget {
-    fn render(self, area: Rect, buf: &mut RatBuffer) {
-        if area.height == 0 {
-            return;
-        }
-        let y = area.top();
-        let bg = Style::default().bg(Color::DarkGray).fg(Color::White);
-
-        // Fill background.
-        for col in area.left()..area.right() {
-            buf[(col, y)].set_char(' ').set_style(bg);
-        }
-
-        // Left side: mode label.
-        let mut x = area.left();
-        for c in self.mode_label.chars() {
-            if x >= area.right() { break; }
-            buf[(x, y)].set_char(c).set_style(self.mode_style);
-            x += 1;
-        }
-
-        // Branch name (dimmed, with  prefix).
-        if let Some(ref branch) = self.branch {
-            let branch_str = format!("  \u{e0a0} {branch}"); // nerd-font branch icon
-            let branch_style = Style::default().bg(Color::DarkGray).fg(Color::Rgb(170, 170, 170));
-            for c in branch_str.chars() {
-                if x >= area.right() { break; }
-                buf[(x, y)].set_char(c).set_style(branch_style);
-                x += 1;
-            }
-        }
-
-        // Filename.
-        for c in self.filename.chars() {
-            if x >= area.right() { break; }
-            buf[(x, y)].set_char(c).set_style(bg);
-            x += 1;
-        }
-
-        // Right side: build colored segments and measure total width.
-        // Segments are rendered right-to-left (position → warnings → errors).
-        let mut segments: Vec<(String, Style)> = Vec::new();
-        segments.push((self.position.clone(), bg));
-        if self.diag_warnings > 0 {
-            let s = format!("  ◆{}", self.diag_warnings);
-            segments.push((s, Style::default().bg(Color::DarkGray).fg(Color::Yellow)));
-        }
-        if self.diag_errors > 0 {
-            let s = format!("  ●{}", self.diag_errors);
-            segments.push((s, Style::default().bg(Color::DarkGray).fg(Color::Red)));
-        }
-        if let Some(g) = self.spinner {
-            segments.push((
-                format!("  {g}"),
-                Style::default().bg(Color::DarkGray).fg(Color::Cyan),
-            ));
-        }
-
-        let total_right: u16 = segments.iter()
-            .map(|(s, _)| s.chars().count() as u16)
-            .sum();
-
-        if area.right() >= total_right {
-            let mut rx = area.right() - total_right;
-            for (text, style) in segments {
-                for c in text.chars() {
-                    if rx >= area.right() { break; }
-                    buf[(rx, y)].set_char(c).set_style(style);
-                    rx += 1;
-                }
-            }
         }
     }
 }
