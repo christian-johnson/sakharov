@@ -80,6 +80,8 @@ These commands enter a sub-mode that awaits a second key.
 |---------|-------------|-----------|-------------|
 | `write` | `ctrl+s` | `:w` | Write (save) current file (`save` is a backward-compat alias) |
 | `write-as <path>` | — | `:w <path>` | Write to a new path |
+| `new-file` | — | `:new`, `:newfile` | Prompt in the minibuffer for a filename, then create a new empty file in the current buffer's directory (cwd for special buffers) and switch to it |
+| `new-notebook` | — | `:new-nb`, `:newnotebook` | Prompt in the minibuffer for a filename, then create a new empty `.ipynb` notebook in the current buffer's directory (cwd for special buffers) and open it (`.ipynb` appended if omitted) |
 | `open-file-picker` | `ctrl+o` | `:e` | Open a file (built-in fuzzy picker, or external via `editor.file_picker` config) |
 | `quit` | — | `:q` | Quit (fails if there are unsaved changes) |
 | `force-quit` | — | `:q!` | Quit without saving |

@@ -13,7 +13,7 @@ use crate::{
     highlight,
     lang::lang_to_ext,
     lsp_manager::DiagnosticSeverity,
-    mode::Mode,
+    mode::{Mode, PromptKind},
     theme,
 };
 
@@ -618,6 +618,13 @@ fn render_command(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         Mode::Command => format!(":{}", app.command_buf),
+        Mode::Prompt { kind } => {
+            let label = match kind {
+                PromptKind::NewFile => "New file",
+                PromptKind::NewNotebook => "New notebook",
+            };
+            format!("{label}: {}_", app.command_buf)
+        }
         Mode::Search { forward } => {
             let prefix = if *forward { '/' } else { '?' };
             let count = app.search.matches.len();

@@ -629,6 +629,16 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
+        Command::NewFile => {
+            app.command_buf.clear();
+            app.mode = Mode::Prompt { kind: crate::mode::PromptKind::NewFile };
+            return;
+        }
+        Command::NewNotebook => {
+            app.command_buf.clear();
+            app.mode = Mode::Prompt { kind: crate::mode::PromptKind::NewNotebook };
+            return;
+        }
         Command::Quit => {
             let modified = if let Some((ref nb, _)) = app.notebook {
                 nb.modified
@@ -2026,6 +2036,95 @@ fn run_shell_formatter(app: &mut App) -> bool {
 // Buffer list helpers
 // ---------------------------------------------------------------------------
 
+/// Resolve the directory new files should be created in: the directory of the
+/// open notebook or current buffer, falling back to the working directory for
+/// special buffers (scratch / messages / dashboard) or unnamed buffers.
+fn current_buffer_dir(app: &App) -> std::path::PathBuf {
+    if let Some((ref nb, _)) = app.notebook {
+        return crate::notebook::notebook_dir(&nb.path);
+    }
+    app.buffer.path.as_deref()
+        .filter(|p| !is_special_path(p))
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+}
+
+/// Resolve `name` against the current buffer's directory (absolute names are
+/// used verbatim).
+fn resolve_new_path(app: &App, name: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(name);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        current_buffer_dir(app).join(p)
+    }
+}
+
+/// Create an empty file in the current buffer's directory and open it.
+/// If it already exists, just open it instead of clobbering.
+/// Called from the minibuffer `Prompt` handler once a name has been entered.
+pub(crate) fn create_new_file(app: &mut App, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        app.message = Some("Usage: :new-file <name>".into());
+        return;
+    }
+    let path = resolve_new_path(app, name);
+    if path.exists() {
+        app.message = Some(format!("{name} already exists — opening"));
+        lsp::open_file_at(app, &path, 0, 0);
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            app.message = Some(format!("Could not create directory: {e}"));
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&path, "") {
+        app.message = Some(format!("Could not create file: {e}"));
+        return;
+    }
+    lsp::open_file_at(app, &path, 0, 0);
+    app.message = Some(format!("Created {name}"));
+}
+
+/// Create a valid empty `.ipynb` notebook in the current buffer's directory and
+/// open it in the notebook interface.  If it already exists, just open it.
+/// Called from the minibuffer `Prompt` handler once a name has been entered.
+pub(crate) fn create_new_notebook(app: &mut App, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        app.message = Some("Usage: :new-notebook <name>".into());
+        return;
+    }
+    // Ensure the file carries the .ipynb extension so it opens as a notebook.
+    let mut name = name.to_string();
+    if std::path::Path::new(&name).extension().and_then(|e| e.to_str()) != Some("ipynb") {
+        name.push_str(".ipynb");
+    }
+    let path = resolve_new_path(app, &name);
+    if path.exists() {
+        app.message = Some(format!("{name} already exists — opening"));
+        open_as_notebook(app, &path);
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            app.message = Some(format!("Could not create directory: {e}"));
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&path, crate::notebook::empty_notebook_json()) {
+        app.message = Some(format!("Could not create notebook: {e}"));
+        return;
+    }
+    open_as_notebook(app, &path);
+    app.message = Some(format!("Created {name}"));
+}
+
 /// Append `path` to `open_buffers` if it is not already present (by canonical path).
 fn register_buffer(open_buffers: &mut Vec<std::path::PathBuf>, path: &std::path::Path) {
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -2063,6 +2162,55 @@ mod tests {
         app.selection = Selection::point(12);
         update_scroll(&mut app);
         assert_eq!(app.buffer.rope.char_to_line(12), 2);
+    }
+
+    fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sv-test-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_new_file_creates_and_opens() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("newfile");
+        let target = dir.join("scratch_test.txt");
+        let _ = std::fs::remove_file(&target);
+        // Anchor the "current directory" by giving the buffer a path in `dir`.
+        app.buffer.path = Some(dir.join("anchor.txt"));
+
+        create_new_file(&mut app, "scratch_test.txt");
+
+        assert!(target.exists(), "new-file should create the file on disk");
+        assert_eq!(
+            app.buffer.path.as_deref().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("scratch_test.txt")),
+            "editor should switch to the new file's buffer"
+        );
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn test_new_notebook_creates_valid_ipynb() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("newnb");
+        let target = dir.join("analysis.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+
+        // Name given without extension — `.ipynb` should be appended.
+        create_new_notebook(&mut app, "analysis");
+
+        assert!(target.exists(), "new-notebook should create the .ipynb on disk");
+        assert!(app.notebook.is_some(), "editor should open the notebook view");
+        // The file must round-trip back through the notebook parser.
+        let reparsed = crate::notebook::Notebook::from_path(&target);
+        assert!(reparsed.is_ok(), "created notebook must be valid nbformat");
+        let _ = std::fs::remove_file(&target);
     }
 
     #[test]

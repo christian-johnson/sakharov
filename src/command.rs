@@ -73,6 +73,12 @@ pub enum Command {
     // File / application
     Write,
     WriteAs(String),
+    /// Prompt (in the minibuffer) for a filename, then create a new empty file
+    /// in the current buffer's directory and open it.
+    NewFile,
+    /// Prompt (in the minibuffer) for a filename, then create a new empty
+    /// `.ipynb` notebook in the current buffer's directory and open it.
+    NewNotebook,
     Quit,
     ForceQuit,
     WriteQuit,
@@ -257,6 +263,8 @@ impl Command {
             Command::OpenFilePicker => "open-file-picker",
             Command::Write => "write",
             Command::WriteAs(_) => "write-as",
+            Command::NewFile => "new-file",
+            Command::NewNotebook => "new-notebook",
             Command::Quit => "quit",
             Command::ForceQuit => "force-quit",
             Command::WriteQuit => "write-quit",
@@ -362,6 +370,8 @@ impl Command {
                     Some(Command::WriteAs(path.to_string()))
                 }
             }
+            "new-file" | "newfile" | "new" => Some(Command::NewFile),
+            "new-notebook" | "newnotebook" | "new-nb" => Some(Command::NewNotebook),
             "shell" | "sh" => {
                 let shell_cmd = arg.unwrap_or("").trim();
                 if shell_cmd.is_empty() {

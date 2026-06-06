@@ -560,6 +560,37 @@ fn gen_id() -> String {
     format!("{:016x}{:016x}", t as u64, n)
 }
 
+/// Produce the JSON text for a fresh, empty nbformat-4 notebook with a single
+/// empty Python code cell.  Used by the `:new-notebook` command; the result
+/// round-trips cleanly through `Notebook::from_path` and `Notebook::save`.
+pub fn empty_notebook_json() -> String {
+    let json = serde_json::json!({
+        "cells": [
+            {
+                "cell_type": "code",
+                "execution_count": null,
+                "id": gen_id(),
+                "metadata": {},
+                "outputs": [],
+                "source": []
+            }
+        ],
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3"
+            },
+            "language_info": {
+                "name": "python"
+            }
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5
+    });
+    serde_json::to_string_pretty(&json).unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Virtual path / directory helpers (shared with exec and notebook_ui)
 // ---------------------------------------------------------------------------
@@ -589,37 +620,54 @@ pub fn cell_virtual_path(nb_path: &Path, lang: &str, idx: usize) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Find the best Python executable for the given directory.
-/// Checks common virtual-environment layouts (.venv, venv, .env, env) in
-/// the notebook's directory and the current working directory, then falls
-/// back to the system `python3`.
+/// Checks common virtual-environment layouts (.venv, venv, .env, env) by
+/// walking up the directory tree from the notebook's directory (and, as a
+/// fallback, from the current working directory), then falls back to the
+/// system `python3`. Walking up matters because a notebook commonly lives in
+/// a subdirectory of the project whose venv is at the project root — this is
+/// the same ancestor search the LSP uses (`lsp_manager::detect_python_venv`),
+/// so the kernel and LSP agree on which interpreter the project uses.
 ///
 /// Returns `(python_path, found_venv)`. When `found_venv` is false the
 /// caller should warn the user that the system python3 is being used.
 pub fn find_python_executable(base: &Path) -> (String, bool) {
-    let venv_names = [".venv", "venv", ".env", "env"];
-
-    let mut search = vec![base.to_path_buf()];
+    // Search `base` and its ancestors first (most specific to the notebook),
+    // then the cwd and its ancestors as a fallback.
+    let mut roots = vec![base.to_path_buf()];
     if let Ok(cwd) = std::env::current_dir() {
         if cwd != base {
-            search.push(cwd);
+            roots.push(cwd);
         }
     }
 
-    for dir in &search {
-        for name in &venv_names {
-            let candidate = dir.join(name).join("bin").join("python");
-            if candidate.is_file() {
-                return (candidate.to_string_lossy().into_owned(), true);
+    for root in &roots {
+        let mut dir = Some(root.as_path());
+        while let Some(d) = dir {
+            if let Some(python) = venv_python_in(d) {
+                return (python, true);
             }
-            // Windows layout (bin → Scripts)
-            let candidate_win = dir.join(name).join("Scripts").join("python.exe");
-            if candidate_win.is_file() {
-                return (candidate_win.to_string_lossy().into_owned(), true);
-            }
+            dir = d.parent();
         }
     }
 
     ("python3".to_string(), false)
+}
+
+/// If `dir` directly contains a recognised virtualenv layout, return the path
+/// to its python interpreter.
+fn venv_python_in(dir: &Path) -> Option<String> {
+    let venv_names = [".venv", "venv", ".env", "env"];
+    for name in &venv_names {
+        let venv = dir.join(name);
+        // Unix layout, then Windows (bin → Scripts).
+        for rel in ["bin/python", "bin/python3", "Scripts/python.exe"] {
+            let candidate = venv.join(rel);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

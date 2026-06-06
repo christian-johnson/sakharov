@@ -589,6 +589,8 @@ pub fn command_palette_items() -> Vec<ListItem> {
         // File
         ("write", "Write file  [ctrl+s, :w]"),
         ("write-as", "Write to new path  [:w <path>]"),
+        ("new-file", "Create a new file in the current directory (prompts for name)  [:new-file]"),
+        ("new-notebook", "Create a new notebook in the current directory (prompts for name)  [:new-notebook]"),
         ("quit", "Quit  [:q]"),
         ("force-quit", "Quit without saving  [:q!]"),
         ("write-quit", "Write and quit  [:wq]"),

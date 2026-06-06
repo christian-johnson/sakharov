@@ -5,6 +5,15 @@ pub enum FindDir {
     Backward,
 }
 
+/// What a minibuffer text `Prompt` is collecting a filename for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Create a new plain file with the entered name.
+    NewFile,
+    /// Create a new `.ipynb` notebook with the entered name.
+    NewNotebook,
+}
+
 /// Editor mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -30,6 +39,8 @@ pub enum Mode {
     Jump { extend: bool },
     /// Waiting for second key after 'z' (fold operations).
     Fold,
+    /// Minibuffer text prompt — typing builds a filename; Enter confirms, Esc cancels.
+    Prompt { kind: PromptKind },
 }
 
 impl Mode {
@@ -46,6 +57,7 @@ impl Mode {
             Mode::Notebook => "NB ",
             Mode::Jump { .. } => "JMP",
             Mode::Fold => "FLD",
+            Mode::Prompt { .. } => "CMD",
         }
     }
 }

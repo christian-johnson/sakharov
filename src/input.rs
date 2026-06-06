@@ -6,7 +6,7 @@ use crate::{
     exec,
     keymap::KeyBinding,
     lsp_manager::LspLocation,
-    mode::{FindDir, Mode},
+    mode::{FindDir, Mode, PromptKind},
     motion,
     popup::{PopupAction, PopupContent, PopupTarget},
     selection::Selection,
@@ -141,6 +141,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Notebook => handle_notebook_mode(app, key),
         Mode::Jump { .. } => handle_jump(app, key),
         Mode::Fold => handle_fold(app, key),
+        Mode::Prompt { kind } => handle_prompt(app, key, kind),
     }
 
     // Sync completion popup filter after insertions.
@@ -342,6 +343,41 @@ fn handle_command(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char(c) => {
+            app.command_buf.push(c);
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Minibuffer filename prompt (new-file / new-notebook)
+// ---------------------------------------------------------------------------
+
+fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.command_buf.clear();
+            app.message = None;
+        }
+        KeyCode::Backspace => {
+            app.command_buf.pop();
+        }
+        KeyCode::Enter => {
+            let name = app.command_buf.trim().to_string();
+            app.command_buf.clear();
+            app.mode = Mode::Normal;
+            // Empty input cancels quietly rather than erroring.
+            if name.is_empty() {
+                return;
+            }
+            app.show_splash = false;
+            match kind {
+                PromptKind::NewFile => exec::create_new_file(app, &name),
+                PromptKind::NewNotebook => exec::create_new_notebook(app, &name),
+            }
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.command_buf.push(c);
         }
         _ => {}
