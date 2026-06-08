@@ -24,6 +24,8 @@ pub enum ServerMessage {
 pub enum PendingKind {
     Initialize,
     Completion,
+    /// `completionItem/resolve` — enrich a completion item with documentation.
+    CompletionResolve,
     Hover,
     Definition,
     References,
@@ -184,6 +186,12 @@ impl LspClient {
             "position": { "line": line, "character": character },
             "context": { "triggerKind": 1 }
         }), PendingKind::Completion)
+    }
+
+    /// Resolve a completion item (fetch its documentation). The request params
+    /// are the completion item object echoed back enriched in the response.
+    pub fn request_completion_resolve(&mut self, item: Value) -> u64 {
+        self.send_request("completionItem/resolve", item, PendingKind::CompletionResolve)
     }
 
     pub fn request_hover(&mut self, uri: &str, line: u32, character: u32) -> u64 {

@@ -51,6 +51,11 @@ pub enum LspEvent {
     },
     /// Completion response — show popup if still in Insert mode.
     CompletionResult { items: Vec<CompletionItem> },
+    /// `completionItem/resolve` response — enriched documentation for an item.
+    CompletionResolved {
+        documentation: Option<String>,
+        detail: Option<String>,
+    },
     /// Hover response — show documentation popup.
     HoverResult { content: String },
     /// Definition / type-definition / implementation response.
@@ -88,6 +93,12 @@ pub struct CompletionItem {
     pub kind: Option<String>,
     /// Text to insert; falls back to `label` when absent.
     pub insert_text: Option<String>,
+    /// Documentation shown in the `K` doc panel, when the server includes it
+    /// inline.  `None` means it may still be fetchable via `completionItem/resolve`.
+    pub documentation: Option<String>,
+    /// Raw JSON of the original completion item, sent verbatim with
+    /// `completionItem/resolve` to fetch documentation on demand.
+    pub data: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +348,38 @@ impl LspManager {
         false
     }
 
+    /// True if the completion server for `language` advertised
+    /// `completionProvider.resolveProvider`, i.e. it can enrich items with docs.
+    pub fn completion_resolve_supported(&self, language: &str) -> bool {
+        self.server_idx_for_feature(language, "completion")
+            .and_then(|idx| self.servers.get(language).map(|ss| (idx, ss)))
+            .map(|(idx, ss)| {
+                ss[idx]
+                    .client
+                    .server_capabilities
+                    .get("completionProvider")
+                    .and_then(|c| c.get("resolveProvider"))
+                    .and_then(|r| r.as_bool())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Send `completionItem/resolve` for `item` via the completion server.
+    /// Returns true if a request was actually dispatched.
+    pub fn request_completion_resolve(&mut self, language: &str, item: serde_json::Value) -> bool {
+        if !self.completion_resolve_supported(language) {
+            return false;
+        }
+        if let Some(idx) = self.server_idx_for_feature(language, "completion") {
+            if let Some(servers) = self.servers.get_mut(language) {
+                servers[idx].client.request_completion_resolve(item);
+                return true;
+            }
+        }
+        false
+    }
+
     /// True if `path` has been opened on any server for `language`.
     pub fn is_doc_open(&self, language: &str, path: &std::path::Path) -> bool {
         let uri = path_to_uri(path);
@@ -537,6 +580,14 @@ fn process_message(
                     let items = parse_completion_result(&result);
                     Some(LspEvent::CompletionResult { items })
                 }
+                PendingKind::CompletionResolve => {
+                    let documentation = parse_documentation(&result);
+                    let detail = result
+                        .get("detail")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_owned);
+                    Some(LspEvent::CompletionResolved { documentation, detail })
+                }
                 PendingKind::Hover => {
                     // Always emit an event so the caller can show feedback even
                     // when the server returns null (no docs for this position).
@@ -626,14 +677,29 @@ fn parse_completion_result(val: &Value) -> Vec<CompletionItem> {
                 .get("kind")
                 .and_then(|k| k.as_u64())
                 .map(completion_kind_name);
+            let documentation = parse_documentation(item);
+            // Keep the raw item so it can be sent back for `completionItem/resolve`.
+            let data = serde_json::to_string(item).ok();
             Some(CompletionItem {
                 label,
                 detail,
                 kind,
                 insert_text,
+                documentation,
+                data,
             })
         })
         .collect()
+}
+
+/// Extract a completion/resolve item's `documentation` field, which may be a
+/// plain string or a `MarkupContent` object (`{ kind, value }`).
+fn parse_documentation(item: &Value) -> Option<String> {
+    let doc = item.get("documentation")?;
+    if let Some(s) = doc.as_str() {
+        return Some(s.to_owned());
+    }
+    doc.get("value").and_then(|v| v.as_str()).map(str::to_owned)
 }
 
 fn parse_hover_result(val: &Value) -> Option<String> {

@@ -29,7 +29,7 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 
   | Module | Aliases | Renders | Visibility |
   |--------|---------|---------|------------|
-  | `mode` | — | Coloured chip: `NOR` `INS` `SEL` `CMD` `NB` … | always |
+  | `mode` | — | Coloured chip: `NOR` `INS` `SEL` `CMD` … | always |
   | `file` | `filename` | Filename + ` [+]` when unsaved | always |
   | `git` | `branch`, `git_branch` | ` branch-name` | hidden outside git repo |
   | `diagnostics` | `diag` | `●N` errors (red) · `◆N` warnings (yellow) | hidden when zero |
@@ -103,12 +103,21 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   `gk` documentation, `gw` jump, `gc` comment-region, `gz` center cursor, `gs`/`gb`/`gD` pickers
 
 ### Phase 2 (Jupyter notebooks) — complete
-- Opens `.ipynb` files automatically in notebook mode
+- Opens `.ipynb` files automatically in the notebook view
 - Displays cells as a vertical stack: code (syntax-highlighted), markdown, raw
 - Bordered cells: rounded border (unfocused) / thick border (focused); background `Rgb(20,20,30)`
 - Border colour encodes execution state: **dim blue** = unrun, **bright blue** = executing, **green** = success, **red** = error
 - Cell header (`[N] CODE (python)`) lives in the top border line itself
-- **Navigate mode** (`j/k` between cells) and **Edit mode** (`i` or `Enter` to edit a cell)
+- **No separate notebook mode** — the focused cell is edited in place with the ordinary
+  Normal/Insert/Select modes, exactly like a plain buffer. While a notebook is open a small
+  override map shadows the normal bindings: `J`/`K` move to the next/previous cell, and
+  `Ctrl+E` executes the focused cell (`Shift+Enter`/`Ctrl+Enter` also execute, but only on
+  terminals with keyboard-enhancement reporting — see `app::run`; otherwise a modified Enter
+  arrives as a bare Enter). Cell-execution keys are handled in `input::handle_key` before mode
+  dispatch so they fire from Insert too. A plain `j` on a cell's last
+  line crosses into the next cell (and `k` on the first line into the previous one), so
+  vertical motion flows continuously across cells. Cell management (new/delete/clear-outputs/
+  cell-type/structural-undo) has no default key — use the command palette or `:` command line
 - **Persistent kernel session** — one Python subprocess per notebook; namespace shared across all cells
   - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in notebook dir and cwd before falling back to `python3`
   - Runner script embedded in binary; the editor sends a code block terminated by `__KI_CODE_END__`
@@ -124,9 +133,9 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - `e` / `:run` — execute focused cell; `E` / `:run-next` — execute and advance
 - **Markdown cells** render like a regular Jupyter notebook: a markdown cell shows its
   formatted view (same highlighter as `.md` documents, via `markdown::highlight`) when
-  `Cell.rendered` is set. `e`/`:run` (or Ctrl+Enter) on a markdown cell "renders" it
-  (`rendered = true`, no kernel involvement); entering an edit sub-mode reveals the source
-  (`rendered = false`). `m` / `:cell-md` converts a cell to markdown, `y` / `:cell-code`
+  `Cell.rendered` is set. `:run` / `Shift+Enter` / `Ctrl+Enter` on a markdown cell "renders" it
+  (`rendered = true`, no kernel involvement); entering Insert on it reveals the source
+  (`rendered = false`). `:cell-md` converts a cell to markdown, `:cell-code`
   back to code (clears outputs + reopens the cell's LSP doc under the new language id).
   `Cell.rendered` is runtime-only (not serialised); cells load from disk rendered
 - **Rich display / LaTeX** — the kernel runner evaluates a cell's trailing bare expression
@@ -156,7 +165,14 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   `features` list (`completion`/`hover`/`definition`/`references`/`type-definition`/`implementation`/`code-actions`/`diagnostics`/`format`) routes requests
 - Incremental document sync (`textDocument/didOpen`, `didChange`, `didClose`)
 - Diagnostics inline (underline) + status bar count; diagnostic picker (`gD`)
-- Completions — passive popup (typing) + focused mode (Tab to navigate, Enter to confirm)
+- Completions — passive popup (typing) + focused mode (`Tab` to engage, `j/k`/arrows/`Ctrl-n/p`
+  to navigate, `Enter` to confirm). Inside the focused popup: `/` opens a fuzzy-search row at the
+  top (same scoring as the command palette — `ListState::search` overrides the word-prefix filter)
+  and `K` toggles a documentation side panel for the selected item. The doc panel pulls inline
+  `documentation` from the completion item, falling back to a `completionItem/resolve` request
+  (one in flight at a time, gated on `completionProvider.resolveProvider`) to fetch it on demand.
+  ESC ladder: in search → back to nav; in nav → close docs if open, else dismiss. `Tab` from any
+  focused state returns to passive typing.
 - Hover float (`K` / `gk`)
 - Go-to-definition (`gd`), references (`gr`), type-definition (`gy`), implementation (`gi`)
 - Code actions (`ga`)
@@ -190,7 +206,7 @@ src/
                         insert_raw/remove_raw for session-coalesced undo
   selection.rs        — Selection { anchor, head } (char indices into rope)
   mode.rs             — Mode enum: Normal, Insert, Select, Command, Goto,
-                        FindChar, Search, Notebook, Jump, Fold
+                        FindChar, Search, Jump, Fold, Prompt
   command.rs          — Command enum: every editor action as a named variant
                         Command::parse() maps `:` input → Command
                         Command::name() gives the canonical string name
@@ -259,13 +275,13 @@ docs/
 - `exec::update_scroll` is the authoritative scroll function; the run loop calls it once per
   frame (after refreshing `viewport_height`/`viewport_width`) so scroll always reflects the
   current terminal size. It has two paths: the plain-editor fold/wrap-aware path, and a
-  **notebook editing path** (when a notebook is open, not in the full-screen overlay, and the
-  mode is an edit sub-mode — not `Notebook` navigation). The notebook path runs
-  `ensure_focused_visible` to keep the focused cell on-screen at cell granularity, then scrolls
-  *within* the focused cell (`app.scroll_row`) using the rows actually available below the
-  cell's content-top offset (preceding cells + gaps + top border), so the cursor tracks like a
-  text buffer instead of sliding off the bottom. In `Notebook` navigation mode it returns early
-  and lets the `j`/`k`/scroll command handlers drive `scroll_cell`.
+  **notebook editing path** (whenever a notebook is open and not in the full-screen overlay).
+  The notebook path runs `ensure_focused_visible` to keep the focused cell on-screen at cell
+  granularity, then scrolls *within* the focused cell (`app.scroll_row`) using the rows actually
+  available below the cell's content-top offset (preceding cells + gaps + top border), so the
+  cursor tracks like a text buffer instead of sliding off the bottom. Because scroll always
+  follows the cursor/focused cell now, the command-only `notebook-scroll-down`/`-up` nudges snap
+  back to the focused cell.
 - **LSP document identity**: a document's URI is `lsp::path_to_uri(path)` (absolute +
   canonicalized, with a plain-absolute fallback for nonexistent virtual cell paths).
   Diagnostics arrive keyed by the URI the server echoes back, so any code looking up

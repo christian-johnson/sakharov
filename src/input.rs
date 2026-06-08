@@ -89,7 +89,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 return;
             }
-            PopupAction::Continue => return,
+            PopupAction::Continue => {
+                // Keep the completion doc panel (if open) in sync with the
+                // current selection; a no-op for every other popup.
+                exec::refresh_completion_doc(app);
+                return;
+            }
         }
     }
 
@@ -98,33 +103,64 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Ctrl+Enter: execute cell (notebook view) or close focused overlay.
-    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
-        if app.notebook_focused_edit() {
-            exec::execute(app, &Command::NotebookCloseCellEdit);
-        } else if app.notebook.is_some() {
-            exec::execute(app, &Command::NotebookExecuteCell);
-        }
-        if app.notebook.is_some() {
+    // Cell-execution shortcuts (notebook only), handled before mode dispatch so
+    // they fire from Normal and Insert alike (in Insert, Enter would otherwise
+    // insert a newline):
+    //   • Ctrl+E           — run the focused cell. Legacy-safe: `Ctrl`+letter has
+    //                        a byte encoding, so it works on any terminal.
+    //   • Shift/Ctrl+Enter — run the focused cell (Jupyter muscle memory), except
+    //                        Ctrl+Enter in the full-screen overlay closes it.
+    //                        A *modified* Enter only reaches us when the terminal
+    //                        supports keyboard-enhancement reporting (see app::run);
+    //                        otherwise it arrives as a bare Enter and Ctrl+E is
+    //                        the fallback.
+    if app.notebook.is_some() {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl_e = ctrl && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'));
+        let mod_enter = key.code == KeyCode::Enter && (ctrl || shift);
+        if ctrl_e || mod_enter {
+            if mod_enter && ctrl && app.notebook_focused_edit() {
+                exec::execute(app, &Command::NotebookCloseCellEdit);
+            } else {
+                exec::execute(app, &Command::NotebookExecuteCell);
+            }
             return;
         }
     }
 
     match app.mode.clone() {
         Mode::Normal => {
-            // Esc in Normal mode while a notebook is open (not full-screen overlay)
-            // toggles back to Notebook navigation — check before the keymap so the
-            // Esc→EnterNormal binding doesn't shadow it.
-            if key.code == KeyCode::Esc
-                && app.notebook.is_some()
-                && !app.notebook_focused_edit()
-            {
-                app.mode = Mode::Notebook;
+            let kb = KeyBinding::from(key);
+            // While a notebook is open (outside the full-screen overlay), the
+            // notebook override map shadows the normal bindings — e.g. J/K move
+            // between cells, Shift+Enter executes — falling back to the normal
+            // bindings for everything else.
+            let in_notebook = app.notebook.is_some() && !app.notebook_focused_edit();
+            let cmds = if in_notebook {
+                app.keymap
+                    .lookup_notebook(&kb)
+                    .or_else(|| app.keymap.lookup_normal(&kb))
             } else {
-                let kb = KeyBinding::from(key);
-                if let Some(cmds) = app.keymap.lookup_normal(&kb).map(|v| v.to_vec()) {
-                    exec::run_many(app, &cmds);
+                app.keymap.lookup_normal(&kb)
+            }
+            .map(|v| v.to_vec());
+            if let Some(cmds) = cmds {
+                exec::run_many(app, &cmds);
+            }
+            // Dropping into Insert on the focused cell: unfold it, reveal a
+            // rendered Markdown cell's source for editing, and push the current
+            // content to the LSP once (Insert keystrokes sync per-character after).
+            if in_notebook && app.mode == Mode::Insert {
+                if let Some((ref mut nb, ref mut state)) = app.notebook {
+                    state.folded_cells.remove(&state.focused_cell);
+                    if let Some(cell) = nb.cells.get_mut(state.focused_cell) {
+                        if cell.cell_type == crate::notebook::CellType::Markdown {
+                            cell.rendered = false;
+                        }
+                    }
                 }
+                exec::lsp_did_change(app);
             }
         }
         Mode::Select => {
@@ -138,7 +174,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Goto { .. } => handle_goto(app, key),
         Mode::FindChar { dir, till } => handle_find_char(app, key, dir, till),
         Mode::Search { forward } => handle_search(app, key, forward),
-        Mode::Notebook => handle_notebook_mode(app, key),
         Mode::Jump { .. } => handle_jump(app, key),
         Mode::Fold => handle_fold(app, key),
         Mode::Prompt { kind } => handle_prompt(app, key, kind),
@@ -521,34 +556,8 @@ fn begin_insert_edit(app: &mut App) {
 }
 
 // ---------------------------------------------------------------------------
-// Notebook mode
+// Notebook buffer sync
 // ---------------------------------------------------------------------------
-
-fn handle_notebook_mode(app: &mut App, key: KeyEvent) {
-    let kb = KeyBinding::from(key);
-    if let Some(cmds) = app.keymap.lookup_notebook(&kb).map(|v| v.to_vec()) {
-        let was_notebook = app.mode == Mode::Notebook;
-        exec::run_many(app, &cmds);
-        // When the binding transitions to Insert mode, unfold and ensure LSP has current content.
-        if was_notebook && app.mode == Mode::Insert {
-            if let Some((_, ref mut state)) = app.notebook {
-                state.folded_cells.remove(&state.focused_cell);
-            }
-            exec::lsp_did_change(app);
-        }
-        // Dropping into any edit sub-mode on a rendered Markdown cell reveals its
-        // source so the markup is editable; re-running the cell re-renders it.
-        if was_notebook && app.mode != Mode::Notebook {
-            if let Some((ref mut nb, ref state)) = app.notebook {
-                if let Some(cell) = nb.cells.get_mut(state.focused_cell) {
-                    if cell.cell_type == crate::notebook::CellType::Markdown {
-                        cell.rendered = false;
-                    }
-                }
-            }
-        }
-    }
-}
 
 fn sync_buffer_to_notebook(app: &mut App) {
     if let Some((ref mut nb, ref state)) = app.notebook {

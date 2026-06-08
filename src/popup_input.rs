@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     app::App,
-    popup::{PopupAction, PopupContent, PopupTarget},
+    popup::{DocPanel, PopupAction, PopupContent, PopupTarget},
 };
 
 /// Handle a key event when a popup is open.
@@ -30,60 +30,110 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
     // dismiss and return to plain insert mode.
     if is_completion {
         if let PopupContent::List(ref mut list) = popup.content {
-            if list.focused {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+            // Confirm the current selection, inserting its payload/label.
+            let confirm = |list: &crate::popup::ListState| -> PopupAction {
+                if let Some(item) = list.selected_item() {
+                    let text = item.payload.as_deref().unwrap_or(&item.label).to_owned();
+                    PopupAction::Confirm(text)
+                } else {
+                    PopupAction::Dismiss
+                }
+            };
+
+            if !list.focused {
+                // Passive: hint overlay. Tab engages; everything else types.
                 return match key.code {
-                    // Esc → dismiss popup entirely.
-                    KeyCode::Esc => {
-                        list.focused = false;
-                        PopupAction::Dismiss
-                    }
-                    // Tab → back to passive mode; popup stays alive.
-                    KeyCode::Tab => {
-                        list.focused = false;
-                        PopupAction::Continue
-                    }
-                    // Plain Enter → confirm the selected item.
-                    KeyCode::Enter if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Some(item) = list.selected_item() {
-                            let text = item.payload.as_deref().unwrap_or(&item.label).to_owned();
-                            PopupAction::Confirm(text)
-                        } else {
-                            PopupAction::Dismiss
-                        }
-                    }
-                    // Navigation keys.
-                    KeyCode::Down => { list.move_down(); PopupAction::Continue }
-                    KeyCode::Up | KeyCode::BackTab => { list.move_up(); PopupAction::Continue }
-                    KeyCode::Char('j') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        list.move_down(); PopupAction::Continue
-                    }
-                    KeyCode::Char('k') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        list.move_up(); PopupAction::Continue
-                    }
-                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        list.move_down(); PopupAction::Continue
-                    }
-                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        list.move_up(); PopupAction::Continue
-                    }
-                    // Any other key: deactivate popup and let the key reach insert mode.
-                    _ => {
-                        list.focused = false;
-                        PopupAction::ClosePassthrough
-                    }
-                };
-            } else {
-                // Passive mode.
-                return match key.code {
-                    // Tab → engage with the popup.
                     KeyCode::Tab => {
                         list.focused = true;
                         PopupAction::Continue
                     }
-                    // All other keys fall through so insert mode works normally.
                     _ => PopupAction::DismissPassthrough,
                 };
             }
+
+            // ---- Focused, Search sub-mode ('/' row open) ----------------------
+            // Printable keys build the fuzzy query (reusing the palette scoring);
+            // arrows / Ctrl-n/p still navigate. Esc backs out to Nav.
+            if list.search.is_some() {
+                return match key.code {
+                    KeyCode::Esc => {
+                        list.search = None;
+                        list.selected = 0;
+                        PopupAction::Continue
+                    }
+                    // Tab fully disengages back to passive typing.
+                    KeyCode::Tab => {
+                        list.search = None;
+                        list.doc = None;
+                        list.focused = false;
+                        PopupAction::Continue
+                    }
+                    KeyCode::Enter if !ctrl => confirm(list),
+                    KeyCode::Down => { list.move_down(); PopupAction::Continue }
+                    KeyCode::Up | KeyCode::BackTab => { list.move_up(); PopupAction::Continue }
+                    KeyCode::Char('n') if ctrl => { list.move_down(); PopupAction::Continue }
+                    KeyCode::Char('p') if ctrl => { list.move_up(); PopupAction::Continue }
+                    KeyCode::Backspace => { list.pop_search_char(); PopupAction::Continue }
+                    KeyCode::Char(c) if !ctrl && !alt => {
+                        list.push_search_char(c);
+                        PopupAction::Continue
+                    }
+                    _ => PopupAction::Continue,
+                };
+            }
+
+            // ---- Focused, Nav sub-mode --------------------------------------
+            return match key.code {
+                // Esc peels one layer: close docs first, else dismiss.
+                KeyCode::Esc => {
+                    if list.doc.is_some() {
+                        list.doc = None;
+                        PopupAction::Continue
+                    } else {
+                        list.focused = false;
+                        PopupAction::Dismiss
+                    }
+                }
+                // Tab → back to passive mode; popup stays alive.
+                KeyCode::Tab => {
+                    list.focused = false;
+                    list.doc = None;
+                    PopupAction::Continue
+                }
+                KeyCode::Enter if !ctrl => confirm(list),
+                // '/' opens the fuzzy-search row (closes docs — letters type there).
+                KeyCode::Char('/') if !ctrl => {
+                    list.search = Some(String::new());
+                    list.doc = None;
+                    list.selected = 0;
+                    PopupAction::Continue
+                }
+                // 'K' toggles the documentation side panel for the selection.
+                // Filled in by exec::refresh_completion_doc on the Continue path.
+                KeyCode::Char('K') if !ctrl => {
+                    if list.doc.is_some() {
+                        list.doc = None;
+                    } else {
+                        list.doc = Some(DocPanel { lines: Vec::new(), loading: false });
+                    }
+                    PopupAction::Continue
+                }
+                KeyCode::Down => { list.move_down(); PopupAction::Continue }
+                KeyCode::Up | KeyCode::BackTab => { list.move_up(); PopupAction::Continue }
+                KeyCode::Char('j') if !ctrl => { list.move_down(); PopupAction::Continue }
+                KeyCode::Char('k') if !ctrl => { list.move_up(); PopupAction::Continue }
+                KeyCode::Char('n') if ctrl => { list.move_down(); PopupAction::Continue }
+                KeyCode::Char('p') if ctrl => { list.move_up(); PopupAction::Continue }
+                // Any other key: deactivate popup and let the key reach insert mode.
+                _ => {
+                    list.focused = false;
+                    list.doc = None;
+                    PopupAction::ClosePassthrough
+                }
+            };
         }
         return PopupAction::DismissPassthrough;
     }

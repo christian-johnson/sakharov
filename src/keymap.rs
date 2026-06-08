@@ -108,7 +108,8 @@ pub struct Keymap {
 }
 
 impl Keymap {
-    /// Build the default key bindings for Normal, Select, and Notebook modes.
+    /// Build the default key bindings for Normal and Select modes, plus the
+    /// notebook override map (bindings that shadow Normal while a notebook is open).
     pub fn default_bindings() -> Self {
         let mut normal: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut select: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
@@ -223,7 +224,6 @@ impl Keymap {
         // --- Normal-mode-only bindings ---
 
         // Search: standard vim n/N bindings for next/prev match.
-        // Notebook mode is accessible via :nb / :notebook (or by opening a .ipynb file).
         normal.insert(KeyBinding::char('/'), vec![Command::SearchForward]);
         normal.insert(KeyBinding::char('?'), vec![Command::SearchBackward]);
         normal.insert(KeyBinding::char('n'), vec![Command::SearchNext]);
@@ -275,47 +275,20 @@ impl Keymap {
 
         select.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
 
-        // --- Notebook navigation mode bindings ---
+        // --- Notebook normal-mode overrides ---
+        //
+        // These shadow the normal-mode bindings *only* while a notebook is open
+        // (and not in the full-screen cell overlay). Everything else in a
+        // notebook uses the regular normal/select bindings, so editing a cell is
+        // exactly like editing a plain buffer. Cell management (new/delete cell,
+        // structural undo, clear outputs, cell-type conversion) is available via
+        // the command palette and `:` command line.
 
-        notebook.insert(KeyBinding::char('j'), vec![Command::NotebookNextCell]);
-        notebook.insert(KeyBinding::key(KeyCode::Down), vec![Command::NotebookNextCell]);
-        notebook.insert(KeyBinding::char('k'), vec![Command::NotebookPrevCell]);
-        notebook.insert(KeyBinding::key(KeyCode::Up), vec![Command::NotebookPrevCell]);
-
-        // Enter opens full-screen cell overlay; i enters Insert in-place
-        notebook.insert(KeyBinding::key(KeyCode::Enter), vec![Command::NotebookOpenCellEdit]);
-        notebook.insert(KeyBinding::char('i'), vec![Command::EnterInsert]);
-        notebook.insert(KeyBinding::char('v'), vec![Command::EnterNormal]);
-
-        // g-prefix: same goto-mode as normal editing (LSP goto-def, hover, etc.)
-        notebook.insert(KeyBinding::char('g'), vec![Command::EnterGotoMode]);
-
-        // Cell management
-        notebook.insert(KeyBinding::char('o'), vec![Command::NotebookNewCellBelow]);
-        notebook.insert(KeyBinding::char('O'), vec![Command::NotebookNewCellAbove]);
-        notebook.insert(KeyBinding::char('d'), vec![Command::NotebookDeleteCell]);
-        notebook.insert(KeyBinding::char('x'), vec![Command::NotebookClearOutputs]);
-
-        // Cell type (Jupyter-style: m → markdown, y → code)
-        notebook.insert(KeyBinding::char('m'), vec![Command::NotebookCellToMarkdown]);
-        notebook.insert(KeyBinding::char('y'), vec![Command::NotebookCellToCode]);
-
-        // Execution
-        notebook.insert(KeyBinding::char('e'), vec![Command::NotebookExecuteCell]);
-        notebook.insert(KeyBinding::char('E'), vec![Command::NotebookExecuteAndAdvance]);
-
-        // Structural undo / redo
-        notebook.insert(KeyBinding::char('u'), vec![Command::NotebookUndoStructural]);
-        notebook.insert(KeyBinding::char('U'), vec![Command::NotebookRedoStructural]);
-
-        // z/Z → cell folding
-        notebook.insert(KeyBinding::char('z'), vec![Command::NotebookToggleFoldCell]);
-        notebook.insert(KeyBinding::char('Z'), vec![Command::NotebookToggleAllFolds]);
-
-        notebook.insert(KeyBinding::key(KeyCode::Esc), vec![Command::EnterNormal]);
-        notebook.insert(KeyBinding::char(':'), vec![Command::EnterCommandMode]);
-        notebook.insert(KeyBinding::ctrl('s'), vec![Command::Write]);
-        notebook.insert(KeyBinding::ctrl('r'), vec![Command::NotebookRestartKernel]);
+        // J / K move between cells (supercharged j/k, like H/L for buffers).
+        notebook.insert(KeyBinding::char('J'), vec![Command::NotebookNextCell]);
+        notebook.insert(KeyBinding::char('K'), vec![Command::NotebookPrevCell]);
+        // Shift+Enter / Ctrl+Enter execute the focused cell — handled directly in
+        // input::handle_key (before mode dispatch) so they fire from Insert too.
 
         Self { normal, select, notebook }
     }

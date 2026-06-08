@@ -87,7 +87,6 @@ pub fn mode_color(mode: &Mode, colors: &crate::config::ModeColorsConfig) -> Colo
         Mode::Insert                                                        => &colors.insert,
         Mode::Select                                                        => &colors.select,
         Mode::Command | Mode::Prompt { .. }                                 => &colors.command,
-        Mode::Notebook                                                      => &colors.notebook,
         Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. }    => &colors.goto,
         Mode::Jump { .. }                                                   => &colors.jump,
         Mode::Fold                                                          => &colors.fold,
@@ -103,7 +102,6 @@ pub fn mode_color(mode: &Mode, colors: &crate::config::ModeColorsConfig) -> Colo
         Mode::Select                                                        => Color::Yellow,
         Mode::Command | Mode::Prompt { .. }                                 => Color::Cyan,
         Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. }    => Color::Magenta,
-        Mode::Notebook                                                      => Color::Cyan,
         Mode::Jump { .. }                                                   => Color::Rgb(255, 160, 0),
         Mode::Fold                                                          => Color::Rgb(255, 160, 50),
     }

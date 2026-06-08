@@ -132,7 +132,7 @@ pub enum Command {
     NotebookCloseCellEdit,
 
     // Notebook
-    /// Enter Notebook navigation mode (cell-level j/k/o/e/d bindings).
+    /// Open the current `.ipynb` buffer as a notebook (no-op if already open).
     EnterNotebook,
 
     // Search
@@ -479,7 +479,7 @@ impl Command {
                 Some(Command::NotebookCloseCellEdit)
             }
 
-            // Notebook mode
+            // Open the current .ipynb as a notebook
             "enter-notebook" | "nb" | "notebook" => Some(Command::EnterNotebook),
 
             // Search

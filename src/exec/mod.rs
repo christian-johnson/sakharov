@@ -3,7 +3,10 @@ pub(crate) mod notebook;
 mod search;
 mod text;
 
-pub use lsp::{apply_code_action, jump_to_location, lsp_did_change, process_lsp_events};
+pub use lsp::{
+    apply_code_action, jump_to_location, lsp_did_change, process_lsp_events,
+    refresh_completion_doc,
+};
 pub use search::{search_compute_matches, search_jump};
 
 use ropey::Rope;
@@ -120,8 +123,46 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- Motions ---
         Command::MoveLeft         => app.selection = motion::move_left(&app.buffer.rope, app.selection, extend),
         Command::MoveRight        => app.selection = motion::move_right(&app.buffer.rope, app.selection, extend),
-        Command::MoveUp           => app.selection = motion::move_up(&app.buffer.rope, app.selection, extend),
-        Command::MoveDown         => app.selection = motion::move_down(&app.buffer.rope, app.selection, extend),
+        Command::MoveUp => {
+            // In a notebook, `k` on the first line of a cell crosses into the
+            // previous cell, landing on its last line (column preserved).
+            if app.notebook.is_some() && !app.notebook_focused_edit() && !extend {
+                let rope = &app.buffer.rope;
+                let pos = app.selection.head.min(rope.len_chars());
+                let on_first_line = rope.len_chars() == 0 || rope.char_to_line(pos) == 0;
+                let focused = app.notebook.as_ref().map(|(_, s)| s.focused_cell).unwrap_or(0);
+                if on_first_line && focused > 0 {
+                    let col = motion::col_of(rope, pos);
+                    switch_focused_cell(app, focused - 1);
+                    let last_line = app.buffer.rope.len_lines().saturating_sub(1);
+                    place_cursor_at_line(app, last_line, col);
+                    update_scroll(app);
+                    return;
+                }
+            }
+            app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
+        }
+        Command::MoveDown => {
+            // In a notebook, `j` on the last line of a cell crosses into the
+            // next cell, landing on its first line (column preserved).
+            if app.notebook.is_some() && !app.notebook_focused_edit() && !extend {
+                let rope = &app.buffer.rope;
+                let pos = app.selection.head.min(rope.len_chars());
+                let on_last_line =
+                    rope.len_chars() == 0 || rope.char_to_line(pos) + 1 >= rope.len_lines();
+                let (focused, count) = app.notebook.as_ref()
+                    .map(|(nb, s)| (s.focused_cell, nb.cells.len()))
+                    .unwrap_or((0, 0));
+                if on_last_line && focused + 1 < count {
+                    let col = motion::col_of(rope, pos);
+                    switch_focused_cell(app, focused + 1);
+                    place_cursor_at_line(app, 0, col);
+                    update_scroll(app);
+                    return;
+                }
+            }
+            app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
+        }
         Command::MoveWordForward  => app.selection = motion::move_word_forward(&app.buffer.rope, app.selection, extend),
         Command::MoveWordBackward => app.selection = motion::move_word_backward(&app.buffer.rope, app.selection, extend),
         Command::MoveWordEnd      => app.selection = motion::move_word_end(&app.buffer.rope, app.selection, extend),
@@ -814,26 +855,17 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         // --- Notebook commands ---
         Command::NotebookNextCell => {
-            lsp_did_change(app);
-            notebook::save_focused_cell(app);
-            if let Some((ref nb, ref mut state)) = app.notebook {
-                let last = nb.cells.len().saturating_sub(1);
-                state.focused_cell = (state.focused_cell + 1).min(last);
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
-            }
-            notebook::load_focused_cell(app);
-            app.mode = Mode::Notebook;
+            let target = app.notebook.as_ref()
+                .map(|(_, s)| s.focused_cell + 1)
+                .unwrap_or(0);
+            switch_focused_cell(app, target);
             return;
         }
         Command::NotebookPrevCell => {
-            lsp_did_change(app);
-            notebook::save_focused_cell(app);
-            if let Some((ref nb, ref mut state)) = app.notebook {
-                state.focused_cell = state.focused_cell.saturating_sub(1);
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
-            }
-            notebook::load_focused_cell(app);
-            app.mode = Mode::Notebook;
+            let target = app.notebook.as_ref()
+                .map(|(_, s)| s.focused_cell.saturating_sub(1))
+                .unwrap_or(0);
+            switch_focused_cell(app, target);
             return;
         }
         Command::NotebookScrollDown => {
@@ -863,7 +895,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                         nb.cells[idx].rendered = true;
                     }
                 }
-                app.mode = Mode::Notebook;
+                app.mode = Mode::Normal;
                 app.message = Some("Rendered markdown".into());
                 return;
             }
@@ -972,7 +1004,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 }
                 notebook::load_focused_cell(app);
                 notebook::notebook_lsp_reopen(app);
-                app.mode = Mode::Notebook;
+                app.mode = Mode::Normal;
             } else {
                 app.message = Some("Nothing to undo".into());
             }
@@ -997,7 +1029,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 }
                 notebook::load_focused_cell(app);
                 notebook::notebook_lsp_reopen(app);
-                app.mode = Mode::Notebook;
+                app.mode = Mode::Normal;
             } else {
                 app.message = Some("Nothing to redo".into());
             }
@@ -1022,7 +1054,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
-            app.mode = Mode::Notebook;
+            app.mode = Mode::Normal;
             return;
         }
         Command::NotebookNewCellAbove => {
@@ -1043,7 +1075,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
-            app.mode = Mode::Notebook;
+            app.mode = Mode::Normal;
             return;
         }
         Command::NotebookDeleteCell => {
@@ -1062,7 +1094,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.kitty_image_ids.clear();
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
-            app.mode = Mode::Notebook;
+            app.mode = Mode::Normal;
             return;
         }
         Command::NotebookClearOutputs => {
@@ -1119,7 +1151,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             // virtual document must be reopened under the new language.
             notebook::load_focused_cell(app);
             notebook::notebook_lsp_reopen(app);
-            app.mode = Mode::Notebook;
+            app.mode = Mode::Normal;
             app.message = Some(if to_markdown {
                 "Cell → markdown".into()
             } else {
@@ -1163,7 +1195,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             if let Some(ref mut session) = app.notebook_cell_edit {
                 session.focused_edit = false;
             }
-            app.mode = Mode::Notebook;
+            app.mode = Mode::Normal;
             if let Some(ref session) = app.notebook_cell_edit {
                 if let Some(path) = app.buffer.path.clone() {
                     if app.lsp.notebook_sync_supported(&session.language) {
@@ -1179,13 +1211,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
 
-        // --- Notebook mode ---
+        // --- Notebook ---
+        // Open the current `.ipynb` buffer as a notebook. A no-op when one is
+        // already open (there's no separate notebook navigation mode anymore —
+        // cell navigation is J/K within Normal mode).
         Command::EnterNotebook => {
-            if app.notebook.is_some() {
-                app.mode = Mode::Notebook;
-            } else if app.buffer.path.as_ref()
-                .and_then(|p| p.extension())
-                .and_then(|e| e.to_str()) == Some("ipynb")
+            if app.notebook.is_none()
+                && app.buffer.path.as_ref()
+                    .and_then(|p| p.extension())
+                    .and_then(|e| e.to_str()) == Some("ipynb")
             {
                 if let Some(path) = app.buffer.path.clone() {
                     open_as_notebook(app, &path);
@@ -1397,6 +1431,57 @@ fn normalize_cursor_folds_directional(app: &mut App, pre_exec_line: usize) {
     }
 }
 
+/// Switch the focused notebook cell to `new_idx` (clamped to the valid range),
+/// flushing the current cell to the LSP and notebook model first and loading the
+/// target cell into `app.buffer`. The cursor lands at the start of the new cell;
+/// callers wanting a specific position set the selection afterwards. No-op when
+/// no notebook is open.
+fn switch_focused_cell(app: &mut App, new_idx: usize) {
+    if app.notebook.is_none() {
+        return;
+    }
+    lsp_did_change(app);
+    notebook::save_focused_cell(app);
+    if let Some((ref nb, ref mut state)) = app.notebook {
+        let last = nb.cells.len().saturating_sub(1);
+        state.focused_cell = new_idx.min(last);
+        state.ensure_focused_visible(
+            &nb.cells,
+            app.viewport_height,
+            &app.buffer.rope,
+            app.config.notebook.image_rows,
+            app.cell_pixel_size,
+            app.viewport_width.saturating_sub(2) as u16,
+        );
+    }
+    notebook::load_focused_cell(app);
+}
+
+/// Place a point selection on `line_idx` (clamped) at column `col` (clamped to
+/// the line's content), using the same column discipline as vertical motion.
+fn place_cursor_at_line(app: &mut App, line_idx: usize, col: usize) {
+    let rope = &app.buffer.rope;
+    if rope.len_chars() == 0 {
+        app.selection = Selection::point(0);
+        return;
+    }
+    let line_idx = line_idx.min(rope.len_lines().saturating_sub(1));
+    let line_start = rope.line_to_char(line_idx);
+    let line = rope.line(line_idx);
+    let nl = line.len_chars();
+    let content_len = if nl > 0 && (line.char(nl - 1) == '\n' || line.char(nl - 1) == '\r') {
+        nl - 1
+    } else {
+        nl
+    };
+    let head = if content_len == 0 {
+        line_start
+    } else {
+        line_start + col.min(content_len - 1)
+    };
+    app.selection = Selection::point(head);
+}
+
 /// Cycle through `open_buffers` by `delta` (+1 = next, -1 = prev).
 fn navigate_buffer(app: &mut App, delta: i32) {
     let n = app.open_buffers.len();
@@ -1496,7 +1581,7 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     app.selection = Selection::point(0);
     app.scroll_row = 0;
     app.scroll_col = 0;
-    app.mode = Mode::Notebook;
+    app.mode = Mode::Normal;
     app.lsp_language = Some(lang.clone());
     app.highlighter = Highlighter::new(Some(&vpath));
     recompute_highlights(app);
@@ -1632,12 +1717,6 @@ pub fn update_scroll(app: &mut App) {
     let tab_width = app.config.editor.tab_width;
 
     if app.notebook.is_some() && !app.notebook_focused_edit() {
-        // In Notebook navigation mode, cell-level scrolling is driven by the
-        // command handlers (`j`/`k`, scroll-up/down) — don't auto-snap here, or
-        // we'd fight an explicit scroll away from the focused cell.
-        if app.mode == Mode::Notebook {
-            return;
-        }
         // Editing within the focused cell.  The cell is in `app.buffer`, but it
         // does not fill the viewport: cells above it (and its own top border)
         // push its content downward.  We first keep the focused cell visible at
@@ -2222,5 +2301,50 @@ mod tests {
         text::delete_selection(&mut app);
         assert_eq!(app.buffer.rope.len_chars(), 0);
         assert_eq!(app.selection.head, 0);
+    }
+
+    #[test]
+    fn test_notebook_cross_cell_motion() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        // Start from a real on-disk notebook (one empty cell), then give the
+        // first cell content and append a second cell.
+        let dir = unique_tmp_dir("xcell");
+        let target = dir.join("xcell.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "xcell");
+
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("a\nb");
+            let mut second = nb.cells[0].clone();
+            second.id = notebook::new_cell_id();
+            second.source = Rope::from_str("c\nd");
+            nb.cells.push(second);
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+        assert_eq!(app.buffer.rope.to_string(), "a\nb");
+
+        // `j` on the last line of cell 0 crosses into cell 1, first line.
+        app.selection = Selection::point(2); // the 'b'
+        execute(&mut app, &Command::MoveDown);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 1);
+        assert_eq!(app.buffer.rope.to_string(), "c\nd");
+        assert_eq!(app.selection.head, 0); // first line, column preserved
+
+        // `k` on the first line of cell 1 crosses back into cell 0, last line.
+        execute(&mut app, &Command::MoveUp);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+        assert_eq!(app.buffer.rope.to_string(), "a\nb");
+        assert_eq!(app.buffer.rope.char_to_line(app.selection.head), 1); // last line
+
+        // `k` at the top cell stays put (no previous cell to cross into).
+        app.selection = Selection::point(0);
+        execute(&mut app, &Command::MoveUp);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+
+        let _ = std::fs::remove_file(&target);
     }
 }

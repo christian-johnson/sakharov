@@ -151,7 +151,7 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 | `format-document` | `gf` (via Goto mode) | Format the buffer (shell formatter if configured, else LSP `:fmt`/`:format`) |
 
 Diagnostics are shown inline (underline) and as an error/warning count in the status
-bar, for both plain files and per-cell in notebook mode. They are keyed by the
+bar, for both plain files and per-cell in notebooks. They are keyed by the
 document's resolved absolute path, so they work regardless of whether the file was
 opened by a relative or absolute path.
 
@@ -225,54 +225,70 @@ The cursor is automatically snapped past folds when moving down, and to the fold
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `notebook-toggle-fold-cell` | `z` (notebook mode) | `:fold-cell` | Toggle collapse of the focused cell |
-| `notebook-toggle-all-folds` | `Z` (notebook mode) | `:fold-all-cells` | Toggle all cells: fold all if any are expanded, else unfold all |
+| `notebook-toggle-fold-cell` | — | `:fold-cell` | Toggle collapse of the focused cell |
+| `notebook-toggle-all-folds` | — | `:fold-all-cells` | Toggle all cells: fold all if any are expanded, else unfold all |
 
 A folded cell shows: first line of source + `▶ N lines · M outputs` indicator.
-Entering edit mode (`i`) on a folded cell auto-unfolds it.
+Entering Insert (`i`) on a folded cell auto-unfolds it.
 
 ## Notebooks
 
-Opening a `.ipynb` file (or `:nb` / `:notebook` on an already-open one) enters
-**Notebook mode**. Cells are shown as a vertical stack; `j`/`k` move between cells
-(Navigate). Press `i` to edit the focused cell in place, `Enter` for a full-screen
-cell-edit overlay, and `Esc`/`v` to return to Navigate. The default keys below apply
-in Notebook Navigate mode.
+Opening a `.ipynb` file shows its cells as a vertical stack. **There is no separate
+notebook mode** — the focused cell is edited in place with the ordinary Normal /
+Insert / Select modes, exactly like a plain buffer. A few extra bindings apply while
+a notebook is open (they shadow the normal bindings):
+
+- `J` / `K` move to the next / previous cell (like `H`/`L` for buffers).
+- A plain `j` on the last line of a cell crosses into the next cell; `k` on the
+  first line crosses into the previous cell (column preserved) — so vertical motion
+  flows continuously across cells.
+- `Ctrl+E` executes the focused cell (works on any terminal). `Shift+Enter` /
+  `Ctrl+Enter` also execute it, but only on terminals that support keyboard-enhancement
+  reporting (kitty protocol) — otherwise a modified Enter is indistinguishable from a
+  plain Enter and never arrives.
+
+Cell management (new/delete cell, clear outputs, cell-type conversion, structural
+undo) has no default key — use the command palette (`Space`) or the `:` command line.
 
 ### Navigation & editing
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `enter-notebook` | — | `:nb`, `:notebook` | Enter Notebook mode (opens the buffer's `.ipynb` if needed) |
-| `notebook-next-cell` | `j`, `↓` | — | Focus the next cell |
-| `notebook-prev-cell` | `k`, `↑` | — | Focus the previous cell |
-| `notebook-scroll-down` | — | — | Scroll the cell viewport down without moving focus |
-| `notebook-scroll-up` | — | — | Scroll the cell viewport up without moving focus |
-| `notebook-open-cell-edit` | `Enter` | `:open-cell`, `:edit-cell` | Open the focused cell in a full-screen edit overlay |
-| `notebook-close-cell-edit` | `ctrl+Enter` | `:close-cell`, `:discard-cell` | Save the cell and close the overlay (return to Navigate) |
+| `enter-notebook` | — | `:nb`, `:notebook` | Open the current buffer's `.ipynb` as a notebook (no-op if already open) |
+| `notebook-next-cell` | `J` | — | Focus the next cell |
+| `notebook-prev-cell` | `K` | — | Focus the previous cell |
+| `notebook-scroll-down` | — | — | Scroll the cell viewport down (snaps back to the focused cell) |
+| `notebook-scroll-up` | — | — | Scroll the cell viewport up (snaps back to the focused cell) |
+| `notebook-open-cell-edit` | — | `:open-cell`, `:edit-cell` | Open the focused cell in a full-screen edit overlay |
+| `notebook-close-cell-edit` | `ctrl+Enter` | `:close-cell`, `:discard-cell` | Save the cell and close the overlay |
 
 ### Cell management
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `notebook-new-cell-below` | `o` | `:new-cell` | Insert a new code cell below the focused cell |
-| `notebook-new-cell-above` | `O` | — | Insert a new code cell above the focused cell |
-| `notebook-delete-cell` | `d` | — | Delete the focused cell |
-| `notebook-clear-outputs` | `x` | — | Clear the focused cell's outputs |
-| `notebook-cell-to-markdown` | `m` | `:cell-md`, `:to-markdown` | Convert the focused cell to a Markdown cell |
-| `notebook-cell-to-code` | `y` | `:cell-code`, `:to-code` | Convert the focused cell to a code cell |
-| `notebook-undo-structural` | `u` | — | Undo the last add/delete-cell change |
-| `notebook-redo-structural` | `U` | — | Redo the last undone structural change |
+| `notebook-new-cell-below` | — | `:new-cell` | Insert a new code cell below the focused cell |
+| `notebook-new-cell-above` | — | — | Insert a new code cell above the focused cell |
+| `notebook-delete-cell` | — | — | Delete the focused cell |
+| `notebook-clear-outputs` | — | — | Clear the focused cell's outputs |
+| `notebook-cell-to-markdown` | — | `:cell-md`, `:to-markdown` | Convert the focused cell to a Markdown cell |
+| `notebook-cell-to-code` | — | `:cell-code`, `:to-code` | Convert the focused cell to a code cell |
+| `notebook-undo-structural` | — | — | Undo the last add/delete-cell change |
+| `notebook-redo-structural` | — | — | Redo the last undone structural change |
 
 ### Execution & kernel
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `notebook-execute-cell` | `e` | `:run` | Execute the focused cell. Code cells run in the kernel; Markdown cells render to their formatted view |
-| `notebook-execute-and-advance` | `E` | `:run-next` | Execute the focused cell, then focus the next |
-| `notebook-restart-kernel` | `ctrl+r` | `:restart-kernel`, `:kernel-restart` | Kill and restart the kernel (clears all state) |
+| `notebook-execute-cell` | `Ctrl+E`, `Shift+Enter`, `ctrl+Enter` | `:run` | Execute the focused cell. Code cells run in the kernel; Markdown cells render to their formatted view |
+| `notebook-execute-and-advance` | — | `:run-next` | Execute the focused cell, then focus the next |
+| `notebook-restart-kernel` | — | `:restart-kernel`, `:kernel-restart` | Kill and restart the kernel (clears all state) |
 | `notebook-interrupt-kernel` | — | `:interrupt-kernel`, `:kernel-interrupt` | Send SIGINT to the running kernel |
 
-In Notebook mode, `g` enters Goto mode and the usual LSP bindings work on the focused
-cell (`gd`, `gr`, `K`, `ga`, …); `:` opens the command line and `ctrl+s` saves the
-notebook back to disk.
+`Ctrl+E` is the portable execute key. `Shift+Enter` / `ctrl+Enter` additionally
+require a terminal that supports keyboard-enhancement reporting (the kitty protocol);
+on terminals that don't, a modified Enter collapses to a bare Enter and won't trigger
+execution. (Set `SV_DEBUG_KEYS=1` to log received key events to `/tmp/sv-keys.log`
+and see what your terminal actually reports.) All notebook commands also work from the
+command palette and `:` line. Normal editing keys, `g`-prefixed LSP bindings (`gd`,
+`gr`, `gk`, `ga`, …), `:`, and `ctrl+s` (save notebook to disk) behave exactly as in a
+plain buffer.

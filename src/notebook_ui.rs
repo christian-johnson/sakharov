@@ -215,10 +215,11 @@ fn render_cell_content(
     let rope: &ropey::Rope = if is_focused { active.rope } else { &cell.source };
 
     // A Markdown cell shows its formatted (highlighted) view when `rendered`,
-    // except while it's the focused cell being actively edited (i.e. we've
-    // dropped out of Notebook navigation into an edit sub-mode) — then we show
-    // the raw source so the markup is editable.
-    let editing_this = is_focused && !matches!(active.mode, Mode::Notebook);
+    // except while it's the focused cell being actively edited (Insert/Select) —
+    // then we show the raw source so the markup is editable. (Entering Insert
+    // also flips `rendered` off, so navigating over it in Normal keeps it
+    // rendered until you start editing or convert/re-render it.)
+    let editing_this = is_focused && matches!(active.mode, Mode::Insert | Mode::Select);
     let show_markdown = cell.cell_type == CellType::Markdown && cell.rendered && !editing_this;
 
     // Suppress the cursor/selection in the rendered markdown view.

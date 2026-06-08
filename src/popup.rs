@@ -95,6 +95,12 @@ pub struct ListState {
     /// to explicitly engage with the list. In passive mode (focused=false) the
     /// popup is a hint overlay and all keys fall through to insert mode.
     pub focused: bool,
+    /// Completion-only: when `Some`, the `/` fuzzy-search row is open and this
+    /// string overrides `filter` for matching.  `None` = search row closed, the
+    /// list is filtered by the word-prefix in `filter` as usual.
+    pub search: Option<String>,
+    /// Completion-only: the `K` documentation side panel, when open.
+    pub doc: Option<DocPanel>,
     /// Optional command-name → recency rank (0 = most recent).  Populated only
     /// by the command palette; empty for every other popup.  Used as a
     /// tiebreaker between matches of equal fuzzy-match quality (recent first),
@@ -102,6 +108,7 @@ pub struct ListState {
     pub recency: std::collections::HashMap<String, usize>,
 }
 
+#[derive(Default)]
 pub struct ListItem {
     pub label: String,
     pub detail: Option<String>,
@@ -109,6 +116,18 @@ pub struct ListItem {
     /// Returned verbatim as the `Confirm` payload instead of `label`.
     /// Use `NavigateTarget::encode` or set manually to `"path\0line\0col"`.
     pub payload: Option<String>,
+    /// Completion-only: documentation shown in the `K` doc panel. `None` means
+    /// it may still be fetchable via `completionItem/resolve` (see `resolve_data`).
+    pub documentation: Option<String>,
+    /// Completion-only: raw LSP completion-item JSON for `completionItem/resolve`.
+    pub resolve_data: Option<String>,
+}
+
+/// The `K` documentation side panel attached to a focused completion popup.
+pub struct DocPanel {
+    pub lines: Vec<String>,
+    /// True while a `completionItem/resolve` request is in flight for this item.
+    pub loading: bool,
 }
 
 impl ListItem {
@@ -130,6 +149,7 @@ impl ListItem {
                 line,
                 col
             )),
+            ..Default::default()
         }
     }
 }
@@ -149,8 +169,15 @@ impl ListState {
     ///
     /// Within each tier items are sorted alphabetically so the list is stable
     /// as the user types.
+    /// The string actually used for matching: the `/` search query when the
+    /// search row is open, otherwise the (word-prefix) `filter`.
+    pub fn effective_filter(&self) -> &str {
+        self.search.as_deref().unwrap_or(self.filter.as_str())
+    }
+
     pub fn filtered_indices(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
+        let active_filter = self.effective_filter();
+        if active_filter.is_empty() {
             // With recency tracking, float recently-used items to the top in
             // recency order; everything else keeps its original order below.
             if self.recency.is_empty() {
@@ -170,7 +197,7 @@ impl ListState {
             .iter()
             .enumerate()
             .filter_map(|(i, item)| {
-                match_score_item(item, &self.filter).map(|s| (i, s))
+                match_score_item(item, active_filter).map(|s| (i, s))
             })
             .collect();
 
@@ -206,6 +233,28 @@ impl ListState {
     pub fn selected_item(&self) -> Option<&ListItem> {
         let indices = self.filtered_indices();
         indices.get(self.selected).map(|&i| &self.items[i])
+    }
+
+    /// The absolute `items` index of the current selection (stable across
+    /// re-filtering, unlike `selected` which indexes the filtered view).
+    pub fn selected_index(&self) -> Option<usize> {
+        self.filtered_indices().get(self.selected).copied()
+    }
+
+    /// Append a char to the `/` search query, resetting the selection.
+    pub fn push_search_char(&mut self, c: char) {
+        if let Some(s) = self.search.as_mut() {
+            s.push(c);
+        }
+        self.selected = 0;
+    }
+
+    /// Remove the last char from the `/` search query, resetting the selection.
+    pub fn pop_search_char(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            s.pop();
+        }
+        self.selected = 0;
     }
 
     /// Advance selected, wrapping around.
@@ -429,6 +478,8 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                search: None,
+                doc: None,
                 recency,
             }),
             anchor: PopupAnchor::Center,
@@ -445,12 +496,14 @@ impl Popup {
                 detail: Some("Load the recovered contents into the buffer".into()),
                 kind: None,
                 payload: Some("restore".into()),
+                ..Default::default()
             },
             ListItem {
                 label: "Discard recovered contents".into(),
                 detail: Some("Delete the recovery file and keep the on-disk version".into()),
                 kind: None,
                 payload: Some("discard".into()),
+                ..Default::default()
             },
         ];
         Self {
@@ -462,6 +515,8 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                search: None,
+                doc: None,
                 recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::Center,
@@ -482,6 +537,8 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                search: None,
+                doc: None,
                 recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::CursorBelow,
@@ -516,6 +573,8 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                search: None,
+                doc: None,
                 recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::Center,
@@ -535,6 +594,8 @@ impl Popup {
                 two_phase: true,
                 navigating: false,
                 focused: false,
+                search: None,
+                doc: None,
                 recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::Center,
@@ -554,6 +615,8 @@ impl Popup {
                 two_phase: false,
                 navigating: false,
                 focused: false,
+                search: None,
+                doc: None,
                 recency: std::collections::HashMap::new(),
             }),
             anchor: PopupAnchor::CursorBelow,
@@ -641,7 +704,7 @@ pub fn command_palette_items() -> Vec<ListItem> {
         ("notebook-close-cell-edit", "Save cell and return  [ctrl+enter]"),
         ("notebook-discard-cell-edit", "Discard cell edits  [:discard-cell]"),
         // Notebook
-        ("enter-notebook", "Enter notebook navigation mode  [n]"),
+        ("enter-notebook", "Open the current .ipynb as a notebook  [n]"),
         // Search / Grep
         ("search-forward", "Search forward  [/]"),
         ("search-backward", "Search backward  [?]"),
@@ -705,6 +768,7 @@ pub fn command_palette_items() -> Vec<ListItem> {
             detail: Some(detail.to_string()),
             kind: None,
             payload: None,
+            ..Default::default()
         })
         .collect()
 }
@@ -714,7 +778,7 @@ mod tests {
     use super::*;
 
     fn item(label: &str, detail: &str) -> ListItem {
-        ListItem { label: label.into(), detail: Some(detail.into()), kind: None, payload: None }
+        ListItem { label: label.into(), detail: Some(detail.into()), kind: None, payload: None, ..Default::default() }
     }
 
     #[test]
@@ -756,6 +820,8 @@ mod tests {
             two_phase: false,
             navigating: false,
             focused: false,
+            search: None,
+            doc: None,
             recency: recency.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
         }
     }
@@ -782,6 +848,33 @@ mod tests {
             &[("file-open", 0)],
         );
         assert_eq!(s.filtered_indices()[0], 1, "recent same-tier match first");
+    }
+
+    #[test]
+    fn search_query_overrides_prefix_filter() {
+        // With the `/` search row closed, the word-prefix `filter` drives matching.
+        let mut s = list(&["alpha", "beta", "gamma"], "al", &[]);
+        assert_eq!(s.filtered_indices(), vec![0]);
+
+        // Opening search overrides the prefix filter with the typed query.
+        s.search = Some("be".into());
+        assert_eq!(s.effective_filter(), "be");
+        assert_eq!(s.filtered_indices(), vec![1]);
+
+        // An empty search row shows everything (source order, no recency).
+        s.search = Some(String::new());
+        assert_eq!(s.filtered_indices(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn selected_index_is_absolute() {
+        let mut s = list(&["alpha", "beta", "gamma"], "", &[]);
+        s.selected = 2;
+        assert_eq!(s.selected_index(), Some(2));
+        // When filtering reorders the view, selected_index follows the filtered set.
+        s.search = Some("beta".into());
+        s.selected = 0;
+        assert_eq!(s.selected_index(), Some(1));
     }
 
     #[test]

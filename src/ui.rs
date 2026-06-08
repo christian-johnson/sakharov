@@ -599,7 +599,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
 // Command/message line — notebook variant (public)
 // ---------------------------------------------------------------------------
 
-/// Render the command/message line for notebook mode.
+/// Render the command/message line for the notebook view.
 pub fn render_command_nb(frame: &mut Frame, app: &App, area: Rect) {
     render_command(frame, app, area);
 }

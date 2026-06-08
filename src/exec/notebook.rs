@@ -108,7 +108,7 @@ pub fn restore_stashed_notebook(app: &mut App, path: &std::path::Path) -> bool {
     let lang = nb.metadata.kernel_language.clone();
     app.lsp_language = Some(lang);
     app.notebook = Some((nb, state));
-    app.mode = crate::mode::Mode::Notebook;
+    app.mode = crate::mode::Mode::Normal;
     load_focused_cell(app);
     super::recompute_highlights(app);
     true

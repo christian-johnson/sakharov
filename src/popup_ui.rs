@@ -1,11 +1,14 @@
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::{Block, BorderType, Borders},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
-use crate::popup::{match_positions, KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize, PopupTarget};
+use crate::popup::{
+    match_positions, DocPanel, KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize,
+    PopupTarget,
+};
 
 /// Render a popup on top of the current frame.
 pub fn render(
@@ -28,6 +31,10 @@ pub fn render(
     match &popup.content {
         PopupContent::List(state) => {
             render_list_popup(frame, popup, state, popup_rect);
+            // The `K` documentation panel floats beside the completion popup.
+            if let Some(ref doc) = state.doc {
+                render_completion_doc(frame, doc, popup_rect, term, ui_config);
+            }
         }
         PopupContent::Text(state) => {
             render_text_popup(frame, popup, state, popup_rect);
@@ -36,6 +43,71 @@ pub fn render(
             render_key_hints_popup(frame, state, popup_rect);
         }
     }
+}
+
+/// Render the `K` documentation side panel next to the completion popup.
+/// Prefers the right of `list_rect`, falling back to the left when there is
+/// more room there; skipped entirely if neither side can fit a usable panel.
+fn render_completion_doc(
+    frame: &mut Frame,
+    doc: &DocPanel,
+    list_rect: Rect,
+    term: Rect,
+    ui_config: &crate::config::UiConfig,
+) {
+    const GAP: u16 = 1;
+    const MIN_W: u16 = 24;
+    const DESIRED_W: u16 = 60;
+
+    let right_space = term.right().saturating_sub(list_rect.right());
+    let left_space = list_rect.left().saturating_sub(term.left());
+
+    // Choose the side with enough room (preferring the right).
+    let (x, width) = if right_space >= MIN_W + GAP {
+        let w = DESIRED_W.min(right_space - GAP);
+        (list_rect.right() + GAP, w)
+    } else if left_space >= MIN_W + GAP {
+        let w = DESIRED_W.min(left_space - GAP);
+        (list_rect.left() - GAP - w, w)
+    } else {
+        return; // no room on either side
+    };
+
+    // Height tracks content, capped by config and the terminal.
+    let content_h = (doc.lines.len() as u16).saturating_add(2);
+    let h = content_h
+        .min(ui_config.doc_popup_height.saturating_add(2))
+        .min(term.height)
+        .max(3);
+    // Align the top with the list popup, clamped into the terminal.
+    let mut y = list_rect.top();
+    if y + h > term.bottom() {
+        y = term.bottom().saturating_sub(h);
+    }
+    y = y.max(term.top());
+
+    let rect = Rect { x, y, width, height: h };
+
+    let border_fg = if doc.loading {
+        Color::Rgb(120, 120, 160)
+    } else {
+        Color::Rgb(80, 180, 255)
+    };
+    let block = Block::default()
+        .title(" docs ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_fg))
+        .style(Style::default().bg(Color::Rgb(28, 28, 40)));
+
+    let text = doc.lines.join("\n");
+    let para = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(Color::Rgb(200, 200, 200)).bg(Color::Rgb(28, 28, 40)))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(para, rect);
 }
 
 // ---------------------------------------------------------------------------
@@ -84,8 +156,9 @@ fn compute_height(popup: &Popup, ui_config: &crate::config::UiConfig) -> u16 {
             let filtered = s.filtered_indices().len();
             let items_shown = filtered.min(ui_config.completion_list_height as usize) as u16;
             if is_completion {
-                // 2 borders + items only (no filter row or separator)
-                (2 + items_shown).min(22).max(3)
+                // 2 borders + items; +2 header rows when the `/` search row is open.
+                let header = if s.search.is_some() { 2 } else { 0 };
+                (2 + header + items_shown).min(22).max(3)
             } else {
                 // 2 borders + 1 filter row + 1 separator + items
                 (2 + 1 + 1 + items_shown).min(22).max(5)
@@ -156,7 +229,11 @@ fn render_list_popup(
     state: &crate::popup::ListState,
     rect: Rect,
 ) {
-    let is_focused_completion = popup.on_confirm == PopupTarget::InsertText && state.focused;
+    let is_completion = popup.on_confirm == PopupTarget::InsertText;
+    let is_focused_completion = is_completion && state.focused;
+    // The filter/search input row is shown for ordinary list popups always, and
+    // for completion popups only while the `/` search row is open.
+    let show_header = if is_completion { state.search.is_some() } else { true };
 
     // Draw the border block — brighter border when the completion popup is focused.
     let block = if is_focused_completion {
@@ -181,9 +258,9 @@ fn render_list_popup(
 
     let buf = frame.buffer_mut();
 
-    // For non-completion popups: filter input row + separator.
-    // Completion popups show items directly — no header rows.
-    if !is_focused_completion && popup.on_confirm != PopupTarget::InsertText {
+    // Filter input row + separator (always for list pickers; for completion
+    // popups only while the `/` search row is open).
+    if show_header {
         if inner.height == 0 {
             return;
         }
@@ -213,7 +290,7 @@ fn render_list_popup(
                         .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
                     x += 1;
                 }
-                for c in state.filter.chars() {
+                for c in state.effective_filter().chars() {
                     if x >= inner.right() { break; }
                     buf[(x, filter_y)]
                         .set_char(c)
@@ -248,10 +325,9 @@ fn render_list_popup(
         }
     }
 
-    // Items area: starts right at the top for completion, after header rows for others.
-    let is_completion = popup.on_confirm == PopupTarget::InsertText;
-    let items_top = if is_completion { inner.top() } else { inner.top() + 2 };
-    let items_height = if is_completion { inner.height } else { inner.height.saturating_sub(2) };
+    // Items area: starts after the header rows when a header is shown.
+    let items_top = if show_header { inner.top() + 2 } else { inner.top() };
+    let items_height = if show_header { inner.height.saturating_sub(2) } else { inner.height };
     let visible_rows = items_height as usize;
 
     let indices = state.filtered_indices();
@@ -335,10 +411,11 @@ fn render_list_popup(
 
         // Label — highlight chars that matched the filter.
         let label_start = x;
-        let matched: std::collections::HashSet<usize> = if state.filter.is_empty() {
+        let active_filter = state.effective_filter();
+        let matched: std::collections::HashSet<usize> = if active_filter.is_empty() {
             Default::default()
         } else {
-            match_positions(&item.label, &state.filter)
+            match_positions(&item.label, active_filter)
                 .unwrap_or_default()
                 .into_iter()
                 .collect()

@@ -98,6 +98,7 @@ pub(super) fn show_buffer_completions(app: &mut App) {
             detail: None,
             kind: Some(symbol_kind_badge(s.kind, &app.config.ui.symbol_icons)),
             payload: None,
+            ..Default::default()
         })
         .collect();
     open_completion_popup(app, items, prefix);
@@ -175,6 +176,8 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                         detail: item.detail.clone(),
                         kind: item.kind.clone(),
                         payload: None,
+                        documentation: item.documentation.clone(),
+                        resolve_data: item.data.clone(),
                     })
                     .collect();
 
@@ -190,6 +193,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                             detail: Some("buf".into()),
                             kind: Some(symbol_kind_badge(sym.kind, &app.config.ui.symbol_icons)),
                             payload: None,
+                            ..Default::default()
                         });
                     }
                 }
@@ -198,6 +202,28 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                     let prefix = word_prefix_at_cursor(app);
                     open_completion_popup(app, popup_items, prefix);
                 }
+            }
+        }
+        LspEvent::CompletionResolved { documentation, detail } => {
+            if let Some(idx) = app.pending_completion_resolve.take() {
+                if let Some(popup) = app.popup.as_mut() {
+                    if popup.on_confirm == crate::popup::PopupTarget::InsertText {
+                        if let crate::popup::PopupContent::List(ref mut list) = popup.content {
+                            if let Some(item) = list.items.get_mut(idx) {
+                                // Record the result (Some even when empty) so this
+                                // item is treated as resolved and never re-requested.
+                                item.documentation =
+                                    Some(documentation.unwrap_or_default());
+                                if item.detail.is_none() {
+                                    item.detail = detail;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Refresh so the doc panel reflects the newly-resolved content
+                // (and may kick off a resolve for whatever is now selected).
+                refresh_completion_doc(app);
             }
         }
         LspEvent::HoverResult { content } => {
@@ -263,6 +289,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                         detail: kind,
                         kind: None,
                         payload: Some(i.to_string()),
+                        ..Default::default()
                     }
                 })
                 .collect();
@@ -510,7 +537,158 @@ fn open_completion_popup(app: &mut crate::app::App, items: Vec<crate::popup::Lis
             return;
         }
     }
+    app.pending_completion_resolve = None;
     app.popup = Some(popup);
+}
+
+/// Refresh the `K` documentation side panel of the focused completion popup to
+/// match the current selection.  A no-op unless a completion popup with an open
+/// doc panel is showing.  Fires a `completionItem/resolve` request (at most one
+/// in flight) when the selected item has no inline documentation yet.
+pub fn refresh_completion_doc(app: &mut App) {
+    // Phase 1 — read the selected item under an immutable borrow.
+    let info = match app.popup.as_ref() {
+        Some(p) if p.on_confirm == crate::popup::PopupTarget::InsertText => {
+            if let crate::popup::PopupContent::List(list) = &p.content {
+                if list.doc.is_some() {
+                    list.selected_index().map(|idx| {
+                        let it = &list.items[idx];
+                        (
+                            idx,
+                            it.documentation.clone(),
+                            it.detail.clone(),
+                            it.resolve_data.clone(),
+                        )
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let Some((idx, documentation, detail, resolve_json)) = info else {
+        return;
+    };
+
+    // Phase 2 — decide content and whether a resolve request is warranted.
+    let lang = app.current_language().unwrap_or("").to_owned();
+    let can_resolve = documentation.is_none()
+        && resolve_json.is_some()
+        && !lang.is_empty()
+        && app.lsp.completion_resolve_supported(&lang);
+    let (lines, loading) = build_doc_content(&documentation, &detail, can_resolve);
+
+    // Phase 3 — write the panel back.
+    if let Some(p) = app.popup.as_mut() {
+        if let crate::popup::PopupContent::List(ref mut list) = p.content {
+            if list.doc.is_some() {
+                list.doc = Some(crate::popup::DocPanel { lines, loading });
+            }
+        }
+    }
+
+    // Phase 4 — fire the resolve request (only one outstanding at a time).
+    if can_resolve && app.pending_completion_resolve.is_none() {
+        if let Some(json) = resolve_json {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json) {
+                if app.lsp.request_completion_resolve(&lang, val) {
+                    app.pending_completion_resolve = Some(idx);
+                }
+            }
+        }
+    }
+}
+
+/// Build the doc-panel lines for a completion item: its signature (`detail`)
+/// followed by documentation, or a loading/placeholder line.
+fn build_doc_content(
+    documentation: &Option<String>,
+    detail: &Option<String>,
+    can_resolve: bool,
+) -> (Vec<String>, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(sig) = detail.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        lines.extend(sig.lines().map(str::to_owned));
+    }
+
+    match documentation {
+        Some(doc) => {
+            let doc = doc.trim();
+            if !doc.is_empty() {
+                if !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.extend(doc.lines().map(str::to_owned));
+            }
+            if lines.is_empty() {
+                lines.push("No documentation available.".into());
+            }
+            (lines, false)
+        }
+        None if can_resolve => {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push("Loading documentation…".into());
+            (lines, true)
+        }
+        None => {
+            if lines.is_empty() {
+                lines.push("No documentation available.".into());
+            }
+            (lines, false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::build_doc_content;
+
+    #[test]
+    fn shows_signature_and_documentation() {
+        let (lines, loading) = build_doc_content(
+            &Some("Returns the answer.".into()),
+            &Some("def f() -> int".into()),
+            false,
+        );
+        assert!(!loading);
+        assert_eq!(lines[0], "def f() -> int");
+        assert!(lines.iter().any(|l| l.contains("Returns the answer.")));
+    }
+
+    #[test]
+    fn loading_state_when_resolvable() {
+        let (lines, loading) = build_doc_content(&None, &None, true);
+        assert!(loading);
+        assert!(lines.iter().any(|l| l.contains("Loading")));
+    }
+
+    #[test]
+    fn detail_only_when_not_resolvable() {
+        let (lines, loading) = build_doc_content(&None, &Some("x: int".into()), false);
+        assert!(!loading);
+        assert_eq!(lines, vec!["x: int".to_string()]);
+    }
+
+    #[test]
+    fn placeholder_when_nothing_available() {
+        let (lines, loading) = build_doc_content(&None, &None, false);
+        assert!(!loading);
+        assert_eq!(lines, vec!["No documentation available.".to_string()]);
+    }
+
+    #[test]
+    fn resolved_empty_documentation_is_not_loading() {
+        // An item resolved to empty docs (Some("")) must not show as loading,
+        // otherwise the panel would re-request forever.
+        let (lines, loading) = build_doc_content(&Some(String::new()), &None, false);
+        assert!(!loading);
+        assert_eq!(lines, vec!["No documentation available.".to_string()]);
+    }
 }
 
 /// Return the kind badge string for a tree-sitter symbol, using the configured icons map.

@@ -67,8 +67,10 @@ pub struct ModeColorsConfig {
     /// `:` command-line mode.  Default: ANSI Cyan.
     #[serde(default)]
     pub command: String,
-    /// Notebook navigation mode.  Default: ANSI Cyan.
+    /// Accepted for backwards compatibility — there is no longer a distinct
+    /// notebook mode (cell editing uses Normal/Insert/Select), so this is unused.
     #[serde(default)]
+    #[allow(dead_code)]
     pub notebook: String,
     /// `g` Goto / `/` Search / `f` FindChar sub-modes.  Default: ANSI Magenta.
     #[serde(default)]

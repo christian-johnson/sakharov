@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -38,6 +38,11 @@ use crate::{
 /// uncatchable SIGKILL).
 static PENDING_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// Set once we've pushed the kitty keyboard-enhancement flags, so the matching
+/// pop happens exactly once on teardown (and only when we actually pushed).
+static KEYBOARD_ENHANCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Signal handler: async-signal-safe — performs only an atomic store.
 #[cfg(unix)]
 extern "C" fn handle_term_signal(sig: libc::c_int) {
@@ -62,6 +67,23 @@ fn install_signal_handlers() {
 
 #[cfg(not(unix))]
 fn install_signal_handlers() {}
+
+/// Path of the key-event debug log (used only when `SV_DEBUG_KEYS` is set).
+fn key_debug_log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("sv-keys.log")
+}
+
+/// Append a received key event to the debug log (best-effort).
+fn log_key_event(key: &crossterm::event::KeyEvent) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(key_debug_log_path())
+    {
+        let _ = writeln!(f, "{key:?}");
+    }
+}
 
 /// The pending termination signal, if one has been received.
 fn pending_signal() -> Option<i32> {
@@ -211,6 +233,10 @@ pub struct App {
     /// completion requests — typing more characters can only reduce results further.
     /// Cleared on Backspace, non-identifier chars, and trigger chars (`.` / `:`).
     pub completion_suppressed_prefix: Option<String>,
+    /// Absolute `items` index of the completion item awaiting a
+    /// `completionItem/resolve` reply (for the `K` doc panel). At most one
+    /// resolve is in flight; the reply fills this item's documentation.
+    pub pending_completion_resolve: Option<usize>,
     /// In-memory stash of notebooks that have been navigated away from.
     /// Keyed by the canonicalized `.ipynb` path.  When the user navigates back
     /// to a notebook, its state is restored from here rather than reloading from
@@ -310,7 +336,7 @@ impl App {
         // Compute fold ranges immediately so folding works before the first edit.
         let initial_fold_ranges = highlighter.fold_ranges(&buffer.rope);
 
-        let initial_mode = if notebook.is_some() { Mode::Notebook } else { Mode::Normal };
+        let initial_mode = Mode::Normal;
 
         // *scratch* and *Messages* are always present at the front of the buffer list.
         let mut open_buffers: Vec<std::path::PathBuf> = vec![
@@ -387,6 +413,7 @@ impl App {
             last_logged_message: None,
             pending_format_save: false,
             completion_suppressed_prefix: None,
+            pending_completion_resolve: None,
             notebook_buffers: std::collections::HashMap::new(),
             recovery,
             pending_recoveries: std::collections::VecDeque::new(),
@@ -477,6 +504,29 @@ pub fn run(path: Option<&str>) -> Result<()> {
     crate::theme::initialize_color_cache();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+
+    // Opt into the kitty keyboard protocol when the terminal supports it, so
+    // modified keys like Shift+Enter / Ctrl+Enter are reported as distinct events
+    // instead of collapsing into a bare Enter. DISAMBIGUATE_ESCAPE_CODES is the
+    // safe level for this — it disambiguates modified special keys without
+    // altering how ordinary text (incl. shifted symbols) is reported.
+    let kbd_support = terminal::supports_keyboard_enhancement();
+    if matches!(kbd_support, Ok(true)) {
+        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+        if execute!(stdout, PushKeyboardEnhancementFlags(flags)).is_ok() {
+            KEYBOARD_ENHANCED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    // Surface what was negotiated when key debugging is on (SV_DEBUG_KEYS=1).
+    if std::env::var_os("SV_DEBUG_KEYS").is_some() {
+        app.message = Some(format!(
+            "keyboard enhancement: support={kbd_support:?} active={}  (logging keys to {})",
+            KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst),
+            key_debug_log_path().display(),
+        ));
+    }
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -514,6 +564,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    let debug_keys = std::env::var_os("SV_DEBUG_KEYS").is_some();
     loop {
         // Update stored viewport dimensions, then recompute scroll.
         // This runs before every render so the scroll is always based on the
@@ -767,7 +818,17 @@ fn run_loop(
         if event::poll(std::time::Duration::from_millis(16))? {
             loop {
                 match event::read()? {
-                    Event::Key(key) => input::handle_key(app, key),
+                    Event::Key(key) => {
+                        if debug_keys {
+                            log_key_event(&key);
+                        }
+                        // With the keyboard-enhancement protocol active some
+                        // terminals also emit key-release events; only act on
+                        // press/repeat.
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                            input::handle_key(app, key);
+                        }
+                    }
                     Event::Resize(_, _) => {}
                     _ => {}
                 }
@@ -820,6 +881,11 @@ fn restore_terminal() -> Result<()> {
     use std::io::Write;
     terminal::disable_raw_mode()?;
     let mut stdout = io::stdout();
+    // Release the keyboard-enhancement flags if we pushed them. `swap` makes a
+    // second restore (e.g. panic hook then normal exit) a no-op.
+    if KEYBOARD_ENHANCED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let _ = execute!(stdout, crossterm::event::PopKeyboardEnhancementFlags);
+    }
     execute!(
         stdout,
         LeaveAlternateScreen,

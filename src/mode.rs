@@ -32,8 +32,6 @@ pub enum Mode {
     FindChar { dir: FindDir, till: bool },
     /// Buffer search — typing builds the query; Enter confirms, Esc cancels.
     Search { forward: bool },
-    /// Notebook cell-navigation mode — j/k move between cells, o/e/d etc.
-    Notebook,
     /// Label-jump mode — visible word starts are labelled; type label to jump.
     /// `extend` is true when entered from Select mode — the jump extends the selection.
     Jump { extend: bool },
@@ -54,7 +52,6 @@ impl Mode {
             Mode::Goto { .. } => "GTO",
             Mode::FindChar { .. } => "FND",
             Mode::Search { .. } => "SRC",
-            Mode::Notebook => "NB ",
             Mode::Jump { .. } => "JMP",
             Mode::Fold => "FLD",
             Mode::Prompt { .. } => "CMD",
