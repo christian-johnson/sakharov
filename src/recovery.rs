@@ -509,13 +509,12 @@ fn apply_restore(app: &mut App, item: &PendingRecovery) {
                 app.selection = crate::selection::Selection::point(0);
                 crate::exec::recompute_highlights(app);
                 crate::exec::lsp_did_change(app);
-                app.message = Some(format!(
+                app.messages.show(format!(
                     "Restored unsaved changes ({})",
                     file_label(item)
                 ));
             } else {
-                app.message =
-                    Some("Could not restore: file is no longer the active buffer".into());
+                app.messages.show("Could not restore: file is no longer the active buffer");
             }
         }
         RecoveryKind::Notebook => {
@@ -536,16 +535,15 @@ fn apply_restore(app: &mut App, item: &PendingRecovery) {
                     app.notebook = Some((nb, crate::notebook_state::NotebookState::new()));
                     crate::exec::notebook::load_focused_cell(app);
                     crate::exec::recompute_highlights(app);
-                    app.message =
-                        Some(format!("Restored unsaved notebook ({})", file_label(item)));
+                    app.messages.show(format!("Restored unsaved notebook ({})", file_label(item)));
                 }
                 Ok(_) => {
-                    app.message = Some(
-                        "Could not restore: notebook is no longer the active buffer".into(),
+                    app.messages.show(
+                        "Could not restore: notebook is no longer the active buffer",
                     );
                 }
                 Err(e) => {
-                    app.message = Some(format!("Could not restore notebook: {e}"));
+                    app.messages.show(format!("Could not restore notebook: {e}"));
                 }
             }
         }
@@ -558,7 +556,7 @@ fn apply_restore(app: &mut App, item: &PendingRecovery) {
                 app.buffer.modified = true;
                 crate::exec::recompute_highlights(app);
             }
-            app.message = Some("Restored scratch buffer (open with :scratch)".into());
+            app.messages.show("Restored scratch buffer (open with :scratch)");
         }
     }
 }

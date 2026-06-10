@@ -181,7 +181,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             // Git mark column (1 char).
             if git_col > 0 {
-                let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+                let arrow_style = Style::default().fg(crate::theme::ACCENT);
                 if fold_end_opt.is_some() {
                     buf[(gx, y)].set_char('▶').set_style(arrow_style);
                 } else if is_continuation {
@@ -225,7 +225,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                     };
 
                     if fold_end_opt.is_some() && git_col == 0 && line_num_width >= 2 {
-                        let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+                        let arrow_style = Style::default().fg(crate::theme::ACCENT);
                         buf[(gx, y)].set_char('▶').set_style(arrow_style);
                         gx += 1;
                         for c in line_num_str.chars().skip(1) {
@@ -350,7 +350,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
         // Append fold badge when this row is a fold indicator.
         if let Some(ref badge) = fold_badge {
-            let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+            let arrow_style = Style::default().fg(crate::theme::ACCENT);
             let count_style = Style::default().fg(Color::DarkGray);
             for (i, c) in badge.chars().enumerate() {
                 let style = if i < 4 { arrow_style } else { count_style };
@@ -604,8 +604,9 @@ pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
         // A transient message wins; otherwise show the active call signature
         // (Insert mode only — it's cleared elsewhere) so argument hints are visible.
         _ => app
-            .message
-            .clone()
+            .messages
+            .current()
+            .map(str::to_owned)
             .or_else(|| app.signature_help.clone())
             .unwrap_or_default(),
     };

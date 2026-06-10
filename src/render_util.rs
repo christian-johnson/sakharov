@@ -51,7 +51,7 @@ pub fn apply_diag_underline<'a>(
 pub fn jump_label_styles() -> (Style, Style) {
     let pending = Style::default()
         .fg(Color::Black)
-        .bg(Color::Rgb(255, 160, 0))
+        .bg(crate::theme::JUMP_LABEL_BG)
         .add_modifier(Modifier::BOLD);
     let confirmed = Style::default()
         .fg(Color::Black)

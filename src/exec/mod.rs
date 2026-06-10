@@ -1,16 +1,28 @@
+mod buffers;
+mod format;
 mod lsp;
 pub(crate) mod notebook;
 mod pickers;
+mod scroll;
 mod search;
 mod text;
 
+pub use buffers::{is_special_path, open_as_notebook, switch_to_special_buffer};
+pub(crate) use buffers::{create_new_file, create_new_notebook, SCRATCH_INTRO};
 pub use lsp::{
     apply_code_action, jump_to_location, lsp_did_change, lsp_signature_help,
     process_lsp_events, refresh_completion_doc,
 };
+pub use scroll::{normalize_cursor_folds, update_scroll};
 pub use search::{search_compute_matches, search_jump};
 
-use ropey::Rope;
+// Names used by `execute()` and by sibling submodules via `super::…`.
+use buffers::{
+    navigate_buffer, register_buffer, save_current_special_buffer,
+    stash_current_file_buffer, take_stashed_file_buffer, unsaved_buffer_names,
+};
+use format::run_shell_formatter;
+use scroll::normalize_cursor_folds_directional;
 
 use crate::{
     app::App,
@@ -21,83 +33,6 @@ use crate::{
     motion,
     selection::Selection,
 };
-
-// ---------------------------------------------------------------------------
-// Special buffers
-// ---------------------------------------------------------------------------
-
-pub(crate) const SCRATCH_INTRO: &str = "\
-;; This buffer is for notes you don't want to save.\n\
-;; Use it for scratch text.\n";
-
-/// Returns true for virtual buffer names that don't correspond to real files.
-pub fn is_special_path(path: &std::path::Path) -> bool {
-    matches!(path.to_str(), Some("*scratch*") | Some("*Messages*"))
-}
-
-/// Save the scratch buffer rope when leaving it (so edits survive switches).
-pub(super) fn save_current_special_buffer(app: &mut App) {
-    if let Some(ref path) = app.buffer.path.clone() {
-        if path.to_str() == Some("*scratch*") {
-            app.special_buffer_ropes
-                .insert("*scratch*".to_string(), app.buffer.rope.clone());
-        }
-    }
-}
-
-/// Switch the editor to a named special buffer (`*scratch*` or `*Messages*`).
-pub fn switch_to_special_buffer(app: &mut App, name: &str) {
-    save_current_special_buffer(app);
-
-    if app.notebook.is_some() {
-        // Stash the open notebook so edits are preserved if the user comes back.
-        // (After this, `app.buffer` holds stale cell text — do NOT stash it.)
-        notebook::stash_current_notebook(app);
-    } else {
-        // Plain buffer: close it with the LSP and keep its unsaved edits in memory.
-        if let (Some(ref lang), Some(ref old_path)) =
-            (app.lsp_language.clone(), app.buffer.path.clone())
-        {
-            if !is_special_path(old_path) {
-                app.lsp.did_close(lang, old_path);
-            }
-        }
-        stash_current_file_buffer(app);
-    }
-
-    let rope = if name == "*scratch*" {
-        app.special_buffer_ropes
-            .get("*scratch*")
-            .cloned()
-            .unwrap_or_else(|| Rope::from_str(SCRATCH_INTRO))
-    } else {
-        // *Messages*: rebuild from the accumulated log.
-        let content = if app.messages_log.is_empty() {
-            String::new()
-        } else {
-            let mut s = app.messages_log.join("\n");
-            s.push('\n');
-            s
-        };
-        Rope::from_str(&content)
-    };
-
-    let mut buf = crate::buffer::Buffer::new_empty();
-    buf.rope = rope;
-    buf.path = Some(std::path::PathBuf::from(name));
-
-    app.buffer = buf;
-    app.selection = Selection::point(0);
-    app.scroll_row = 0;
-    app.scroll_col = 0;
-    app.insert_session_active = false;
-    app.lsp_language = None;
-    app.highlighter = crate::highlight::Highlighter::new(None);
-    recompute_highlights(app);
-    app.mode = Mode::Normal;
-    app.git_diff.clear();
-    rebuild_diag_cache(app);
-}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -407,15 +342,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::Write | Command::WriteForce => {
             let force = matches!(cmd, Command::WriteForce);
             if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
-                app.message = Some("Special buffer — nothing to save".into());
+                app.messages.show("Special buffer — nothing to save");
                 return;
             }
             // format_on_save: try shell formatter first, then LSP.
             if app.notebook.is_none() && app.config.editor.format_on_save {
                 if run_shell_formatter(app) {
                     // Shell formatter saved+formatted the file; show result and return.
-                    if app.message.is_none() {
-                        app.message = Some(format!("Saved {}", app.buffer.display_name()));
+                    if app.messages.current().is_none() {
+                        app.messages.show(format!("Saved {}", app.buffer.display_name()));
                     }
                     return;
                 }
@@ -443,34 +378,34 @@ pub fn execute(app: &mut App, cmd: &Command) {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("notebook.ipynb")
                                 .to_string();
-                            app.message = Some(format!("Saved {name}"));
+                            app.messages.show(format!("Saved {name}"));
                         }
-                        Err(e) => app.message = Some(format!("Error: {e}")),
+                        Err(e) => app.messages.show(format!("Error: {e}")),
                     }
                 }
             } else {
                 match app.buffer.save(None, force) {
                     Ok(()) => {
-                        app.message = Some(format!("Saved {}", app.buffer.display_name()));
+                        app.messages.show(format!("Saved {}", app.buffer.display_name()));
                         refresh_git(app);
                     }
-                    Err(e) => app.message = Some(format!("Error: {e}")),
+                    Err(e) => app.messages.show(format!("Error: {e}")),
                 }
             }
             return;
         }
         Command::WriteAs(_) if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) => {
-            app.message = Some("Special buffer — nothing to save".into());
+            app.messages.show("Special buffer — nothing to save");
             return;
         }
         Command::WriteAs(path) => {
             let path = path.clone();
             match app.buffer.save(Some(&path), false) {
                 Ok(()) => {
-                    app.message = Some(format!("Saved {path}"));
+                    app.messages.show(format!("Saved {path}"));
                     refresh_git(app);
                 }
-                Err(e) => app.message = Some(format!("Error: {e}")),
+                Err(e) => app.messages.show(format!("Error: {e}")),
             }
             return;
         }
@@ -493,7 +428,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             if unsaved.is_empty() {
                 app.should_quit = true;
             } else {
-                app.message = Some(format!(
+                app.messages.show(format!(
                     "Unsaved changes in {} — :w to write, :q! to force quit",
                     unsaved.join(", ")
                 ));
@@ -515,7 +450,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     match nb.save() {
                         Ok(()) => true,
                         Err(e) => {
-                            app.message = Some(format!("Error: {e}"));
+                            app.messages.show(format!("Error: {e}"));
                             false
                         }
                     }
@@ -526,7 +461,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 match app.buffer.save(None, false) {
                     Ok(()) => true,
                     Err(e) => {
-                        app.message = Some(format!("Error: {e}"));
+                        app.messages.show(format!("Error: {e}"));
                         false
                     }
                 }
@@ -536,7 +471,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 if unsaved.is_empty() {
                     app.should_quit = true;
                 } else {
-                    app.message = Some(format!(
+                    app.messages.show(format!(
                         "Saved — but unsaved changes remain in {} (:q! to discard)",
                         unsaved.join(", ")
                     ));
@@ -556,7 +491,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 let name = app.buffer.path.as_ref()
                     .and_then(|p| p.to_str())
                     .unwrap_or("this buffer");
-                app.message = Some(format!("Cannot close special buffer {name}"));
+                app.messages.show(format!("Cannot close special buffer {name}"));
                 return;
             }
 
@@ -567,8 +502,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.buffer.modified
             };
             if is_modified && !force {
-                app.message = Some(
-                    "Buffer modified — save with :w or use :bd! to force close".into(),
+                app.messages.show(
+                    "Buffer modified — save with :w or use :bd! to force close",
                 );
                 return;
             }
@@ -625,7 +560,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 lsp::open_file_at(app, &next, 0, 0);
             }
 
-            app.message = Some("Buffer closed".into());
+            app.messages.show("Buffer closed");
             return;
         }
 
@@ -672,9 +607,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     } else {
                         format!("exit code: {}", out.status)
                     };
-                    app.message = Some(msg);
+                    app.messages.show(msg);
                 }
-                Err(e) => app.message = Some(format!("shell error: {e}")),
+                Err(e) => app.messages.show(format!("shell error: {e}")),
             }
             return;
         }
@@ -731,48 +666,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
             execute(app, &Command::NotebookNextCell);
             return;
         }
-        Command::NotebookUndoStructural => {
-            let snap = {
-                let current = app.notebook.as_ref()
-                    .map(|(nb, state)| (state.focused_cell, nb.cells.clone()));
-                if let Some((focused, cells)) = current {
-                    if let Some((_, ref mut state)) = app.notebook {
-                        state.pop_snapshot_undo(focused, &cells)
-                    } else { None }
-                } else { None }
-            };
-            if let Some((focused, cells)) = snap {
-                if let Some((ref mut nb, ref mut state)) = app.notebook {
-                    nb.cells = cells;
-                    nb.modified = true;
-                    state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                }
-                notebook::after_structural_edit(app);
-            } else {
-                app.message = Some("Nothing to undo".into());
-            }
-            return;
-        }
-        Command::NotebookRedoStructural => {
-            let snap = {
-                let current = app.notebook.as_ref()
-                    .map(|(nb, state)| (state.focused_cell, nb.cells.clone()));
-                if let Some((focused, cells)) = current {
-                    if let Some((_, ref mut state)) = app.notebook {
-                        state.pop_snapshot_redo(focused, &cells)
-                    } else { None }
-                } else { None }
-            };
-            if let Some((focused, cells)) = snap {
-                if let Some((ref mut nb, ref mut state)) = app.notebook {
-                    nb.cells = cells;
-                    nb.modified = true;
-                    state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                }
-                notebook::after_structural_edit(app);
-            } else {
-                app.message = Some("Nothing to redo".into());
-            }
+        Command::NotebookUndoStructural | Command::NotebookRedoStructural => {
+            let redo = matches!(cmd, Command::NotebookRedoStructural);
+            notebook::structural_history_step(app, redo);
             return;
         }
         Command::NotebookNewCellBelow => {
@@ -912,24 +808,24 @@ pub fn execute(app: &mut App, cmd: &Command) {
             let lang = match app.current_language() {
                 Some(l) => l.to_owned(),
                 None => {
-                    app.message = Some("No formatter configured for this file type".into());
+                    app.messages.show("No formatter configured for this file type");
                     return;
                 }
             };
             let path = match app.buffer.path.clone() {
                 Some(p) => p,
                 None => {
-                    app.message = Some("Save the file before formatting".into());
+                    app.messages.show("Save the file before formatting");
                     return;
                 }
             };
             if !app.lsp.is_ready(&lang) {
-                app.message = Some("No formatter configured (add [formatters.python] to config, or wait for LSP)".into());
+                app.messages.show("No formatter configured (add [formatters.python] to config, or wait for LSP)");
                 return;
             }
             let tab_size = app.config.editor.tab_width;
             if !app.lsp.format_document(&lang, &path, tab_size, true) {
-                app.message = Some("No formatter configured — add [formatters.<lang>] to your config".into());
+                app.messages.show("No formatter configured — add [formatters.<lang>] to your config");
             }
             return;
         }
@@ -937,7 +833,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             let path = match crate::config::config_file_path() {
                 Some(p) => p,
                 None => {
-                    app.message = Some("Could not determine config file path".into());
+                    app.messages.show("Could not determine config file path");
                     return;
                 }
             };
@@ -956,7 +852,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             keymap.apply_custom_bindings(&config.keys);
             app.config = config;
             app.keymap = keymap;
-            app.message = Some("Config reloaded".into());
+            app.messages.show("Config reloaded");
             return;
         }
 
@@ -1017,50 +913,6 @@ pub fn execute(app: &mut App, cmd: &Command) {
     update_scroll(app);
 }
 
-/// If the cursor is inside a hidden fold region, move it to the fold's start line.
-pub fn normalize_cursor_folds(app: &mut App) {
-    if app.fold.ranges.is_empty() { return; }
-    let rope = &app.buffer.rope;
-    if rope.len_chars() == 0 { return; }
-    let pos = app.selection.head.min(rope.len_chars());
-    let line_idx = rope.char_to_line(pos);
-    if app.fold.is_hidden(line_idx) {
-        let vis_line = app.fold.normalize_line(line_idx);
-        let new_pos = rope.line_to_char(vis_line);
-        app.selection = Selection::point(new_pos);
-    }
-}
-
-/// Direction-aware version: if cursor landed inside a hidden fold, snap to
-/// fold_start when moving backward/up or to fold_end+1 when moving forward/down.
-fn normalize_cursor_folds_directional(app: &mut App, pre_exec_line: usize) {
-    if app.fold.ranges.is_empty() { return; }
-    let rope = &app.buffer.rope;
-    if rope.len_chars() == 0 { return; }
-    let pos = app.selection.head.min(rope.len_chars());
-    let line_idx = rope.char_to_line(pos);
-    if !app.fold.is_hidden(line_idx) { return; }
-
-    let moved_forward = line_idx > pre_exec_line;
-
-    if moved_forward {
-        // Moving down/forward: jump past the fold to the first line after it.
-        // Find the fold that contains this hidden line.
-        let snap_line = app.fold.folded.iter()
-            .filter_map(|&start| app.fold.range_starting_at(start))
-            .find(|&(s, e)| line_idx > s && line_idx <= e)
-            .map(|(_, e)| (e + 1).min(rope.len_lines().saturating_sub(1)))
-            .unwrap_or_else(|| app.fold.normalize_line(line_idx));
-        let new_pos = rope.line_to_char(snap_line);
-        app.selection = Selection::point(new_pos);
-    } else {
-        // Moving up/backward: snap to the fold start line.
-        let vis_line = app.fold.normalize_line(line_idx);
-        let new_pos = rope.line_to_char(vis_line);
-        app.selection = Selection::point(new_pos);
-    }
-}
-
 /// Switch the focused notebook cell to `new_idx` (clamped to the valid range),
 /// flushing the current cell to the LSP and notebook model first and loading the
 /// target cell into `app.buffer`. The cursor lands at the start of the new cell;
@@ -1103,103 +955,6 @@ fn place_cursor_at_line(app: &mut App, line_idx: usize, col: usize) {
         line_start + col.min(content_len - 1)
     };
     app.selection = Selection::point(head);
-}
-
-/// Cycle through `open_buffers` by `delta` (+1 = next, -1 = prev).
-fn navigate_buffer(app: &mut App, delta: i32) {
-    let n = app.open_buffers.len();
-    if n <= 1 {
-        return;
-    }
-
-    let current_canon = if let Some((ref nb, _)) = app.notebook {
-        nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone())
-    } else if let Some(ref p) = app.buffer.path {
-        p.canonicalize().unwrap_or_else(|_| p.clone())
-    } else {
-        return;
-    };
-
-    let current_idx = app.open_buffers.iter().position(|p| {
-        p.canonicalize().unwrap_or_else(|_| p.clone()) == current_canon
-    });
-
-    let idx = match current_idx {
-        Some(i) => ((i as i32 + delta).rem_euclid(n as i32)) as usize,
-        None => 0,
-    };
-
-    let target = app.open_buffers[idx].clone();
-    if is_special_path(&target) {
-        switch_to_special_buffer(app, target.to_str().unwrap_or("*scratch*"));
-    } else if target.extension().and_then(|e| e.to_str()) == Some("ipynb") {
-        open_as_notebook(app, &target);
-    } else {
-        lsp::open_file_at(app, &target, 0, 0);
-    }
-}
-
-/// Open a `.ipynb` file as a notebook, replacing whatever is currently open.
-/// Called when the user selects a notebook from the buffer picker.
-pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
-    use crate::{notebook::Notebook, notebook_state::NotebookState};
-
-    // Save scratch content when leaving it.
-    save_current_special_buffer(app);
-
-    // Stash or close whatever is currently open.
-    if app.notebook.is_some() {
-        notebook::stash_current_notebook(app);
-    } else {
-        if let (Some(ref lang), Some(ref old_path)) =
-            (app.lsp_language.clone(), app.buffer.path.clone())
-        {
-            if !is_special_path(old_path) {
-                app.lsp.did_close(lang, old_path);
-            }
-        }
-        stash_current_file_buffer(app);
-    }
-
-    // Restore from stash if we've visited this notebook before (preserves unsaved edits).
-    if notebook::restore_stashed_notebook(app, path) {
-        register_buffer(&mut app.open_buffers, path);
-        app.message = Some(format!(
-            "Opened {}",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
-        ));
-        return;
-    }
-
-    let nb = match Notebook::from_path(path) {
-        Ok(n) => n,
-        Err(e) => {
-            app.message = Some(format!("Failed to open notebook: {e}"));
-            return;
-        }
-    };
-
-    let lang = nb.metadata.kernel_language.clone();
-    app.notebook = Some((nb, NotebookState::new()));
-    app.cell_focused_edit = false;
-    app.mode = Mode::Normal;
-    app.lsp_language = Some(lang);
-    // Load cell 0 into the buffer — this sets the buffer/path/highlighter,
-    // resets the selection + scroll, and opens the cell with the LSP.
-    notebook::load_focused_cell(app);
-    // Register the whole notebook with a notebook-aware server. When the server
-    // is still initializing this is a no-op; the Initialized event re-runs it.
-    notebook::notebook_lsp_open(app);
-
-    register_buffer(&mut app.open_buffers, path);
-
-    app.message = Some(format!(
-        "Opened {}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
-    ));
-
-    // Offer to restore unsaved cells from a previous crash, if any.
-    crate::recovery::offer_on_open(app, path);
 }
 
 /// Execute a slice of commands in order.
@@ -1321,432 +1076,6 @@ pub fn rebuild_diag_cache(app: &mut App) {
                     .push((d.col_start, d.col_end, d.severity.clone()));
             }
         }
-    }
-}
-
-/// Update scroll_row / scroll_col so the cursor is visible.
-///
-/// Uses the stored viewport dimensions (`app.viewport_height` / `app.viewport_width`)
-/// which are refreshed at the top of every render frame.  This is the single
-/// authoritative scroll function.
-pub fn update_scroll(app: &mut App) {
-    let visible_rows = app.viewport_height;
-    let git_col = if app.config.editor.git_gutter && app.notebook.is_none() { 1usize } else { 0 };
-    let gutter_width = if app.config.editor.line_numbers { 5 + git_col } else { git_col };
-    let visible_cols = app.viewport_width.saturating_sub(gutter_width);
-    let word_wrap = app.config.editor.word_wrap;
-
-    let rope = &app.buffer.rope;
-    if rope.len_chars() == 0 {
-        app.scroll_row = 0;
-        app.scroll_col = 0;
-        return;
-    }
-    if visible_rows == 0 || visible_cols == 0 {
-        return;
-    }
-
-    let pos = app.selection.head.min(rope.len_chars());
-    let line_idx = rope.char_to_line(pos);
-    let total_lines = rope.len_lines();
-    let scroll_off = app.config.editor.scroll_off;
-    let tab_width = app.config.editor.tab_width;
-
-    if app.notebook.is_some() && !app.notebook_focused_edit() {
-        // Editing within the focused cell.  The cell is in `app.buffer`, but it
-        // does not fill the viewport: cells above it (and its own top border)
-        // push its content downward.  We first keep the focused cell visible at
-        // the cell granularity, then scroll *within* the cell so the cursor
-        // stays inside the rows actually available below that offset — the same
-        // text-buffer behaviour you'd expect, rather than letting the cursor
-        // slide off the bottom of the screen.
-        let image_rows = app.config.notebook.image_rows;
-        let cell_px = app.graphics.cell_pixel_size;
-        let avail_cols = app.viewport_width.saturating_sub(2) as u16;
-        let mut new_scroll_row = app.scroll_row;
-        if let Some((nb, state)) = app.notebook.as_mut() {
-            state.ensure_focused_visible(
-                &nb.cells, visible_rows, rope, image_rows, cell_px, avail_cols,
-            );
-            let focused = state.focused_cell.min(nb.cells.len().saturating_sub(1));
-            // Rows consumed above the focused cell's content: each fully-shown
-            // preceding cell plus the 1-row inter-cell gap, then the focused
-            // cell's own top border.
-            let mut content_top = 0usize;
-            for idx in state.scroll_cell..focused {
-                let h = if state.is_cell_folded(idx) {
-                    3
-                } else {
-                    crate::notebook_ui::cell_display_height(
-                        &nb.cells[idx].source, &nb.cells[idx], image_rows, cell_px, avail_cols,
-                    ) as usize
-                };
-                content_top += h + 1;
-            }
-            content_top += 1; // top border of the focused cell
-
-            let avail = visible_rows.saturating_sub(content_top).max(1);
-            let so = scroll_off.min(avail.saturating_sub(1) / 2);
-            if line_idx < new_scroll_row + so || new_scroll_row > line_idx {
-                new_scroll_row = line_idx.saturating_sub(so);
-            } else if line_idx + so + 1 > new_scroll_row + avail {
-                new_scroll_row = (line_idx + so + 1).saturating_sub(avail);
-            }
-            let max_scroll = total_lines.saturating_sub(1);
-            if new_scroll_row > max_scroll {
-                new_scroll_row = max_scroll;
-            }
-        }
-        app.scroll_row = new_scroll_row;
-    } else {
-        // Normalize scroll_row so it never points inside a hidden fold region.
-        app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
-
-        // Vertical — fold+wrap-aware row count from scroll_row to cursor line.
-        let vdist = if word_wrap {
-            wrap_visible_row_count(app, app.scroll_row, line_idx, visible_cols, tab_width)
-        } else {
-            app.fold.visible_row_count(app.scroll_row, line_idx, total_lines)
-        };
-
-        if vdist < scroll_off || app.scroll_row > line_idx {
-            // Cursor too close to top (or above scroll area): scroll up.
-            let desired = scroll_off.min(line_idx);
-            app.scroll_row = if word_wrap {
-                wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
-            } else {
-                app.fold.scroll_row_for_cursor(line_idx, desired)
-            };
-        } else if vdist + scroll_off >= visible_rows {
-            // Cursor too close to bottom: scroll down.
-            let desired = visible_rows.saturating_sub(scroll_off + 1);
-            app.scroll_row = if word_wrap {
-                wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
-            } else {
-                app.fold.scroll_row_for_cursor(line_idx, desired)
-            };
-        }
-    }
-
-    if word_wrap {
-        // No horizontal scrolling when wrapping.
-        app.scroll_col = 0;
-        return;
-    }
-
-    // Horizontal — accurate display-column calculation (handles tabs)
-    let line_start = rope.line_to_char(line_idx);
-    let line_str = rope.line(line_idx);
-    let cursor_off = pos - line_start;
-    let mut display_col: usize = 0;
-    for i in 0..cursor_off {
-        display_col +=
-            crate::render_util::char_display_width(line_str.char(i), display_col, tab_width);
-    }
-
-    if display_col < app.scroll_col {
-        app.scroll_col = display_col;
-    }
-    if display_col >= app.scroll_col + visible_cols {
-        app.scroll_col = display_col.saturating_sub(visible_cols) + 1;
-    }
-}
-
-/// Count visual rows from `from` (inclusive) to `to` (exclusive), accounting
-/// for folds and word-wrap.  `text_width` is the number of display columns
-/// available for text (viewport minus gutter).
-fn wrap_visible_row_count(
-    app: &App,
-    from: usize,
-    to: usize,
-    text_width: usize,
-    tab_width: usize,
-) -> usize {
-    let rope = &app.buffer.rope;
-    let total_lines = rope.len_lines();
-    let mut count = 0;
-    let mut line = from;
-    while line < to && line < total_lines {
-        if app.fold.is_hidden(line) {
-            line += 1;
-            continue;
-        }
-        if let Some(end) = app.fold.fold_end_at(line) {
-            count += 1;
-            line = end + 1;
-        } else {
-            count += crate::ui::visual_line_height(rope, line, text_width, tab_width);
-            line += 1;
-        }
-    }
-    count
-}
-
-/// Walk backward from `cursor_line` by `desired_vrows` visual rows (fold+wrap
-/// aware) and return the resulting scroll_row.
-fn wrap_scroll_row_for_cursor(
-    fold: &crate::fold::FoldState,
-    rope: &ropey::Rope,
-    cursor_line: usize,
-    desired_vrows: usize,
-    text_width: usize,
-    tab_width: usize,
-) -> usize {
-    let mut line = cursor_line;
-    let mut remaining = desired_vrows;
-
-    while remaining > 0 && line > 0 {
-        line -= 1;
-        if let Some(start) = fold.fold_start_hiding(line) {
-            line = start;
-        }
-        let height = if fold.is_hidden(line) {
-            0
-        } else if fold.fold_end_at(line).is_some() {
-            1
-        } else {
-            crate::ui::visual_line_height(rope, line, text_width, tab_width)
-        };
-        remaining = remaining.saturating_sub(height);
-    }
-    line
-}
-
-// ---------------------------------------------------------------------------
-// Shell formatter
-// ---------------------------------------------------------------------------
-
-/// Run the configured shell formatter for the current buffer's language.
-///
-/// Flow: save buffer → run `command args... <file>` → reload formatted content.
-///
-/// Returns `true` if a formatter was configured and was attempted (the caller
-/// should not try anything else for this save/format cycle).
-/// Returns `false` if no formatter is configured for this language (caller
-/// should fall back to LSP or a plain save).
-fn run_shell_formatter(app: &mut App) -> bool {
-    let path = match app.buffer.path.clone() {
-        Some(p) => p,
-        None => return false,
-    };
-    if is_special_path(&path) {
-        return false;
-    }
-    let lang = match app.current_language() {
-        Some(l) => l.to_owned(),
-        None => return false,
-    };
-    let fmt = match app.config.formatters.get(&lang).cloned() {
-        Some(f) => f,
-        None => return false,
-    };
-
-    // Save current buffer content to disk first so the formatter sees it.
-    if let Err(e) = app.buffer.save(None, false) {
-        app.message = Some(format!("Could not save before formatting: {e}"));
-        return true;
-    }
-
-    let result = std::process::Command::new(&fmt.command)
-        .args(&fmt.args)
-        .arg(&path)
-        .output();
-
-    match result {
-        Ok(out) if out.status.success() => {
-            // Reload the formatter's output back into the buffer.
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    app.buffer.rope = ropey::Rope::from_str(&content);
-                    app.buffer.modified = false;
-                    // The formatter rewrote the file; re-stat so the next save's
-                    // external-modification check doesn't false-positive.
-                    app.buffer.refresh_disk_mtime();
-                    recompute_highlights(app);
-                    lsp::lsp_did_change(app);
-                    refresh_git(app);
-                }
-                Err(e) => {
-                    app.message = Some(format!("Could not reload after format: {e}"));
-                }
-            }
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let msg = stderr.trim();
-            app.message = Some(if msg.is_empty() {
-                format!("Formatter exited with code {}", out.status.code().unwrap_or(-1))
-            } else {
-                msg.chars().take(200).collect()
-            });
-        }
-        Err(e) => {
-            app.message = Some(format!("Formatter '{}': {e}", fmt.command));
-        }
-    }
-    true
-}
-
-// ---------------------------------------------------------------------------
-// Buffer list helpers
-// ---------------------------------------------------------------------------
-
-/// Resolve the directory new files should be created in: the directory of the
-/// open notebook or current buffer, falling back to the working directory for
-/// special buffers (scratch / messages / dashboard) or unnamed buffers.
-fn current_buffer_dir(app: &App) -> std::path::PathBuf {
-    if let Some((ref nb, _)) = app.notebook {
-        return crate::notebook::notebook_dir(&nb.path);
-    }
-    app.buffer.path.as_deref()
-        .filter(|p| !is_special_path(p))
-        .and_then(|p| p.parent())
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
-}
-
-/// Resolve `name` against the current buffer's directory (absolute names are
-/// used verbatim).
-fn resolve_new_path(app: &App, name: &str) -> std::path::PathBuf {
-    let p = std::path::Path::new(name);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        current_buffer_dir(app).join(p)
-    }
-}
-
-/// Create an empty file in the current buffer's directory and open it.
-/// If it already exists, just open it instead of clobbering.
-/// Called from the minibuffer `Prompt` handler once a name has been entered.
-pub(crate) fn create_new_file(app: &mut App, name: &str) {
-    let name = name.trim();
-    if name.is_empty() {
-        app.message = Some("Usage: :new-file <name>".into());
-        return;
-    }
-    let path = resolve_new_path(app, name);
-    if path.exists() {
-        app.message = Some(format!("{name} already exists — opening"));
-        lsp::open_file_at(app, &path, 0, 0);
-        return;
-    }
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            app.message = Some(format!("Could not create directory: {e}"));
-            return;
-        }
-    }
-    if let Err(e) = std::fs::write(&path, "") {
-        app.message = Some(format!("Could not create file: {e}"));
-        return;
-    }
-    lsp::open_file_at(app, &path, 0, 0);
-    app.message = Some(format!("Created {name}"));
-}
-
-/// Create a valid empty `.ipynb` notebook in the current buffer's directory and
-/// open it in the notebook interface.  If it already exists, just open it.
-/// Called from the minibuffer `Prompt` handler once a name has been entered.
-pub(crate) fn create_new_notebook(app: &mut App, name: &str) {
-    let name = name.trim();
-    if name.is_empty() {
-        app.message = Some("Usage: :new-notebook <name>".into());
-        return;
-    }
-    // Ensure the file carries the .ipynb extension so it opens as a notebook.
-    let mut name = name.to_string();
-    if std::path::Path::new(&name).extension().and_then(|e| e.to_str()) != Some("ipynb") {
-        name.push_str(".ipynb");
-    }
-    let path = resolve_new_path(app, &name);
-    if path.exists() {
-        app.message = Some(format!("{name} already exists — opening"));
-        open_as_notebook(app, &path);
-        return;
-    }
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            app.message = Some(format!("Could not create directory: {e}"));
-            return;
-        }
-    }
-    if let Err(e) = std::fs::write(&path, crate::notebook::empty_notebook_json()) {
-        app.message = Some(format!("Could not create notebook: {e}"));
-        return;
-    }
-    open_as_notebook(app, &path);
-    app.message = Some(format!("Created {name}"));
-}
-
-/// Stash the current plain-file buffer so unsaved edits and undo history
-/// survive switching away (the buffer is otherwise reloaded from disk when the
-/// user comes back).  No-op for notebooks (stashed separately via
-/// `notebook::stash_current_notebook`), special buffers, and path-less buffers.
-/// Leaves `app.buffer` empty — every caller immediately replaces it.
-pub(crate) fn stash_current_file_buffer(app: &mut App) {
-    if app.notebook.is_some() {
-        return;
-    }
-    let Some(path) = app.buffer.path.clone() else { return };
-    if is_special_path(&path) {
-        return;
-    }
-    let key = path.canonicalize().unwrap_or(path);
-    let buf = std::mem::replace(&mut app.buffer, crate::buffer::Buffer::new_empty());
-    app.file_buffers.insert(key, buf);
-}
-
-/// Remove and return the stashed buffer for `path`, if one exists.
-pub(crate) fn take_stashed_file_buffer(
-    app: &mut App,
-    path: &std::path::Path,
-) -> Option<crate::buffer::Buffer> {
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    app.file_buffers.remove(&key)
-}
-
-/// Names of every buffer holding unsaved changes, anywhere in the session:
-/// the active buffer/notebook, stashed notebooks, and stashed plain files.
-/// Special buffers (scratch/messages) are excluded — they are throwaway by
-/// design and covered by crash recovery.
-pub(crate) fn unsaved_buffer_names(app: &App) -> Vec<String> {
-    fn short(p: &std::path::Path) -> String {
-        p.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| p.to_string_lossy().into_owned())
-    }
-    let mut names = Vec::new();
-    if let Some((nb, _)) = &app.notebook {
-        if nb.modified {
-            names.push(short(&nb.path));
-        }
-    } else if app.buffer.modified {
-        if let Some(p) = app.buffer.path.as_deref().filter(|p| !is_special_path(p)) {
-            names.push(short(p));
-        }
-    }
-    for (path, (nb, _)) in &app.notebook_buffers {
-        if nb.modified {
-            names.push(short(path));
-        }
-    }
-    for (path, buf) in &app.file_buffers {
-        if buf.modified {
-            names.push(short(path));
-        }
-    }
-    names
-}
-
-/// Append `path` to `open_buffers` if it is not already present (by canonical path).
-fn register_buffer(open_buffers: &mut Vec<std::path::PathBuf>, path: &std::path::Path) {
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !open_buffers.iter().any(|stored| {
-        stored.canonicalize().unwrap_or_else(|_| stored.clone()) == canon
-    }) {
-        open_buffers.push(canon);
     }
 }
 
@@ -1887,9 +1216,9 @@ mod tests {
         execute(&mut app, &Command::Quit);
         assert!(!app.should_quit, "quit must be blocked by stashed dirty buffer");
         assert!(
-            app.message.as_deref().unwrap_or("").contains("dirty.txt"),
+            app.messages.current().unwrap_or("").contains("dirty.txt"),
             "message should name the dirty buffer: {:?}",
-            app.message
+            app.messages.current()
         );
 
         // :q! still force-quits.
@@ -1924,7 +1253,7 @@ mod tests {
             "theirs\n",
             ":w must not clobber an externally-modified file"
         );
-        assert!(app.message.as_deref().unwrap_or("").contains("changed on disk"));
+        assert!(app.messages.current().unwrap_or("").contains("changed on disk"));
 
         execute(&mut app, &Command::WriteForce);
         assert_eq!(

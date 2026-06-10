@@ -31,7 +31,7 @@ pub fn search_compute_matches(app: &mut App) {
 pub fn search_jump(app: &mut App, reverse: bool) {
     if app.search.matches.is_empty() {
         if !app.search.query.is_empty() {
-            app.message = Some(format!("No matches for \"{}\"", app.search.query));
+            app.messages.show(format!("No matches for \"{}\"", app.search.query));
         }
         return;
     }
@@ -48,7 +48,7 @@ pub fn search_jump(app: &mut App, reverse: bool) {
     }
     app.selection = Selection::point(app.search.matches[app.search.current]);
     super::update_scroll(app);
-    app.message = Some(format!(
+    app.messages.show(format!(
         "Match {}/{} for \"{}\"",
         app.search.current + 1,
         count,

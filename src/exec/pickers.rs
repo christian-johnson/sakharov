@@ -90,7 +90,7 @@ pub(super) fn grep_project(app: &mut App) {
                 .collect()
         }
         Err(_) => {
-            app.message = Some("grep not available".into());
+            app.messages.show("grep not available");
             return;
         }
     };
@@ -115,7 +115,7 @@ pub(super) fn buffer_picker(app: &mut App) {
         })
         .collect();
     if items.is_empty() {
-        app.message = Some("No open buffers".into());
+        app.messages.show("No open buffers");
         return;
     }
     let mut popup = crate::popup::Popup::navigate("buffers", items);
@@ -142,7 +142,7 @@ pub(super) fn symbol_picker(app: &mut App) {
     });
     let syms = symbols::extract_symbols(&app.buffer.rope, &lang);
     if syms.is_empty() {
-        app.message = Some("No symbols found".into());
+        app.messages.show("No symbols found");
         return;
     }
     let items: Vec<crate::popup::ListItem> = syms
@@ -187,7 +187,7 @@ pub(super) fn diagnostic_picker(app: &mut App) {
         }
     }
     if items.is_empty() {
-        app.message = Some("No diagnostics".into());
+        app.messages.show("No diagnostics");
         return;
     }
     items.sort_by(|a, b| {
@@ -248,7 +248,7 @@ fn open_file_picker_popup(app: &mut App) {
     items.sort_by(|a, b| a.label.cmp(&b.label));
 
     if items.is_empty() {
-        app.message = Some("No files found".into());
+        app.messages.show("No files found");
         return;
     }
 
@@ -356,7 +356,7 @@ fn open_file_external_picker(app: &mut App, cmd: &str) {
         match output {
             Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
             Err(e) => {
-                app.message = Some(format!("File picker error: {e}"));
+                app.messages.show(format!("File picker error: {e}"));
                 return;
             }
         }

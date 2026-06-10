@@ -74,6 +74,25 @@ pub fn style_for_highlight(index: usize) -> Style {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UI palette constants — the single home for colors used by the renderers.
+// (Syntax colors come from `style_for_highlight`; chip/cursor colors from
+// `[theme.modes]` config via `mode_color`.)
+// ---------------------------------------------------------------------------
+
+/// Background of every floating popup (pickers, completion, docs, which-key).
+pub const POPUP_BG: Color = Color::Rgb(28, 28, 40);
+/// Popup scrollbar track/thumb tint.
+pub const POPUP_SCROLLBAR: Color = Color::Rgb(100, 100, 180);
+/// Accent for fold arrows / fold badges.
+pub const ACCENT: Color = Color::Rgb(255, 160, 50);
+/// Background of a pending (not-yet-typed) `gw` jump label.
+pub const JUMP_LABEL_BG: Color = Color::Rgb(255, 160, 0);
+/// Notebook cell interior background.
+pub const CELL_BG: Color = Color::Rgb(20, 20, 30);
+/// Selection highlight inside notebook cells.
+pub const CELL_SELECTION_BG: Color = Color::Rgb(60, 80, 120);
+
 /// Style for selected text.
 pub fn selection_style() -> Style {
     Style::default().fg(Color::Black).bg(Color::Blue)

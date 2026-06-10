@@ -233,7 +233,7 @@ fn render_cells(
             .borders(Borders::ALL)
             .border_type(if is_focused { BorderType::Thick } else { BorderType::Rounded })
             .border_style(Style::default().fg(border_color))
-            .style(Style::default().bg(Color::Rgb(20, 20, 30)));
+            .style(Style::default().bg(crate::theme::CELL_BG));
 
         let inner = block.inner(cell_rect);
         frame.render_widget(block, cell_rect);
@@ -448,7 +448,7 @@ fn render_folded_cell_summary_rope(
     let mut x = row.x;
 
     let content_style = Style::default().fg(Color::Rgb(120, 120, 150));
-    let arrow_style = Style::default().fg(Color::Rgb(255, 160, 50));
+    let arrow_style = Style::default().fg(crate::theme::ACCENT);
     let count_style = Style::default().fg(Color::DarkGray);
 
     for c in format!("  {content}").chars() {
@@ -637,7 +637,7 @@ fn render_source_line(
     }
     let content_area = Rect { x: content_x, y: area.y, width: content_width, height: 1 };
     let cursor_style = crate::theme::cursor_style(ctx.mode, ctx.mode_colors);
-    let selection_style = Style::default().bg(Color::Rgb(60, 80, 120)).fg(Color::White);
+    let selection_style = Style::default().bg(crate::theme::CELL_SELECTION_BG).fg(Color::White);
     let (sel_lo, sel_hi) = ctx.sel_range;
     let has_selection = sel_lo != sel_hi;
 

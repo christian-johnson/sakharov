@@ -63,6 +63,38 @@ pub(super) fn insert_new_cell(app: &mut App, above: bool) {
     after_structural_edit(app);
 }
 
+/// Apply one structural undo (or redo) step: pop the snapshot, restore the
+/// cell list + focus, and run the structural-edit fix-up ritual.
+pub(super) fn structural_history_step(app: &mut App, redo: bool) {
+    let snap = {
+        let current = app.notebook.as_ref()
+            .map(|(nb, state)| (state.focused_cell, nb.cells.clone()));
+        if let Some((focused, cells)) = current {
+            if let Some((_, ref mut state)) = app.notebook {
+                if redo {
+                    state.pop_snapshot_redo(focused, &cells)
+                } else {
+                    state.pop_snapshot_undo(focused, &cells)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some((focused, cells)) = snap {
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells = cells;
+            nb.modified = true;
+            state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
+        }
+        after_structural_edit(app);
+    } else {
+        app.messages.show(if redo { "Nothing to redo" } else { "Nothing to undo" });
+    }
+}
+
 /// Snapshot the full cell list before a structural mutation (undo support).
 pub(super) fn push_cell_snapshot(app: &mut App) {
     let snapshot = app.notebook.as_ref()
@@ -176,7 +208,7 @@ pub(super) fn execute_focused_cell(app: &mut App) {
             }
         }
         app.mode = crate::mode::Mode::Normal;
-        app.message = Some("Rendered markdown".into());
+        app.messages.show("Rendered markdown");
         return;
     }
 
@@ -185,7 +217,7 @@ pub(super) fn execute_focused_cell(app: &mut App) {
         .map(|(_, state)| state.executing_cell.is_some())
         .unwrap_or(false);
     if busy {
-        app.message = Some("Kernel busy — wait or :interrupt-kernel".into());
+        app.messages.show("Kernel busy — wait or :interrupt-kernel");
         return;
     }
 
@@ -195,13 +227,13 @@ pub(super) fn execute_focused_cell(app: &mut App) {
             match nb.start_kernel(&nb_dir) {
                 Ok(found_venv) => {
                     if !found_venv {
-                        app.message = Some(
-                            "Kernel started (no venv found — using system python3)".into(),
+                        app.messages.show(
+                            "Kernel started (no venv found — using system python3)",
                         );
                     }
                 }
                 Err(e) => {
-                    app.message = Some(format!("Kernel start failed: {e}"));
+                    app.messages.show(format!("Kernel start failed: {e}"));
                     return;
                 }
             }
@@ -216,10 +248,10 @@ pub(super) fn execute_focused_cell(app: &mut App) {
                     Ok(()) => {
                         state.executing_cell = Some(idx);
                         nb.modified = true;
-                        app.message = Some(format!("Running cell [{}]…", idx + 1));
+                        app.messages.show(format!("Running cell [{}]…", idx + 1));
                     }
                     Err(e) => {
-                        app.message = Some(format!("Kernel error: {e}"));
+                        app.messages.show(format!("Kernel error: {e}"));
                         nb.kernel = None;
                     }
                 }
@@ -239,13 +271,13 @@ pub(super) fn restart_kernel(app: &mut App) {
         let nb_dir = crate::notebook::notebook_dir(&nb.path);
         match nb.start_kernel(&nb_dir) {
             Ok(found_venv) => {
-                app.message = Some(if found_venv {
-                    "Kernel restarted".into()
+                app.messages.show(if found_venv {
+                    "Kernel restarted"
                 } else {
-                    "Kernel restarted (no venv found — using system python3)".into()
+                    "Kernel restarted (no venv found — using system python3)"
                 });
             }
-            Err(e) => app.message = Some(format!("Kernel restart failed: {e}")),
+            Err(e) => app.messages.show(format!("Kernel restart failed: {e}")),
         }
     }
 }
@@ -255,9 +287,9 @@ pub(super) fn interrupt_kernel(app: &mut App) {
     if let Some((nb, _)) = app.notebook.as_ref() {
         if let Some(ref session) = nb.kernel {
             session.interrupt();
-            app.message = Some("Kernel interrupted".into());
+            app.messages.show("Kernel interrupted");
         } else {
-            app.message = Some("No kernel running".into());
+            app.messages.show("No kernel running");
         }
     }
 }
@@ -310,7 +342,7 @@ pub(super) fn convert_cell(app: &mut App, to_markdown: bool) {
     // The cell's LSP language id changed (python ↔ markdown) and its virtual
     // document must be reopened under the new language.
     after_structural_edit(app);
-    app.message = Some(if to_markdown { "Cell → markdown".into() } else { "Cell → code".into() });
+    app.messages.show(if to_markdown { "Cell → markdown" } else { "Cell → code" });
 }
 
 /// Delete the focused cell (a no-op on an empty notebook).

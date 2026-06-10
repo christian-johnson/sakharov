@@ -170,6 +170,35 @@ pub struct JumpState {
     pub typed: String,
 }
 
+/// The transient minibuffer message plus the persistent message log that
+/// powers the *Messages* special buffer.  `show` records to both, so the log
+/// is complete by construction (no frame-diffing needed).
+#[derive(Default)]
+pub struct Messages {
+    current: Option<String>,
+    /// Chronological log of every message shown in the minibuffer.
+    pub log: Vec<String>,
+}
+
+impl Messages {
+    /// Show `msg` in the minibuffer and append it to the *Messages* log.
+    pub fn show(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.log.push(msg.clone());
+        self.current = Some(msg);
+    }
+
+    /// Clear the minibuffer (the log keeps everything shown so far).
+    pub fn clear(&mut self) {
+        self.current = None;
+    }
+
+    /// The message currently shown in the minibuffer, if any.
+    pub fn current(&self) -> Option<&str> {
+        self.current.as_deref()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Central application state
 // ---------------------------------------------------------------------------
@@ -182,7 +211,8 @@ pub struct App {
     pub scroll_col: usize,
     pub mode: Mode,
     pub command_buf: String,
-    pub message: Option<String>,
+    /// Minibuffer message + the *Messages* log (see [`Messages`]).
+    pub messages: Messages,
     pub clipboard: String,
     pub should_quit: bool,
     /// True once the first edit has been made in the current Insert session.
@@ -245,12 +275,6 @@ pub struct App {
     pub last_rendered_mode: Option<Mode>,
     /// Code fold state for the plain-text editor (fold ranges + which are closed).
     pub fold: FoldState,
-    /// Chronological log of every message shown in the minibuffer.
-    /// Powers the *Messages* special buffer.
-    pub messages_log: Vec<String>,
-    /// The last message that was appended to `messages_log`, used to avoid
-    /// logging the same message twice when it persists across frames.
-    pub last_logged_message: Option<String>,
     /// Persisted rope content for special buffers (currently only *scratch*).
     pub special_buffer_ropes: std::collections::HashMap<String, ropey::Rope>,
     /// When true, the next `FormattingResult` event will also trigger a save.
@@ -388,7 +412,7 @@ impl App {
             scroll_col: 0,
             mode: initial_mode,
             command_buf: String::new(),
-            message: None,
+            messages: Messages::default(),
             clipboard: String::new(),
             should_quit: false,
             insert_session_active: false,
@@ -420,8 +444,6 @@ impl App {
                 ranges: initial_fold_ranges,
                 ..FoldState::default()
             },
-            messages_log: Vec::new(),
-            last_logged_message: None,
             pending_format_save: false,
             completion: CompletionState::default(),
             signature_help: None,
@@ -523,7 +545,7 @@ pub fn run(path: Option<&str>) -> Result<()> {
     }
     // Surface what was negotiated when key debugging is on (SV_DEBUG_KEYS=1).
     if std::env::var_os("SV_DEBUG_KEYS").is_some() {
-        app.message = Some(format!(
+        app.messages.show(format!(
             "keyboard enhancement: support={kbd_support:?} active={}  (logging keys to {})",
             KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst),
             key_debug_log_path().display(),
@@ -632,13 +654,8 @@ fn run_loop(
         // Debounced crash-recovery flush of any unsaved buffers.
         crate::recovery::tick(app);
 
-        // Append any new minibuffer message to the *Messages* log.
-        if app.message.as_deref() != app.last_logged_message.as_deref() {
-            if let Some(ref msg) = app.message {
-                app.messages_log.push(msg.clone());
-                app.last_logged_message = app.message.clone();
-            }
-        }
+        // (Messages are appended to the *Messages* log by `Messages::show`
+        // at the moment they are shown — no per-frame diffing needed.)
 
         // A catchable termination signal was received: break promptly. run()
         // flushes recovery, restores the terminal, and re-raises the signal.

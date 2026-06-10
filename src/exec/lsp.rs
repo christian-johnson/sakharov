@@ -15,14 +15,14 @@ pub(super) fn lsp_code_actions_request(app: &mut App) {
     let lang = match app.current_language() {
         Some(l) => l.to_owned(),
         None => {
-            app.message = Some("No language server configured for this file".into());
+            app.messages.show("No language server configured for this file");
             return;
         }
     };
     let path = match app.buffer.path.clone() {
         Some(p) => p,
         None => {
-            app.message = Some("Save the file before using LSP features".into());
+            app.messages.show("Save the file before using LSP features");
             return;
         }
     };
@@ -32,7 +32,7 @@ pub(super) fn lsp_code_actions_request(app: &mut App) {
     let rope = app.buffer.rope.clone();
 
     if !app.lsp.request_code_actions(&lang, &path, &rope, start_char, end_char) {
-        app.message = Some("LSP server initializing — try again in a moment".into());
+        app.messages.show("LSP server initializing — try again in a moment");
     }
 }
 
@@ -104,14 +104,14 @@ pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
     let lang = match app.current_language() {
         Some(l) => l.to_owned(),
         None => {
-            app.message = Some("No language server configured for this file".into());
+            app.messages.show("No language server configured for this file");
             return;
         }
     };
     let path = match app.buffer.path.clone() {
         Some(p) => p,
         None => {
-            app.message = Some("Save the file before using LSP features".into());
+            app.messages.show("Save the file before using LSP features");
             return;
         }
     };
@@ -119,7 +119,7 @@ pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
     let rope = app.buffer.rope.clone();
 
     if !app.lsp.request(kind, &lang, &path, &rope, char_idx) {
-        app.message = Some("LSP server initializing — try again in a moment".into());
+        app.messages.show("LSP server initializing — try again in a moment");
     }
 }
 
@@ -289,7 +289,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
         }
         LspEvent::HoverResult { content } => {
             if content.is_empty() {
-                app.message = Some("No documentation available".into());
+                app.messages.show("No documentation available");
             } else {
                 app.popup = Some(crate::popup::Popup::documentation("hover", &content));
             }
@@ -302,12 +302,12 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             if let Some(loc) = location {
                 jump_to_location(app, &loc);
             } else {
-                app.message = Some("No definition found".into());
+                app.messages.show("No definition found");
             }
         }
         LspEvent::ReferencesResult { locations } => {
             if locations.is_empty() {
-                app.message = Some("No references found".into());
+                app.messages.show("No references found");
             } else if locations.len() == 1 {
                 jump_to_location(app, &locations[0]);
             } else {
@@ -335,7 +335,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
         }
         LspEvent::CodeActionsResult { actions } => {
             if actions.is_empty() {
-                app.message = Some("No code actions available".into());
+                app.messages.show("No code actions available");
                 return;
             }
             let items: Vec<crate::popup::ListItem> = actions
@@ -512,7 +512,7 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     }
 
     let Some(path_str) = path.to_str() else {
-        app.message = Some(format!("Cannot open: {}", path.display()));
+        app.messages.show(format!("Cannot open: {}", path.display()));
         return;
     };
 
@@ -590,7 +590,7 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     super::rebuild_diag_cache(app);
 
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-    app.message = Some(format!("Opened {} (line {})", name, line + 1));
+    app.messages.show(format!("Opened {} (line {})", name, line + 1));
 
     // If a recovery file from a previous crash exists for this path, offer it.
     // Skipped when restoring from the in-session stash: the stash already
@@ -706,10 +706,10 @@ fn apply_workspace_edit(app: &mut App, edit: Value) {
 fn do_save(app: &mut App) {
     match app.buffer.save(None, false) {
         Ok(()) => {
-            app.message = Some(format!("Saved {}", app.buffer.display_name()));
+            app.messages.show(format!("Saved {}", app.buffer.display_name()));
             super::refresh_git(app);
         }
-        Err(e) => app.message = Some(format!("Error: {e}")),
+        Err(e) => app.messages.show(format!("Error: {e}")),
     }
 }
 

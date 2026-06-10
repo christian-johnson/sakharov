@@ -55,7 +55,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
     }
 
-    app.message = None;
+    app.messages.clear();
 
     let had_completion_popup = app.popup.as_ref()
         .map(|p| p.on_confirm == PopupTarget::InsertText)
@@ -99,7 +99,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.message = Some("use :q to quit, :q! to force quit".into());
+        app.messages.show("use :q to quit, :q! to force quit");
         return;
     }
 
@@ -390,7 +390,7 @@ fn handle_command(app: &mut App, key: KeyEvent) {
                 exec::execute(app, &cmd);
             } else if !input.is_empty() {
                 app.show_splash = false;
-                app.message = Some(format!("Unknown command: {input}"));
+                app.messages.show(format!("Unknown command: {input}"));
             }
         }
         KeyCode::Char(c) => {
@@ -409,7 +409,7 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
             app.command_buf.clear();
-            app.message = None;
+            app.messages.clear();
         }
         KeyCode::Backspace => {
             app.command_buf.pop();
@@ -502,7 +502,7 @@ fn handle_search(app: &mut App, key: KeyEvent, forward: bool) {
     match key.code {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
-            app.message = None;
+            app.messages.clear();
         }
         KeyCode::Backspace => {
             app.search.query.pop();
@@ -660,7 +660,7 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
                 crate::history::record(app, cmd.name());
                 exec::execute(app, &cmd);
             } else {
-                app.message = Some(format!("Unknown command: {text}"));
+                app.messages.show(format!("Unknown command: {text}"));
             }
         }
         PopupTarget::InsertText => {

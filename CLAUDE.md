@@ -278,7 +278,14 @@ src/
   exec/               — execute(app, cmd): the only place that mutates state in
                         response to commands. The execute() match is largely a
                         routing table; bodies live in the submodules below.
-    mod.rs            — execute() dispatch + buffers/files/folding handlers
+    mod.rs            — execute() dispatch, folding/notebook-motion handlers,
+                        refresh_git/poll_git, process_kernel_events, diag cache
+    buffers.rs        — buffer-list management: special buffers, buffer switch +
+                        stashes (plain-file & via notebook), open_as_notebook,
+                        new-file/new-notebook, unsaved_buffer_names quit sweep
+    scroll.rs         — update_scroll (the single authoritative scroll fn) +
+                        wrap helpers + fold-aware cursor normalisation
+    format.rs         — external shell formatters ([formatters.<lang>])
     text.rs           — text-editing command helpers (delete/change/paste/comment…)
     search.rs         — incremental search match computation + jump
     lsp.rs            — LSP request dispatch, event handling, did_change, jumps,
@@ -305,6 +312,8 @@ src/
   theme.rs            — highlight index → ratatui Style (incl. MD_* markup); terminal color queries
   lang.rs             — language id ↔ file extension mapping
   symbols.rs          — tree-sitter symbol extraction (buffer completions, picker)
+  render_util.rs      — helpers shared by ui.rs and notebook_ui.rs: SingleLineWidget,
+                        jump-label overlay, diagnostic underline, char_display_width
   spinner.rs          — "boiling" Braille status-bar spinner (random-dot-flip animation)
   statusline.rs       — starship-style status line: config-driven module lists (left/right),
                         shared by the plain editor + notebook view (Ctx + render)
@@ -339,6 +348,10 @@ docs/
 
 ### Key invariants
 - The `exec/` module is the only place that mutates `App` state in response to commands
+- Minibuffer messages go through `app.messages.show(...)` (see `app::Messages`), which appends
+  to the *Messages* log at show time — never write a message field directly
+- Renderer colors that aren't syntax/theme-config-driven live as constants in `theme.rs`
+  (`POPUP_BG`, `ACCENT`, `CELL_BG`, …) — don't scatter new `Color::Rgb` literals in the renderers
 - `Command::parse()`, `name()`, and the palette are generated from the single
   `commands!` table in `command.rs`, so they cannot drift. A test
   (`palette_entries_round_trip_through_parse`) enforces that every palette entry parses back.

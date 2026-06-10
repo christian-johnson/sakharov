@@ -20,7 +20,7 @@ pub(super) fn yank_selection(app: &mut App) {
     let text = app.buffer.rope.slice(start..end).to_string();
     app.clipboard = text.clone();
     crate::clipboard::write(&text);
-    app.message = Some(format!("Yanked {} chars", end - start));
+    app.messages.show(format!("Yanked {} chars", end - start));
 }
 
 pub(super) fn paste_after(app: &mut App) {
@@ -114,7 +114,7 @@ pub(super) fn comment_region(app: &mut App) {
         "python" => "# ",
         "rust" | "javascript" => "// ",
         _ => {
-            app.message = Some("No comment syntax known for this file type".into());
+            app.messages.show("No comment syntax known for this file type");
             return;
         }
     };

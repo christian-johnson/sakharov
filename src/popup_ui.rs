@@ -98,12 +98,12 @@ fn render_completion_doc(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_fg))
-        .style(Style::default().bg(Color::Rgb(28, 28, 40)));
+        .style(Style::default().bg(crate::theme::POPUP_BG));
 
     let text = doc.lines.join("\n");
     let para = Paragraph::new(text)
         .block(block)
-        .style(Style::default().fg(Color::Rgb(200, 200, 200)).bg(Color::Rgb(28, 28, 40)))
+        .style(Style::default().fg(Color::Rgb(200, 200, 200)).bg(crate::theme::POPUP_BG))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, rect);
@@ -236,7 +236,7 @@ fn render_list_popup(
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(80, 180, 255)))
-            .style(Style::default().bg(Color::Rgb(28, 28, 40)));
+            .style(Style::default().bg(crate::theme::POPUP_BG));
         match &popup.title {
             Some(t) => block.title(format!(" {t} ")),
             None => block,
@@ -265,7 +265,7 @@ fn render_list_popup(
             for col in inner.left()..inner.right() {
                 buf[(col, filter_y)]
                     .set_char(' ')
-                    .set_style(Style::default().bg(Color::Rgb(28, 28, 40)));
+                    .set_style(Style::default().bg(crate::theme::POPUP_BG));
             }
             if state.navigating {
                 let hint = format!("  j/k navigate · i to type · esc to close · {}", state.filter);
@@ -273,7 +273,7 @@ fn render_list_popup(
                     if x >= inner.right() { break; }
                     buf[(x, filter_y)]
                         .set_char(c)
-                        .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
+                        .set_style(Style::default().fg(Color::DarkGray).bg(crate::theme::POPUP_BG));
                     x += 1;
                 }
             } else {
@@ -282,14 +282,14 @@ fn render_list_popup(
                     if x >= inner.right() { break; }
                     buf[(x, filter_y)]
                         .set_char(c)
-                        .set_style(Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40)));
+                        .set_style(Style::default().fg(Color::DarkGray).bg(crate::theme::POPUP_BG));
                     x += 1;
                 }
                 for c in state.effective_filter().chars() {
                     if x >= inner.right() { break; }
                     buf[(x, filter_y)]
                         .set_char(c)
-                        .set_style(Style::default().fg(Color::White).bg(Color::Rgb(28, 28, 40)));
+                        .set_style(Style::default().fg(Color::White).bg(crate::theme::POPUP_BG));
                     x += 1;
                 }
                 if x < inner.right() {
@@ -297,7 +297,7 @@ fn render_list_popup(
                         .set_char(' ')
                         .set_style(
                             Style::default()
-                                .fg(Color::Rgb(28, 28, 40))
+                                .fg(crate::theme::POPUP_BG)
                                 .bg(Color::White)
                                 .add_modifier(Modifier::REVERSED),
                         );
@@ -310,7 +310,7 @@ fn render_list_popup(
         }
 
         let sep_y = inner.top() + 1;
-        let sep_style = Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40));
+        let sep_style = Style::default().fg(Color::DarkGray).bg(crate::theme::POPUP_BG);
         for col in inner.left()..inner.right() {
             buf[(col, sep_y)].set_char('\u{2500}').set_style(sep_style);
         }
@@ -347,7 +347,7 @@ fn render_list_popup(
         for col in inner.left()..inner.right() {
             buf[(col, y)]
                 .set_char(' ')
-                .set_style(Style::default().bg(Color::Rgb(28, 28, 40)));
+                .set_style(Style::default().bg(crate::theme::POPUP_BG));
         }
 
         let Some(&item_idx) = indices.get(item_row) else {
@@ -360,7 +360,7 @@ fn render_list_popup(
         let row_bg = if is_selected {
             Color::Rgb(60, 60, 100)
         } else {
-            Color::Rgb(28, 28, 40)
+            crate::theme::POPUP_BG
         };
         let row_fg = if is_selected {
             Color::White
@@ -467,8 +467,8 @@ fn render_list_popup(
             let in_thumb = row >= thumb_top && row < thumb_top + thumb_h;
             let sc = if in_thumb { '\u{2588}' } else { '\u{2502}' };
             let sb_style = Style::default()
-                .fg(Color::Rgb(100, 100, 180))
-                .bg(Color::Rgb(28, 28, 40));
+                .fg(crate::theme::POPUP_SCROLLBAR)
+                .bg(crate::theme::POPUP_BG);
             buf[(sb_x, sy)].set_char(sc).set_style(sb_style);
         }
     }
@@ -504,7 +504,7 @@ fn render_text_popup(
         for col in inner.left()..inner.right() {
             buf[(col, y)]
                 .set_char(' ')
-                .set_style(Style::default().bg(Color::Rgb(28, 28, 40)));
+                .set_style(Style::default().bg(crate::theme::POPUP_BG));
         }
 
         let Some(line) = state.lines.get(line_idx) else {
@@ -514,7 +514,7 @@ fn render_text_popup(
         for (x, c) in (inner.left()..inner.right()).zip(line.chars()) {
             buf[(x, y)]
                 .set_char(c)
-                .set_style(Style::default().fg(Color::Rgb(200, 200, 200)).bg(Color::Rgb(28, 28, 40)));
+                .set_style(Style::default().fg(Color::Rgb(200, 200, 200)).bg(crate::theme::POPUP_BG));
         }
     }
 
@@ -525,7 +525,7 @@ fn render_text_popup(
         let py = rect.bottom() - 1;
         let px_end = rect.right().saturating_sub(1);
         let px_start = px_end.saturating_sub(pct_str.len() as u16);
-        let pct_style = Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40));
+        let pct_style = Style::default().fg(Color::DarkGray).bg(crate::theme::POPUP_BG);
         for (px, c) in (px_start..px_end).zip(pct_str.chars()) {
             buf[(px, py)].set_char(c).set_style(pct_style);
         }
@@ -546,8 +546,8 @@ fn render_key_hints_popup(
         .title(format!(" {} ", state.prefix))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(100, 100, 180)))
-        .style(Style::default().bg(Color::Rgb(28, 28, 40)));
+        .border_style(Style::default().fg(crate::theme::POPUP_SCROLLBAR))
+        .style(Style::default().bg(crate::theme::POPUP_BG));
 
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -622,8 +622,8 @@ fn key_hints_natural_width(s: &KeyHintsState) -> usize {
 // ---------------------------------------------------------------------------
 
 fn build_block(popup: &Popup) -> Block<'static> {
-    let border_style = Style::default().fg(Color::Rgb(100, 100, 180));
-    let bg_style = Style::default().bg(Color::Rgb(28, 28, 40));
+    let border_style = Style::default().fg(crate::theme::POPUP_SCROLLBAR);
+    let bg_style = Style::default().bg(crate::theme::POPUP_BG);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
