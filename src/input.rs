@@ -240,8 +240,19 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             begin_insert_edit(app);
             let pos = app.selection.head;
-            let unit = crate::indent::unit(app.config.editor.expand_tabs, app.config.editor.tab_width);
-            if crate::indent::is_bracket_pair(&app.buffer.rope, pos) {
+            let unit = app.indent_unit();
+            // In Markdown, Enter on a list item continues the list with the
+            // next marker (`- `, `2. `, `- [ ] `, `> `).
+            let md_cont = if app.buffer_is_markdown() {
+                crate::indent::markdown_list_continuation(&app.buffer.rope, pos)
+            } else {
+                None
+            };
+            if let Some(cont) = md_cont {
+                let cont_len = cont.chars().count();
+                app.buffer.insert_raw(pos, &format!("\n{cont}"));
+                app.selection = Selection::point(pos + 1 + cont_len);
+            } else if crate::indent::is_bracket_pair(&app.buffer.rope, pos) {
                 // {|} → {\n    |\n} : expand bracket pair onto three lines.
                 let inner = crate::indent::for_new_line(&app.buffer.rope, pos, &unit);
                 let base = crate::indent::for_line_above(&app.buffer.rope, pos);
@@ -275,7 +286,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => {
             begin_insert_edit(app);
             let pos = app.selection.head;
-            let unit = crate::indent::unit(app.config.editor.expand_tabs, app.config.editor.tab_width);
+            let unit = app.indent_unit();
             app.buffer.insert_raw(pos, &unit);
             app.selection = Selection::point(pos + unit.chars().count());
             exec::recompute_highlights(app);

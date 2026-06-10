@@ -10,6 +10,13 @@ pub struct NotebookState {
     pub scroll_cell: usize,
     /// Set while a cell is executing (for yellow border). None when idle.
     pub executing_cell: Option<usize>,
+    /// Cell IDs waiting to execute, run in order as the kernel becomes idle.
+    /// IDs rather than indices, so structural edits (add/delete cell) can't
+    /// redirect the queue — a deleted cell is simply skipped at start time.
+    pub exec_queue: std::collections::VecDeque<String>,
+    /// When the currently-executing cell started (drives the "finished in …"
+    /// log message). Runtime-only.
+    pub executing_since: Option<std::time::Instant>,
     /// Snapshots for structural undo (add/delete cell).
     /// Each entry: (focused_cell_at_snapshot, cells_at_snapshot).
     cell_snapshots: Vec<(usize, Vec<Cell>)>,
@@ -26,6 +33,8 @@ impl NotebookState {
             focused_cell: 0,
             scroll_cell: 0,
             executing_cell: None,
+            exec_queue: std::collections::VecDeque::new(),
+            executing_since: None,
             cell_snapshots: Vec::new(),
             cell_redo: Vec::new(),
             folded_cells: BTreeSet::new(),

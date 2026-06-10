@@ -43,6 +43,7 @@ pub(super) fn after_structural_edit(app: &mut App) {
 pub(super) fn insert_new_cell(app: &mut App, above: bool) {
     save_focused_cell(app);
     push_cell_snapshot(app);
+    let mut added: Option<usize> = None;
     if let Some((nb, state)) = app.notebook.as_mut() {
         let new_idx = if above {
             state.focused_cell
@@ -59,8 +60,12 @@ pub(super) fn insert_new_cell(app: &mut App, above: bool) {
         });
         state.focused_cell = new_idx;
         nb.modified = true;
+        added = Some(new_idx);
     }
     after_structural_edit(app);
+    if let Some(idx) = added {
+        app.messages.show(format!("New cell [{}]", idx + 1));
+    }
 }
 
 /// Apply one structural undo (or redo) step: pop the snapshot, restore the
@@ -197,89 +202,168 @@ pub fn restore_stashed_notebook(app: &mut App, path: &std::path::Path) -> bool {
 }
 
 /// Execute the focused cell. Markdown cells "execute" by rendering (no kernel);
-/// code cells start a kernel if needed and stream output asynchronously.
+/// code cells are queued and run as soon as the kernel is free — a second
+/// `:run` while a cell is executing enqueues instead of refusing.
 pub(super) fn execute_focused_cell(app: &mut App) {
     save_focused_cell(app);
+    let Some(idx) = app.notebook.as_ref().map(|(_, s)| s.focused_cell) else { return };
+    queue_cells(app, idx..idx + 1);
+}
 
-    // "Executing" a Markdown cell just renders it (no kernel involvement).
-    let is_markdown = app.notebook.as_ref().and_then(|(nb, state)| {
-        nb.cells.get(state.focused_cell).map(|c| c.cell_type == CellType::Markdown)
-    }).unwrap_or(false);
-    if is_markdown {
-        if let Some((nb, state)) = app.notebook.as_mut() {
-            let idx = state.focused_cell;
-            if idx < nb.cells.len() {
-                nb.cells[idx].rendered = true;
+/// Execute every cell in order (`below_only` starts from the focused cell).
+/// Markdown cells render; code cells are queued and run sequentially.
+pub(super) fn execute_all_cells(app: &mut App, below_only: bool) {
+    save_focused_cell(app);
+    let Some((nb, state)) = app.notebook.as_ref() else { return };
+    let start = if below_only { state.focused_cell } else { 0 };
+    let end = nb.cells.len();
+    queue_cells(app, start..end);
+}
+
+/// Render any markdown cells in `range` and queue the code cells for
+/// execution, starting the kernel if needed. Shared by run / run-all.
+fn queue_cells(app: &mut App, range: std::ops::Range<usize>) {
+    let mut queued: Vec<String> = Vec::new();
+    let mut rendered = 0usize;
+    if let Some((nb, _)) = app.notebook.as_mut() {
+        for idx in range {
+            let Some(cell) = nb.cells.get_mut(idx) else { continue };
+            match cell.cell_type {
+                CellType::Markdown => {
+                    cell.rendered = true;
+                    rendered += 1;
+                }
+                CellType::Code => queued.push(cell.id.clone()),
+                CellType::Raw => {}
             }
         }
+    }
+    if rendered > 0 {
         app.mode = crate::mode::Mode::Normal;
-        app.messages.show("Rendered markdown");
+    }
+    if queued.is_empty() {
+        app.messages.show(if rendered > 0 { "Rendered markdown" } else { "No code cells to run" });
         return;
     }
-
-    // One cell at a time: the persistent kernel is a single REPL.
-    let busy = app.notebook.as_ref()
-        .map(|(_, state)| state.executing_cell.is_some())
-        .unwrap_or(false);
-    if busy {
-        app.messages.show("Kernel busy — wait or :interrupt-kernel");
+    if !ensure_kernel(app) {
         return;
     }
+    let n = queued.len();
+    if let Some((_, state)) = app.notebook.as_mut() {
+        state.exec_queue.extend(queued);
+    }
+    // Try to start immediately; otherwise report what's waiting and why.
+    if !pump_execution_queue(app) {
+        let starting = app.notebook.as_ref().and_then(|(nb, _)| nb.kernel.as_ref())
+            .map(|k| k.status == crate::notebook::KernelStatus::Starting)
+            .unwrap_or(false);
+        let plural = if n == 1 { "cell" } else { "cells" };
+        app.messages.show(if starting {
+            format!("Queued {n} {plural} — waiting for kernel to start")
+        } else {
+            format!("Queued {n} {plural} — kernel busy")
+        });
+    }
+}
 
-    if let Some((nb, state)) = app.notebook.as_mut() {
-        let nb_dir = crate::notebook::notebook_dir(&nb.path);
-        if nb.kernel.is_none() || !nb.kernel.as_mut().map(|k| k.is_alive()).unwrap_or(false) {
-            match nb.start_kernel(&nb_dir) {
-                Ok(found_venv) => {
-                    if !found_venv {
-                        app.messages.show(
-                            "Kernel started (no venv found — using system python3)",
-                        );
-                    }
-                }
-                Err(e) => {
-                    app.messages.show(format!("Kernel start failed: {e}"));
-                    return;
-                }
-            }
+/// Make sure a kernel process exists and is alive (booting counts), spawning
+/// one asynchronously if needed. Returns false when the spawn itself failed.
+fn ensure_kernel(app: &mut App) -> bool {
+    let Some((nb, _)) = app.notebook.as_mut() else { return false };
+    if nb.kernel.as_mut().map(|k| k.is_alive()).unwrap_or(false) {
+        return true;
+    }
+    let nb_dir = crate::notebook::notebook_dir(&nb.path);
+    match nb.start_kernel(&nb_dir) {
+        Ok(found_venv) => {
+            let python = nb.kernel.as_ref().map(|k| k.python.clone()).unwrap_or_default();
+            app.messages.show(if found_venv {
+                format!("Kernel starting ({python})…")
+            } else {
+                "Kernel starting (no venv found — using system python3)…".to_string()
+            });
+            true
         }
-        let idx = state.focused_cell;
-        if idx < nb.cells.len() {
+        Err(e) => {
+            app.messages.show(format!("Kernel start failed: {e}"));
+            false
+        }
+    }
+}
+
+/// Start the next queued cell if the kernel is idle and nothing is executing.
+/// Returns true when state changed (a cell started, or the queue drained
+/// stale entries). Called after every kernel event and after queueing.
+pub(super) fn pump_execution_queue(app: &mut App) -> bool {
+    use crate::notebook::KernelStatus;
+
+    let mut started: Option<(usize, usize)> = None; // (cell idx, cells still queued)
+    let mut failed: Option<String> = None;
+    if let Some((nb, state)) = app.notebook.as_mut() {
+        if state.executing_cell.is_some() || state.exec_queue.is_empty() {
+            return false;
+        }
+        if nb.kernel.as_ref().map(|k| k.status != KernelStatus::Idle).unwrap_or(true) {
+            return false;
+        }
+        while let Some(id) = state.exec_queue.pop_front() {
+            // Resolve by ID at start time — the cell may have been moved,
+            // deleted, or converted since it was queued.
+            let Some(idx) = nb.cells.iter().position(|c| c.id == id) else { continue };
+            if nb.cells[idx].cell_type != CellType::Code {
+                continue;
+            }
             let code = nb.cells[idx].source.to_string();
             nb.cells[idx].outputs.clear();
-            if let Some(ref mut session) = nb.kernel {
-                // Fire-and-forget: output streams back via process_kernel_events.
-                match session.start_execution(&code) {
-                    Ok(()) => {
-                        state.executing_cell = Some(idx);
-                        nb.modified = true;
-                        app.messages.show(format!("Running cell [{}]…", idx + 1));
-                    }
-                    Err(e) => {
-                        app.messages.show(format!("Kernel error: {e}"));
-                        nb.kernel = None;
-                    }
+            let Some(session) = nb.kernel.as_mut() else { break };
+            // Fire-and-forget: output streams back via process_kernel_events.
+            match session.start_execution(&code) {
+                Ok(()) => {
+                    state.executing_cell = Some(idx);
+                    state.executing_since = Some(std::time::Instant::now());
+                    nb.modified = true;
+                    started = Some((idx, state.exec_queue.len()));
+                }
+                Err(e) => {
+                    failed = Some(format!("Kernel error: {e}"));
+                    nb.kernel = None;
+                    state.exec_queue.clear();
                 }
             }
+            break;
         }
     }
+    if let Some(msg) = failed {
+        app.messages.show(msg);
+        return true;
+    }
+    let Some((idx, remaining)) = started else { return false };
+    app.messages.show(if remaining > 0 {
+        format!("Running cell [{}]… ({remaining} queued)", idx + 1)
+    } else {
+        format!("Running cell [{}]…", idx + 1)
+    });
     // Old output image Arcs were just freed; drop their Kitty cache entries so
     // freshly-streamed images upload cleanly.
     app.graphics.image_ids.clear();
+    true
 }
 
-/// Kill and restart the kernel, clearing all in-memory execution state.
+/// Kill and restart the kernel, clearing all in-memory execution state
+/// (including any queued cells).
 pub(super) fn restart_kernel(app: &mut App) {
     if let Some((nb, state)) = app.notebook.as_mut() {
         nb.kernel = None;
         state.executing_cell = None;
+        state.executing_since = None;
+        state.exec_queue.clear();
         let nb_dir = crate::notebook::notebook_dir(&nb.path);
         match nb.start_kernel(&nb_dir) {
             Ok(found_venv) => {
                 app.messages.show(if found_venv {
-                    "Kernel restarted"
+                    "Kernel restarting…"
                 } else {
-                    "Kernel restarted (no venv found — using system python3)"
+                    "Kernel restarting (no venv found — using system python3)…"
                 });
             }
             Err(e) => app.messages.show(format!("Kernel restart failed: {e}")),
@@ -287,12 +371,18 @@ pub(super) fn restart_kernel(app: &mut App) {
     }
 }
 
-/// Send SIGINT to the running kernel.
+/// Send SIGINT to the running kernel and drop any queued cells.
 pub(super) fn interrupt_kernel(app: &mut App) {
-    if let Some((nb, _)) = app.notebook.as_ref() {
+    if let Some((nb, state)) = app.notebook.as_mut() {
         if let Some(ref session) = nb.kernel {
             session.interrupt();
-            app.messages.show("Kernel interrupted");
+            let dropped = state.exec_queue.len();
+            state.exec_queue.clear();
+            app.messages.show(if dropped > 0 {
+                format!("Kernel interrupted — {dropped} queued cell(s) dropped")
+            } else {
+                "Kernel interrupted".to_string()
+            });
         } else {
             app.messages.show("No kernel running");
         }
@@ -322,6 +412,7 @@ pub(super) fn clear_outputs(app: &mut App) {
             }
             nb.cells[idx].outputs.clear();
             nb.modified = true;
+            app.messages.show(format!("Cleared outputs of cell [{}]", idx + 1));
         }
     }
 }
@@ -354,16 +445,21 @@ pub(super) fn convert_cell(app: &mut App, to_markdown: bool) {
 pub(super) fn delete_cell(app: &mut App) {
     save_focused_cell(app);
     push_cell_snapshot(app);
+    let mut deleted: Option<usize> = None;
     if let Some((nb, state)) = app.notebook.as_mut() {
         if !nb.cells.is_empty() {
             nb.cells.remove(state.focused_cell);
             nb.modified = true;
+            deleted = Some(state.focused_cell);
             state.focused_cell = state.focused_cell.min(nb.cells.len().saturating_sub(1));
         }
     }
     let _ = crate::kitty::clear_images();
     app.graphics.image_ids.clear();
     after_structural_edit(app);
+    if let Some(idx) = deleted {
+        app.messages.show(format!("Deleted cell [{}] — :notebook-undo-structural to restore", idx + 1));
+    }
 }
 
 /// Build the full cell list for `notebookDocument/didOpen` or a reopen.

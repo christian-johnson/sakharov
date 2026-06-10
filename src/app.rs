@@ -256,6 +256,8 @@ pub struct App {
     /// In-flight background git refresh (branch + diff marks), polled once per
     /// frame by the run loop.  `None` when no refresh is pending.
     pub git_pending: Option<crate::git::GitRefresh>,
+    /// In-flight background `quarto render` export, polled once per frame.
+    pub export_pending: Option<crate::exec::ExportJob>,
     /// Code actions returned by the last LSP `textDocument/codeAction` request.
     /// Indexed by the popup item's `ConfirmPayload::CodeAction(idx)`.
     pub pending_code_actions: Vec<serde_json::Value>,
@@ -330,6 +332,35 @@ impl App {
     /// The language id for the document currently in the editor buffer.
     pub fn current_language(&self) -> Option<&str> {
         self.notebook_language().or(self.lsp_language.as_deref())
+    }
+
+    /// Indent width for the current buffer's language: the per-language
+    /// `[languages.<lang>] indent_width` override when set, otherwise the
+    /// global `editor.tab_width`.
+    pub fn indent_width(&self) -> usize {
+        self.current_language()
+            .and_then(|l| self.config.languages.get(l))
+            .and_then(|lc| lc.indent_width)
+            .unwrap_or(self.config.editor.tab_width)
+    }
+
+    /// The string one indent level inserts in this buffer (spaces unless
+    /// `editor.expand_tabs = false`).
+    pub fn indent_unit(&self) -> String {
+        crate::indent::unit(self.config.editor.expand_tabs, self.indent_width())
+    }
+
+    /// True when the text being edited is Markdown — a `.md`/`.qmd` buffer or
+    /// the focused cell of a notebook when it is a markdown cell.
+    pub fn buffer_is_markdown(&self) -> bool {
+        if let Some((nb, state)) = self.notebook.as_ref() {
+            nb.cells
+                .get(state.focused_cell)
+                .map(|c| c.cell_type == crate::notebook::CellType::Markdown)
+                .unwrap_or(false)
+        } else {
+            self.highlighter.markdown
+        }
     }
 
     /// Create a new App, loading `path` if provided.
@@ -434,6 +465,7 @@ impl App {
             git_diff: std::collections::HashMap::new(),
             git_branch: None,
             git_pending,
+            export_pending: None,
             pending_code_actions: Vec::new(),
             jump: JumpState::default(),
             needs_clear: false,
@@ -635,16 +667,24 @@ fn run_loop(
         needs_redraw |= crate::exec::process_lsp_events(app);
         needs_redraw |= crate::exec::process_kernel_events(app);
         needs_redraw |= crate::exec::poll_git(app);
+        needs_redraw |= crate::exec::poll_export(app);
 
         // Advance the status-bar spinner.  It's "active" whenever a notebook
-        // cell is executing or an LSP request is in flight — and animating it
-        // requires a redraw per tick.
+        // cell is executing or queued, the kernel is booting, an LSP request
+        // is in flight, or an export is running — and animating it requires a
+        // redraw per tick.
         let background_active = app
             .notebook
             .as_ref()
-            .map(|(_, state)| state.executing_cell.is_some())
+            .map(|(nb, state)| {
+                state.executing_cell.is_some()
+                    || !state.exec_queue.is_empty()
+                    || nb.kernel.as_ref()
+                        .is_some_and(|k| k.status == crate::notebook::KernelStatus::Starting)
+            })
             .unwrap_or(false)
-            || app.lsp.has_pending_requests();
+            || app.lsp.has_pending_requests()
+            || app.export_pending.is_some();
         app.spinner.update(background_active);
         needs_redraw |= background_active;
 

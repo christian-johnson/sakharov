@@ -71,6 +71,14 @@ pub enum Language {
     Rust,
     Python,
     JavaScript,
+    Toml,
+    Json,
+    Yaml,
+    Bash,
+    Go,
+    C,
+    Html,
+    Css,
 }
 
 impl Language {
@@ -80,7 +88,33 @@ impl Language {
             "rs" => Some(Self::Rust),
             "py" => Some(Self::Python),
             "js" | "jsx" => Some(Self::JavaScript),
+            "toml" => Some(Self::Toml),
+            "json" => Some(Self::Json),
+            "yaml" | "yml" => Some(Self::Yaml),
+            "sh" | "bash" | "zsh" => Some(Self::Bash),
+            "go" => Some(Self::Go),
+            "c" | "h" => Some(Self::C),
+            "html" | "htm" => Some(Self::Html),
+            "css" => Some(Self::Css),
             _ => None,
+        }
+    }
+
+    /// The raw tree-sitter grammar for this language (shared by the
+    /// highlighter and the fold-range walker).
+    pub fn ts_language(self) -> tree_sitter::Language {
+        match self {
+            Self::Rust => tree_sitter_rust::language(),
+            Self::Python => tree_sitter_python::language(),
+            Self::JavaScript => tree_sitter_javascript::language(),
+            Self::Toml => tree_sitter_toml_ng::language(),
+            Self::Json => tree_sitter_json::language(),
+            Self::Yaml => tree_sitter_yaml::language(),
+            Self::Bash => tree_sitter_bash::language(),
+            Self::Go => tree_sitter_go::language(),
+            Self::C => tree_sitter_c::language(),
+            Self::Html => tree_sitter_html::language(),
+            Self::Css => tree_sitter_css::language(),
         }
     }
 }
@@ -197,29 +231,74 @@ pub fn style_at(spans: &[Span], char_idx: usize) -> ratatui::style::Style {
 
 /// Build a `HighlightConfiguration` for the given language.
 fn build_config(lang: Language) -> Result<HighlightConfiguration> {
-    let (ts_lang, highlights_query, injections_query, locals_query) = match lang {
-        Language::Rust => (
-            tree_sitter_rust::language(),
-            tree_sitter_rust::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
-        Language::Python => (
-            tree_sitter_python::language(),
-            tree_sitter_python::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
+    let (highlights_query, injections_query, locals_query) = match lang {
+        Language::Rust => (tree_sitter_rust::HIGHLIGHTS_QUERY, "", ""),
+        Language::Python => (tree_sitter_python::HIGHLIGHTS_QUERY, "", ""),
         Language::JavaScript => (
-            tree_sitter_javascript::language(),
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::INJECTIONS_QUERY,
             tree_sitter_javascript::LOCALS_QUERY,
         ),
+        Language::Toml => (tree_sitter_toml_ng::HIGHLIGHTS_QUERY, "", ""),
+        Language::Json => (tree_sitter_json::HIGHLIGHTS_QUERY, "", ""),
+        Language::Yaml => (tree_sitter_yaml::HIGHLIGHTS_QUERY, "", ""),
+        Language::Bash => (tree_sitter_bash::HIGHLIGHT_QUERY, "", ""),
+        Language::Go => (tree_sitter_go::HIGHLIGHTS_QUERY, "", ""),
+        Language::C => (tree_sitter_c::HIGHLIGHT_QUERY, "", ""),
+        Language::Html => (
+            tree_sitter_html::HIGHLIGHTS_QUERY,
+            tree_sitter_html::INJECTIONS_QUERY,
+            "",
+        ),
+        Language::Css => (tree_sitter_css::HIGHLIGHTS_QUERY, "", ""),
     };
 
-    let mut config =
-        HighlightConfiguration::new(ts_lang, "highlights", highlights_query, injections_query, locals_query)?;
+    let mut config = HighlightConfiguration::new(
+        lang.ts_language(),
+        "highlights",
+        highlights_query,
+        injections_query,
+        locals_query,
+    )?;
     config.configure(HIGHLIGHT_NAMES);
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every supported language must produce a working highlight config and
+    /// non-empty spans for a representative snippet — a query-syntax error in
+    /// a grammar crate would otherwise silently disable highlighting.
+    #[test]
+    fn all_languages_highlight() {
+        let samples: &[(&str, &str)] = &[
+            ("rs", "fn main() { let x = 1; }"),
+            ("py", "def f():\n    return 1\n"),
+            ("js", "function f() { return 1; }"),
+            ("toml", "[table]\nkey = \"value\"\n"),
+            ("json", "{\"key\": [1, 2, true]}"),
+            ("yaml", "key: value\nlist:\n  - 1\n"),
+            ("sh", "if true; then echo hi; fi\n"),
+            ("go", "func main() { x := 1 }"),
+            ("c", "int main(void) { return 0; }"),
+            ("html", "<html><body class=\"x\">hi</body></html>"),
+            ("css", ".cls { color: red; }"),
+        ];
+        for (ext, src) in samples {
+            let lang = Language::from_extension(ext)
+                .unwrap_or_else(|| panic!("no language for extension {ext:?}"));
+            let config = build_config(lang)
+                .unwrap_or_else(|e| panic!("{lang:?}: highlight query failed to compile: {e}"));
+            let mut hl = Highlighter {
+                language: Some(lang),
+                markdown: false,
+                config: Some(config),
+                ts_highlighter: TsHighlighter::new(),
+            };
+            let spans = hl.highlight(&Rope::from_str(src)).expect("highlight runs");
+            assert!(!spans.is_empty(), "{lang:?}: no highlight spans for {src:?}");
+        }
+    }
 }

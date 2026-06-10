@@ -175,11 +175,7 @@ impl FoldState {
 /// Compute all foldable ranges in `rope` for the given language.
 pub fn compute_fold_ranges(rope: &Rope, language: Language) -> Vec<FoldRange> {
     let text = rope.to_string();
-    let ts_lang = match language {
-        Language::Rust => tree_sitter_rust::language(),
-        Language::Python => tree_sitter_python::language(),
-        Language::JavaScript => tree_sitter_javascript::language(),
-    };
+    let ts_lang = language.ts_language();
 
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&ts_lang).is_err() {
@@ -263,5 +259,42 @@ fn is_foldable_node(kind: &str, language: Language) -> bool {
                 | "switch_statement"
                 | "try_statement"
         ),
+        Language::Toml => matches!(kind, "table" | "table_array_element" | "array" | "inline_table"),
+        Language::Json => matches!(kind, "object" | "array"),
+        Language::Yaml => matches!(kind, "block_mapping_pair" | "block_sequence"),
+        Language::Bash => matches!(
+            kind,
+            "function_definition"
+                | "if_statement"
+                | "for_statement"
+                | "while_statement"
+                | "case_statement"
+                | "subshell"
+        ),
+        Language::Go => matches!(
+            kind,
+            "function_declaration"
+                | "method_declaration"
+                | "type_declaration"
+                | "struct_type"
+                | "interface_type"
+                | "if_statement"
+                | "for_statement"
+                | "expression_switch_statement"
+                | "type_switch_statement"
+        ),
+        Language::C => matches!(
+            kind,
+            "function_definition"
+                | "struct_specifier"
+                | "enum_specifier"
+                | "union_specifier"
+                | "if_statement"
+                | "for_statement"
+                | "while_statement"
+                | "switch_statement"
+        ),
+        Language::Html => kind == "element",
+        Language::Css => matches!(kind, "rule_set" | "media_statement" | "keyframes_statement"),
     }
 }

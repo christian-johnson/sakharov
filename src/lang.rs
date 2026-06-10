@@ -7,6 +7,15 @@ pub fn lang_to_ext(lang: &str) -> &'static str {
         "python" | "python3" => "py",
         "javascript" | "js" => "js",
         "rust" => "rs",
+        "markdown" => "md",
+        "toml" => "toml",
+        "json" => "json",
+        "yaml" => "yaml",
+        "bash" | "sh" | "shell" => "sh",
+        "go" => "go",
+        "c" => "c",
+        "html" => "html",
+        "css" => "css",
         _ => "txt",
     }
 }
@@ -17,6 +26,15 @@ pub fn ext_to_lang(ext: &str) -> Option<&'static str> {
         "py" => Some("python"),
         "rs" => Some("rust"),
         "js" | "ts" | "jsx" | "tsx" => Some("javascript"),
+        "md" | "markdown" | "qmd" => Some("markdown"),
+        "toml" => Some("toml"),
+        "json" => Some("json"),
+        "yaml" | "yml" => Some("yaml"),
+        "sh" | "bash" | "zsh" => Some("bash"),
+        "go" => Some("go"),
+        "c" | "h" => Some("c"),
+        "html" | "htm" => Some("html"),
+        "css" => Some("css"),
         _ => None,
     }
 }

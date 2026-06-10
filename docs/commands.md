@@ -50,8 +50,8 @@ These commands enter a sub-mode that awaits a second key.
 | Command | Default Key | Description |
 |---------|-------------|-------------|
 | `comment-region` | `gc` (via Goto mode) | Toggle comment/uncomment for the current selection or line |
-| `indent-region` | `Ctrl+>` | Indent the selected lines by one indentation unit (alias `:indent`) |
-| `dedent-region` | `Ctrl+<` | Dedent the selected lines by one indentation unit (alias `:dedent`) |
+| `indent-region` | `>`, `Ctrl+>` | Indent the selected lines by one indentation unit (alias `:indent`). The unit is language-aware: `[languages.<lang>] indent_width` overrides `editor.tab_width` |
+| `dedent-region` | `<`, `Ctrl+<` | Dedent the selected lines by one indentation unit (alias `:dedent`) |
 | `delete-selection` | `d` | Delete the current selection |
 | `change-selection` | `c` | Delete the current selection and enter Insert mode |
 | `yank-selection` | `y` | Copy the current selection to the clipboard |
@@ -280,10 +280,19 @@ undo) has no default key — use the command palette (`Space`) or the `:` comman
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `notebook-execute-cell` | `Ctrl+E`, `Shift+Enter`, `ctrl+Enter` | `:run` | Execute the focused cell. Code cells run in the kernel; Markdown cells render to their formatted view |
+| `notebook-execute-cell` | `Ctrl+E`, `Shift+Enter`, `ctrl+Enter` | `:run` | Execute the focused cell. Code cells run in the kernel (queued if one is already running); Markdown cells render to their formatted view |
 | `notebook-execute-and-advance` | — | `:run-next` | Execute the focused cell, then focus the next |
-| `notebook-restart-kernel` | — | `:restart-kernel`, `:kernel-restart` | Kill and restart the kernel (clears all state) |
-| `notebook-interrupt-kernel` | — | `:interrupt-kernel`, `:kernel-interrupt` | Send SIGINT to the running kernel |
+| `notebook-execute-all-cells` | — | `:run-all`, `:execute-all-cells` | Queue every cell for execution in order (markdown cells render) |
+| `notebook-execute-cells-below` | — | `:run-all-below`, `:execute-all-cells-below` | Queue the focused cell and every cell below it, in order |
+| `notebook-restart-kernel` | — | `:restart-kernel`, `:kernel-restart` | Kill and restart the kernel (clears all state and the execution queue) |
+| `notebook-interrupt-kernel` | — | `:interrupt-kernel`, `:kernel-interrupt` | Send SIGINT to the running kernel and drop any queued cells |
+| `export` | — | `:export <fmt>`, `:quarto` | Render the notebook (or a markdown buffer) via Quarto, in the background. Format defaults to `pdf`; any `quarto render --to` value works (`html`, `docx`, `revealjs`, …) |
+
+The kernel boots **asynchronously**: the first `:run` starts it in the background
+(`[starting]` in the status line) and queues the cell; queued cells start as soon
+as the kernel reports ready. Cell completion, kernel lifecycle events (ready /
+restarted / died), and queue progress are all logged to the `*Messages*` buffer
+with timings.
 
 `Ctrl+E` is the portable execute key. `Shift+Enter` / `ctrl+Enter` additionally
 require a terminal that supports keyboard-enhancement reporting (the kitty protocol);

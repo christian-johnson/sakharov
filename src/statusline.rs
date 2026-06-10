@@ -26,6 +26,7 @@ use unicode_width::UnicodeWidthChar;
 /// Kernel state as far as the status line is concerned (notebook only).
 #[derive(Clone, Copy)]
 pub enum KernelView {
+    Starting,
     Idle,
     Busy,
     Dead,
@@ -216,6 +217,14 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
             None => vec![],
         },
         "kernel" => match ctx.kernel {
+            Some(KernelView::Starting) => {
+                // Fold the live spinner into the starting indicator when available.
+                let label = match ctx.spinner {
+                    Some(g) => format!("[{g} starting]"),
+                    None => "[starting]".to_string(),
+                };
+                vec![Segment::new(label, base.fg(Color::Yellow))]
+            }
             Some(KernelView::Idle) => vec![Segment::new("[idle]", dim_style())],
             Some(KernelView::Busy) => {
                 // Fold the live spinner into the busy indicator when available.

@@ -53,10 +53,6 @@ pub(super) fn paste_before(app: &mut App) {
 
 pub(super) fn open_line_below(app: &mut App) {
     let pos = app.selection.head;
-    // Compute indentation before borrowing mutably.
-    let unit = indent::unit(app.config.editor.expand_tabs, app.config.editor.tab_width);
-    let ind = indent::for_new_line(&app.buffer.rope, pos, &unit);
-
     let le = {
         let rope = &app.buffer.rope;
         if rope.len_chars() == 0 {
@@ -74,6 +70,17 @@ pub(super) fn open_line_below(app: &mut App) {
             }
         }
     };
+
+    // Indent decisions look at the whole line (`le`), not the cursor column —
+    // `o` anywhere on `def f():` opens an indented line. In Markdown, a list
+    // item continues with its marker instead.
+    let unit = app.indent_unit();
+    let ind = if app.buffer_is_markdown() {
+        indent::markdown_list_continuation(&app.buffer.rope, le)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| indent::for_new_line(&app.buffer.rope, le, &unit));
 
     let ind_len = ind.chars().count();
     let to_insert = format!("\n{ind}");
@@ -111,8 +118,8 @@ pub(super) fn open_line_above(app: &mut App) {
 pub(super) fn comment_region(app: &mut App) {
     let lang = app.current_language().unwrap_or("").to_owned();
     let prefix: &str = match lang.as_str() {
-        "python" => "# ",
-        "rust" | "javascript" => "// ",
+        "python" | "toml" | "yaml" | "bash" => "# ",
+        "rust" | "javascript" | "go" | "c" => "// ",
         _ => {
             app.messages.show("No comment syntax known for this file type");
             return;
@@ -236,7 +243,7 @@ fn select_lines(app: &mut App, start_line: usize, end_line: usize) {
 /// Indent every line touched by the selection by one indentation unit.
 pub(super) fn indent_region(app: &mut App) {
     let Some((start_line, end_line)) = selected_line_range(app) else { return };
-    let unit = indent::unit(app.config.editor.expand_tabs, app.config.editor.tab_width);
+    let unit = app.indent_unit();
 
     app.buffer.begin_edit_session();
     for li in (start_line..=end_line).rev() {
@@ -258,7 +265,7 @@ pub(super) fn indent_region(app: &mut App) {
 /// Remove up to one indentation unit of leading whitespace from each selected line.
 pub(super) fn dedent_region(app: &mut App) {
     let Some((start_line, end_line)) = selected_line_range(app) else { return };
-    let width = app.config.editor.tab_width.max(1);
+    let width = app.indent_width().max(1);
 
     app.buffer.begin_edit_session();
     for li in (start_line..=end_line).rev() {

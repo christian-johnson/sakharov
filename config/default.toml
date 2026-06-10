@@ -172,6 +172,26 @@ max_output_lines = 20
 # Maximum Python traceback lines shown for error outputs.
 max_traceback_lines = 5
 
+# Per-language editor overrides, keyed by language id.
+# `indent_width` sets the spaces-per-indent for that language (auto-indent,
+# Tab, and indent-/dedent-region); languages without an entry use
+# editor.tab_width.  Python and Rust intentionally have no override here —
+# they follow the 4-space default.
+[languages.javascript]
+indent_width = 2
+[languages.json]
+indent_width = 2
+[languages.yaml]
+indent_width = 2
+[languages.toml]
+indent_width = 2
+[languages.html]
+indent_width = 2
+[languages.css]
+indent_width = 2
+[languages.markdown]
+indent_width = 2
+
 # Shell formatters — run a CLI tool on the current file.
 # These take priority over LSP-based formatting (`:fmt`, format_on_save).
 # The command receives the file path as the last argument, e.g. `ruff format <file>`.

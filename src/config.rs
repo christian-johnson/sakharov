@@ -38,6 +38,19 @@ pub struct Config {
     /// instead of (and taking priority over) LSP-based formatting.
     #[serde(default)]
     pub formatters: HashMap<String, FormatterConfig>,
+    /// Per-language editor overrides, keyed by language id (e.g. "python").
+    #[serde(default)]
+    pub languages: HashMap<String, LanguageConfig>,
+}
+
+/// Per-language editor settings (`[languages.<lang>]`).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct LanguageConfig {
+    /// Spaces per indent level for this language. Overrides `editor.tab_width`
+    /// for auto-indent, Tab, and indent-/dedent-region in buffers of this
+    /// language (e.g. 4 for Python, 2 for JavaScript).
+    #[serde(default)]
+    pub indent_width: Option<usize>,
 }
 
 /// Custom key bindings config.

@@ -236,7 +236,10 @@ impl Keymap {
         normal.insert(KeyBinding::ctrl('g'), vec![Command::GrepProject]);
         normal.insert(KeyBinding::ctrl('o'), vec![Command::OpenFilePicker]);
 
-        // Ctrl+> / Ctrl+< → indent / dedent the selected lines (both Normal and Select)
+        // > / < (and Ctrl+> / Ctrl+<) → indent / dedent the selected lines
+        // (both Normal and Select)
+        both!(KeyBinding::char('>'), Command::IndentRegion);
+        both!(KeyBinding::char('<'), Command::DedentRegion);
         both!(KeyBinding::ctrl('>'), Command::IndentRegion);
         both!(KeyBinding::ctrl('<'), Command::DedentRegion);
 

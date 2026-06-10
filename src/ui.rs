@@ -519,6 +519,7 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
             count_diags(&crate::lsp::diagnostic_key(&vpath), &mut diag_errors, &mut diag_warnings);
         }
         let kernel = Some(match nb.kernel.as_ref().map(|k| &k.status) {
+            Some(crate::notebook::KernelStatus::Starting) => crate::statusline::KernelView::Starting,
             Some(crate::notebook::KernelStatus::Idle) => crate::statusline::KernelView::Idle,
             Some(crate::notebook::KernelStatus::Busy) => crate::statusline::KernelView::Busy,
             Some(crate::notebook::KernelStatus::Dead) => crate::statusline::KernelView::Dead,

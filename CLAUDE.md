@@ -13,7 +13,10 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Edit operations: `d/c/y/p/P`, `u` undo (session-coalesced), `U` redo
 - `o/O` open line, `i/a/I/A` insert variants, `v` select mode, `x` select line, `%` select all
 - `:` command line — every `Command` variant is accessible by name (see `docs/commands.md`)
-- Tree-sitter syntax highlighting: `.rs`, `.py`, `.js`
+- Tree-sitter syntax highlighting: Rust, Python, JavaScript, TOML, JSON, YAML, Bash, Go, C,
+  HTML, CSS (see `highlight::Language` + `lang.rs`; a unit test compiles every grammar's
+  highlight query and asserts it produces spans, so a broken query can't silently disable
+  highlighting). Folding (`fold.rs`) and `gc` comment syntax cover the new languages too
 - Markdown (`.md`/`.markdown`/`.qmd`): custom (non-tree-sitter) highlighting in `markdown.rs` —
   per-level header colours, **bold**/*italic*, inline `code`/fenced blocks, links, blockquotes,
   list markers — plus header-section + code-fence folding (same `zc/zo/za` interface)
@@ -37,7 +40,7 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   | `scroll` | `scroll_percent` | `N%` through file | always |
   | `spinner` | — | Animated Braille glyph (cyan) | hidden when idle |
   | `cell` | `cell_position` | `current/total` cell index | notebook only |
-  | `kernel` | — | `[idle]` / `[⠿ busy]` / `[dead]` / `[no kernel]` | notebook only |
+  | `kernel` | — | `[⠿ starting]` / `[idle]` / `[⠿ busy]` / `[dead]` / `[no kernel]` | notebook only |
 
   `kernel` folds the live spinner into itself when busy; no need for both `kernel` and
   `spinner` in the notebook layout. `cell` and `kernel` produce nothing in the plain editor.
@@ -68,7 +71,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   `crash_recovery`, format-on-save, file-picker limits/external command, UI popup sizing +
   `jump_keys` + `symbol_icons` + `command_history`, `[statusline]` modeline layout (left/right
   module lists, `separator`, `[statusline.styles]` color overrides, separate notebook variant),
-  notebook (`image_rows`/output caps), `[language_servers]`, `[formatters]`.
+  notebook (`image_rows`/output caps), `[language_servers]`, `[formatters]`,
+  `[languages.<lang>]` per-language overrides (`indent_width`).
   **Config loading is infallible** — any syntax error or type mismatch in the user file is
   reported to stderr and the built-in defaults are used instead.
 - `/` and `?` incremental search, `n/N` cycle matches
@@ -76,10 +80,19 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Code folding (`zc/zo/za`), git gutter marks, word wrap toggle
 - Multiple buffers (`H`/`L` cycle prev/next), clipboard integration
 - Auto-indent on Enter, format-on-save (`:fmt` or configurable)
-- `indent-region` (`Ctrl+>`) / `dedent-region` (`Ctrl+<`) shift the selected lines by one indent unit
+- `indent-region` (`>` / `Ctrl+>`) / `dedent-region` (`<` / `Ctrl+<`) shift the selected lines by one indent unit
 - **Spaces, never tabs, by default** — Tab key and all auto-indent insert `tab_width` spaces.
   `editor.expand_tabs` (default `true`) controls this; set `false` to indent with real tabs.
-  Indent unit comes from `indent::unit(expand_tabs, tab_width)`
+  **Indent width is language-aware**: `[languages.<lang>] indent_width` overrides
+  `editor.tab_width` per language (defaults ship 2 for js/json/yaml/toml/html/css/markdown;
+  Python/Rust follow the 4-space default). Call sites use `App::indent_unit()` /
+  `App::indent_width()`; the raw helper is `indent::unit(expand_tabs, width)`
+- **`o` is indent-aware from anywhere on the line** — open-line-below evaluates the indent
+  trigger (`:`/`{`/`(`/`[`) against the whole line, not just the text before the cursor.
+  In Markdown (`.md`/`.qmd` buffers and markdown notebook cells, via
+  `App::buffer_is_markdown`), Enter and `o` continue list items — `- `/`* `/`+ ` bullets,
+  `1.` → `2.` ordered markers, `- [ ]` task boxes, `> ` quotes
+  (`indent::markdown_list_continuation`). Enter on an *empty* item ends the list
 - **Fuzzy pickers / telescope-style popups** (see `popup*.rs`):
   - **Space** — command palette (all named commands, filterable)
   - **Ctrl+O** — file picker (built-in fuzzy file list, or an external picker like yazi/fzf
@@ -122,15 +135,34 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in notebook dir and cwd before falling back to `python3`
   - Runner script embedded in binary; the editor sends a code block terminated by `__KI_CODE_END__`
   - `exec(compile(code, '<cell>', 'exec'), shared_ns)` — full statement support, persistent imports/variables
-- **Asynchronous, streaming execution** — execution never blocks the UI:
-  - `KernelSession::start_execution` writes the code and returns immediately; a background reader thread
-    parses one JSON message per line (`{"t":"stream"|"image"|"error"|"done"}`) onto an mpsc channel
+- **Asynchronous, streaming execution** — nothing about the kernel ever blocks the UI:
+  - **Kernel startup is async**: `KernelSession::new` spawns python and returns immediately
+    with `KernelStatus::Starting`; the reader thread performs the `__KI_READY__` handshake and
+    sends `KernelMessage::Ready`, which flips the status to `Idle` (and logs "Kernel ready").
+    The status line shows `[⠿ starting]` while booting
+  - `KernelSession::start_execution` writes the code and returns immediately; the background
+    reader thread parses one JSON message per line (`{"t":"stream"|"image"|"error"|"done"}`)
+    onto an mpsc channel
   - `exec::process_kernel_events` (run-loop, once per frame) drains the channel and appends to the
     executing cell's outputs, so stdout/stderr — including in-place progress bars (tqdm, `\r`) — render live
   - The executing cell's border is **bright blue** (`Color::LightBlue`); navigation/editing of other cells
-    stays responsive while a cell runs. Only one cell runs at a time (a second `:run` reports "Kernel busy")
+    stays responsive while a cell runs
   - `notebook::append_stream` applies carriage-return line discipline so `\r`-overwrite bars show one updating line
-- `e` / `:run` — execute focused cell; `E` / `:run-next` — execute and advance
+- **Execution queue** — `NotebookState.exec_queue` holds *cell IDs* (stable across structural
+  edits; deleted/converted cells are skipped at start time). `:run` while a cell is executing
+  (or the kernel is booting) **enqueues** instead of refusing; `exec::notebook::pump_execution_queue`
+  (called from `process_kernel_events` and after queueing) starts the next cell whenever the
+  kernel is idle. Cell completion is logged with timing ("Cell [2] finished in 1.3s" /
+  "failed in …"); an end-to-end test (`async_kernel_executes_queued_cells_in_order`) drives
+  the whole pipeline against a real python3
+- `:run` — execute focused cell; `:run-next` — execute and advance;
+  `:run-all` — queue every cell in order; `:run-all-below` — queue focused cell and below
+  (markdown cells render as they're passed)
+- **Quarto export** (`exec/export.rs`) — `:export [fmt]` (default `pdf`; alias `:quarto`)
+  saves the notebook (or a `.md`/`.qmd` buffer) and runs `quarto render --to <fmt>` on a
+  background thread (`app.export_pending`, polled by `exec::poll_export` in the run loop;
+  spinner active while rendering). Reports quarto's "Output created:" artifact on success,
+  the stderr tail on failure, and a friendly hint when quarto isn't installed
 - **Markdown cells** render like a regular Jupyter notebook: a markdown cell shows its
   formatted view (same highlighter as `.md` documents, via `markdown::highlight`) when
   `Cell.rendered` is set. `:run` / `Shift+Enter` / `Ctrl+Enter` on a markdown cell "renders" it
@@ -143,10 +175,13 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   PNG via matplotlib mathtext and shown through the normal image pipeline (so SymPy output
   renders as math), then `_repr_png_`, then `repr()`. Requires matplotlib + a graphics
   terminal for the LaTeX→image path; otherwise the text repr is shown
-- `Ctrl+R` / `:restart-kernel` — kill and restart kernel (clears all state)
-- `:interrupt-kernel` — send SIGINT to the running kernel; the streaming read loop surfaces the resulting
-  `KeyboardInterrupt` and returns the cell to idle (now effective, not best-effort)
-- Kernel status shown in status bar: `[idle]` / `[busy]` / `[dead]` / `[no kernel]`
+- `Ctrl+R` / `:restart-kernel` — kill and restart kernel (clears all state + the execution queue)
+- `:interrupt-kernel` — send SIGINT to the running kernel **and drop any queued cells**; the
+  streaming read loop surfaces the resulting `KeyboardInterrupt` and returns the cell to idle
+- Kernel status shown in status bar: `[starting]` / `[idle]` / `[busy]` / `[dead]` / `[no kernel]`
+- **Kernel/cell lifecycle is logged to *Messages*** — kernel starting (with interpreter path),
+  ready, restarting, died (with queue-drop count), cell running/queued, and per-cell
+  completion with duration (`format_duration` in `exec/mod.rs`)
 - `o/O` new cell below/above, `d` delete cell, `x` clear outputs
 - Saves back to valid nbformat 4 JSON (`:w`)
 - **Kitty/WezTerm graphics** — matplotlib figures captured automatically via Agg backend; displayed
@@ -251,8 +286,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 
 ### Known rough edges / not yet implemented
 - No split panes
-- Only one notebook cell executes at a time (no run-queue); a second `:run` while busy reports "Kernel busy"
-- Kernel startup (first `:run`) is synchronous — the UI briefly blocks while Python boots; execution itself is async
+- The kernel is a single REPL, so cells still *run* one at a time — but they queue (`:run-all`,
+  repeated `:run`) and the kernel boots asynchronously, so the UI never blocks
 - Highlight recompute is whole-buffer per edit (incremental tree-sitter parsing not adopted yet)
 - Gutter overflows at >9999 lines (cosmetic)
 - Notebook cell rendering assumes width-1 characters (tabs/CJK render at the wrong width inside cells)
@@ -285,6 +320,7 @@ src/
                         new-file/new-notebook, unsaved_buffer_names quit sweep
     scroll.rs         — update_scroll (the single authoritative scroll fn) +
                         wrap helpers + fold-aware cursor normalisation
+    export.rs         — Quarto export (:export): background `quarto render` + poll_export
     format.rs         — external shell formatters ([formatters.<lang>])
     text.rs           — text-editing command helpers (delete/change/paste/comment…)
     search.rs         — incremental search match computation + jump
@@ -394,6 +430,14 @@ tree-sitter-highlight = "0.22"
 tree-sitter-rust = "0.21"        # default-features = false
 tree-sitter-python = "0.21"      # default-features = false
 tree-sitter-javascript = "0.21"  # default-features = false
+tree-sitter-toml-ng = "0.6"      # plus json 0.21, yaml 0.6, bash 0.21,
+tree-sitter-json = "0.21"        # go 0.21, c 0.21, html 0.20, css 0.21 —
+tree-sitter-yaml = "0.6"         # all pinned to versions whose `language()`
+tree-sitter-bash = "0.21"        # is ABI-compatible with tree-sitter 0.22
+tree-sitter-go = "0.21"
+tree-sitter-c = "0.21"
+tree-sitter-html = "0.20"
+tree-sitter-css = "0.21"
 serde = "1"                      # features = ["derive"]
 serde_json = "1"
 toml = "0.8"

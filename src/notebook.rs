@@ -206,6 +206,8 @@ while True:
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelStatus {
+    /// Spawned but still booting — waiting for the `__KI_READY__` handshake.
+    Starting,
     Idle,
     Busy,
     Dead,
@@ -214,6 +216,8 @@ pub enum KernelStatus {
 /// One incremental message from a running cell, produced by the kernel reader
 /// thread and drained on the main thread via [`KernelSession::poll`].
 pub enum KernelMessage {
+    /// The kernel finished booting and sent `__KI_READY__`.
+    Ready,
     /// A chunk of stdout/stderr text, emitted as the cell produces it.
     Stream { name: String, text: String },
     /// A captured matplotlib figure (decoded PNG bytes).
@@ -233,13 +237,17 @@ pub struct KernelSession {
     rx: Receiver<KernelMessage>,
     pub execution_count: u32,
     pub status: KernelStatus,
+    /// The interpreter this kernel runs (for status/log messages).
+    pub python: String,
 }
 
 impl KernelSession {
     /// Spawn a persistent Python kernel running the runner script.
     ///
-    /// Blocks until the kernel prints `__KI_READY__`, then hands stdout to a
-    /// background reader thread so cell execution never blocks the UI.
+    /// Returns immediately with status [`KernelStatus::Starting`]; the
+    /// background reader thread sends [`KernelMessage::Ready`] once the kernel
+    /// prints `__KI_READY__`, so a slow Python boot (venv, matplotlib import)
+    /// never blocks the UI.
     pub fn new(python: &str, notebook_dir: &Path) -> Result<Self> {
         use std::process::{Command, Stdio};
 
@@ -263,29 +271,10 @@ impl KernelSession {
             .context("kernel child process has no stdout")?;
 
         let stdin = std::io::BufWriter::new(stdin);
-        let mut stdout = std::io::BufReader::new(stdout_raw);
+        let stdout = std::io::BufReader::new(stdout_raw);
 
-        // Wait for __KI_READY__ (synchronous one-time startup handshake).
-        let mut buf = String::new();
-        let mut attempts = 0usize;
-        loop {
-            if attempts >= 200 {
-                anyhow::bail!("kernel did not send __KI_READY__ within 200 lines");
-            }
-            buf.clear();
-            let n = stdout
-                .read_line(&mut buf)
-                .context("reading kernel startup output")?;
-            if n == 0 {
-                anyhow::bail!("kernel process exited before sending __KI_READY__");
-            }
-            if buf.trim() == "__KI_READY__" {
-                break;
-            }
-            attempts += 1;
-        }
-
-        // Hand the (already-buffered) reader to a background thread.
+        // The reader thread performs the __KI_READY__ handshake and then
+        // parses the JSON message stream; nothing here blocks on the child.
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || reader_thread(stdout, tx));
 
@@ -294,7 +283,8 @@ impl KernelSession {
             stdin,
             rx,
             execution_count: 0,
-            status: KernelStatus::Idle,
+            status: KernelStatus::Starting,
+            python: python.to_owned(),
         })
     }
 
@@ -344,13 +334,32 @@ impl Drop for KernelSession {
     }
 }
 
-/// Background thread: parse one JSON message per line from the kernel and
-/// forward it to the session. Exits (sending `Dead`) when stdout closes.
+/// Background thread: wait for the `__KI_READY__` startup handshake (sending
+/// `Ready`), then parse one JSON message per line from the kernel and forward
+/// it to the session. Exits (sending `Dead`) when stdout closes.
 fn reader_thread(
     mut reader: std::io::BufReader<std::process::ChildStdout>,
     tx: std::sync::mpsc::Sender<KernelMessage>,
 ) {
     let mut line = String::new();
+    // Handshake phase: scan for the ready marker, skipping any noise the
+    // interpreter prints while booting.
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => {
+                let _ = tx.send(KernelMessage::Dead);
+                return;
+            }
+            Ok(_) => {}
+        }
+        if line.trim() == "__KI_READY__" {
+            if tx.send(KernelMessage::Ready).is_err() {
+                return; // session dropped
+            }
+            break;
+        }
+    }
     loop {
         line.clear();
         match reader.read_line(&mut line) {

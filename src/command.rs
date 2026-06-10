@@ -183,6 +183,8 @@ commands! {
         NotebookScrollUp => "notebook-scroll-up";
         NotebookExecuteCell => "notebook-execute-cell", aliases: ["run"], palette: "Execute cell  [ctrl+e, shift+enter, :run]";
         NotebookExecuteAndAdvance => "notebook-execute-and-advance", aliases: ["run-next"], palette: "Execute cell and advance  [:run-next]";
+        NotebookExecuteAllCells => "notebook-execute-all-cells", aliases: ["run-all", "execute-all-cells"], palette: "Execute all cells in order  [:run-all]";
+        NotebookExecuteCellsBelow => "notebook-execute-cells-below", aliases: ["run-all-below", "execute-all-cells-below"], palette: "Execute the focused cell and all below  [:run-all-below]";
         NotebookNewCellBelow => "notebook-new-cell-below", aliases: ["new-cell"], palette: "New cell below  [:new-cell]";
         NotebookNewCellAbove => "notebook-new-cell-above", palette: "New cell above  [:notebook-new-cell-above]";
         NotebookDeleteCell => "notebook-delete-cell", palette: "Delete cell  [:notebook-delete-cell]";
@@ -221,6 +223,8 @@ commands! {
         WriteAs(String) => "write-as", palette: "Write to new path  [:w <path>]";
         // Run a shell command.
         Shell(String) => "shell", palette: "Run a shell command  [:shell <cmd>]";
+        // Render the current notebook / markdown document via Quarto.
+        ExportDocument(String) => "export", palette: "Export via Quarto to pdf/html/docx…  [:export <fmt>]";
         // A list of commands executed in sequence (composition / scripting).
         Sequence(Vec<Command>) => "sequence";
     }
@@ -260,6 +264,12 @@ impl Command {
             "shell" | "sh" => {
                 let shell_cmd = arg.unwrap_or("").trim();
                 (!shell_cmd.is_empty()).then(|| Command::Shell(shell_cmd.to_string()))
+            }
+            // `:export` defaults to PDF; `:export html` etc. pass the format through.
+            "export" | "quarto" => {
+                let fmt = arg.unwrap_or("").trim();
+                let fmt = if fmt.is_empty() { "pdf" } else { fmt };
+                Some(Command::ExportDocument(fmt.to_string()))
             }
             "goto-line" => {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;

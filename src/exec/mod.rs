@@ -1,4 +1,5 @@
 mod buffers;
+mod export;
 mod format;
 mod lsp;
 pub(crate) mod notebook;
@@ -8,6 +9,7 @@ mod search;
 mod text;
 
 pub use buffers::{is_special_path, open_as_notebook, switch_to_special_buffer};
+pub use export::{poll_export, ExportJob};
 pub(crate) use buffers::{create_new_file, create_new_notebook, SCRATCH_INTRO};
 pub use lsp::{
     apply_code_action, jump_to_location, lsp_did_change, lsp_signature_help,
@@ -303,6 +305,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
             } else {
                 app.git_diff.clear();
             }
+            app.messages.show(if app.config.editor.git_gutter {
+                "Git gutter on"
+            } else {
+                "Git gutter off"
+            });
             return;
         }
 
@@ -583,10 +590,20 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         Command::ToggleLineNumbers => {
             app.config.editor.line_numbers = !app.config.editor.line_numbers;
+            app.messages.show(if app.config.editor.line_numbers {
+                "Line numbers on"
+            } else {
+                "Line numbers off"
+            });
             return;
         }
         Command::ToggleRelativeLineNumbers => {
             app.config.editor.relative_line_numbers = !app.config.editor.relative_line_numbers;
+            app.messages.show(if app.config.editor.relative_line_numbers {
+                "Relative line numbers on"
+            } else {
+                "Relative line numbers off"
+            });
             return;
         }
 
@@ -664,6 +681,18 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::NotebookExecuteAndAdvance => {
             execute(app, &Command::NotebookExecuteCell);
             execute(app, &Command::NotebookNextCell);
+            return;
+        }
+        Command::NotebookExecuteAllCells => {
+            notebook::execute_all_cells(app, false);
+            return;
+        }
+        Command::NotebookExecuteCellsBelow => {
+            notebook::execute_all_cells(app, true);
+            return;
+        }
+        Command::ExportDocument(fmt) => {
+            export::start_export(app, fmt);
             return;
         }
         Command::NotebookUndoStructural | Command::NotebookRedoStructural => {
@@ -900,6 +929,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
             if app.config.editor.word_wrap {
                 app.scroll_col = 0;
             }
+            app.messages.show(if app.config.editor.word_wrap {
+                "Word wrap on"
+            } else {
+                "Word wrap off"
+            });
             return;
         }
         Command::ShowDashboard => {
@@ -999,48 +1033,76 @@ pub fn poll_git(app: &mut App) -> bool {
 
 /// Drain streamed output from the running kernel and apply it to the executing
 /// cell. Called once per frame so outputs (incl. live progress bars) appear as
-/// they are produced rather than only when the cell finishes.
-/// Returns true when any output was applied (the caller should redraw).
+/// they are produced rather than only when the cell finishes. Also handles the
+/// kernel-ready handshake and starts the next queued cell when the kernel
+/// becomes idle. Returns true when state changed (the caller should redraw).
 pub fn process_kernel_events(app: &mut App) -> bool {
     use crate::notebook::{append_stream, push_error_output, KernelMessage, KernelStatus, MimeData, Output};
 
     let mut refresh_images = false;
     let mut applied = false;
+    // Status changes worth logging are collected and shown after the notebook
+    // borrow ends; when several arrive in one frame the last (most recent)
+    // wins the minibuffer and the log keeps them all.
+    let mut announce: Vec<String> = Vec::new();
     if let Some((ref mut nb, ref mut state)) = app.notebook {
-        let Some(idx) = state.executing_cell else { return false };
+        if state.executing_cell.is_some() && nb.kernel.is_none() {
+            state.executing_cell = None;
+            state.executing_since = None;
+            applied = true;
+        }
         let msgs = match nb.kernel.as_mut() {
             Some(k) => k.poll(),
-            None => {
-                state.executing_cell = None;
-                return true;
-            }
+            None => Vec::new(),
         };
-        if msgs.is_empty() {
-            return false;
-        }
-        applied = true;
+        applied |= !msgs.is_empty();
         for msg in msgs {
-            if idx >= nb.cells.len() {
-                break;
-            }
+            // The executing cell, revalidated per message (Done/Dead clear it).
+            let idx = state.executing_cell.filter(|&i| i < nb.cells.len());
             match msg {
+                KernelMessage::Ready => {
+                    if let Some(ref mut k) = nb.kernel {
+                        if k.status == KernelStatus::Starting {
+                            k.status = KernelStatus::Idle;
+                        }
+                        announce.push(format!("Kernel ready ({})", k.python));
+                    }
+                }
                 KernelMessage::Stream { name, text } => {
-                    append_stream(&mut nb.cells[idx].outputs, &name, &text);
+                    if let Some(idx) = idx {
+                        append_stream(&mut nb.cells[idx].outputs, &name, &text);
+                    }
                 }
                 KernelMessage::Image { png } => {
-                    nb.cells[idx].outputs.push(Output::DisplayData {
-                        data: MimeData { text_plain: None, image_png: Some(std::sync::Arc::new(png)) },
-                    });
-                    refresh_images = true;
+                    if let Some(idx) = idx {
+                        nb.cells[idx].outputs.push(Output::DisplayData {
+                            data: MimeData { text_plain: None, image_png: Some(std::sync::Arc::new(png)) },
+                        });
+                        refresh_images = true;
+                    }
                 }
                 KernelMessage::Error { traceback } => {
-                    push_error_output(&mut nb.cells[idx].outputs, &traceback);
+                    if let Some(idx) = idx {
+                        push_error_output(&mut nb.cells[idx].outputs, &traceback);
+                    }
                 }
                 KernelMessage::Done => {
                     if let Some(ref mut k) = nb.kernel {
                         k.execution_count += 1;
                         k.status = KernelStatus::Idle;
-                        nb.cells[idx].execution_count = Some(k.execution_count);
+                        if let Some(idx) = idx {
+                            nb.cells[idx].execution_count = Some(k.execution_count);
+                        }
+                    }
+                    let elapsed = state.executing_since.take().map(|t| format_duration(t.elapsed()));
+                    if let Some(idx) = idx {
+                        let failed = nb.cells[idx].outputs.iter()
+                            .any(|o| matches!(o, Output::Error { .. }));
+                        let verb = if failed { "failed" } else { "finished" };
+                        announce.push(match elapsed {
+                            Some(t) => format!("Cell [{}] {verb} in {t}", idx + 1),
+                            None => format!("Cell [{}] {verb}", idx + 1),
+                        });
                     }
                     state.executing_cell = None;
                     nb.modified = true;
@@ -1051,15 +1113,41 @@ pub fn process_kernel_events(app: &mut App) -> bool {
                         k.status = KernelStatus::Dead;
                     }
                     state.executing_cell = None;
+                    state.executing_since = None;
+                    let dropped = state.exec_queue.len();
+                    state.exec_queue.clear();
+                    announce.push(if dropped > 0 {
+                        format!("Kernel died — {dropped} queued cell(s) dropped (:restart-kernel)")
+                    } else {
+                        "Kernel died (:restart-kernel to restart)".to_string()
+                    });
                     refresh_images = true;
                 }
             }
         }
     }
+    for msg in announce {
+        app.messages.show(msg);
+    }
     if refresh_images {
         app.graphics.image_ids.clear();
     }
+    // The kernel may have just become idle (Ready/Done) — start the next
+    // queued cell. Its "Running cell [N]…" takes over the minibuffer.
+    applied |= notebook::pump_execution_queue(app);
     applied
+}
+
+/// Human-readable duration for the cell-completion log message.
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{:.0}ms", secs * 1000.0)
+    } else if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else {
+        format!("{}m{:02}s", d.as_secs() / 60, d.as_secs() % 60)
+    }
 }
 
 /// Rebuild the per-line diagnostic cache for the current buffer.
@@ -1317,6 +1405,86 @@ mod tests {
         assert!(app.should_quit, "no unsaved buffers should remain after :bd!");
 
         let _ = std::fs::remove_file(&a);
+    }
+
+    /// End-to-end async execution: `:run-all` queues both cells, the kernel
+    /// boots in the background, and `process_kernel_events` (the run-loop
+    /// pump) runs them in order with a shared namespace, logging progress.
+    #[test]
+    fn async_kernel_executes_queued_cells_in_order() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 not available — skipping kernel integration test");
+            return;
+        }
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("kernelq");
+        let target = dir.join("queue.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "queue");
+
+        if let Some((ref mut nb, _)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("x = 1\nprint('first', x)");
+            let mut second = nb.cells[0].clone();
+            second.id = crate::notebook::new_cell_id();
+            second.source = Rope::from_str("print('second', x + 1)");
+            nb.cells.push(second);
+        }
+        notebook::load_focused_cell(&mut app);
+
+        execute(&mut app, &Command::NotebookExecuteAllCells);
+        // The kernel boots asynchronously — nothing has finished yet, but the
+        // work must be queued (or already started) without blocking.
+        {
+            let (_, state) = app.notebook.as_ref().unwrap();
+            assert!(
+                state.executing_cell.is_some() || !state.exec_queue.is_empty(),
+                "run-all must queue the code cells"
+            );
+        }
+
+        // Drive the run-loop pump until both cells complete (or time out).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            process_kernel_events(&mut app);
+            let (nb, state) = app.notebook.as_ref().unwrap();
+            let kernel_dead = nb.kernel.as_ref()
+                .map(|k| k.status == crate::notebook::KernelStatus::Dead)
+                .unwrap_or(false);
+            assert!(!kernel_dead, "kernel died during the test");
+            let done = state.exec_queue.is_empty()
+                && state.executing_cell.is_none()
+                && nb.cells.iter().all(|c| c.execution_count.is_some());
+            if done {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "kernel execution timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let stream_text = |cell: &crate::notebook::Cell| -> String {
+            cell.outputs.iter().filter_map(|o| match o {
+                crate::notebook::Output::Stream { text, .. } => Some(text.as_str()),
+                _ => None,
+            }).collect()
+        };
+        let (nb, _) = app.notebook.as_ref().unwrap();
+        // Ran in order with a shared namespace: cell 1 saw cell 0's `x`.
+        assert_eq!(nb.cells[0].execution_count, Some(1));
+        assert_eq!(nb.cells[1].execution_count, Some(2));
+        assert!(stream_text(&nb.cells[0]).contains("first 1"));
+        assert!(stream_text(&nb.cells[1]).contains("second 2"));
+        // The message log recorded the kernel lifecycle and cell completions.
+        assert!(app.messages.log.iter().any(|m| m.starts_with("Kernel ready")));
+        assert!(app.messages.log.iter().any(|m| m.contains("Cell [1] finished")));
+        assert!(app.messages.log.iter().any(|m| m.contains("Cell [2] finished")));
+
+        let _ = std::fs::remove_file(&target);
     }
 
     #[test]
