@@ -364,9 +364,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::ToggleGitGutter => {
             app.config.editor.git_gutter = !app.config.editor.git_gutter;
             if app.config.editor.git_gutter {
-                if let Some(path) = &app.buffer.path {
-                    app.git_diff = crate::git::diff_marks(path);
-                }
+                refresh_git(app);
             } else {
                 app.git_diff.clear();
             }
@@ -454,10 +452,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 match app.buffer.save(None, force) {
                     Ok(()) => {
                         app.message = Some(format!("Saved {}", app.buffer.display_name()));
-                        if let Some(ref path) = app.buffer.path.clone() {
-                            app.git_diff = crate::git::diff_marks(path);
-                            app.git_branch = crate::git::current_branch();
-                        }
+                        refresh_git(app);
                     }
                     Err(e) => app.message = Some(format!("Error: {e}")),
                 }
@@ -473,10 +468,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             match app.buffer.save(Some(&path), false) {
                 Ok(()) => {
                     app.message = Some(format!("Saved {path}"));
-                    if let Some(ref p) = app.buffer.path {
-                        app.git_diff = crate::git::diff_marks(p);
-                        app.git_branch = crate::git::current_branch();
-                    }
+                    refresh_git(app);
                 }
                 Err(e) => app.message = Some(format!("Error: {e}")),
             }
@@ -1223,25 +1215,55 @@ pub fn recompute_highlights(app: &mut App) {
     app.highlights_dirty = true;
 }
 
+/// Kick off a background git refresh (branch + per-line diff marks for the
+/// current buffer).  The result is applied by the run loop when it arrives —
+/// a slow or absent git can never block the UI.
+pub fn refresh_git(app: &mut App) {
+    let path = if app.notebook.is_some() {
+        None // notebook buffers have virtual paths; no per-line diff applies
+    } else {
+        app.buffer.path.clone().filter(|p| !is_special_path(p))
+    };
+    app.git_pending = Some(crate::git::refresh(path));
+}
+
+/// Apply a finished background git refresh, if one is ready.  Returns true
+/// when state changed (the caller should redraw).
+pub fn poll_git(app: &mut App) -> bool {
+    let Some(pending) = &app.git_pending else { return false };
+    let Some(info) = pending.poll() else { return false };
+    app.git_pending = None;
+    app.git_branch = info.branch;
+    app.git_diff = if app.config.editor.git_gutter {
+        info.diff
+    } else {
+        Default::default()
+    };
+    true
+}
+
 /// Drain streamed output from the running kernel and apply it to the executing
 /// cell. Called once per frame so outputs (incl. live progress bars) appear as
 /// they are produced rather than only when the cell finishes.
-pub fn process_kernel_events(app: &mut App) {
+/// Returns true when any output was applied (the caller should redraw).
+pub fn process_kernel_events(app: &mut App) -> bool {
     use crate::notebook::{append_stream, push_error_output, KernelMessage, KernelStatus, MimeData, Output};
 
     let mut refresh_images = false;
+    let mut applied = false;
     if let Some((ref mut nb, ref mut state)) = app.notebook {
-        let Some(idx) = state.executing_cell else { return };
+        let Some(idx) = state.executing_cell else { return false };
         let msgs = match nb.kernel.as_mut() {
             Some(k) => k.poll(),
             None => {
                 state.executing_cell = None;
-                return;
+                return true;
             }
         };
         if msgs.is_empty() {
-            return;
+            return false;
         }
+        applied = true;
         for msg in msgs {
             if idx >= nb.cells.len() {
                 break;
@@ -1282,6 +1304,7 @@ pub fn process_kernel_events(app: &mut App) {
     if refresh_images {
         app.graphics.image_ids.clear();
     }
+    applied
 }
 
 /// Rebuild the per-line diagnostic cache for the current buffer.
@@ -1541,8 +1564,7 @@ fn run_shell_formatter(app: &mut App) -> bool {
                     app.buffer.refresh_disk_mtime();
                     recompute_highlights(app);
                     lsp::lsp_did_change(app);
-                    app.git_diff = crate::git::diff_marks(&path);
-                    app.git_branch = crate::git::current_branch();
+                    refresh_git(app);
                 }
                 Err(e) => {
                     app.message = Some(format!("Could not reload after format: {e}"));

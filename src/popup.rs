@@ -128,6 +128,11 @@ pub struct ListState {
     /// tiebreaker between matches of equal fuzzy-match quality (recent first),
     /// and to order the list when the filter is empty.
     pub recency: std::collections::HashMap<String, usize>,
+    /// Memoised `(effective_filter, result)` of the last `filtered_indices`
+    /// call.  Scoring + sorting the whole item list on every navigation
+    /// keystroke and render is wasted work; the key check keeps the cache
+    /// correct even when `filter` is mutated directly.
+    filtered_cache: std::cell::RefCell<Option<(String, Vec<usize>)>>,
 }
 
 #[derive(Default)]
@@ -197,7 +202,16 @@ impl ListState {
             search: None,
             doc: None,
             recency: std::collections::HashMap::new(),
+            filtered_cache: std::cell::RefCell::new(None),
         }
+    }
+
+    /// Drop the memoised filter result.  Needed only when item *contents*
+    /// change after construction (e.g. a `completionItem/resolve` reply filling
+    /// in `detail`, which participates in match scoring) — plain filter edits
+    /// are handled by the cache key.
+    pub fn invalidate_filter_cache(&mut self) {
+        *self.filtered_cache.borrow_mut() = None;
     }
 
     /// Return indices of matching items sorted by relevance.
@@ -221,6 +235,18 @@ impl ListState {
     }
 
     pub fn filtered_indices(&self) -> Vec<usize> {
+        let key = self.effective_filter();
+        if let Some((cached_key, cached)) = self.filtered_cache.borrow().as_ref() {
+            if cached_key == key {
+                return cached.clone();
+            }
+        }
+        let result = self.compute_filtered_indices();
+        *self.filtered_cache.borrow_mut() = Some((key.to_owned(), result.clone()));
+        result
+    }
+
+    fn compute_filtered_indices(&self) -> Vec<usize> {
         let active_filter = self.effective_filter();
         if active_filter.is_empty() {
             // With recency tracking, float recently-used items to the top in

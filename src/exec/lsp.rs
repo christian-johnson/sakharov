@@ -192,11 +192,14 @@ pub fn lsp_did_change(app: &mut App) {
 }
 
 /// Drain LSP events and apply them to the editor state.
-pub fn process_lsp_events(app: &mut App) {
+/// Returns true when any event was applied (the caller should redraw).
+pub fn process_lsp_events(app: &mut App) -> bool {
     let events = app.lsp.poll();
+    let any = !events.is_empty();
     for event in events {
         handle_lsp_event(app, event);
     }
+    any
 }
 
 fn handle_lsp_event(app: &mut App, event: LspEvent) {
@@ -274,6 +277,8 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                                     item.detail = detail;
                                 }
                             }
+                            // `detail` participates in match scoring.
+                            list.invalidate_filter_cache();
                         }
                     }
                 }
@@ -581,7 +586,7 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
 
     super::register_buffer(&mut app.open_buffers, path);
 
-    app.git_diff = crate::git::diff_marks(path);
+    super::refresh_git(app);
     super::rebuild_diag_cache(app);
 
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
@@ -702,10 +707,7 @@ fn do_save(app: &mut App) {
     match app.buffer.save(None, false) {
         Ok(()) => {
             app.message = Some(format!("Saved {}", app.buffer.display_name()));
-            if let Some(ref path) = app.buffer.path.clone() {
-                app.git_diff = crate::git::diff_marks(path);
-                app.git_branch = crate::git::current_branch();
-            }
+            super::refresh_git(app);
         }
         Err(e) => app.message = Some(format!("Error: {e}")),
     }

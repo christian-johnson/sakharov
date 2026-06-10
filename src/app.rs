@@ -194,6 +194,10 @@ pub struct App {
     pub keymap: Keymap,
     /// Loaded notebook + UI state, present when a `.ipynb` file is opened.
     pub notebook: Option<(Notebook, NotebookState)>,
+    /// Per-cell highlight-span cache + shared highlighter for the notebook
+    /// view.  Lives outside `notebook` so the renderer can borrow it mutably
+    /// alongside an immutable borrow of the notebook itself.
+    pub nb_highlight: crate::notebook_ui::CellHighlightCache,
     /// Terminal-graphics (Kitty/WezTerm) image state.
     pub graphics: GraphicsState,
     /// True while the full-screen focused-cell overlay (Enter from notebook nav)
@@ -217,8 +221,11 @@ pub struct App {
     pub open_buffers: Vec<std::path::PathBuf>,
     /// Git diff marks for the current buffer, keyed by 0-indexed line number.
     pub git_diff: std::collections::HashMap<usize, GutterMark>,
-    /// Current git branch name (read at startup, refreshed on write).
+    /// Current git branch name (refreshed in the background at startup and on write).
     pub git_branch: Option<String>,
+    /// In-flight background git refresh (branch + diff marks), polled once per
+    /// frame by the run loop.  `None` when no refresh is pending.
+    pub git_pending: Option<crate::git::GitRefresh>,
     /// Code actions returned by the last LSP `textDocument/codeAction` request.
     /// Indexed by the popup item's `ConfirmPayload::CodeAction(idx)`.
     pub pending_code_actions: Vec<serde_json::Value>,
@@ -361,11 +368,10 @@ impl App {
             open_buffers.push(p.canonicalize().unwrap_or_else(|_| p.clone()));
         }
 
-        let git_diff = buffer
-            .path
-            .as_deref()
-            .map(crate::git::diff_marks)
-            .unwrap_or_default();
+        // Branch + diff marks arrive asynchronously; the run loop polls this.
+        let git_pending = Some(crate::git::refresh(
+            if notebook.is_some() { None } else { buffer.path.clone() },
+        ));
 
         let mut keymap = Keymap::default_bindings();
         keymap.apply_custom_bindings(&config.keys);
@@ -391,6 +397,7 @@ impl App {
             config,
             keymap,
             notebook,
+            nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
             graphics: GraphicsState::default(),
             cell_focused_edit: false,
             popup: None,
@@ -400,8 +407,9 @@ impl App {
             viewport_height: 24,
             viewport_width: 80,
             open_buffers,
-            git_diff,
-            git_branch: crate::git::current_branch(),
+            git_diff: std::collections::HashMap::new(),
+            git_branch: None,
+            git_pending,
             pending_code_actions: Vec::new(),
             jump: JumpState::default(),
             needs_clear: false,
@@ -560,10 +568,103 @@ fn run_loop(
     app: &mut App,
 ) -> Result<()> {
     let debug_keys = std::env::var_os("SV_DEBUG_KEYS").is_some();
+    // Draw only when something actually changed (a key was handled, an LSP or
+    // kernel event was applied, the spinner is animating, the terminal was
+    // resized).  When idle the loop just polls for events — zero render work,
+    // zero tree-sitter work, instead of a full redraw 60× per second.
+    let mut needs_redraw = true;
     loop {
-        // Update stored viewport dimensions, then recompute scroll.
-        // This runs before every render so the scroll is always based on the
-        // current terminal size (handles resize events too).
+        if needs_redraw {
+            needs_redraw = false;
+            draw_frame(terminal, app)?;
+        }
+
+        // Block up to 16 ms for the first event (keeps input latency low while
+        // background channels are still polled regularly).  Once an event
+        // arrives, drain every additional queued event before redrawing so a
+        // key-repeat burst is consumed in a single frame.
+        if event::poll(std::time::Duration::from_millis(16))? {
+            loop {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if debug_keys {
+                            log_key_event(&key);
+                        }
+                        // With the keyboard-enhancement protocol active some
+                        // terminals also emit key-release events; only act on
+                        // press/repeat.
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                            input::handle_key(app, key);
+                            needs_redraw = true;
+                        }
+                    }
+                    Event::Resize(_, _) => {
+                        needs_redraw = true;
+                    }
+                    _ => {}
+                }
+                if !event::poll(std::time::Duration::from_millis(0))? {
+                    break;
+                }
+            }
+        }
+
+        // Background work: anything applied means the screen is stale.
+        needs_redraw |= crate::exec::process_lsp_events(app);
+        needs_redraw |= crate::exec::process_kernel_events(app);
+        needs_redraw |= crate::exec::poll_git(app);
+
+        // Advance the status-bar spinner.  It's "active" whenever a notebook
+        // cell is executing or an LSP request is in flight — and animating it
+        // requires a redraw per tick.
+        let background_active = app
+            .notebook
+            .as_ref()
+            .map(|(_, state)| state.executing_cell.is_some())
+            .unwrap_or(false)
+            || app.lsp.has_pending_requests();
+        app.spinner.update(background_active);
+        needs_redraw |= background_active;
+
+        // Belt-and-braces: state flagged dirty by any path above.
+        needs_redraw |= app.needs_clear || app.highlights_dirty;
+
+        // Debounced crash-recovery flush of any unsaved buffers.
+        crate::recovery::tick(app);
+
+        // Append any new minibuffer message to the *Messages* log.
+        if app.message.as_deref() != app.last_logged_message.as_deref() {
+            if let Some(ref msg) = app.message {
+                app.messages_log.push(msg.clone());
+                app.last_logged_message = app.message.clone();
+            }
+        }
+
+        // A catchable termination signal was received: break promptly. run()
+        // flushes recovery, restores the terminal, and re-raises the signal.
+        if pending_signal().is_some() {
+            break;
+        }
+
+        if app.should_quit {
+            // Clean exit — nothing to recover next time.
+            crate::recovery::cleanup_on_quit(app);
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Render one frame: refresh viewport dimensions, recompute scroll and any
+/// stale highlights, draw the active view (splash / notebook / plain editor),
+/// then flush Kitty images and the cursor shape.
+fn draw_frame(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    {
+        // Update stored viewport dimensions, then recompute scroll, so the
+        // scroll always reflects the current terminal size.
         if let Ok(size) = terminal.size() {
             app.viewport_height = size.height.saturating_sub(2) as usize;
             app.viewport_width = size.width as usize;
@@ -655,7 +756,7 @@ fn run_loop(
                             jump_typed: &app.jump.typed,
                         };
                         let (images, cursor_pos) =
-                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook, app.graphics.cell_pixel_size);
+                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook, app.graphics.cell_pixel_size, &mut app.nb_highlight);
                         app.graphics.pending = images;
                         nb_cursor = cursor_pos;
 
@@ -758,71 +859,6 @@ fn run_loop(
         if app.last_rendered_mode.as_ref() != Some(&app.mode) {
             app.last_rendered_mode = Some(app.mode.clone());
             set_cursor_shape(&app.mode, &app.config.theme.modes);
-        }
-
-        // Block up to 16 ms for the first event (≈60 fps idle rate).
-        // Once an event arrives, drain every additional event that is already
-        // queued before yielding back to the render loop.  This ensures that a
-        // burst of key-repeat events is consumed in a single frame rather than
-        // trickling in one per frame, which caused the cursor to keep moving
-        // briefly after a key was released.
-        if event::poll(std::time::Duration::from_millis(16))? {
-            loop {
-                match event::read()? {
-                    Event::Key(key) => {
-                        if debug_keys {
-                            log_key_event(&key);
-                        }
-                        // With the keyboard-enhancement protocol active some
-                        // terminals also emit key-release events; only act on
-                        // press/repeat.
-                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                            input::handle_key(app, key);
-                        }
-                    }
-                    Event::Resize(_, _) => {}
-                    _ => {}
-                }
-                if !event::poll(std::time::Duration::from_millis(0))? {
-                    break;
-                }
-            }
-        }
-
-        crate::exec::process_lsp_events(app);
-        crate::exec::process_kernel_events(app);
-
-        // Advance the status-bar spinner.  It's "active" whenever a notebook
-        // cell is executing or an LSP request is in flight.
-        let background_active = app
-            .notebook
-            .as_ref()
-            .map(|(_, state)| state.executing_cell.is_some())
-            .unwrap_or(false)
-            || app.lsp.has_pending_requests();
-        app.spinner.update(background_active);
-
-        // Debounced crash-recovery flush of any unsaved buffers.
-        crate::recovery::tick(app);
-
-        // Append any new minibuffer message to the *Messages* log.
-        if app.message.as_deref() != app.last_logged_message.as_deref() {
-            if let Some(ref msg) = app.message {
-                app.messages_log.push(msg.clone());
-                app.last_logged_message = app.message.clone();
-            }
-        }
-
-        // A catchable termination signal was received: break promptly. run()
-        // flushes recovery, restores the terminal, and re-raises the signal.
-        if pending_signal().is_some() {
-            break;
-        }
-
-        if app.should_quit {
-            // Clean exit — nothing to recover next time.
-            crate::recovery::cleanup_on_quit(app);
-            break;
         }
     }
     Ok(())

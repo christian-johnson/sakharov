@@ -233,12 +233,29 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - **LSP URIs are percent-encoded** (`lsp::path_to_uri`/`uri_to_path`) so paths with spaces or
   non-ASCII work; `diagnostic_key` round-trips through the same transform.
 
+### Performance (Phase C hardening)
+- **Dirty-flag rendering** — the run loop (`app::run_loop`) draws only when something changed
+  (a key was handled, an LSP/kernel/git event was applied, the spinner is animating, resize).
+  Idle CPU is just a 16 ms event poll; there is no 60 fps idle redraw. The frame itself lives in
+  `app::draw_frame`. `exec::process_lsp_events` / `process_kernel_events` / `poll_git` return
+  `bool` ("anything applied?") to feed the flag.
+- **Notebook highlight cache** (`notebook_ui::CellHighlightCache`, stored as `app.nb_highlight`) —
+  per-cell highlight spans keyed by a content fingerprint, plus one persistent tree-sitter
+  highlighter per kernel language. Previously every visible cell was re-parsed (and the highlight
+  query re-compiled) on every frame.
+- **Git is fully async** — `git::refresh(path)` spawns a thread and returns a `GitRefresh` handle;
+  `exec::poll_git` applies the result when it arrives. The old API blocked the UI thread for up to
+  2 s per save/open on a slow filesystem. `exec::refresh_git(app)` is the standard trigger.
+- **`ListState::filtered_indices` is memoised** keyed by the effective filter string; item-content
+  mutations (completion resolve) call `invalidate_filter_cache`.
+
 ### Known rough edges / not yet implemented
 - No split panes
 - Only one notebook cell executes at a time (no run-queue); a second `:run` while busy reports "Kernel busy"
 - Kernel startup (first `:run`) is synchronous — the UI briefly blocks while Python boots; execution itself is async
-- Highlight recompute is whole-buffer on every keystroke (fine for now)
+- Highlight recompute is whole-buffer per edit (incremental tree-sitter parsing not adopted yet)
 - Gutter overflows at >9999 lines (cosmetic)
+- Notebook cell rendering assumes width-1 characters (tabs/CJK render at the wrong width inside cells)
 
 ## Architecture
 

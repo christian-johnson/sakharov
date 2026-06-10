@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GutterMark {
@@ -7,18 +8,48 @@ pub enum GutterMark {
     Modified,
 }
 
-/// Return the current git branch name, or `None` when git is unavailable or
-/// the working directory is not inside a repository.
-pub fn current_branch() -> Option<String> {
-    use std::sync::mpsc;
+/// Result of a background git refresh: current branch + per-line diff marks.
+pub struct GitInfo {
+    pub branch: Option<String>,
+    pub diff: HashMap<usize, GutterMark>,
+}
+
+/// An in-flight background git refresh.  Poll with [`GitRefresh::poll`] from
+/// the run loop; the result arrives without ever blocking the UI thread.
+pub struct GitRefresh {
+    rx: Receiver<GitInfo>,
+}
+
+impl GitRefresh {
+    /// Non-blocking: `Some(info)` once the background git commands finish.
+    pub fn poll(&self) -> Option<GitInfo> {
+        self.rx.try_recv().ok()
+    }
+}
+
+/// Start a background refresh of the git branch and (when `path` is given)
+/// the per-line diff marks for that file.  Never blocks: a slow or absent
+/// git simply means the result arrives late or reads as "no repo".
+pub fn refresh(path: Option<PathBuf>) -> GitRefresh {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output();
-        let _ = tx.send(out);
+        let info = GitInfo {
+            branch: query_branch(),
+            diff: path.as_deref().map(query_diff_marks).unwrap_or_default(),
+        };
+        let _ = tx.send(info);
     });
-    let output = rx.recv_timeout(std::time::Duration::from_secs(2)).ok()?.ok()?;
+    GitRefresh { rx }
+}
+
+/// Blocking: current git branch name, or `None` when git is unavailable or
+/// the working directory is not inside a repository.  Run on the refresh
+/// thread only — never call from the UI thread.
+fn query_branch() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -30,36 +61,22 @@ pub fn current_branch() -> Option<String> {
     }
 }
 
-/// Compute per-line git diff marks for `path`.
-///
-/// Returns an empty map when the file is untracked, git is unavailable,
-/// or no changes exist relative to HEAD.  Capped at 2 s so a slow git
-/// invocation can't block the UI.
-pub fn diff_marks(path: &Path) -> HashMap<usize, GutterMark> {
-    use std::sync::mpsc;
-
-    let path_str = match path.to_str() {
-        Some(s) => s.to_owned(),
-        None => return HashMap::new(),
+/// Blocking: per-line git diff marks for `path` (empty when untracked /
+/// unavailable / unchanged).  Run on the refresh thread only.
+fn query_diff_marks(path: &std::path::Path) -> HashMap<usize, GutterMark> {
+    let Some(path_str) = path.to_str() else {
+        return HashMap::new();
     };
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let out = std::process::Command::new("git")
-            .args(["diff", "--no-color", "--unified=0", "HEAD", "--", &path_str])
-            .output();
-        let _ = tx.send(out);
-    });
-
-    let output = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-        Ok(Ok(o)) => o,
-        _ => return HashMap::new(),
+    let output = match std::process::Command::new("git")
+        .args(["diff", "--no-color", "--unified=0", "HEAD", "--", path_str])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return HashMap::new(),
     };
-
     if output.stdout.is_empty() {
         return HashMap::new();
     }
-
     parse_diff(&String::from_utf8_lossy(&output.stdout))
 }
 

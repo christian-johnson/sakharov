@@ -37,6 +37,80 @@ pub struct ActiveCellView<'a> {
     pub jump_typed: &'a str,
 }
 
+/// Cache of per-cell highlight spans plus the shared tree-sitter highlighter
+/// for the notebook's kernel language.
+///
+/// Building a `HighlightConfiguration` parses the grammar's highlight query —
+/// far too expensive to repeat per frame — and re-highlighting unchanged cells
+/// is wasted tree-sitter work.  Entries are keyed by cell index and validated
+/// by a content fingerprint, so both costs are paid only when a cell's text
+/// (or render kind) actually changes.  No invalidation plumbing is needed:
+/// structural edits shift indices but the fingerprint check makes a stale
+/// entry recompute rather than mis-render.
+#[derive(Default)]
+pub struct CellHighlightCache {
+    lang_ext: String,
+    highlighter: Option<Highlighter>,
+    spans: std::collections::HashMap<usize, (u64, Vec<highlight::Span>)>,
+}
+
+/// How a cell's content is highlighted.
+#[derive(Clone, Copy, PartialEq)]
+enum CellKind {
+    /// No highlighting (raw cells, markdown source view).
+    Plain,
+    /// Tree-sitter highlighting in the kernel language.
+    Code,
+    /// Rendered-markdown highlighting.
+    Markdown,
+}
+
+fn cell_fingerprint(rope: &ropey::Rope, kind: CellKind) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write_u8(match kind {
+        CellKind::Plain => 0,
+        CellKind::Code => 1,
+        CellKind::Markdown => 2,
+    });
+    for chunk in rope.chunks() {
+        h.write(chunk.as_bytes());
+    }
+    h.finish()
+}
+
+impl CellHighlightCache {
+    /// The shared highlighter for `lang`, (re)built only on language change.
+    fn highlighter_for(&mut self, lang: &str) -> &mut Highlighter {
+        let ext = lang_to_ext(lang);
+        if self.highlighter.is_none() || self.lang_ext != ext {
+            self.lang_ext = ext.to_owned();
+            let fake = format!("_.{ext}");
+            self.highlighter = Some(Highlighter::new(Some(std::path::Path::new(&fake))));
+            self.spans.clear();
+        }
+        self.highlighter.as_mut().expect("just ensured")
+    }
+
+    /// Highlight spans for cell `idx` with content `rope`, recomputed only
+    /// when the content fingerprint changes.
+    fn spans_for(&mut self, lang: &str, idx: usize, rope: &ropey::Rope, kind: CellKind) -> &[highlight::Span] {
+        if kind == CellKind::Plain {
+            return &[];
+        }
+        let fp = cell_fingerprint(rope, kind);
+        let stale = self.spans.get(&idx).map(|(h, _)| *h != fp).unwrap_or(true);
+        if stale {
+            let spans = match kind {
+                CellKind::Code => self.highlighter_for(lang).highlight(rope).unwrap_or_default(),
+                _ => crate::markdown::highlight(rope),
+            };
+            self.spans.insert(idx, (fp, spans));
+        }
+        &self.spans[&idx].1
+    }
+}
+
 /// A request to render a PNG image via the Kitty graphics protocol.
 pub struct ImageRequest {
     pub col: u16,
@@ -57,6 +131,7 @@ pub struct ImageRequest {
 /// Returns `(image_requests, cursor_screen_pos)`.  The cursor position is the
 /// terminal (col, row) of the insertion point inside the focused cell — pass
 /// it to `popup_ui::render` so completion popups anchor to the right spot.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     state: &NotebookState,
@@ -65,6 +140,7 @@ pub fn render(
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
+    cache: &mut CellHighlightCache,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let size = frame.area();
     if size.height < 3 {
@@ -79,7 +155,7 @@ pub fn render(
         height: size.height.saturating_sub(2),
     };
 
-    render_cells(frame, state, nb, active, lsp_diagnostics, content_area, nb_config, cell_pixel_size)
+    render_cells(frame, state, nb, active, lsp_diagnostics, content_area, nb_config, cell_pixel_size, cache)
 }
 
 // ---------------------------------------------------------------------------
@@ -96,15 +172,11 @@ fn render_cells(
     area: Rect,
     nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
+    cache: &mut CellHighlightCache,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let mut image_requests = Vec::new();
     let mut current_row = area.top();
     let mut focused_cell_screen_pos: Option<(u16, u16)> = None;
-
-    // One Highlighter shared across all cells — avoids rebuilding the
-    // tree-sitter HighlightConfiguration (grammar query parse) per cell.
-    let lang_ext = format!("_.{}", lang_to_ext(&nb.metadata.kernel_language));
-    let mut shared_hl = Highlighter::new(Some(std::path::Path::new(&lang_ext)));
 
     for (cell_idx, cell) in nb.cells.iter().enumerate() {
         if cell_idx < state.scroll_cell {
@@ -174,7 +246,7 @@ fn render_cells(
             } else {
                 let cursor_screen = render_cell_content(
                     frame, nb, cell, cell_idx, is_focused, inner, active,
-                    lsp_diagnostics, &mut image_requests, &mut shared_hl, nb_config,
+                    lsp_diagnostics, &mut image_requests, cache, nb_config,
                     cell_pixel_size,
                 );
                 if is_focused {
@@ -207,7 +279,7 @@ fn render_cell_content(
     active: &ActiveCellView<'_>,
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     image_requests: &mut Vec<ImageRequest>,
-    highlighter: &mut Highlighter,
+    cache: &mut CellHighlightCache,
     nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
 ) -> Option<(u16, u16)> {
@@ -238,13 +310,15 @@ fn render_cell_content(
         source_text.split('\n').collect()
     };
 
-    let highlight_spans = if cell.cell_type == CellType::Code {
-        highlighter.highlight(rope).unwrap_or_default()
+    let kind = if cell.cell_type == CellType::Code {
+        CellKind::Code
     } else if show_markdown {
-        crate::markdown::highlight(rope)
+        CellKind::Markdown
     } else {
-        vec![]
+        CellKind::Plain
     };
+    let highlight_spans =
+        cache.spans_for(&nb.metadata.kernel_language, cell_idx, rope, kind);
 
     // Collect diagnostics for this cell's virtual path (e.g. notebook__cell0.py).
     // Format: (line_within_cell, col_start, col_end, severity).
@@ -268,8 +342,8 @@ fn render_cell_content(
         sel_range,
         mode: active.mode,
         mode_colors: active.mode_colors,
-        highlight_spans: &highlight_spans,
-        use_highlight: cell.cell_type == CellType::Code || show_markdown,
+        highlight_spans,
+        use_highlight: kind != CellKind::Plain,
         diag_ranges: &cell_diag_ranges,
         // Only overlay jump labels on the focused cell.
         jump_labels: if is_focused { active.jump_labels } else { &[] },
@@ -280,7 +354,12 @@ fn render_cell_content(
     let mut cursor_screen: Option<(u16, u16)> = None;
     let pad_len = 2u16; // leading spaces
 
+    // Running char offset of the current line's start (O(L) total, not O(L²)).
+    let mut next_line_start: usize = 0;
     for (line_no, line) in source_lines.iter().enumerate() {
+        let line_start_char = next_line_start;
+        next_line_start += line.chars().count() + 1;
+
         // Honour intra-cell scroll offset.
         if line_no < scroll_row {
             continue;
@@ -288,12 +367,6 @@ fn render_cell_content(
         if current_row >= area.bottom() {
             break;
         }
-
-        // Compute the char index at the start of this line.
-        let line_start_char: usize = source_lines[..line_no]
-            .iter()
-            .map(|l| l.chars().count() + 1)
-            .sum();
 
         // Compute cursor screen position if the cursor is on this line.
         if let Some(ci) = cursor_char_idx {
