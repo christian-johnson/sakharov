@@ -1266,6 +1266,60 @@ mod tests {
     }
 
     #[test]
+    fn notebook_stash_round_trip_preserves_cell_edits() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("nbstash");
+        let nb_path = dir.join("roundtrip.ipynb");
+        let txt = dir.join("side.txt");
+        let _ = std::fs::remove_file(&nb_path);
+        std::fs::write(&txt, "side\n").unwrap();
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "roundtrip");
+        assert!(app.notebook.is_some());
+
+        // Type into the focused cell (buffer mirrors the cell).
+        app.buffer.insert(0, "x = 42");
+        // Leave for a plain file (stashes the notebook), then come back.
+        lsp::open_file_at(&mut app, &txt, 0, 0);
+        assert!(app.notebook.is_none());
+        open_as_notebook(&mut app, &nb_path);
+
+        let (nb, _) = app.notebook.as_ref().unwrap();
+        assert_eq!(nb.cells[0].source.to_string(), "x = 42");
+        assert!(nb.modified, "unsaved notebook edit must survive the round trip");
+        // …and the unsaved notebook must block :q from anywhere.
+        lsp::open_file_at(&mut app, &txt, 0, 0);
+        execute(&mut app, &Command::Quit);
+        assert!(!app.should_quit);
+
+        let _ = std::fs::remove_file(&nb_path);
+        let _ = std::fs::remove_file(&txt);
+    }
+
+    #[test]
+    fn force_closed_buffer_is_not_resurrected_into_stash() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("bdstash");
+        let a = dir.join("doomed.txt");
+        std::fs::write(&a, "x\n").unwrap();
+
+        lsp::open_file_at(&mut app, &a, 0, 0);
+        app.buffer.insert(0, "unsaved ");
+        execute(&mut app, &Command::BufferForceClose);
+
+        // The closed buffer must be gone from every stash; quit is clean.
+        assert!(app.file_buffers.is_empty(), "closed buffer must not linger in stash");
+        execute(&mut app, &Command::Quit);
+        assert!(app.should_quit, "no unsaved buffers should remain after :bd!");
+
+        let _ = std::fs::remove_file(&a);
+    }
+
+    #[test]
     fn test_notebook_cross_cell_motion() {
         let config = Config::load();
         let mut app = App::new(None, config).unwrap();

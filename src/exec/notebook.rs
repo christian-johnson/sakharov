@@ -106,12 +106,17 @@ pub(super) fn push_cell_snapshot(app: &mut App) {
     }
 }
 
-/// Write `app.buffer.rope` back to the currently focused notebook cell.
+/// Write `app.buffer.rope` back to the currently focused notebook cell,
+/// propagating the buffer's modified flag to the notebook (same discipline as
+/// `input::sync_buffer_to_notebook`).
 pub(super) fn save_focused_cell(app: &mut App) {
     if let Some((ref mut nb, ref state)) = app.notebook {
         let idx = state.focused_cell;
         if idx < nb.cells.len() {
             nb.cells[idx].source = app.buffer.rope.clone();
+            if app.buffer.modified {
+                nb.modified = true;
+            }
         }
     }
 }

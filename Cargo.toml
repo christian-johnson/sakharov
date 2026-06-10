@@ -1,11 +1,23 @@
 [package]
 name = "sakharov"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "A from-scratch TUI text editor with first-class Jupyter notebook support and LSP integration"
+license = "MIT"
+repository = "https://github.com/christian-johnson/text-editor"
+keywords = ["editor", "tui", "jupyter", "notebook", "lsp"]
+categories = ["text-editors", "command-line-utilities"]
+rust-version = "1.76"
 
 [[bin]]
 name = "sv"
 path = "src/main.rs"
+
+# A TUI binary people `cargo install`: optimise for runtime speed and size.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
 
 [dependencies]
 ratatui = "0.29"
