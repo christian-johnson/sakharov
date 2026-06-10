@@ -177,7 +177,10 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - **Signature help** — typing `(` or `,` in Insert mode requests `textDocument/signatureHelp`;
   the active call's argument list shows in the minibuffer with the current parameter marked
   `‹like this›`, refreshed as you type and cleared when the call closes / on leaving Insert
-- Go-to-definition (`gd`), references (`gr`), type-definition (`gy`), implementation (`gi`)
+- Go-to-definition (`gd`), references (`gr`), type-definition (`gy`), implementation (`gi`).
+  `gr` jumps directly when there's a single result; multiple results open a navigate popup
+  (one line of source per reference, `cell N:line` / `file:line` detail, Enter to jump —
+  notebook references jump to the cell in-place)
 - Code actions (`ga`)
 - Formatting (`gf` / `:fmt`, format-on-save option). Shell formatters via `[formatters.<lang>]`
   take priority over LSP formatting when configured
@@ -367,4 +370,3 @@ picker, and config-driven keybinding overrides in TOML.
 - Split panes
 - User-defined named commands in TOML (`[commands]` section)
 - Incremental tree-sitter highlighting (avoid full reparse on every keystroke)
-- Reference/location-list popup (currently `gr` jumps to the first reference only)

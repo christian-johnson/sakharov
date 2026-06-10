@@ -307,8 +307,10 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             } else if locations.len() == 1 {
                 jump_to_location(app, &locations[0]);
             } else {
-                // Jump to first; full location-list popup is Phase 4.
-                jump_to_location(app, &locations[0]);
+                // Location-list popup: Enter jumps via the Navigate confirm path
+                // (which understands notebook virtual-cell paths).
+                let items = reference_items(app, &locations);
+                app.popup = Some(crate::popup::Popup::navigate("references", items));
             }
         }
         LspEvent::FormattingResult { edits } => {
@@ -358,6 +360,91 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             app.popup = Some(crate::popup::Popup::code_actions(items));
         }
     }
+}
+
+/// One trimmed source line from a rope (empty when out of range).
+fn line_text(rope: &ropey::Rope, line: usize) -> String {
+    if line < rope.len_lines() {
+        rope.line(line).to_string().trim().to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// Build navigate-popup items for a references result. Locations inside the
+/// notebook's shadow concatenated document (or its virtual cell docs) are
+/// rewritten to cell virtual paths with cell-relative lines, so confirming an
+/// item jumps to the cell in-place through `jump_to_location`.
+fn reference_items(app: &App, locations: &[LspLocation]) -> Vec<crate::popup::ListItem> {
+    locations
+        .iter()
+        .map(|loc| {
+            if let Some((nb, state)) = app.notebook.as_ref() {
+                let lang = &nb.metadata.kernel_language;
+                let shadow = crate::notebook::concat_virtual_path(&nb.path, lang);
+                let cell_loc = if crate::lsp::diagnostic_key(&loc.path)
+                    == crate::lsp::diagnostic_key(&shadow)
+                {
+                    let over = (state.focused_cell, &app.buffer.rope);
+                    crate::notebook::cell_for_concat_line(nb, Some(over), loc.line)
+                } else {
+                    crate::notebook::cell_index_for_virtual_path(nb, &loc.path)
+                        .map(|idx| (idx, loc.line))
+                };
+                if let Some((idx, line)) = cell_loc {
+                    // The focused cell's live text is in the buffer, not nb.cells.
+                    let text = if idx == state.focused_cell {
+                        line_text(&app.buffer.rope, line)
+                    } else {
+                        nb.cells
+                            .get(idx)
+                            .map(|c| line_text(&c.source, line))
+                            .unwrap_or_default()
+                    };
+                    return crate::popup::ListItem::navigate(
+                        text,
+                        format!("cell {}:{}", idx + 1, line + 1),
+                        &crate::notebook::cell_virtual_path(&nb.path, lang, idx),
+                        line,
+                        loc.character,
+                    );
+                }
+            }
+
+            // Plain file: prefer the open buffer's text, fall back to disk.
+            let file = loc
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| loc.path.to_string_lossy().into_owned());
+            let in_buffer = app
+                .buffer
+                .path
+                .as_deref()
+                .map(|p| crate::lsp::diagnostic_key(p) == crate::lsp::diagnostic_key(&loc.path))
+                .unwrap_or(false);
+            let text = if in_buffer {
+                line_text(&app.buffer.rope, loc.line)
+            } else {
+                std::fs::read_to_string(&loc.path)
+                    .ok()
+                    .and_then(|s| s.lines().nth(loc.line).map(|l| l.trim().to_owned()))
+                    .unwrap_or_default()
+            };
+            let label = if text.is_empty() {
+                format!("{file}:{}", loc.line + 1)
+            } else {
+                text
+            };
+            crate::popup::ListItem::navigate(
+                label,
+                format!("{file}:{}", loc.line + 1),
+                &loc.path,
+                loc.line,
+                loc.character,
+            )
+        })
+        .collect()
 }
 
 pub fn jump_to_location(app: &mut App, loc: &LspLocation) {
