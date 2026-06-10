@@ -50,7 +50,7 @@ pub(super) fn insert_new_cell(app: &mut App, above: bool) {
             (state.focused_cell + 1).min(nb.cells.len())
         };
         nb.cells.insert(new_idx, crate::notebook::Cell {
-            id: new_cell_id(),
+            id: crate::notebook::new_cell_id(),
             cell_type: CellType::Code,
             source: ropey::Rope::new(),
             outputs: vec![],
@@ -327,18 +327,6 @@ pub(super) fn delete_cell(app: &mut App) {
     let _ = crate::kitty::clear_images();
     app.graphics.image_ids.clear();
     after_structural_edit(app);
-}
-
-/// Generate a simple unique cell ID.
-pub(super) fn new_cell_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{t:016x}{n:016x}")
 }
 
 /// Build the full cell list for `notebookDocument/didOpen` or a reopen.

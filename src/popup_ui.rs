@@ -116,7 +116,6 @@ fn render_completion_doc(
 
 fn compute_width(popup: &Popup, term_width: u16) -> u16 {
     match popup.width {
-        PopupSize::Fixed(n) => n.min(term_width),
         PopupSize::FractionOfScreen(f) => {
             let w = (term_width as f32 * f) as u16;
             w.max(20).min(term_width)
@@ -158,10 +157,10 @@ fn compute_height(popup: &Popup, ui_config: &crate::config::UiConfig) -> u16 {
             if is_completion {
                 // 2 borders + items; +2 header rows when the `/` search row is open.
                 let header = if s.search.is_some() { 2 } else { 0 };
-                (2 + header + items_shown).min(22).max(3)
+                (2 + header + items_shown).clamp(3, 22)
             } else {
                 // 2 borders + 1 filter row + 1 separator + items
-                (2 + 1 + 1 + items_shown).min(22).max(5)
+                (2 + 1 + 1 + items_shown).clamp(5, 22)
             }
         }
         PopupContent::Text(s) => {
@@ -203,10 +202,6 @@ fn compute_rect(
             let x = term.right().saturating_sub(pw + margin_right);
             let y = term.bottom().saturating_sub(ph + margin_bottom);
             (x, y, pw, ph)
-        }
-        PopupAnchor::BottomStrip => {
-            let y = term.bottom().saturating_sub(ph);
-            (term.x, y, term.width, ph)
         }
     };
 
@@ -453,13 +448,8 @@ fn render_list_popup(
                 let start_x = max_detail_right.saturating_sub(show_len as u16);
                 let draw_start = start_x.max(label_end + 2);
                 let skip = show_len.saturating_sub((max_detail_right.saturating_sub(draw_start)) as usize);
-                let mut dx = draw_start;
-                for c in detail_chars.iter().skip(skip) {
-                    if dx >= max_detail_right {
-                        break;
-                    }
+                for (dx, c) in (draw_start..max_detail_right).zip(detail_chars.iter().skip(skip)) {
                     buf[(dx, y)].set_char(*c).set_style(detail_style);
-                    dx += 1;
                 }
             }
         }
@@ -521,15 +511,10 @@ fn render_text_popup(
             continue;
         };
 
-        let mut x = inner.left();
-        for c in line.chars() {
-            if x >= inner.right() {
-                break;
-            }
+        for (x, c) in (inner.left()..inner.right()).zip(line.chars()) {
             buf[(x, y)]
                 .set_char(c)
                 .set_style(Style::default().fg(Color::Rgb(200, 200, 200)).bg(Color::Rgb(28, 28, 40)));
-            x += 1;
         }
     }
 
@@ -541,13 +526,8 @@ fn render_text_popup(
         let px_end = rect.right().saturating_sub(1);
         let px_start = px_end.saturating_sub(pct_str.len() as u16);
         let pct_style = Style::default().fg(Color::DarkGray).bg(Color::Rgb(28, 28, 40));
-        let mut px = px_start;
-        for c in pct_str.chars() {
-            if px >= px_end {
-                break;
-            }
+        for (px, c) in (px_start..px_end).zip(pct_str.chars()) {
             buf[(px, py)].set_char(c).set_style(pct_style);
-            px += 1;
         }
     }
 }

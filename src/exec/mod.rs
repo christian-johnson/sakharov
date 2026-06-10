@@ -1322,7 +1322,7 @@ pub fn update_scroll(app: &mut App) {
                     3
                 } else {
                     crate::notebook_ui::cell_display_height(
-                        &nb.cells[idx], image_rows, cell_px, avail_cols,
+                        &nb.cells[idx].source, &nb.cells[idx], image_rows, cell_px, avail_cols,
                     ) as usize
                 };
                 content_top += h + 1;
@@ -1384,12 +1384,8 @@ pub fn update_scroll(app: &mut App) {
     let cursor_off = pos - line_start;
     let mut display_col: usize = 0;
     for i in 0..cursor_off {
-        let c = line_str.char(i);
-        display_col += if c == '\t' {
-            tab_width - (display_col % tab_width)
-        } else {
-            unicode_display_width(c)
-        };
+        display_col +=
+            crate::render_util::char_display_width(line_str.char(i), display_col, tab_width);
     }
 
     if display_col < app.scroll_col {
@@ -1458,11 +1454,6 @@ fn wrap_scroll_row_for_cursor(
         remaining = remaining.saturating_sub(height);
     }
     line
-}
-
-fn unicode_display_width(c: char) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    c.width().unwrap_or(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1746,7 +1737,7 @@ mod tests {
         if let Some((ref mut nb, ref mut state)) = app.notebook {
             nb.cells[0].source = Rope::from_str("a\nb");
             let mut second = nb.cells[0].clone();
-            second.id = notebook::new_cell_id();
+            second.id = crate::notebook::new_cell_id();
             second.source = Rope::from_str("c\nd");
             nb.cells.push(second);
             state.focused_cell = 0;

@@ -208,10 +208,10 @@ fn parse_all_responses(data: &[u8], cache: &mut HashMap<u8, String>) {
             continue;
         }
         
-        let content = if part.ends_with('\x07') {
-            &part[..part.len() - 1]
-        } else if part.ends_with("\x1b\\") {
-            &part[..part.len() - 2]
+        let content = if let Some(s) = part.strip_suffix('\x07') {
+            s
+        } else if let Some(s) = part.strip_suffix("\x1b\\") {
+            s
         } else {
             part.trim_end_matches(|c: char| c.is_control() || c == '\\')
         };

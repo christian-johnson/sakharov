@@ -412,7 +412,6 @@ pub struct NotebookMeta {
 
 #[derive(Clone)]
 pub struct Cell {
-    #[allow(dead_code)]
     pub id: String,
     pub cell_type: CellType,
     pub source: Rope,
@@ -547,14 +546,14 @@ fn parse_output(obj: &Value) -> Option<Output> {
     }
 }
 
-/// Generate a pseudo-random hex ID without an external crate.
-fn gen_id() -> String {
+/// Generate a unique cell ID without an external crate: nanosecond timestamp
+/// mixed with a process-wide counter to avoid collisions between cells.
+pub fn new_cell_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    // Mix in some extra bits to reduce collision chance between cells.
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("{:016x}{:016x}", t as u64, n)
@@ -569,7 +568,7 @@ pub fn empty_notebook_json() -> String {
             {
                 "cell_type": "code",
                 "execution_count": null,
-                "id": gen_id(),
+                "id": new_cell_id(),
                 "metadata": {},
                 "outputs": [],
                 "source": []
@@ -794,7 +793,7 @@ impl Notebook {
                 .get("id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
-                .unwrap_or_else(gen_id);
+                .unwrap_or_else(new_cell_id);
 
             let source_str = cell_obj
                 .get("source")
@@ -973,7 +972,7 @@ impl Notebook {
                     None => Value::Null,
                 };
                 obj["outputs"] = Value::Array(
-                    cell.outputs.iter().map(|o| serialise_output(o)).collect(),
+                    cell.outputs.iter().map(&serialise_output).collect(),
                 );
             }
             obj

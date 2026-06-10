@@ -354,7 +354,7 @@ code
         let span_text = |idx: usize, frag: &str| {
             spans
                 .iter()
-                .any(|&(s, e, h)| h == idx && rope.slice(s..e).to_string() == frag)
+                .any(|&(s, e, h)| h == idx && rope.slice(s..e) == frag)
         };
         assert!(span_text(MD_BOLD, "**b**"), "spans={spans:?}");
         assert!(span_text(MD_ITALIC, "_c_"), "spans={spans:?}");

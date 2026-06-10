@@ -81,15 +81,12 @@ impl NotebookState {
         // 1. Calculate display heights of cells
         let mut cell_heights = Vec::with_capacity(num_cells);
         for (idx, cell) in cells.iter().enumerate() {
-            let h = if idx == focused {
-                crate::notebook_ui::focused_cell_display_height(
-                    active_rope, cell, image_rows, cell_pixel_size, available_cols,
-                ) as usize
-            } else if self.is_cell_folded(idx) {
+            let h = if self.is_cell_folded(idx) && idx != focused {
                 3usize // top border + 1 summary line + bottom border
             } else {
+                let source = if idx == focused { active_rope } else { &cell.source };
                 crate::notebook_ui::cell_display_height(
-                    cell, image_rows, cell_pixel_size, available_cols,
+                    source, cell, image_rows, cell_pixel_size, available_cols,
                 ) as usize
             };
             cell_heights.push(h);
@@ -107,32 +104,18 @@ impl NotebookState {
             self.scroll_cell = focused;
         } else {
             // Rule 3: Otherwise, ensure the focused cell is fully visible.
-            // Calculate bottom position of the focused cell starting from current scroll_cell.
-            let mut y_end = 0;
-            for idx in self.scroll_cell..=focused {
-                y_end += cell_heights[idx];
-                if idx > self.scroll_cell {
-                    y_end += 1; // +1 gap between cells
-                }
-            }
+            // Rows from cell `from` through the focused cell, incl. 1-row gaps.
+            let span = |from: usize| -> usize {
+                let slice = &cell_heights[from..=focused];
+                slice.iter().sum::<usize>() + slice.len().saturating_sub(1)
+            };
 
-            // If the bottom of the focused cell is below the bottom of the viewport, scroll down.
-            if y_end > viewport_height {
-                // Find the largest scroll_cell `s` <= focused such that cells from `s` to `focused` fit.
+            // If the bottom of the focused cell is below the bottom of the viewport,
+            // scroll down to the largest `s` <= focused where cells s..=focused fit.
+            if span(self.scroll_cell) > viewport_height {
                 let mut s = focused;
-                while s > 0 {
-                    let mut test_y_end = 0;
-                    for idx in (s - 1)..=focused {
-                        test_y_end += cell_heights[idx];
-                        if idx > s - 1 {
-                            test_y_end += 1;
-                        }
-                    }
-                    if test_y_end <= viewport_height {
-                        s -= 1;
-                    } else {
-                        break;
-                    }
+                while s > 0 && span(s - 1) <= viewport_height {
+                    s -= 1;
                 }
                 self.scroll_cell = s;
             }

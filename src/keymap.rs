@@ -38,7 +38,7 @@ impl KeyBinding {
             return None;
         }
 
-        let parts: Vec<&str> = s.split(|c| c == '+' || c == '-').collect();
+        let parts: Vec<&str> = s.split(['+', '-']).collect();
         let mut modifiers = KeyModifiers::NONE;
         let mut key_part = "";
 

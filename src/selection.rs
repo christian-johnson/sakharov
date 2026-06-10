@@ -34,9 +34,4 @@ impl Selection {
         self.anchor.max(self.head)
     }
 
-    /// Return true if this is a point selection (zero-width).
-    #[allow(dead_code)]
-    pub fn is_point(&self) -> bool {
-        self.anchor == self.head
-    }
 }

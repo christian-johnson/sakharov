@@ -1,7 +1,7 @@
 use ratatui::{
     buffer::Buffer as RatBuffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     widgets::Widget,
     Frame,
 };
@@ -14,6 +14,7 @@ use crate::{
     lang::lang_to_ext,
     lsp_manager::DiagnosticSeverity,
     mode::{Mode, PromptKind},
+    render_util::{apply_diag_underline, char_display_width, for_each_jump_label_char, SingleLineWidget},
     theme,
 };
 
@@ -98,11 +99,11 @@ fn build_vis_rows(
     rope: &ropey::Rope,
     scroll_row: usize,
     visible_rows: usize,
-    total_lines: usize,
     word_wrap: bool,
     text_width: usize,
     tab_width: usize,
 ) -> Vec<VisRow> {
+    let total_lines = rope.len_lines();
     let mut rows: Vec<VisRow> = Vec::with_capacity(visible_rows);
     let mut line = scroll_row;
 
@@ -159,7 +160,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
     // Build the fold+wrap-aware list of visible rows.
     let vis_rows = build_vis_rows(
-        &app.fold, rope, scroll_row, visible_rows, total_lines,
+        &app.fold, rope, scroll_row, visible_rows,
         word_wrap, text_width, tab_width,
     );
 
@@ -321,24 +322,13 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             // Diagnostic underline.
             let char_off_diag = char_idx - line_start_char;
             let style = if let Some(line_diags) = diag_by_line.get(&line_idx) {
-                let worst = line_diags
-                    .iter()
-                    .filter(|(cs, ce, _)| char_off_diag >= *cs && char_off_diag < *ce)
-                    .fold(None::<&DiagnosticSeverity>, |acc, (_, _, sev)| {
-                        Some(match acc {
-                            Some(DiagnosticSeverity::Error) => &DiagnosticSeverity::Error,
-                            _ => sev,
-                        })
-                    });
-                match worst {
-                    Some(DiagnosticSeverity::Error) => style
-                        .add_modifier(ratatui::style::Modifier::UNDERLINED)
-                        .underline_color(Color::Red),
-                    Some(_) => style
-                        .add_modifier(ratatui::style::Modifier::UNDERLINED)
-                        .underline_color(Color::Yellow),
-                    None => style,
-                }
+                apply_diag_underline(
+                    style,
+                    line_diags
+                        .iter()
+                        .filter(|(cs, ce, _)| char_off_diag >= *cs && char_off_diag < *ce)
+                        .map(|(_, _, sev)| sev),
+                )
             } else {
                 style
             };
@@ -366,52 +356,34 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 let style = if i < 4 { arrow_style } else { count_style };
                 cells.push((c, style));
             }
-        } else if !is_continuation {
+        } else if !is_continuation
+            && matches!(app.mode, crate::mode::Mode::Jump { .. })
+        {
             // Jump label overlay — only on first sub-row (non-fold) lines.
-            if matches!(app.mode, crate::mode::Mode::Jump { .. }) && !app.jump.labels.is_empty() {
-                let typed_len = app.jump.typed.len();
-                let jump_pending = Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Rgb(255, 160, 0))
-                    .add_modifier(Modifier::BOLD);
-                let jump_confirmed = Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD);
-
-                for &(pos, ref label) in &app.jump.labels {
-                    if !label.starts_with(app.jump.typed.as_str()) {
-                        continue;
-                    }
-                    if pos < line_start_char {
-                        continue;
-                    }
-                    let char_off = pos - line_start_char;
-                    if char_off >= line_len {
-                        continue;
-                    }
-                    let display_col = {
-                        let mut col = 0usize;
-                        for i in 0..char_off {
-                            let c = line_str.char(i);
-                            col += char_display_width(c, col, tab_width);
-                        }
-                        col
-                    };
+            // Map char offsets to display columns (tab-aware) before painting.
+            let display_col_of = |char_off: usize| {
+                let mut col = 0usize;
+                for i in 0..char_off {
+                    col += char_display_width(line_str.char(i), col, tab_width);
+                }
+                col
+            };
+            for_each_jump_label_char(
+                &app.jump.labels,
+                &app.jump.typed,
+                line_start_char,
+                line_len,
+                |char_off, lc, style| {
+                    let display_col = display_col_of(char_off);
                     if display_col < effective_skip {
-                        continue;
+                        return;
                     }
-                    let cell_idx = display_col - effective_skip;
-                    for (j, lc) in label.chars().enumerate() {
-                        let idx = cell_idx + j;
-                        if idx >= cells.len() {
-                            break;
-                        }
-                        let style = if j < typed_len { jump_confirmed } else { jump_pending };
+                    let idx = display_col - effective_skip;
+                    if idx < cells.len() {
                         cells[idx] = (lc, style);
                     }
-                }
-            }
+                },
+            );
         }
 
         let line_widget = LineWidget { cells: &cells };
@@ -473,15 +445,14 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
     // Compute total display column from the start of this logical line.
     let mut total_col: usize = 0;
     for i in 0..cursor_off {
-        let c = line_str.char(i);
-        total_col += if c == '\t' { tab_stop(total_col, tab_width) } else { c.width().unwrap_or(1) };
+        total_col += char_display_width(line_str.char(i), total_col, tab_width);
     }
 
     if word_wrap && text_width > 0 {
         // With wrapping: find the screen row by walking the visible entry list.
         let vis_rows = build_vis_rows(
             &app.fold, rope, app.scroll_row, lines_area.height as usize,
-            total_lines, true, text_width, tab_width,
+            true, text_width, tab_width,
         );
         let cursor_sub_row = total_col / text_width;
         let col_in_sub_row = total_col % text_width;
@@ -507,18 +478,6 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
         let screen_y = lines_area.top() + screen_row as u16;
         Some((screen_x, screen_y))
     }
-}
-
-fn char_display_width(c: char, col: usize, tab_width: usize) -> usize {
-    if c == '\t' {
-        tab_stop(col, tab_width)
-    } else {
-        c.width().unwrap_or(1)
-    }
-}
-
-fn tab_stop(col: usize, tab_width: usize) -> usize {
-    tab_width - (col % tab_width)
 }
 
 // ---------------------------------------------------------------------------
@@ -604,19 +563,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
-// Command/message line — notebook variant (public)
-// ---------------------------------------------------------------------------
-
-/// Render the command/message line for the notebook view.
-pub fn render_command_nb(frame: &mut Frame, app: &App, area: Rect) {
-    render_command(frame, app, area);
-}
-
-// ---------------------------------------------------------------------------
 // Command/message line
 // ---------------------------------------------------------------------------
 
-fn render_command(frame: &mut Frame, app: &App, area: Rect) {
+/// Render the command/message/prompt line (bottom row).  Shared by the plain
+/// editor, the notebook view, and the splash screen.
+pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
         Mode::Jump { .. } => {
             if app.jump.typed.is_empty() {
@@ -696,30 +648,3 @@ impl Widget for LineWidget<'_> {
     }
 }
 
-struct SingleLineWidget {
-    text: String,
-    style: Style,
-}
-
-impl Widget for SingleLineWidget {
-    fn render(self, area: Rect, buf: &mut RatBuffer) {
-        if area.height == 0 {
-            return;
-        }
-        let y = area.top();
-        let mut x = area.left();
-
-        // Fill with spaces first
-        for col in area.left()..area.right() {
-            buf[(col, y)].set_char(' ').set_style(self.style);
-        }
-
-        for c in self.text.chars() {
-            if x >= area.right() {
-                break;
-            }
-            buf[(x, y)].set_char(c).set_style(self.style);
-            x += 1;
-        }
-    }
-}

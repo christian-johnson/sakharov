@@ -26,6 +26,7 @@ mod popup;
 mod popup_input;
 mod popup_ui;
 mod recovery;
+mod render_util;
 mod selection;
 mod spinner;
 mod splash;

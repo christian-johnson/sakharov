@@ -406,10 +406,6 @@ impl LspClient {
         msgs
     }
 
-    #[allow(dead_code)]
-    pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
-    }
 }
 
 impl Drop for LspClient {
@@ -481,14 +477,10 @@ fn parse_message(val: Value) -> Option<ServerMessage> {
             result: val.get("result").cloned(),
             error: val.get("error").cloned(),
         })
-    } else if let Some(method) = val.get("method").and_then(|m| m.as_str()) {
-        Some(ServerMessage::Notification {
+    } else { val.get("method").and_then(|m| m.as_str()).map(|method| ServerMessage::Notification {
             method: method.to_owned(),
             params: val.get("params").cloned(),
-        })
-    } else {
-        None
-    }
+        }) }
 }
 
 // ---------------------------------------------------------------------------

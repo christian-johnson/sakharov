@@ -49,7 +49,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         let preserves = app
             .keymap
             .lookup_normal(&kb)
-            .map_or(false, |cmds| cmds.iter().any(is_splash_preserving));
+            .is_some_and(|cmds| cmds.iter().any(is_splash_preserving));
         if !preserves {
             app.show_splash = false;
         }

@@ -114,21 +114,6 @@ impl Highlighter {
         }
     }
 
-    /// Update the language based on a new path.
-    #[allow(dead_code)]
-    pub fn set_path(&mut self, path: Option<&std::path::Path>) {
-        let language = path
-            .and_then(|p| p.extension())
-            .and_then(|e| e.to_str())
-            .and_then(Language::from_extension);
-
-        self.markdown = crate::markdown::is_markdown(path);
-        if language != self.language {
-            self.language = language;
-            self.config = language.and_then(|lang| build_config(lang).ok());
-        }
-    }
-
     /// Compute the foldable line ranges for the current buffer contents.
     /// Routes to the markdown section/fence folder or the tree-sitter folder.
     pub fn fold_ranges(&self, rope: &Rope) -> Vec<crate::fold::FoldRange> {
@@ -162,7 +147,6 @@ impl Highlighter {
 
         let mut spans = Vec::new();
         let mut current_highlight: Option<usize> = None;
-        let mut byte_start: usize = 0;
 
         for event in events {
             match event? {
@@ -177,14 +161,12 @@ impl Highlighter {
                             spans.push((char_start, char_end, hl));
                         }
                     }
-                    byte_start = end;
                 }
                 HighlightEvent::HighlightEnd => {
                     current_highlight = None;
                 }
             }
         }
-        let _ = byte_start;
 
         Ok(spans)
     }

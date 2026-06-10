@@ -96,6 +96,7 @@ fn pending_signal() -> Option<i32> {
 // Search state
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 pub struct SearchState {
     pub query: String,
     pub matches: Vec<usize>,
@@ -106,17 +107,6 @@ pub struct SearchState {
     pub just_opened: bool,
 }
 
-impl Default for SearchState {
-    fn default() -> Self {
-        Self {
-            query: String::new(),
-            matches: Vec::new(),
-            current: 0,
-            active: false,
-            just_opened: false,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Grouped sub-state
@@ -413,10 +403,9 @@ impl App {
             highlights_dirty: false,
             diag_by_line: std::collections::HashMap::new(),
             last_rendered_mode: None,
-            fold: {
-                let mut f = FoldState::default();
-                f.ranges = initial_fold_ranges;
-                f
+            fold: FoldState {
+                ranges: initial_fold_ranges,
+                ..FoldState::default()
             },
             messages_log: Vec::new(),
             last_logged_message: None,
@@ -443,15 +432,9 @@ impl App {
     }
 }
 
-/// Map a file extension to an LSP language id.
+/// Map a file path to an LSP language id via its extension (see [`crate::lang`]).
 pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str> {
-    let ext = path?.extension()?.to_str()?;
-    match ext {
-        "py" => Some("python"),
-        "rs" => Some("rust"),
-        "js" | "ts" | "jsx" | "tsx" => Some("javascript"),
-        _ => None,
-    }
+    crate::lang::ext_to_lang(path?.extension()?.to_str()?)
 }
 
 /// Set up terminal, run the event loop, then restore terminal.
@@ -635,8 +618,7 @@ fn run_loop(
                         width: size.width,
                         height: 1,
                     };
-                    // render_command_nb is the pub alias for render_command.
-                    crate::ui::render_command_nb(f, app, cmd_area);
+                    crate::ui::render_command(f, app, cmd_area);
                 }
                 // If a popup was opened from the dashboard (e.g. file picker),
                 // render it on top of the splash background.
@@ -694,7 +676,7 @@ fn run_loop(
                             &app.config.statusline.separator,
                             &app.config.statusline.styles,
                         );
-                        ui::render_command_nb(f, app, cmd_area);
+                        ui::render_command(f, app, cmd_area);
                     }
                 }
                 if let Some(ref popup) = app.popup {

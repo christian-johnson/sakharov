@@ -12,31 +12,6 @@ pub fn unit(expand_tabs: bool, tab_width: usize) -> String {
     }
 }
 
-/// Detect the indentation unit in use by scanning the first 200 lines.
-/// Returns a tab character if tabs are found first, otherwise the smallest
-/// non-zero run of spaces seen (defaulting to 4 spaces if nothing is found).
-#[allow(dead_code)]
-pub fn detect_unit(rope: &Rope) -> String {
-    let mut min_spaces: Option<usize> = None;
-    for line_idx in 0..rope.len_lines().min(200) {
-        let line = rope.line(line_idx);
-        match line.chars().next() {
-            Some('\t') => return "\t".to_string(),
-            Some(' ') => {
-                let n = line.chars().take_while(|&c| c == ' ').count();
-                if n > 0 {
-                    min_spaces = Some(match min_spaces {
-                        None => n,
-                        Some(cur) => cur.min(n),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    " ".repeat(min_spaces.unwrap_or(4))
-}
-
 /// Extract the leading whitespace of a rope line slice as an owned string.
 pub fn line_indent(line: ropey::RopeSlice) -> String {
     line.chars().take_while(|&c| c == ' ' || c == '\t').collect()

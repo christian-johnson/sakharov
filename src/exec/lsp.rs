@@ -219,8 +219,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                 }
             }
         }
-        LspEvent::Diagnostics { path: _, ref items } => {
-            let _ = items;
+        LspEvent::Diagnostics => {
             super::rebuild_diag_cache(app);
         }
         LspEvent::CompletionResult { items } => {
@@ -667,7 +666,7 @@ fn apply_workspace_edit(app: &mut App, edit: Value) {
             Some((start_idx, end_idx, new_text))
         })
         .collect();
-    text_edits.sort_by(|a, b| b.0.cmp(&a.0));
+    text_edits.sort_by_key(|e| std::cmp::Reverse(e.0));
 
     app.buffer.begin_edit_session();
     for (start, end, new_text) in text_edits {
@@ -826,6 +825,11 @@ fn build_doc_content(
     }
 }
 
+/// Return the kind badge string for a tree-sitter symbol, using the configured icons map.
+fn symbol_kind_badge(kind: &str, icons: &std::collections::HashMap<String, String>) -> String {
+    icons.get(kind).cloned().unwrap_or_else(|| kind.to_owned())
+}
+
 #[cfg(test)]
 mod doc_tests {
     use super::build_doc_content;
@@ -871,9 +875,4 @@ mod doc_tests {
         assert!(!loading);
         assert_eq!(lines, vec!["No documentation available.".to_string()]);
     }
-}
-
-/// Return the kind badge string for a tree-sitter symbol, using the configured icons map.
-fn symbol_kind_badge(kind: &str, icons: &std::collections::HashMap<String, String>) -> String {
-    icons.get(kind).cloned().unwrap_or_else(|| kind.to_owned())
 }

@@ -19,7 +19,6 @@ pub(crate) fn parse_hex_color(s: &str) -> Option<Color> {
 
 /// Top-level configuration structure.
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct Config {
     pub theme: ThemeConfig,
     pub editor: EditorConfig,
@@ -84,7 +83,7 @@ pub struct ModeColorsConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // background/foreground/etc. parse from TOML but are not yet wired to the renderer
 pub struct ThemeConfig {
     pub background: String,
     pub foreground: String,

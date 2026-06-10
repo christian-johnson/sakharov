@@ -135,7 +135,7 @@ pub fn move_down(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     } else {
         nl
     };
-    let new_col = col.min(content_len.saturating_sub(1).max(0));
+    let new_col = col.min(content_len.saturating_sub(1));
     // But if content_len == 0 we stay at the line start
     let new_head = if content_len == 0 {
         next_line_start
@@ -166,7 +166,7 @@ pub fn move_up(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     } else {
         nl
     };
-    let new_col = col.min(content_len.saturating_sub(1).max(0));
+    let new_col = col.min(content_len.saturating_sub(1));
     let new_head = if content_len == 0 {
         prev_line_start
     } else {
@@ -206,9 +206,8 @@ pub fn move_line_end(rope: &Rope, sel: Selection, extend: bool) -> Selection {
 }
 
 /// Go to the first char of the file.
-pub fn goto_file_start(rope: &Rope, sel: Selection, extend: bool) -> Selection {
-    let new_head = if rope.len_chars() == 0 { 0 } else { 0 };
-    apply_extend(sel, new_head, extend)
+pub fn goto_file_start(_rope: &Rope, sel: Selection, extend: bool) -> Selection {
+    apply_extend(sel, 0, extend)
 }
 
 /// Go to the first char of the last line.

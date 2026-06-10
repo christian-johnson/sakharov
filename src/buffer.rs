@@ -57,18 +57,6 @@ impl Buffer {
         })
     }
 
-    /// Return the total number of characters in the buffer.
-    #[allow(dead_code)]
-    pub fn len_chars(&self) -> usize {
-        self.rope.len_chars()
-    }
-
-    /// Return the total number of lines.
-    #[allow(dead_code)]
-    pub fn len_lines(&self) -> usize {
-        self.rope.len_lines()
-    }
-
     /// Save the current rope state for undo before making an edit.
     fn push_undo(&mut self) {
         self.undo_stack.push_back(self.rope.clone());

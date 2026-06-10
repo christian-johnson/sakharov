@@ -93,7 +93,7 @@ const BAR_BG: Color = Color::DarkGray;
 /// Ensure a module's segment list has a leading space on the first segment and
 /// a trailing space on the last.  Skips sides that already have a space so
 /// `mode`'s `" NOR "` is never double-padded.
-fn pad_module(segs: &mut Vec<Segment>) {
+fn pad_module(segs: &mut [Segment]) {
     if segs.is_empty() {
         return;
     }
@@ -153,7 +153,7 @@ fn fg_for_bg(bg: Color) -> Color {
 /// Apply a module's background color to all its segments.  When the bg is the
 /// default bar color the existing foreground (semantic red/yellow/cyan) is
 /// preserved; when a custom bg is set both fg and bg are overridden for contrast.
-fn apply_module_bg(segs: &mut Vec<Segment>, bg: Color) {
+fn apply_module_bg(segs: &mut [Segment], bg: Color) {
     let custom = !matches!(bg, Color::DarkGray);
     let fg = if custom { Some(fg_for_bg(bg)) } else { None };
     for seg in segs.iter_mut() {

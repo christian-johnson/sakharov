@@ -10,3 +10,13 @@ pub fn lang_to_ext(lang: &str) -> &'static str {
         _ => "txt",
     }
 }
+
+/// Map a file extension to an LSP language id — the inverse of [`lang_to_ext`].
+pub fn ext_to_lang(ext: &str) -> Option<&'static str> {
+    match ext {
+        "py" => Some("python"),
+        "rs" => Some("rust"),
+        "js" | "ts" | "jsx" | "tsx" => Some("javascript"),
+        _ => None,
+    }
+}

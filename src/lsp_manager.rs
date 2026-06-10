@@ -47,12 +47,9 @@ fn request_feature(kind: LspRequestKind) -> &'static str {
 pub enum LspEvent {
     /// Server finished initializing — re-send didOpen for the current document.
     Initialized { language: String },
-    /// Server published diagnostics for a file.
-    Diagnostics {
-        #[allow(dead_code)]
-        path: PathBuf,
-        items: Vec<Diagnostic>,
-    },
+    /// Server published diagnostics (already merged into `LspManager::diagnostics`);
+    /// the receiver just refreshes its per-line cache.
+    Diagnostics,
     /// Completion response — show popup if still in Insert mode.
     CompletionResult { items: Vec<CompletionItem> },
     /// `completionItem/resolve` response — enriched documentation for an item.
@@ -76,7 +73,6 @@ pub enum LspEvent {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Diagnostic {
     pub line: usize,
     pub col_start: usize,
@@ -174,7 +170,9 @@ impl LspManager {
         root_path: Option<&std::path::Path>,
     ) {
         // Collect all server specs: primary first, then extras.
-        let mut specs: Vec<(&str, &[String], Option<&serde_json::Value>, &[String])> = vec![
+        // (command, args, init_options, features)
+        type ServerSpec<'a> = (&'a str, &'a [String], Option<&'a serde_json::Value>, &'a [String]);
+        let mut specs: Vec<ServerSpec> = vec![
             (&config.command, &config.args, config.init_options.as_ref(), &config.features),
         ];
         for extra in &config.extra_servers {
@@ -712,9 +710,9 @@ fn process_message(
                     })
                     .flat_map(|(_, diags)| diags.iter().cloned())
                     .collect();
-                diagnostics.insert(path_str, merged.clone());
+                diagnostics.insert(path_str, merged);
 
-                Some(LspEvent::Diagnostics { path, items: merged })
+                Some(LspEvent::Diagnostics)
             } else {
                 None
             }

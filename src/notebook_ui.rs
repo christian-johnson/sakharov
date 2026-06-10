@@ -1,8 +1,7 @@
 use ratatui::{
-    buffer::Buffer as RatBuffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::{Block, BorderType, Borders, Widget},
+    widgets::{Block, BorderType, Borders},
     Frame,
 };
 
@@ -13,6 +12,7 @@ use crate::{
     mode::Mode,
     notebook::{Cell, CellType, MimeData, Notebook, Output},
     notebook_state::NotebookState,
+    render_util::{apply_diag_underline, for_each_jump_label_char, SingleLineWidget},
 };
 
 
@@ -127,10 +127,10 @@ fn render_cells(
         // For the focused non-folded cell, use the live buffer rope height.
         let cell_height = if is_folded {
             3u16.min(remaining) // border-top + 1 summary line + border-bottom
-        } else if is_focused {
-            focused_cell_display_height(active.rope, cell, nb_config.image_rows, cell_pixel_size, inner_cols).min(remaining)
         } else {
-            cell_display_height(cell, nb_config.image_rows, cell_pixel_size, inner_cols).min(remaining)
+            let source = if is_focused { active.rope } else { &cell.source };
+            cell_display_height(source, cell, nb_config.image_rows, cell_pixel_size, inner_cols)
+                .min(remaining)
         };
 
         let cell_rect = Rect {
@@ -355,7 +355,7 @@ fn render_folded_cell_summary_rope(
     }
     let row = single_row(area, area.y);
 
-    let total_lines = source.len_lines().max(1) as usize;
+    let total_lines = source.len_lines().max(1);
     let hidden_lines = total_lines.saturating_sub(1);
     let output_count = outputs.len();
 
@@ -438,14 +438,19 @@ pub fn compute_image_rows(
     (rows as u16).max(2).min(max_image_rows)
 }
 
+/// Display height of a cell in terminal rows: borders + source lines + outputs.
+///
+/// `source` is the rope whose line count to use — `&cell.source` normally, or
+/// the live editor rope for the focused cell (whose unsaved edits are in
+/// `app.buffer`, ahead of the stored source).  `len_lines()` is O(1) on a Rope.
 pub fn cell_display_height(
+    source: &ropey::Rope,
     cell: &Cell,
     max_image_rows: u16,
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
 ) -> u16 {
-    // len_lines() is O(1) on a Rope; avoids the O(n) to_string() conversion.
-    let source_lines = cell.source.len_lines().max(1) as u16;
+    let source_lines = source.len_lines().max(1) as u16;
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
         1 + cell.outputs.iter()
             .map(|o| single_output_height_count(o, max_image_rows, cell_pixel_size, available_cols))
@@ -454,24 +459,6 @@ pub fn cell_display_height(
         0
     };
     2 + source_lines + output_h // 2 = top border + bottom border
-}
-
-pub fn focused_cell_display_height(
-    rope: &ropey::Rope,
-    cell: &Cell,
-    max_image_rows: u16,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
-) -> u16 {
-    let source_lines = rope.len_lines().max(1) as u16;
-    let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
-        1 + cell.outputs.iter()
-            .map(|o| single_output_height_count(o, max_image_rows, cell_pixel_size, available_cols))
-            .sum::<u16>()
-    } else {
-        0
-    };
-    2 + source_lines + output_h
 }
 
 fn single_output_height_count(
@@ -497,7 +484,7 @@ fn single_output_height_count(
             } else {
                 data.text_plain
                     .as_deref()
-                    .map(|t| t.lines().count().min(20).max(1))
+                    .map(|t| t.lines().count().clamp(1, 20))
                     .unwrap_or(0) as u16
             }
         }
@@ -603,27 +590,13 @@ fn render_source_line(
             base_style
         };
         // Diagnostic underline (does not override cursor/selection colours).
-        let style = {
-            let worst = ctx
-                .diag_ranges
+        let style = apply_diag_underline(
+            style,
+            ctx.diag_ranges
                 .iter()
                 .filter(|(dl, cs, ce, _)| *dl == line_no && char_off >= *cs && char_off < *ce)
-                .fold(None::<&DiagnosticSeverity>, |acc, (_, _, _, sev)| {
-                    Some(match acc {
-                        Some(DiagnosticSeverity::Error) => &DiagnosticSeverity::Error,
-                        _ => sev,
-                    })
-                });
-            match worst {
-                Some(DiagnosticSeverity::Error) => style
-                    .add_modifier(ratatui::style::Modifier::UNDERLINED)
-                    .underline_color(Color::Red),
-                Some(_) => style
-                    .add_modifier(ratatui::style::Modifier::UNDERLINED)
-                    .underline_color(Color::Yellow),
-                None => style,
-            }
-        };
+                .map(|(_, _, _, sev)| sev),
+        );
         buf[(x, area.y)].set_char(c).set_style(style);
         x += 1;
     }
@@ -636,37 +609,18 @@ fn render_source_line(
     }
 
     // Jump label overlay — paint over already-rendered characters.
-    if !ctx.jump_labels.is_empty() {
-        let typed_len = ctx.jump_typed.len();
-        let jump_pending = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Rgb(255, 160, 0))
-            .add_modifier(Modifier::BOLD);
-        let jump_confirmed = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD);
-        for (pos, label) in ctx.jump_labels {
-            if !label.starts_with(ctx.jump_typed) {
-                continue;
-            }
-            if *pos < line_start_char {
-                continue;
-            }
-            let char_off = pos - line_start_char;
-            if char_off >= line_len {
-                continue;
-            }
-            for (i, lc) in label.chars().enumerate() {
-                let col = content_x + (char_off + i) as u16;
-                if col >= content_area.right() {
-                    break;
-                }
-                let style = if i < typed_len { jump_confirmed } else { jump_pending };
+    for_each_jump_label_char(
+        ctx.jump_labels,
+        ctx.jump_typed,
+        line_start_char,
+        line_len,
+        |char_off, lc, style| {
+            let col = content_x + char_off as u16;
+            if col < content_area.right() {
                 buf[(col, area.y)].set_char(lc).set_style(style);
             }
-        }
-    }
+        },
+    );
 }
 
 fn render_output(
@@ -863,31 +817,3 @@ fn single_row(area: Rect, row: u16) -> Rect {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Custom widgets
-// ---------------------------------------------------------------------------
-
-struct SingleLineWidget {
-    text: String,
-    style: Style,
-}
-
-impl Widget for SingleLineWidget {
-    fn render(self, area: Rect, buf: &mut RatBuffer) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        let y = area.top();
-        let mut x = area.left();
-        for col in area.left()..area.right() {
-            buf[(col, y)].set_char(' ').set_style(self.style);
-        }
-        for c in self.text.chars() {
-            if x >= area.right() {
-                break;
-            }
-            buf[(x, y)].set_char(c).set_style(self.style);
-            x += 1;
-        }
-    }
-}

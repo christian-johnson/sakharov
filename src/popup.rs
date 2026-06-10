@@ -9,7 +9,6 @@ pub struct Popup {
 }
 
 /// The three interaction patterns all popups reduce to.
-#[allow(dead_code)]
 pub enum PopupContent {
     /// Filterable, scrollable list of items. Covers completions,
     /// command palette, buffer picker, diagnostics.
@@ -21,7 +20,6 @@ pub enum PopupContent {
     KeyHints(KeyHintsState),
 }
 
-#[allow(dead_code)]
 pub enum PopupAnchor {
     /// Just below the cursor (completions). Flips above if near bottom.
     CursorBelow,
@@ -29,23 +27,17 @@ pub enum PopupAnchor {
     Center,
     /// Bordered window in the bottom-right corner (which-key).
     BottomRight,
-    /// Full-width strip at the bottom (kept for future use).
-    BottomStrip,
 }
 
-#[allow(dead_code)]
 pub enum PopupSize {
     /// Use the content's natural width, up to the terminal width.
     Auto,
-    /// Exactly N columns wide.
-    Fixed(u16),
     /// Fraction of the terminal width (0.0–1.0).
     FractionOfScreen(f32),
 }
 
 /// What happens when the user confirms (presses Enter).
 #[derive(Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum PopupTarget {
     /// Parse the confirmed item's label as a Command name and execute it.
     ExecuteCommand,
@@ -66,7 +58,6 @@ pub enum PopupTarget {
 /// `"path\0line\0col"` string-encoding so confirmation handlers match on real
 /// values instead of re-parsing strings.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub enum ConfirmPayload {
     /// No explicit payload — the item's label is the meaningful value
     /// (command palette, completion). Synthesised from `label` at confirm time.
@@ -193,6 +184,22 @@ impl ListItem {
 }
 
 impl ListState {
+    /// A fresh list over `items`: empty filter, first item selected, all
+    /// optional behaviours (two-phase nav, search row, doc panel, recency) off.
+    pub fn new(items: Vec<ListItem>) -> Self {
+        Self {
+            items,
+            filter: String::new(),
+            selected: 0,
+            two_phase: false,
+            navigating: false,
+            focused: false,
+            search: None,
+            doc: None,
+            recency: std::collections::HashMap::new(),
+        }
+    }
+
     /// Return indices of matching items sorted by relevance.
     ///
     /// When the filter is empty all items are returned in their original order
@@ -329,12 +336,6 @@ impl ListState {
         self.selected = 0;
     }
 
-    /// Clear filter and selection.
-    #[allow(dead_code)]
-    pub fn reset_filter(&mut self) {
-        self.filter.clear();
-        self.selected = 0;
-    }
 }
 
 /// Score an item against the user's filter string.
@@ -509,17 +510,7 @@ impl Popup {
     ) -> Self {
         Self {
             title: Some("command palette".into()),
-            content: PopupContent::List(ListState {
-                items,
-                filter: String::new(),
-                selected: 0,
-                two_phase: false,
-                navigating: false,
-                focused: false,
-                search: None,
-                doc: None,
-                recency,
-            }),
+            content: PopupContent::List(ListState { recency, ..ListState::new(items) }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.55),
             on_confirm: PopupTarget::ExecuteCommand,
@@ -546,17 +537,7 @@ impl Popup {
         ];
         Self {
             title: Some(title),
-            content: PopupContent::List(ListState {
-                items,
-                filter: String::new(),
-                selected: 0,
-                two_phase: false,
-                navigating: false,
-                focused: false,
-                search: None,
-                doc: None,
-                recency: std::collections::HashMap::new(),
-            }),
+            content: PopupContent::List(ListState::new(items)),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.55),
             on_confirm: PopupTarget::RestoreRecovery,
@@ -564,21 +545,10 @@ impl Popup {
     }
 
     /// Generic filterable list that inserts the selection.
-    #[allow(dead_code)]
     pub fn completion(items: Vec<ListItem>) -> Self {
         Self {
             title: None,
-            content: PopupContent::List(ListState {
-                items,
-                filter: String::new(),
-                selected: 0,
-                two_phase: false,
-                navigating: false,
-                focused: false,
-                search: None,
-                doc: None,
-                recency: std::collections::HashMap::new(),
-            }),
+            content: PopupContent::List(ListState::new(items)),
             anchor: PopupAnchor::CursorBelow,
             width: PopupSize::FractionOfScreen(0.45),
             on_confirm: PopupTarget::InsertText,
@@ -586,7 +556,6 @@ impl Popup {
     }
 
     /// Scrollable documentation / hover text.
-    #[allow(dead_code)]
     pub fn documentation(title: &str, content: &str) -> Self {
         Self {
             title: Some(title.into()),
@@ -604,17 +573,7 @@ impl Popup {
     pub fn navigate(title: &str, items: Vec<ListItem>) -> Self {
         Self {
             title: Some(title.into()),
-            content: PopupContent::List(ListState {
-                items,
-                filter: String::new(),
-                selected: 0,
-                two_phase: false,
-                navigating: false,
-                focused: false,
-                search: None,
-                doc: None,
-                recency: std::collections::HashMap::new(),
-            }),
+            content: PopupContent::List(ListState::new(items)),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.65),
             on_confirm: PopupTarget::Navigate,
@@ -626,15 +585,9 @@ impl Popup {
         Self {
             title: Some(title.into()),
             content: PopupContent::List(ListState {
-                items,
                 filter: initial_filter,
-                selected: 0,
                 two_phase: true,
-                navigating: false,
-                focused: false,
-                search: None,
-                doc: None,
-                recency: std::collections::HashMap::new(),
+                ..ListState::new(items)
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.75),
@@ -646,17 +599,7 @@ impl Popup {
     pub fn code_actions(items: Vec<ListItem>) -> Self {
         Self {
             title: Some("code actions".into()),
-            content: PopupContent::List(ListState {
-                items,
-                filter: String::new(),
-                selected: 0,
-                two_phase: false,
-                navigating: false,
-                focused: false,
-                search: None,
-                doc: None,
-                recency: std::collections::HashMap::new(),
-            }),
+            content: PopupContent::List(ListState::new(items)),
             anchor: PopupAnchor::CursorBelow,
             width: PopupSize::FractionOfScreen(0.5),
             on_confirm: PopupTarget::ApplyCodeAction,
@@ -740,15 +683,9 @@ mod tests {
 
     fn list(items: &[&str], filter: &str, recency: &[(&str, usize)]) -> ListState {
         ListState {
-            items: items.iter().map(|l| item(l, "")).collect(),
             filter: filter.into(),
-            selected: 0,
-            two_phase: false,
-            navigating: false,
-            focused: false,
-            search: None,
-            doc: None,
             recency: recency.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            ..ListState::new(items.iter().map(|l| item(l, "")).collect())
         }
     }
 
