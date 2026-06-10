@@ -8,7 +8,7 @@ use crate::{
     lsp_manager::LspLocation,
     mode::{FindDir, Mode, PromptKind},
     motion,
-    popup::{PopupAction, PopupContent, PopupTarget},
+    popup::{ConfirmPayload, PopupAction, PopupContent, PopupTarget},
     selection::Selection,
 };
 
@@ -81,11 +81,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 app.popup = None;
                 // fall through
             }
-            PopupAction::Confirm(text) => {
+            PopupAction::Confirm(payload) => {
                 let target = app.popup.as_ref().map(|p| p.on_confirm.clone());
                 app.popup = None;
                 if let Some(target) = target {
-                    handle_popup_confirm(app, target, text);
+                    handle_popup_confirm(app, target, payload);
                 }
                 return;
             }
@@ -200,6 +200,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 fn handle_insert(app: &mut App, key: KeyEvent) {
+    // Whether a call-signature hint was already showing, so we can keep it live
+    // as the user types arguments (see the signature-help block at the end).
+    let sig_was_active = app.signature_help.is_some();
+
     match key.code {
         KeyCode::Esc => {
             // Always clear any popup (e.g. completion) when leaving Insert mode.
@@ -217,7 +221,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                 exec::recompute_highlights(app);
                 exec::lsp_did_change(app);
                 // Shorter prefix may now match items, so allow popups again.
-                app.completion_suppressed_prefix = None;
+                app.completion.suppressed_prefix = None;
             }
         }
         KeyCode::Delete => {
@@ -316,7 +320,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             exec::lsp_did_change(app);
             if c == '.' || c == ':' {
                 // Trigger characters always fire a fresh completion request.
-                app.completion_suppressed_prefix = None;
+                app.completion.suppressed_prefix = None;
                 exec::execute(app, &Command::LspRequestCompletion);
             } else if c.is_alphanumeric() || c == '_' {
                 let has_popup = app.popup.as_ref()
@@ -325,7 +329,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                 if !has_popup {
                     // Check whether the current prefix extends one that already
                     // returned no matches — if so, more typing won't help.
-                    let suppressed = app.completion_suppressed_prefix.as_ref()
+                    let suppressed = app.completion.suppressed_prefix.as_ref()
                         .map(|sup| {
                             let cur = crate::motion::word_prefix_at(
                                 &app.buffer.rope, app.selection.head,
@@ -340,10 +344,22 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             } else {
                 // Non-identifier char (space, punctuation, etc.) resets suppression
                 // so the next word starts fresh.
-                app.completion_suppressed_prefix = None;
+                app.completion.suppressed_prefix = None;
             }
         }
         _ => {}
+    }
+
+    // Signature help: show the active call's argument list in the minibuffer.
+    // `(` and `,` (re)request it; while already inside a call we refresh on every
+    // keystroke so the active-argument marker tracks the cursor. When the call is
+    // closed (`)` typed, cursor leaves the parens) the server returns null and the
+    // hint clears itself.
+    if app.mode == Mode::Insert && !key.modifiers.contains(KeyModifiers::CONTROL) {
+        let opens_or_advances = matches!(key.code, KeyCode::Char('(') | KeyCode::Char(','));
+        if opens_or_advances || sig_was_active {
+            exec::lsp_signature_help(app);
+        }
     }
 
     exec::update_scroll(app);
@@ -538,7 +554,7 @@ fn sync_completion_filter(app: &mut App) {
             // Only suppress future requests when a non-empty prefix returned no
             // matches — an empty prefix means the user backspaced completely and
             // should get fresh completions when they start typing again.
-            app.completion_suppressed_prefix = Some(prefix);
+            app.completion.suppressed_prefix = Some(prefix);
         }
         app.popup = None;
     }
@@ -595,15 +611,15 @@ fn handle_jump(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             app.mode = if extend { Mode::Select } else { Mode::Normal };
-            app.jump_labels.clear();
-            app.jump_typed.clear();
+            app.jump.labels.clear();
+            app.jump.typed.clear();
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.jump_typed.push(c);
-            let typed = app.jump_typed.clone();
+            app.jump.typed.push(c);
+            let typed = app.jump.typed.clone();
 
             // Exact match → jump, extending selection if we came from Select mode.
-            if let Some(&(pos, _)) = app.jump_labels.iter().find(|(_, l)| *l == typed) {
+            if let Some(&(pos, _)) = app.jump.labels.iter().find(|(_, l)| *l == typed) {
                 if extend {
                     app.selection = Selection::new(app.selection.anchor, pos);
                     app.mode = Mode::Select;
@@ -611,17 +627,17 @@ fn handle_jump(app: &mut App, key: KeyEvent) {
                     app.selection = Selection::point(pos);
                     app.mode = Mode::Normal;
                 }
-                app.jump_labels.clear();
-                app.jump_typed.clear();
+                app.jump.labels.clear();
+                app.jump.typed.clear();
                 exec::update_scroll(app);
                 return;
             }
 
             // No label starts with the typed prefix → cancel.
-            if !app.jump_labels.iter().any(|(_, l)| l.starts_with(typed.as_str())) {
+            if !app.jump.labels.iter().any(|(_, l)| l.starts_with(typed.as_str())) {
                 app.mode = if extend { Mode::Select } else { Mode::Normal };
-                app.jump_labels.clear();
-                app.jump_typed.clear();
+                app.jump.labels.clear();
+                app.jump.typed.clear();
             }
         }
         _ => {}
@@ -632,14 +648,15 @@ fn handle_jump(app: &mut App, key: KeyEvent) {
 // Popup confirm handler
 // ---------------------------------------------------------------------------
 
-fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
+fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayload) {
     // A confirmed action (file opened, command run, navigation) is a "commit" —
     // dismiss the splash so the user lands in the editor, not back at the dashboard.
     app.show_splash = false;
 
     match target {
         PopupTarget::ExecuteCommand => {
-            if let Some(cmd) = Command::parse(&text) {
+            let text = payload.as_text();
+            if let Some(cmd) = Command::parse(text) {
                 crate::history::record(app, cmd.name());
                 exec::execute(app, &cmd);
             } else {
@@ -647,37 +664,34 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, text: String) {
             }
         }
         PopupTarget::InsertText => {
+            let text = payload.as_text();
             let pos = app.selection.head;
             let word_start = crate::motion::word_start_at(&app.buffer.rope, pos);
             if word_start < pos {
                 app.buffer.remove(word_start, pos);
             }
-            app.buffer.insert(word_start, &text);
+            app.buffer.insert(word_start, text);
             app.selection = Selection::point(word_start + text.chars().count());
             exec::recompute_highlights(app);
             exec::lsp_did_change(app);
         }
         PopupTarget::Dismiss => {}
         PopupTarget::ApplyCodeAction => {
-            if let Ok(idx) = text.parse::<usize>() {
+            if let ConfirmPayload::CodeAction(idx) = payload {
                 exec::apply_code_action(app, idx);
             }
         }
         PopupTarget::RestoreRecovery => {
-            crate::recovery::handle_choice(app, &text);
+            crate::recovery::handle_choice(app, payload.as_text());
         }
         PopupTarget::Navigate => {
-            let parts: Vec<&str> = text.splitn(3, '\0').collect();
-            if parts.len() == 3 {
-                let path = std::path::PathBuf::from(parts[0]);
-                let line: usize = parts[1].parse().unwrap_or(0);
-                let character: usize = parts[2].parse().unwrap_or(0);
+            if let ConfirmPayload::Navigate { path, line, col } = payload {
                 if exec::is_special_path(&path) {
                     exec::switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
                 } else if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
                     exec::open_as_notebook(app, &path);
                 } else {
-                    exec::jump_to_location(app, &LspLocation { path, line, character });
+                    exec::jump_to_location(app, &LspLocation { path, line, character: col });
                 }
             }
         }

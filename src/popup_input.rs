@@ -36,8 +36,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
             // Confirm the current selection, inserting its payload/label.
             let confirm = |list: &crate::popup::ListState| -> PopupAction {
                 if let Some(item) = list.selected_item() {
-                    let text = item.payload.as_deref().unwrap_or(&item.label).to_owned();
-                    PopupAction::Confirm(text)
+                    PopupAction::Confirm(item.confirm_payload())
                 } else {
                     PopupAction::Dismiss
                 }
@@ -177,8 +176,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         KeyCode::Enter => match &popup.content {
             PopupContent::List(state) => {
                 if let Some(item) = state.selected_item() {
-                    let text = item.payload.as_deref().unwrap_or(&item.label).to_owned();
-                    PopupAction::Confirm(text)
+                    PopupAction::Confirm(item.confirm_payload())
                 } else {
                     PopupAction::Dismiss
                 }

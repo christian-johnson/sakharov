@@ -36,6 +36,37 @@ pub(super) fn lsp_code_actions_request(app: &mut App) {
     }
 }
 
+/// Route a hover / signature-help / references request through the notebook's
+/// shadow concatenated document so it sees cross-cell context (pylsp only
+/// concatenates cells itself for completion and definition). Returns false when
+/// not applicable (no notebook, markdown cell, server not ready) — the caller
+/// falls back to the ordinary per-cell request.
+fn notebook_shadow_request(app: &mut App, kind: LspRequestKind) -> bool {
+    let Some((nb, state)) = app.notebook.as_ref() else { return false };
+    let focused = state.focused_cell;
+    if nb.cells.get(focused).map(|c| c.cell_type != crate::notebook::CellType::Code).unwrap_or(true) {
+        return false;
+    }
+    let lang = nb.metadata.kernel_language.clone();
+    if !app.lsp.is_ready(&lang) {
+        return false;
+    }
+    let (text, map) = crate::notebook::concat_source(nb, Some((focused, &app.buffer.rope)));
+    let Some(&(_, start_line)) = map.iter().find(|&&(idx, _)| idx == focused) else {
+        return false;
+    };
+    let shadow = crate::notebook::concat_virtual_path(&nb.path, &lang);
+    let (line, character) = crate::lsp::char_to_lsp_pos(&app.buffer.rope, app.selection.head);
+    app.lsp.request_via_shadow_doc(
+        kind,
+        &lang,
+        &shadow,
+        &text,
+        line + start_line as u32,
+        character,
+    )
+}
+
 pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
     // For completion requests, fall back to buffer symbols when LSP isn't available.
     if matches!(kind, LspRequestKind::Completion) {
@@ -58,6 +89,15 @@ pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
         } else {
             show_buffer_completions(app);
         }
+        return;
+    }
+
+    // Notebook hover/references: go through the shadow concatenated document
+    // for cross-cell context. (Definition stays on the cell URI — pylsp handles
+    // that one notebook-aware natively, and answers with cell URIs we map back.)
+    if matches!(kind, LspRequestKind::Hover | LspRequestKind::References)
+        && notebook_shadow_request(app, kind)
+    {
         return;
     }
 
@@ -104,6 +144,29 @@ pub(super) fn show_buffer_completions(app: &mut App) {
     open_completion_popup(app, items, prefix);
 }
 
+/// Request `textDocument/signatureHelp` at the cursor so the active call's
+/// argument list can be shown in the minibuffer. No-op (and clears any stale
+/// signature) when no language server is ready for the current document.
+pub fn lsp_signature_help(app: &mut App) {
+    let lang = app.current_language().unwrap_or("").to_owned();
+    if lang.is_empty() || !app.lsp.is_ready(&lang) {
+        app.signature_help = None;
+        return;
+    }
+    // Notebook: route through the shadow concatenated document so calls to
+    // functions defined/imported in other cells resolve.
+    if notebook_shadow_request(app, LspRequestKind::SignatureHelp) {
+        return;
+    }
+    let path = match app.buffer.path.clone() {
+        Some(p) => p,
+        None => return,
+    };
+    let char_idx = app.selection.head;
+    let rope = app.buffer.rope.clone();
+    app.lsp.request(LspRequestKind::SignatureHelp, &lang, &path, &rope, char_idx);
+}
+
 /// Notify the LSP server of a buffer change (called after each Insert-mode edit).
 pub fn lsp_did_change(app: &mut App) {
     let lang = match app.current_language() {
@@ -116,13 +179,13 @@ pub fn lsp_did_change(app: &mut App) {
     };
     let text = app.buffer.rope.to_string();
 
-    if let Some(ref session) = app.notebook_cell_edit {
-        if app.lsp.notebook_sync_supported(&lang) {
-            let notebook_uri = path_to_uri(&session.notebook_path);
-            let cell_uri = path_to_uri(&path);
-            app.lsp.notebook_did_change_cell(&lang, &notebook_uri, &cell_uri, &text);
-            return;
-        }
+    if let Some((nb, _)) = app.notebook.as_ref() {
+        // The manager routes per server: notebookDocument/didChange to servers
+        // with the notebook open, plain didChange on the cell doc to the rest.
+        let notebook_uri = path_to_uri(&nb.path);
+        let cell_uri = path_to_uri(&path);
+        app.lsp.notebook_did_change_cell(&lang, &notebook_uri, &cell_uri, &text);
+        return;
     }
 
     app.lsp.did_change(&lang, &path, &text);
@@ -143,15 +206,9 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                 .map(|(nb, _)| nb.metadata.kernel_language.clone());
 
             if notebook_lang.as_deref() == Some(&language) && !app.notebook_focused_edit() {
-                if app.lsp.notebook_sync_supported(&language) {
-                    super::notebook::notebook_lsp_open(app);
-                }
-                if !app.lsp.notebook_sync_supported(&language) {
-                    if let Some(path) = app.buffer.path.clone() {
-                        let text = app.buffer.rope.to_string();
-                        app.lsp.did_open(&language, &path, &text);
-                    }
-                }
+                // Idempotent per server: only the newly-initialized server
+                // actually receives the (re-)open.
+                super::notebook::notebook_lsp_open(app);
                 return;
             }
 
@@ -205,7 +262,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             }
         }
         LspEvent::CompletionResolved { documentation, detail } => {
-            if let Some(idx) = app.pending_completion_resolve.take() {
+            if let Some(idx) = app.completion.pending_resolve.take() {
                 if let Some(popup) = app.popup.as_mut() {
                     if popup.on_confirm == crate::popup::PopupTarget::InsertText {
                         if let crate::popup::PopupContent::List(ref mut list) = popup.content {
@@ -232,6 +289,10 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             } else {
                 app.popup = Some(crate::popup::Popup::documentation("hover", &content));
             }
+        }
+        LspEvent::SignatureHelpResult { signature } => {
+            // Only meaningful while typing in Insert mode; the minibuffer shows it.
+            app.signature_help = if app.mode == Mode::Insert { signature } else { None };
         }
         LspEvent::DefinitionResult { location } => {
             if let Some(loc) = location {
@@ -288,7 +349,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                         label: title,
                         detail: kind,
                         kind: None,
-                        payload: Some(i.to_string()),
+                        payload: Some(crate::popup::ConfirmPayload::CodeAction(i)),
                         ..Default::default()
                     }
                 })
@@ -300,6 +361,33 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
 }
 
 pub fn jump_to_location(app: &mut App, loc: &LspLocation) {
+    // Notebook: locations inside the notebook's virtual documents refer to
+    // cells, not on-disk files. A virtual cell path maps directly (positions
+    // are cell-relative); a shadow concatenated-document path maps via the
+    // concat line offsets. Jump to the cell in-place either way.
+    let cell_target = app.notebook.as_ref().and_then(|(nb, state)| {
+        if let Some(idx) = crate::notebook::cell_index_for_virtual_path(nb, &loc.path) {
+            return Some((idx, loc.line));
+        }
+        let lang = &nb.metadata.kernel_language;
+        let shadow = crate::notebook::concat_virtual_path(&nb.path, lang);
+        if crate::lsp::diagnostic_key(&loc.path) == crate::lsp::diagnostic_key(&shadow) {
+            let over = (state.focused_cell, &app.buffer.rope);
+            return crate::notebook::cell_for_concat_line(nb, Some(over), loc.line);
+        }
+        None
+    });
+    if let Some((idx, line)) = cell_target {
+        let current = app.notebook.as_ref().map(|(_, s)| s.focused_cell);
+        if Some(idx) != current {
+            super::switch_focused_cell(app, idx);
+        }
+        let char_idx = lsp_pos_to_char(&app.buffer.rope, line, loc.character);
+        app.selection = Selection::point(char_idx);
+        super::update_scroll(app);
+        return;
+    }
+
     let target = loc.path.canonicalize().ok().unwrap_or_else(|| loc.path.clone());
     let same_file = if app.buffer.path.is_none() && loc.path.as_os_str().is_empty() {
         true
@@ -530,14 +618,21 @@ fn open_completion_popup(app: &mut crate::app::App, items: Vec<crate::popup::Lis
     if let crate::popup::PopupContent::List(ref mut list) = popup.content {
         list.filter = prefix.clone();
         // Don't flash an empty popup — if nothing matches the current prefix,
-        // record suppression and bail out rather than opening then immediately
-        // dismissing it (which causes the alternating show/hide flicker).
+        // bail out rather than opening then immediately dismissing it.
+        //
+        // We deliberately do NOT set `suppressed_prefix` here. This response is
+        // one async snapshot: the server may have returned incomplete/empty
+        // results that the very next keystroke's request fills in (a common
+        // cause of "completions sometimes don't show"). Letting later keystrokes
+        // re-request keeps autocomplete reliable. Persistent suppression is set
+        // only from the user-driven filter path (`sync_completion_filter`), where
+        // we have the server's full result set and know the prefix truly matches
+        // nothing.
         if !prefix.is_empty() && list.filtered_indices().is_empty() {
-            app.completion_suppressed_prefix = Some(prefix);
             return;
         }
     }
-    app.pending_completion_resolve = None;
+    app.completion.pending_resolve = None;
     app.popup = Some(popup);
 }
 
@@ -591,11 +686,11 @@ pub fn refresh_completion_doc(app: &mut App) {
     }
 
     // Phase 4 — fire the resolve request (only one outstanding at a time).
-    if can_resolve && app.pending_completion_resolve.is_none() {
+    if can_resolve && app.completion.pending_resolve.is_none() {
         if let Some(json) = resolve_json {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json) {
                 if app.lsp.request_completion_resolve(&lang, val) {
-                    app.pending_completion_resolve = Some(idx);
+                    app.completion.pending_resolve = Some(idx);
                 }
             }
         }

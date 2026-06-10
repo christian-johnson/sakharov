@@ -47,20 +47,51 @@ pub enum PopupSize {
 #[derive(Clone, PartialEq)]
 #[allow(dead_code)]
 pub enum PopupTarget {
-    /// Parse the confirmed text as a Command name and execute it.
+    /// Parse the confirmed item's label as a Command name and execute it.
     ExecuteCommand,
-    /// Insert the confirmed text at the cursor position (completion popup).
+    /// Insert the confirmed item's label at the cursor position (completion popup).
     /// Non-navigation keys dismiss with passthrough so typing continues normally.
     InsertText,
     /// Just close the popup (for Text / informational List).
     Dismiss,
-    /// Jump to the location encoded in the confirmed item's payload.
-    /// Payload format: `"path\0line\0col"` (all fields, line/col zero-indexed).
+    /// Jump to the location in the confirmed item's [`ConfirmPayload::Navigate`].
     Navigate,
-    /// Apply the code action whose index is encoded in the confirmed item's payload.
+    /// Apply the code action in the confirmed item's [`ConfirmPayload::CodeAction`].
     ApplyCodeAction,
-    /// Resolve a crash-recovery prompt. Payload is "restore" or "discard".
+    /// Resolve a crash-recovery prompt ([`ConfirmPayload::Choice`]).
     RestoreRecovery,
+}
+
+/// Typed data carried by a confirmed [`ListItem`]. Replaces the old
+/// `"path\0line\0col"` string-encoding so confirmation handlers match on real
+/// values instead of re-parsing strings.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub enum ConfirmPayload {
+    /// No explicit payload — the item's label is the meaningful value
+    /// (command palette, completion). Synthesised from `label` at confirm time.
+    Label(String),
+    /// A file location to jump to (buffer / symbol / diagnostic / grep pickers).
+    Navigate {
+        path: std::path::PathBuf,
+        line: usize,
+        col: usize,
+    },
+    /// Index into `app.pending_code_actions`.
+    CodeAction(usize),
+    /// A free-form choice token (e.g. crash-recovery "restore" / "discard").
+    Choice(String),
+}
+
+impl ConfirmPayload {
+    /// The label/text value for `Label`-style payloads (command name, completion
+    /// text, or a choice token); empty for structured payloads.
+    pub fn as_text(&self) -> &str {
+        match self {
+            ConfirmPayload::Label(s) | ConfirmPayload::Choice(s) => s,
+            _ => "",
+        }
+    }
 }
 
 /// Returned by popup input handling.
@@ -74,7 +105,7 @@ pub enum PopupAction {
     /// Popup always closes immediately; key falls through to normal handler.
     ClosePassthrough,
     /// Popup closes, caller should act on the payload.
-    Confirm(String),
+    Confirm(ConfirmPayload),
 }
 
 // ---------------------------------------------------------------------------
@@ -113,9 +144,9 @@ pub struct ListItem {
     pub label: String,
     pub detail: Option<String>,
     pub kind: Option<String>,
-    /// Returned verbatim as the `Confirm` payload instead of `label`.
-    /// Use `NavigateTarget::encode` or set manually to `"path\0line\0col"`.
-    pub payload: Option<String>,
+    /// Typed value returned as the `Confirm` payload. When `None`, the item's
+    /// `label` is used (wrapped in [`ConfirmPayload::Label`]).
+    pub payload: Option<ConfirmPayload>,
     /// Completion-only: documentation shown in the `K` doc panel. `None` means
     /// it may still be fetchable via `completionItem/resolve` (see `resolve_data`).
     pub documentation: Option<String>,
@@ -131,6 +162,14 @@ pub struct DocPanel {
 }
 
 impl ListItem {
+    /// The payload to return when this item is confirmed: its explicit typed
+    /// payload, or its label wrapped in [`ConfirmPayload::Label`].
+    pub fn confirm_payload(&self) -> ConfirmPayload {
+        self.payload
+            .clone()
+            .unwrap_or_else(|| ConfirmPayload::Label(self.label.clone()))
+    }
+
     /// Convenience constructor for navigate items (buffer/symbol/diagnostic pickers).
     pub fn navigate(
         label: impl Into<String>,
@@ -143,12 +182,11 @@ impl ListItem {
             label: label.into(),
             detail: Some(detail.into()),
             kind: None,
-            payload: Some(format!(
-                "{}\0{}\0{}",
-                path.to_string_lossy(),
+            payload: Some(ConfirmPayload::Navigate {
+                path: path.to_path_buf(),
                 line,
-                col
-            )),
+                col,
+            }),
             ..Default::default()
         }
     }
@@ -495,14 +533,14 @@ impl Popup {
                 label: "Restore unsaved changes".into(),
                 detail: Some("Load the recovered contents into the buffer".into()),
                 kind: None,
-                payload: Some("restore".into()),
+                payload: Some(ConfirmPayload::Choice("restore".into())),
                 ..Default::default()
             },
             ListItem {
                 label: "Discard recovered contents".into(),
                 detail: Some("Delete the recovery file and keep the on-disk version".into()),
                 kind: None,
-                payload: Some("discard".into()),
+                payload: Some(ConfirmPayload::Choice("discard".into())),
                 ..Default::default()
             },
         ];
@@ -645,124 +683,12 @@ impl Popup {
 // Static command list
 // ---------------------------------------------------------------------------
 
-/// All editor commands with short descriptions and default key hints.
-/// Used to populate the command palette.
+/// All palette-eligible editor commands with short descriptions and default key
+/// hints. Sourced from [`crate::command::Command::palette_entries`] so the
+/// palette never drifts from the canonical command table.
 pub fn command_palette_items() -> Vec<ListItem> {
-    let entries: &[(&str, &str)] = &[
-        // File
-        ("write", "Write file  [ctrl+s, :w]"),
-        ("write-as", "Write to new path  [:w <path>]"),
-        ("new-file", "Create a new file in the current directory (prompts for name)  [:new-file]"),
-        ("new-notebook", "Create a new notebook in the current directory (prompts for name)  [:new-notebook]"),
-        ("quit", "Quit  [:q]"),
-        ("force-quit", "Quit without saving  [:q!]"),
-        ("write-quit", "Write and quit  [:wq]"),
-        // Motions
-        ("move-left", "Move cursor left  [h]"),
-        ("move-right", "Move cursor right  [l]"),
-        ("move-up", "Move cursor up  [k]"),
-        ("move-down", "Move cursor down  [j]"),
-        ("move-word-forward", "Next word  [w]"),
-        ("move-word-backward", "Previous word  [b]"),
-        ("move-word-end", "End of word  [e]"),
-        ("move-line-start", "Start of line  [0]"),
-        ("move-line-end", "End of line  [$]"),
-        ("goto-file-start", "Go to file start  [gg]"),
-        ("goto-file-end", "Go to file end  [G]"),
-        ("select-line", "Select current line  [x]"),
-        ("select-all", "Select entire file  [%]"),
-        // Editing
-        ("delete-selection", "Delete selection  [d]"),
-        ("change-selection", "Delete selection and insert  [c]"),
-        ("yank-selection", "Yank (copy) selection  [y]"),
-        ("paste-after", "Paste after cursor  [p]"),
-        ("paste-before", "Paste before cursor  [P]"),
-        ("undo", "Undo  [u]"),
-        ("redo", "Redo  [U]"),
-        ("open-line-below", "New line below  [o]"),
-        ("open-line-above", "New line above  [O]"),
-        // Mode transitions
-        ("enter-insert", "Enter insert mode  [i]"),
-        ("enter-insert-after", "Insert after cursor  [a]"),
-        ("enter-insert-at-line-start", "Insert at line start  [I]"),
-        ("enter-insert-at-line-end", "Insert at line end  [A]"),
-        ("enter-select", "Enter select mode  [v]"),
-        ("enter-normal", "Return to normal mode  [Esc]"),
-        ("enter-command-mode", "Open command line  [:]"),
-        // Notebook
-        ("notebook-next-cell", "Next cell  [j]"),
-        ("notebook-prev-cell", "Previous cell  [k]"),
-        ("notebook-execute-cell", "Execute cell  [e, ctrl+enter]"),
-        ("notebook-execute-and-advance", "Execute cell and advance  [E]"),
-        ("notebook-new-cell-below", "New cell below  [o]"),
-        ("notebook-new-cell-above", "New cell above  [O]"),
-        ("notebook-delete-cell", "Delete cell  [d]"),
-        ("notebook-clear-outputs", "Clear cell outputs  [x]"),
-        ("notebook-restart-kernel", "Restart kernel  [ctrl+r]"),
-        ("notebook-interrupt-kernel", "Interrupt kernel  [:interrupt-kernel]"),
-        ("notebook-open-cell-edit", "Open cell in editor  [Enter, i]"),
-        ("notebook-close-cell-edit", "Save cell and return  [ctrl+enter]"),
-        ("notebook-discard-cell-edit", "Discard cell edits  [:discard-cell]"),
-        // Notebook
-        ("enter-notebook", "Open the current .ipynb as a notebook  [n]"),
-        // Search / Grep
-        ("search-forward", "Search forward  [/]"),
-        ("search-backward", "Search backward  [?]"),
-        ("search-next", "Next match  [n]"),
-        ("search-prev", "Previous match  [N]"),
-        ("grep-buffer", "Grep current buffer  [ctrl+f]"),
-        ("grep-project", "Grep project files  [ctrl+g]"),
-        // Scroll
-        ("page-down", "Scroll half page down  [ctrl+d, PgDn]"),
-        ("page-up", "Scroll half page up  [ctrl+u, PgUp]"),
-        // Shell
-        ("shell", "Run a shell command  [:shell <cmd>]"),
-        // Editing
-        ("enter-jump-mode", "Jump to label in view  [gw]"),
-        ("comment-region", "Toggle comment/uncomment  [gc]"),
-        // LSP
-        ("lsp-show-documentation", "Show hover documentation  [gk, K]"),
-        ("lsp-code-actions", "Show code actions  [ga]"),
-        ("lsp-goto-definition", "Go to definition  [gd]"),
-        ("lsp-goto-references", "Go to references  [gr]"),
-        ("lsp-goto-type-definition", "Go to type definition  [gy]"),
-        ("lsp-goto-implementation", "Go to implementation  [gi]"),
-        ("lsp-request-completion", "Request completions  [ctrl+space]"),
-        ("format-document", "Format buffer via language server  [:fmt]"),
-        // Config
-        ("open-config",   "Open config file in editor  [:config]"),
-        ("reload-config", "Reload config from disk  [:config-reload]"),
-        // Buffers
-        ("buffer-close",       "Close current buffer  [:bd]"),
-        ("buffer-force-close", "Force-close current buffer (discard changes)  [:bd!]"),
-        ("buffer-next",        "Switch to next buffer  [L, :bn]"),
-        ("buffer-prev",        "Switch to previous buffer  [H, :bp]"),
-        ("switch-to-scratch",  "Switch to *scratch* buffer  [:scratch]"),
-        ("switch-to-messages", "Switch to *Messages* log buffer  [:messages]"),
-        // UI
-        ("open-command-palette", "Open fuzzy-searchable command palette  [Space]"),
-        ("toggle-git-gutter",          "Toggle git gutter indicators  [:toggle-git-gutter]"),
-        ("toggle-line-numbers",        "Toggle line numbers  [:toggle-line-numbers]"),
-        ("toggle-relative-line-numbers", "Toggle relative line numbers  [:toggle-relative-line-numbers]"),
-        ("toggle-word-wrap",           "Toggle soft word-wrap  [:wrap]"),
-        ("scroll-cursor-center",       "Scroll cursor to centre  [gz]"),
-        ("kill-to-end-of-line",        "Kill to end of line  [ctrl+k]"),
-        // Pickers
-        ("open-file-picker",       "Open file  [ctrl+o, :e]"),
-        ("open-buffer-picker",     "Switch buffer  [gb]"),
-        ("open-symbol-picker",     "Jump to symbol in file  [gs]"),
-        ("open-diagnostic-picker", "Jump to diagnostic  [gD]"),
-        // Code folding
-        ("fold-toggle",     "Toggle fold at cursor  [za]"),
-        ("fold-toggle-all", "Toggle all folds  [zA]"),
-        // Notebook folding
-        ("notebook-toggle-fold-cell",  "Toggle cell fold  [z]"),
-        ("notebook-toggle-all-folds",  "Toggle all cell folds  [Z]"),
-        // Dashboard
-        ("show-dashboard", "Show the welcome / dashboard screen  [:dashboard]"),
-    ];
-    entries
-        .iter()
+    crate::command::Command::palette_entries()
+        .into_iter()
         .map(|(label, detail)| ListItem {
             label: label.to_string(),
             detail: Some(detail.to_string()),

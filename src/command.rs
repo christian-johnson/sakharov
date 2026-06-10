@@ -1,333 +1,231 @@
-/// Every editor action that can be triggered by a key, the command line, or a script.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum Command {
-    // Motions — in Normal mode set a new point selection;
-    //           in Select mode extend the existing selection.
-    MoveLeft,
-    MoveRight,
-    MoveUp,
-    MoveDown,
-    MoveWordForward,
-    MoveWordBackward,
-    MoveWordEnd,
-    MoveBigWordForward,
-    MoveBigWordBackward,
-    MoveBigWordEnd,
-    MoveLineStart,
-    MoveLineFirstNonWs,
-    MoveLineEnd,
-    GotoFileStart,
-    GotoFileEnd,
-    GotoLine(usize),
-    SelectLine,
-    SelectAll,
+//! Single source of truth for every editor command.
+//!
+//! The [`commands!`] macro below generates, from one table:
+//!   * the [`Command`] enum,
+//!   * [`Command::name`] (variant → canonical string name),
+//!   * the unit-command parser used by [`Command::parse`] (canonical name + aliases),
+//!   * [`Command::palette_entries`] (the command-palette list with descriptions).
+//!
+//! To add a command, add one row to the table. Data-carrying variants (those
+//! that hold an argument, e.g. `GotoLine(usize)`) live in the `data:` section
+//! and get bespoke parsing in [`Command::parse`]; everything else is a `unit:`
+//! row and needs no further wiring.
 
-    // Two-character sequences — enter a pending sub-mode
-    EnterGotoMode,
-    /// Enter label-jump mode: overlay labels on visible word starts.
-    EnterJumpMode,
-    FindCharForward,
-    FindCharBackward,
-    TillCharForward,
-    TillCharBackward,
+/// Generate the [`Command`] enum plus its `name`, unit-parser, and palette table.
+///
+/// Row syntax:
+/// ```ignore
+/// units: {
+///     // VariantName => "canonical-name" [, aliases: ["a", "b"]] [, palette: "Description  [key]"];
+///     MoveLeft => "move-left", palette: "Move cursor left  [h]";
+/// }
+/// data: {
+///     // VariantName(Type, ...) => "canonical-name" [, palette: "..."];
+///     GotoLine(usize) => "goto-line";
+/// }
+/// ```
+macro_rules! commands {
+    (
+        units: {
+            $( $uvar:ident => $uname:literal
+                $(, aliases: [ $($ualias:literal),* $(,)? ])?
+                $(, palette: $udesc:literal)? ; )*
+        }
+        data: {
+            $( $dvar:ident ( $($dty:ty),* ) => $dname:literal
+                $(, palette: $ddesc:literal)? ; )*
+        }
+    ) => {
+        /// Every editor action that can be triggered by a key, the command line, or a script.
+        #[derive(Debug, Clone)]
+        #[allow(dead_code)]
+        pub enum Command {
+            $( $uvar, )*
+            $( $dvar ( $($dty),* ), )*
+        }
 
-    // Editing
-    DeleteSelection,
-    ChangeSelection,
-    /// Toggle comment/uncomment on the selected lines.
-    CommentRegion,
-    /// Indent the selected lines by one indentation unit.
-    IndentRegion,
-    /// Dedent the selected lines by one indentation unit.
-    DedentRegion,
-    YankSelection,
-    PasteAfter,
-    PasteBefore,
-    Undo,
-    Redo,
-    OpenLineBelow,
-    OpenLineAbove,
+        impl Command {
+            /// The canonical command name used in docs and the `:` command line.
+            #[allow(dead_code)]
+            pub fn name(&self) -> &'static str {
+                match self {
+                    $( Command::$uvar => $uname, )*
+                    $( Command::$dvar(..) => $dname, )*
+                }
+            }
 
-    // Mode transitions
-    EnterInsert,
-    EnterInsertAfter,
-    EnterInsertAtLineStart,
-    EnterInsertAtLineEnd,
-    EnterNormal,
-    EnterSelect,
-    EnterCommandMode,
+            /// Parse a unit (argument-less) command by canonical name or alias.
+            /// Data-carrying commands are handled separately in [`Command::parse`].
+            fn parse_unit(cmd: &str) -> Option<Command> {
+                match cmd {
+                    $( $uname $($( | $ualias )*)? => Some(Command::$uvar), )*
+                    _ => None,
+                }
+            }
 
-    // Popup / UI
-    /// Open the command palette popup.
-    OpenCommandPalette,
-    /// Open the fuzzy buffer-list picker.
-    OpenBufferPicker,
-    /// Open the symbol picker (tree-sitter).
-    OpenSymbolPicker,
-    /// Open the diagnostic picker (LSP diagnostics).
-    OpenDiagnosticPicker,
-    /// Open a file picker (built-in fuzzy list, or external via config).
-    OpenFilePicker,
+            /// `(canonical_name, description)` for every command that opts into the
+            /// command palette, in table order. Drives `command_palette_items()`.
+            pub fn palette_entries() -> Vec<(&'static str, &'static str)> {
+                vec![
+                    $( $( ($uname, $udesc), )? )*
+                    $( $( ($dname, $ddesc), )? )*
+                ]
+            }
+        }
+    };
+}
 
-    // File / application
-    Write,
-    WriteAs(String),
-    /// Prompt (in the minibuffer) for a filename, then create a new empty file
-    /// in the current buffer's directory and open it.
-    NewFile,
-    /// Prompt (in the minibuffer) for a filename, then create a new empty
-    /// `.ipynb` notebook in the current buffer's directory and open it.
-    NewNotebook,
-    Quit,
-    ForceQuit,
-    WriteQuit,
-    /// Close the current buffer; warn if modified.
-    BufferClose,
-    /// Close the current buffer unconditionally (discard unsaved changes).
-    BufferForceClose,
-    /// Switch to the next buffer in the open-buffers list.
-    BufferNext,
-    /// Switch to the previous buffer in the open-buffers list.
-    BufferPrev,
-    /// Switch to the persistent *scratch* buffer.
-    SwitchToScratch,
-    /// Switch to the *Messages* buffer showing the message log.
-    SwitchToMessages,
+commands! {
+    units: {
+        // --- File / application ---
+        Write => "write", aliases: ["save"], palette: "Write file  [ctrl+s, :w]";
+        Quit => "quit", aliases: ["q"], palette: "Quit  [:q]";
+        ForceQuit => "force-quit", aliases: ["q!"], palette: "Quit without saving  [:q!]";
+        WriteQuit => "write-quit", aliases: ["wq", "x"], palette: "Write and quit  [:wq]";
+        NewFile => "new-file", aliases: ["newfile", "new"], palette: "Create a new file in the current directory (prompts for name)  [:new-file]";
+        NewNotebook => "new-notebook", aliases: ["newnotebook", "new-nb"], palette: "Create a new notebook in the current directory (prompts for name)  [:new-notebook]";
 
-    // Scripting / composition
-    Shell(String),
-    Sequence(Vec<Command>),
+        // --- Motions ---
+        MoveLeft => "move-left", palette: "Move cursor left  [h]";
+        MoveRight => "move-right", palette: "Move cursor right  [l]";
+        MoveUp => "move-up", palette: "Move cursor up  [k]";
+        MoveDown => "move-down", palette: "Move cursor down  [j]";
+        MoveWordForward => "move-word-forward", palette: "Next word  [w]";
+        MoveWordBackward => "move-word-backward", palette: "Previous word  [b]";
+        MoveWordEnd => "move-word-end", palette: "End of word  [e]";
+        MoveBigWordForward => "move-big-word-forward";
+        MoveBigWordBackward => "move-big-word-backward";
+        MoveBigWordEnd => "move-big-word-end";
+        MoveLineStart => "move-line-start", palette: "Start of line  [0]";
+        MoveLineFirstNonWs => "move-line-first-non-ws";
+        MoveLineEnd => "move-line-end", palette: "End of line  [$]";
+        GotoFileStart => "goto-file-start", palette: "Go to file start  [gg]";
+        GotoFileEnd => "goto-file-end", palette: "Go to file end  [G]";
+        SelectLine => "select-line", palette: "Select current line  [x]";
+        SelectAll => "select-all", palette: "Select entire file  [%]";
 
-    // Notebook navigation
-    NotebookNextCell,
-    NotebookPrevCell,
-    NotebookScrollDown,
-    NotebookScrollUp,
+        // --- Editing ---
+        DeleteSelection => "delete-selection", aliases: ["delete"], palette: "Delete selection  [d]";
+        ChangeSelection => "change-selection", aliases: ["change"], palette: "Delete selection and insert  [c]";
+        YankSelection => "yank-selection", aliases: ["yank"], palette: "Yank (copy) selection  [y]";
+        PasteAfter => "paste-after", aliases: ["paste"], palette: "Paste after cursor  [p]";
+        PasteBefore => "paste-before", palette: "Paste before cursor  [P]";
+        Undo => "undo", aliases: ["u"], palette: "Undo  [u]";
+        Redo => "redo", palette: "Redo  [U]";
+        OpenLineBelow => "open-line-below", palette: "New line below  [o]";
+        OpenLineAbove => "open-line-above", palette: "New line above  [O]";
+        CommentRegion => "comment-region", aliases: ["comment"], palette: "Toggle comment/uncomment  [gc]";
+        IndentRegion => "indent-region", aliases: ["indent"];
+        DedentRegion => "dedent-region", aliases: ["dedent"];
+        KillToEndOfLine => "kill-to-end-of-line", aliases: ["kill-line"], palette: "Kill to end of line  [ctrl+k]";
 
-    // Notebook editing
-    NotebookExecuteCell,
-    NotebookExecuteAndAdvance,
-    NotebookNewCellBelow,
-    NotebookNewCellAbove,
-    NotebookDeleteCell,
-    NotebookClearOutputs,
-    /// Convert the focused cell to a Markdown cell.
-    NotebookCellToMarkdown,
-    /// Convert the focused cell to a code cell.
-    NotebookCellToCode,
+        // --- Mode transitions ---
+        EnterInsert => "enter-insert", palette: "Enter insert mode  [i]";
+        EnterInsertAfter => "enter-insert-after", palette: "Insert after cursor  [a]";
+        EnterInsertAtLineStart => "enter-insert-at-line-start", palette: "Insert at line start  [I]";
+        EnterInsertAtLineEnd => "enter-insert-at-line-end", palette: "Insert at line end  [A]";
+        EnterSelect => "enter-select", palette: "Enter select mode  [v]";
+        EnterNormal => "enter-normal", palette: "Return to normal mode  [Esc]";
+        EnterCommandMode => "enter-command-mode", palette: "Open command line  [:]";
 
-    // Kernel lifecycle
-    NotebookRestartKernel,
-    NotebookInterruptKernel,
-    /// Undo the last structural notebook change (add/delete cell).
-    NotebookUndoStructural,
-    /// Redo the last undone structural notebook change.
-    NotebookRedoStructural,
+        // --- Sub-mode entries ---
+        EnterGotoMode => "enter-goto-mode";
+        EnterJumpMode => "enter-jump-mode", aliases: ["jump-mode", "jump"], palette: "Jump to label in view  [gw]";
+        FindCharForward => "find-char-forward";
+        FindCharBackward => "find-char-backward";
+        TillCharForward => "till-char-forward";
+        TillCharBackward => "till-char-backward";
+        EnterFoldMode => "enter-fold-mode", aliases: ["fold"];
 
-    // Cell edit overlay
-    /// Open focused cell in a full-screen Helix edit overlay.
-    NotebookOpenCellEdit,
-    /// Save cell content back to notebook and close the overlay.
-    NotebookCloseCellEdit,
+        // --- Pickers / UI popups ---
+        OpenCommandPalette => "open-command-palette", aliases: ["palette", "commands"], palette: "Open fuzzy-searchable command palette  [Space]";
+        OpenFilePicker => "open-file-picker", aliases: ["open-file", "e"], palette: "Open file  [ctrl+o, :e]";
+        OpenBufferPicker => "open-buffer-picker", aliases: ["buffers"], palette: "Switch buffer  [gb]";
+        OpenSymbolPicker => "open-symbol-picker", aliases: ["symbols"], palette: "Jump to symbol in file  [gs]";
+        OpenDiagnosticPicker => "open-diagnostic-picker", aliases: ["diagnostics"], palette: "Jump to diagnostic  [gD]";
 
-    // Notebook
-    /// Open the current `.ipynb` buffer as a notebook (no-op if already open).
-    EnterNotebook,
+        // --- Buffers ---
+        BufferClose => "buffer-close", aliases: ["bd"], palette: "Close current buffer  [:bd]";
+        BufferForceClose => "buffer-force-close", aliases: ["bd!"], palette: "Force-close current buffer (discard changes)  [:bd!]";
+        BufferNext => "buffer-next", aliases: ["bn"], palette: "Switch to next buffer  [L, :bn]";
+        BufferPrev => "buffer-prev", aliases: ["bp"], palette: "Switch to previous buffer  [H, :bp]";
+        SwitchToScratch => "switch-to-scratch", aliases: ["scratch"], palette: "Switch to *scratch* buffer  [:scratch]";
+        SwitchToMessages => "switch-to-messages", aliases: ["messages"], palette: "Switch to *Messages* log buffer  [:messages]";
 
-    // Search
-    /// Enter forward search mode (builds query; Enter jumps to first match).
-    SearchForward,
-    /// Enter backward search mode.
-    SearchBackward,
-    /// Jump to the next search match.
-    SearchNext,
-    /// Jump to the previous search match.
-    SearchPrev,
-    /// Telescope-style grep buffer popup.
-    GrepBuffer,
-    /// Telescope-style project-wide grep popup (uses ripgrep/grep).
-    GrepProject,
+        // --- Search / grep ---
+        SearchForward => "search-forward", aliases: ["search", "/"], palette: "Search forward  [/]";
+        SearchBackward => "search-backward", aliases: ["?"], palette: "Search backward  [?]";
+        SearchNext => "search-next", aliases: ["n"], palette: "Next match  [n]";
+        SearchPrev => "search-prev", aliases: ["N"], palette: "Previous match  [N]";
+        GrepBuffer => "grep-buffer", palette: "Grep current buffer  [ctrl+f]";
+        GrepProject => "grep-project", aliases: ["grep", "rg"], palette: "Grep project files  [ctrl+g]";
 
-    // Scroll
-    /// Scroll half a page up (cursor moves with viewport).
-    PageUp,
-    /// Scroll half a page down (cursor moves with viewport).
-    PageDown,
+        // --- Scroll / view ---
+        PageDown => "page-down", palette: "Scroll half page down  [ctrl+d, PgDn]";
+        PageUp => "page-up", palette: "Scroll half page up  [ctrl+u, PgUp]";
+        ScrollCursorCenter => "scroll-cursor-center", aliases: ["center", "gz"], palette: "Scroll cursor to centre  [gz]";
 
-    // LSP
-    /// Show documentation/hover for the symbol under the cursor.
-    LspShowDocumentation,
-    /// Show code actions available at the cursor/selection.
-    LspCodeActions,
-    /// Jump to the definition of the symbol under the cursor.
-    LspGotoDefinition,
-    /// List all references to the symbol under the cursor.
-    LspGotoReferences,
-    /// Jump to the type definition of the symbol under the cursor.
-    LspGotoTypeDefinition,
-    /// Jump to the implementation of the symbol under the cursor.
-    LspGotoImplementation,
-    /// Explicitly request completions at the cursor position.
-    LspRequestCompletion,
-    /// Toggle visual indicators for the git gutter.
-    ToggleGitGutter,
-    /// Toggle line number display.
-    ToggleLineNumbers,
-    /// Toggle relative line numbers.
-    ToggleRelativeLineNumbers,
+        // --- LSP ---
+        LspShowDocumentation => "lsp-show-documentation", aliases: ["lsp-hover", "hover", "doc"], palette: "Show hover documentation  [gk, K]";
+        LspCodeActions => "lsp-code-actions", aliases: ["code-actions", "ga"], palette: "Show code actions  [ga]";
+        LspGotoDefinition => "lsp-goto-definition", aliases: ["goto-definition", "gd"], palette: "Go to definition  [gd]";
+        LspGotoReferences => "lsp-goto-references", aliases: ["goto-references", "gr"], palette: "Go to references  [gr]";
+        LspGotoTypeDefinition => "lsp-goto-type-definition", aliases: ["goto-type-definition", "gy"], palette: "Go to type definition  [gy]";
+        LspGotoImplementation => "lsp-goto-implementation", aliases: ["goto-implementation", "gi"], palette: "Go to implementation  [gi]";
+        LspRequestCompletion => "lsp-request-completion", aliases: ["completion"], palette: "Request completions  [ctrl+space]";
+        FormatDocument => "format-document", aliases: ["format", "fmt"], palette: "Format buffer via language server  [:fmt]";
 
-    /// Format the current buffer via the language server.
-    FormatDocument,
-    /// Open the user config file in the editor.
-    OpenConfig,
-    /// Reload the config file from disk without restarting.
-    ReloadConfig,
+        // --- Notebook navigation / editing ---
+        NotebookNextCell => "notebook-next-cell", palette: "Next cell  [J]";
+        NotebookPrevCell => "notebook-prev-cell", palette: "Previous cell  [K]";
+        NotebookScrollDown => "notebook-scroll-down";
+        NotebookScrollUp => "notebook-scroll-up";
+        NotebookExecuteCell => "notebook-execute-cell", aliases: ["run"], palette: "Execute cell  [ctrl+e, shift+enter, :run]";
+        NotebookExecuteAndAdvance => "notebook-execute-and-advance", aliases: ["run-next"], palette: "Execute cell and advance  [:run-next]";
+        NotebookNewCellBelow => "notebook-new-cell-below", aliases: ["new-cell"], palette: "New cell below  [:new-cell]";
+        NotebookNewCellAbove => "notebook-new-cell-above", palette: "New cell above  [:notebook-new-cell-above]";
+        NotebookDeleteCell => "notebook-delete-cell", palette: "Delete cell  [:notebook-delete-cell]";
+        NotebookClearOutputs => "notebook-clear-outputs", palette: "Clear cell outputs  [:notebook-clear-outputs]";
+        NotebookCellToMarkdown => "notebook-cell-to-markdown", aliases: ["cell-md", "to-markdown"], palette: "Convert cell to markdown  [:cell-md]";
+        NotebookCellToCode => "notebook-cell-to-code", aliases: ["cell-code", "to-code"], palette: "Convert cell to code  [:cell-code]";
+        NotebookRestartKernel => "notebook-restart-kernel", aliases: ["restart-kernel", "kernel-restart"], palette: "Restart kernel  [:restart-kernel]";
+        NotebookInterruptKernel => "notebook-interrupt-kernel", aliases: ["interrupt-kernel", "kernel-interrupt"], palette: "Interrupt kernel  [:interrupt-kernel]";
+        NotebookUndoStructural => "notebook-undo-structural";
+        NotebookRedoStructural => "notebook-redo-structural";
+        NotebookOpenCellEdit => "notebook-open-cell-edit", aliases: ["open-cell", "edit-cell"], palette: "Open cell in full-screen editor  [:open-cell]";
+        NotebookCloseCellEdit => "notebook-close-cell-edit", aliases: ["close-cell", "notebook-discard-cell-edit", "discard-cell"], palette: "Save cell and return  [ctrl+enter, :close-cell]";
+        EnterNotebook => "enter-notebook", aliases: ["nb", "notebook"], palette: "Open the current .ipynb as a notebook  [:nb]";
 
-    // Code folding (plain text editor)
-    /// Enter fold sub-mode (awaits a second key: a/A).
-    EnterFoldMode,
-    /// Toggle fold on the innermost range at the cursor line.
-    FoldToggle,
-    /// Toggle all folds: close all if any are open, otherwise open all.
-    FoldToggleAll,
+        // --- Code folding ---
+        FoldToggle => "fold-toggle", aliases: ["za"], palette: "Toggle fold at cursor  [za]";
+        FoldToggleAll => "fold-toggle-all", aliases: ["zA"], palette: "Toggle all folds  [zA]";
+        NotebookToggleFoldCell => "notebook-toggle-fold-cell", aliases: ["fold-cell"], palette: "Toggle cell fold  [:fold-cell]";
+        NotebookToggleAllFolds => "notebook-toggle-all-folds", aliases: ["fold-all-cells"], palette: "Toggle all cell folds  [:fold-all-cells]";
 
-    // Notebook cell folding
-    /// Toggle fold on the focused notebook cell (collapse to first line).
-    NotebookToggleFoldCell,
-    /// Toggle all notebook cells: fold all if any are unfolded, else unfold all.
-    NotebookToggleAllFolds,
+        // --- Toggles / config ---
+        ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";
+        ToggleLineNumbers => "toggle-line-numbers", aliases: ["line-numbers"], palette: "Toggle line numbers  [:toggle-line-numbers]";
+        ToggleRelativeLineNumbers => "toggle-relative-line-numbers", aliases: ["relative-line-numbers"], palette: "Toggle relative line numbers  [:toggle-relative-line-numbers]";
+        ToggleWordWrap => "toggle-word-wrap", aliases: ["word-wrap", "wrap"], palette: "Toggle soft word-wrap  [:wrap]";
+        OpenConfig => "open-config", aliases: ["config"], palette: "Open config file in editor  [:config]";
+        ReloadConfig => "reload-config", aliases: ["config-reload"], palette: "Reload config from disk  [:config-reload]";
 
-    /// Scroll viewport so the cursor line is vertically centred in the window.
-    ScrollCursorCenter,
-    /// Delete from the cursor to the end of the current line (kills to clipboard).
-    KillToEndOfLine,
-    /// Toggle soft word-wrap.
-    ToggleWordWrap,
-    /// Show the welcome / dashboard screen.
-    ShowDashboard,
+        // --- Dashboard ---
+        ShowDashboard => "show-dashboard", aliases: ["dashboard", "home", "splash"], palette: "Show the welcome / dashboard screen  [:dashboard]";
+    }
+    data: {
+        // Move the cursor to a 1-based line number (also the numeric `:N` form).
+        GotoLine(usize) => "goto-line";
+        // Write the buffer to a new path.
+        WriteAs(String) => "write-as", palette: "Write to new path  [:w <path>]";
+        // Run a shell command.
+        Shell(String) => "shell", palette: "Run a shell command  [:shell <cmd>]";
+        // A list of commands executed in sequence (composition / scripting).
+        Sequence(Vec<Command>) => "sequence";
+    }
 }
 
 impl Command {
-    /// Returns the canonical command name used in docs and `:` command line.
-    #[allow(dead_code)]
-    pub fn name(&self) -> &'static str {
-        match self {
-            Command::MoveLeft => "move-left",
-            Command::MoveRight => "move-right",
-            Command::MoveUp => "move-up",
-            Command::MoveDown => "move-down",
-            Command::MoveWordForward => "move-word-forward",
-            Command::MoveWordBackward => "move-word-backward",
-            Command::MoveWordEnd => "move-word-end",
-            Command::MoveBigWordForward => "move-big-word-forward",
-            Command::MoveBigWordBackward => "move-big-word-backward",
-            Command::MoveBigWordEnd => "move-big-word-end",
-            Command::MoveLineStart => "move-line-start",
-            Command::MoveLineFirstNonWs => "move-line-first-non-ws",
-            Command::MoveLineEnd => "move-line-end",
-            Command::GotoFileStart => "goto-file-start",
-            Command::GotoFileEnd => "goto-file-end",
-            Command::GotoLine(_) => "goto-line",
-            Command::SelectLine => "select-line",
-            Command::SelectAll => "select-all",
-            Command::EnterGotoMode => "enter-goto-mode",
-            Command::EnterJumpMode => "enter-jump-mode",
-            Command::FindCharForward => "find-char-forward",
-            Command::FindCharBackward => "find-char-backward",
-            Command::TillCharForward => "till-char-forward",
-            Command::TillCharBackward => "till-char-backward",
-            Command::DeleteSelection => "delete-selection",
-            Command::ChangeSelection => "change-selection",
-            Command::CommentRegion => "comment-region",
-            Command::IndentRegion => "indent-region",
-            Command::DedentRegion => "dedent-region",
-            Command::YankSelection => "yank-selection",
-            Command::PasteAfter => "paste-after",
-            Command::PasteBefore => "paste-before",
-            Command::Undo => "undo",
-            Command::Redo => "redo",
-            Command::OpenLineBelow => "open-line-below",
-            Command::OpenLineAbove => "open-line-above",
-            Command::EnterInsert => "enter-insert",
-            Command::EnterInsertAfter => "enter-insert-after",
-            Command::EnterInsertAtLineStart => "enter-insert-at-line-start",
-            Command::EnterInsertAtLineEnd => "enter-insert-at-line-end",
-            Command::EnterNormal => "enter-normal",
-            Command::EnterSelect => "enter-select",
-            Command::EnterCommandMode => "enter-command-mode",
-            Command::OpenCommandPalette => "open-command-palette",
-            Command::OpenBufferPicker => "open-buffer-picker",
-            Command::OpenSymbolPicker => "open-symbol-picker",
-            Command::OpenDiagnosticPicker => "open-diagnostic-picker",
-            Command::OpenFilePicker => "open-file-picker",
-            Command::Write => "write",
-            Command::WriteAs(_) => "write-as",
-            Command::NewFile => "new-file",
-            Command::NewNotebook => "new-notebook",
-            Command::Quit => "quit",
-            Command::ForceQuit => "force-quit",
-            Command::WriteQuit => "write-quit",
-            Command::BufferClose => "buffer-close",
-            Command::BufferForceClose => "buffer-force-close",
-            Command::BufferNext => "buffer-next",
-            Command::BufferPrev => "buffer-prev",
-            Command::SwitchToScratch => "switch-to-scratch",
-            Command::SwitchToMessages => "switch-to-messages",
-            Command::Shell(_) => "shell",
-            Command::Sequence(_) => "sequence",
-            Command::NotebookNextCell => "notebook-next-cell",
-            Command::NotebookPrevCell => "notebook-prev-cell",
-            Command::NotebookScrollDown => "notebook-scroll-down",
-            Command::NotebookScrollUp => "notebook-scroll-up",
-            Command::NotebookExecuteCell => "notebook-execute-cell",
-            Command::NotebookExecuteAndAdvance => "notebook-execute-and-advance",
-            Command::NotebookNewCellBelow => "notebook-new-cell-below",
-            Command::NotebookNewCellAbove => "notebook-new-cell-above",
-            Command::NotebookDeleteCell => "notebook-delete-cell",
-            Command::NotebookClearOutputs => "notebook-clear-outputs",
-            Command::NotebookCellToMarkdown => "notebook-cell-to-markdown",
-            Command::NotebookCellToCode => "notebook-cell-to-code",
-            Command::NotebookRestartKernel => "notebook-restart-kernel",
-            Command::NotebookInterruptKernel => "notebook-interrupt-kernel",
-            Command::NotebookUndoStructural => "notebook-undo-structural",
-            Command::NotebookRedoStructural => "notebook-redo-structural",
-            Command::NotebookOpenCellEdit => "notebook-open-cell-edit",
-            Command::NotebookCloseCellEdit => "notebook-close-cell-edit",
-            Command::EnterNotebook => "enter-notebook",
-            Command::SearchForward => "search-forward",
-            Command::SearchBackward => "search-backward",
-            Command::SearchNext => "search-next",
-            Command::SearchPrev => "search-prev",
-            Command::GrepBuffer => "grep-buffer",
-            Command::GrepProject => "grep-project",
-            Command::PageUp => "page-up",
-            Command::PageDown => "page-down",
-            Command::LspShowDocumentation => "lsp-show-documentation",
-            Command::LspCodeActions => "lsp-code-actions",
-            Command::LspGotoDefinition => "lsp-goto-definition",
-            Command::LspGotoReferences => "lsp-goto-references",
-            Command::LspGotoTypeDefinition => "lsp-goto-type-definition",
-            Command::LspGotoImplementation => "lsp-goto-implementation",
-            Command::LspRequestCompletion => "lsp-request-completion",
-            Command::ToggleGitGutter => "toggle-git-gutter",
-            Command::ToggleLineNumbers => "toggle-line-numbers",
-            Command::ToggleRelativeLineNumbers => "toggle-relative-line-numbers",
-            Command::FormatDocument => "format-document",
-            Command::OpenConfig => "open-config",
-            Command::ReloadConfig => "reload-config",
-            Command::EnterFoldMode => "enter-fold-mode",
-            Command::FoldToggle => "fold-toggle",
-            Command::FoldToggleAll => "fold-toggle-all",
-            Command::NotebookToggleFoldCell => "notebook-toggle-fold-cell",
-            Command::NotebookToggleAllFolds => "notebook-toggle-all-folds",
-            Command::ScrollCursorCenter => "scroll-cursor-center",
-            Command::KillToEndOfLine => "kill-to-end-of-line",
-            Command::ToggleWordWrap => "toggle-word-wrap",
-            Command::ShowDashboard => "show-dashboard",
-        }
-    }
-
     /// Parse a command from `:` input. Returns `None` for unknown commands.
     pub fn parse(input: &str) -> Option<Self> {
         let input = input.trim();
@@ -335,207 +233,78 @@ impl Command {
             return None;
         }
 
-        // Numeric input → GotoLine
+        // Numeric input → GotoLine.
         if let Ok(n) = input.parse::<usize>() {
             return Some(Command::GotoLine(n));
         }
 
-        // Split into command and optional argument
+        // Split into command word and optional argument.
         let (cmd, arg) = match input.find(' ') {
             Some(idx) => (&input[..idx], Some(input[idx + 1..].trim())),
             None => (input, None),
         };
 
+        // Commands that take an argument (and their argument-less fallbacks) are
+        // handled here; everything else is a unit command resolved from the table.
         match cmd {
-            // Vim aliases
-            "w" => {
-                if let Some(path) = arg {
-                    if !path.is_empty() {
-                        return Some(Command::WriteAs(path.to_string()));
-                    }
-                }
-                Some(Command::Write)
-            }
-            "q" => Some(Command::Quit),
-            "q!" => Some(Command::ForceQuit),
-            "wq" | "x" => Some(Command::WriteQuit),
-            "u" => Some(Command::Undo),
-
-            // Canonical names with arguments
+            // `:w` with a path writes-as; bare `:w` writes in place.
+            "w" => match arg {
+                Some(path) if !path.is_empty() => Some(Command::WriteAs(path.to_string())),
+                _ => Some(Command::Write),
+            },
             "write-as" | "save-as" => {
                 let path = arg.unwrap_or("").trim();
-                if path.is_empty() {
-                    None
-                } else {
-                    Some(Command::WriteAs(path.to_string()))
-                }
+                (!path.is_empty()).then(|| Command::WriteAs(path.to_string()))
             }
-            "new-file" | "newfile" | "new" => Some(Command::NewFile),
-            "new-notebook" | "newnotebook" | "new-nb" => Some(Command::NewNotebook),
             "shell" | "sh" => {
                 let shell_cmd = arg.unwrap_or("").trim();
-                if shell_cmd.is_empty() {
-                    None
-                } else {
-                    Some(Command::Shell(shell_cmd.to_string()))
-                }
+                (!shell_cmd.is_empty()).then(|| Command::Shell(shell_cmd.to_string()))
             }
             "goto-line" => {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;
                 Some(Command::GotoLine(n))
             }
-
-            // Popup / UI
-            "open-command-palette" | "palette" | "commands" => Some(Command::OpenCommandPalette),
-            "open-buffer-picker"     | "buffers" => Some(Command::OpenBufferPicker),
-            "open-symbol-picker"     | "symbols" => Some(Command::OpenSymbolPicker),
-            "open-diagnostic-picker" | "diagnostics" => Some(Command::OpenDiagnosticPicker),
-            "open-file-picker" | "open-file" | "e" => Some(Command::OpenFilePicker),
-
-            // Canonical no-arg commands
-            "move-left"               => Some(Command::MoveLeft),
-            "move-right"              => Some(Command::MoveRight),
-            "move-up"                 => Some(Command::MoveUp),
-            "move-down"               => Some(Command::MoveDown),
-            "move-word-forward"       => Some(Command::MoveWordForward),
-            "move-word-backward"      => Some(Command::MoveWordBackward),
-            "move-word-end"           => Some(Command::MoveWordEnd),
-            "move-big-word-forward"   => Some(Command::MoveBigWordForward),
-            "move-big-word-backward"  => Some(Command::MoveBigWordBackward),
-            "move-big-word-end"       => Some(Command::MoveBigWordEnd),
-            "move-line-start"         => Some(Command::MoveLineStart),
-            "move-line-first-non-ws"  => Some(Command::MoveLineFirstNonWs),
-            "move-line-end"           => Some(Command::MoveLineEnd),
-            "goto-file-start"         => Some(Command::GotoFileStart),
-            "goto-file-end"           => Some(Command::GotoFileEnd),
-            "select-line"             => Some(Command::SelectLine),
-            "select-all"              => Some(Command::SelectAll),
-            "enter-goto-mode"                     => Some(Command::EnterGotoMode),
-            "enter-jump-mode" | "jump-mode" | "jump" => Some(Command::EnterJumpMode),
-            "find-char-forward"       => Some(Command::FindCharForward),
-            "find-char-backward"      => Some(Command::FindCharBackward),
-            "till-char-forward"       => Some(Command::TillCharForward),
-            "till-char-backward"      => Some(Command::TillCharBackward),
-            "delete-selection" | "delete" => Some(Command::DeleteSelection),
-            "change-selection" | "change" => Some(Command::ChangeSelection),
-            "comment-region" | "comment" => Some(Command::CommentRegion),
-            "indent-region" | "indent" => Some(Command::IndentRegion),
-            "dedent-region" | "dedent" => Some(Command::DedentRegion),
-            "yank-selection"   | "yank"   => Some(Command::YankSelection),
-            "paste-after"      | "paste"  => Some(Command::PasteAfter),
-            "paste-before"               => Some(Command::PasteBefore),
-            "undo"                       => Some(Command::Undo),
-            "redo"                       => Some(Command::Redo),
-            "open-line-below"            => Some(Command::OpenLineBelow),
-            "open-line-above"            => Some(Command::OpenLineAbove),
-            "enter-insert"               => Some(Command::EnterInsert),
-            "enter-insert-after"         => Some(Command::EnterInsertAfter),
-            "enter-insert-at-line-start" => Some(Command::EnterInsertAtLineStart),
-            "enter-insert-at-line-end"   => Some(Command::EnterInsertAtLineEnd),
-            "enter-normal"               => Some(Command::EnterNormal),
-            "enter-select"               => Some(Command::EnterSelect),
-            "enter-command-mode"         => Some(Command::EnterCommandMode),
-            "write" | "save"             => Some(Command::Write),
-            "quit"                       => Some(Command::Quit),
-            "force-quit"                 => Some(Command::ForceQuit),
-            "write-quit"                 => Some(Command::WriteQuit),
-            "buffer-close" | "bd"        => Some(Command::BufferClose),
-            "buffer-force-close" | "bd!" => Some(Command::BufferForceClose),
-            "buffer-next" | "bn"         => Some(Command::BufferNext),
-            "buffer-prev" | "bp"         => Some(Command::BufferPrev),
-            "switch-to-scratch" | "scratch" => Some(Command::SwitchToScratch),
-            "switch-to-messages" | "messages" => Some(Command::SwitchToMessages),
-
-            // Notebook commands
-            "notebook-next-cell"             => Some(Command::NotebookNextCell),
-            "notebook-prev-cell"             => Some(Command::NotebookPrevCell),
-            "notebook-scroll-down"           => Some(Command::NotebookScrollDown),
-            "notebook-scroll-up"             => Some(Command::NotebookScrollUp),
-            "notebook-execute-cell" | "run"  => Some(Command::NotebookExecuteCell),
-            "notebook-execute-and-advance" | "run-next" => Some(Command::NotebookExecuteAndAdvance),
-            "notebook-new-cell-below" | "new-cell" => Some(Command::NotebookNewCellBelow),
-            "notebook-new-cell-above"        => Some(Command::NotebookNewCellAbove),
-            "notebook-delete-cell"           => Some(Command::NotebookDeleteCell),
-            "notebook-clear-outputs"         => Some(Command::NotebookClearOutputs),
-            "notebook-cell-to-markdown" | "cell-md" | "to-markdown" => {
-                Some(Command::NotebookCellToMarkdown)
-            }
-            "notebook-cell-to-code" | "cell-code" | "to-code" => {
-                Some(Command::NotebookCellToCode)
-            }
-            "notebook-restart-kernel" | "restart-kernel" | "kernel-restart" => {
-                Some(Command::NotebookRestartKernel)
-            }
-            "notebook-interrupt-kernel" | "interrupt-kernel" | "kernel-interrupt" => {
-                Some(Command::NotebookInterruptKernel)
-            }
-            "notebook-undo-structural" => Some(Command::NotebookUndoStructural),
-            "notebook-redo-structural" => Some(Command::NotebookRedoStructural),
-            "notebook-open-cell-edit" | "open-cell" | "edit-cell" => {
-                Some(Command::NotebookOpenCellEdit)
-            }
-            "notebook-close-cell-edit" | "close-cell"
-            | "notebook-discard-cell-edit" | "discard-cell" => {
-                Some(Command::NotebookCloseCellEdit)
-            }
-
-            // Open the current .ipynb as a notebook
-            "enter-notebook" | "nb" | "notebook" => Some(Command::EnterNotebook),
-
-            // Search
-            "search-forward" | "search" | "/" => Some(Command::SearchForward),
-            "search-backward" | "?" => Some(Command::SearchBackward),
-            "search-next" | "n" => Some(Command::SearchNext),
-            "search-prev" | "N" => Some(Command::SearchPrev),
-            "grep-buffer" => Some(Command::GrepBuffer),
-            "grep-project" | "grep" | "rg" => Some(Command::GrepProject),
-
-            // Scroll
-            "page-up" => Some(Command::PageUp),
-            "page-down" => Some(Command::PageDown),
-
-            // LSP commands
-            "lsp-show-documentation" | "lsp-hover" | "hover" | "doc" => Some(Command::LspShowDocumentation),
-            "lsp-code-actions" | "code-actions" | "ga" => Some(Command::LspCodeActions),
-            "lsp-goto-definition" | "goto-definition" | "gd" => Some(Command::LspGotoDefinition),
-            "lsp-goto-references" | "goto-references" | "gr" => Some(Command::LspGotoReferences),
-            "lsp-goto-type-definition" | "goto-type-definition" | "gy" => {
-                Some(Command::LspGotoTypeDefinition)
-            }
-            "lsp-goto-implementation" | "goto-implementation" | "gi" => {
-                Some(Command::LspGotoImplementation)
-            }
-            "lsp-request-completion" | "completion" => Some(Command::LspRequestCompletion),
-            "toggle-git-gutter" | "git-gutter" | "gutter" => Some(Command::ToggleGitGutter),
-            "toggle-line-numbers" | "line-numbers" => Some(Command::ToggleLineNumbers),
-            "toggle-relative-line-numbers" | "relative-line-numbers" => Some(Command::ToggleRelativeLineNumbers),
-
-            "format-document" | "format" | "fmt" => Some(Command::FormatDocument),
-            "open-config" | "config" => Some(Command::OpenConfig),
-            "reload-config" | "config-reload" => Some(Command::ReloadConfig),
-
-            // Fold commands
-            "enter-fold-mode" | "fold" => Some(Command::EnterFoldMode),
-            "fold-toggle" | "za" => Some(Command::FoldToggle),
-            "fold-toggle-all" | "zA" => Some(Command::FoldToggleAll),
-
-            // Notebook fold commands
-            "notebook-toggle-fold-cell" | "fold-cell" => Some(Command::NotebookToggleFoldCell),
-            "notebook-toggle-all-folds" | "fold-all-cells" => Some(Command::NotebookToggleAllFolds),
-
-            // Scroll / view
-            "scroll-cursor-center" | "center" | "gz" => Some(Command::ScrollCursorCenter),
-
-            // Editing
-            "kill-to-end-of-line" | "kill-line" => Some(Command::KillToEndOfLine),
-
-            // Display
-            "toggle-word-wrap" | "word-wrap" | "wrap" => Some(Command::ToggleWordWrap),
-
-            // Dashboard
-            "show-dashboard" | "dashboard" | "home" | "splash" => Some(Command::ShowDashboard),
-
-            _ => None,
+            _ => Self::parse_unit(cmd),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every command offered in the palette must parse back to a command whose
+    /// canonical `name()` matches the palette label — otherwise the palette would
+    /// list a command that can't actually be run (the bug the single-source table
+    /// was introduced to prevent).
+    #[test]
+    fn palette_entries_round_trip_through_parse() {
+        // These palette entries name argument-taking commands, so the bare name
+        // intentionally parses to None (the user supplies the argument on the `:` line).
+        const ARG_COMMANDS: &[&str] = &["write-as", "shell"];
+        for (name, _desc) in Command::palette_entries() {
+            if ARG_COMMANDS.contains(&name) {
+                continue;
+            }
+            let parsed = Command::parse(name)
+                .unwrap_or_else(|| panic!("palette entry {name:?} does not parse"));
+            assert_eq!(parsed.name(), name, "palette entry {name:?} parsed to a different command");
+        }
+    }
+
+    #[test]
+    fn vim_aliases_and_special_forms_parse() {
+        assert!(matches!(Command::parse("42"), Some(Command::GotoLine(42))));
+        assert!(matches!(Command::parse("w"), Some(Command::Write)));
+        assert!(matches!(Command::parse("w foo.txt"), Some(Command::WriteAs(p)) if p == "foo.txt"));
+        assert!(matches!(Command::parse("q!"), Some(Command::ForceQuit)));
+        assert!(matches!(Command::parse("bd!"), Some(Command::BufferForceClose)));
+        assert!(matches!(Command::parse("sh ls"), Some(Command::Shell(c)) if c == "ls"));
+        // Former drift: this alias must now resolve to the real close-cell command.
+        assert!(matches!(
+            Command::parse("notebook-discard-cell-edit"),
+            Some(Command::NotebookCloseCellEdit)
+        ));
+        assert!(Command::parse("totally-not-a-command").is_none());
     }
 }

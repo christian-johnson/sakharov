@@ -174,13 +174,39 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   ESC ladder: in search → back to nav; in nav → close docs if open, else dismiss. `Tab` from any
   focused state returns to passive typing.
 - Hover float (`K` / `gk`)
+- **Signature help** — typing `(` or `,` in Insert mode requests `textDocument/signatureHelp`;
+  the active call's argument list shows in the minibuffer with the current parameter marked
+  `‹like this›`, refreshed as you type and cleared when the call closes / on leaving Insert
 - Go-to-definition (`gd`), references (`gr`), type-definition (`gy`), implementation (`gi`)
 - Code actions (`ga`)
 - Formatting (`gf` / `:fmt`, format-on-save option). Shell formatters via `[formatters.<lang>]`
   take priority over LSP formatting when configured
 - **Notebook LSP** — `notebookDocument/didOpen` sync; virtual cell paths for per-cell diagnostics and completions.
   Notebook-aware servers (e.g. `pylsp`) see the whole notebook, so completions/diagnostics resolve **cross-cell**
-  (an `import` in one cell is visible to every later cell).
+  (an `import` in one cell is visible to every later cell). The notebook is (re)opened to the LSP on every
+  entry path — startup, buffer-picker open, and restore-from-stash — not just the first launch.
+  Go-to-definition / references that land in another cell jump to that cell **in-place**
+  (`notebook::cell_index_for_virtual_path` maps the returned virtual-cell path → cell index in
+  `exec::lsp::jump_to_location`) rather than opening the nonexistent virtual file as a blank buffer.
+  **Notebook sync is broadcast to every server, per server**: `LspManager::notebook_did_open/`
+  `did_change_cell/did_close` send `notebookDocument/*` to each initialized server advertising
+  `notebookDocumentSync` and fall back to per-cell `textDocument/*` on the virtual cell docs for
+  servers that don't (so e.g. ruff's diagnostics stay live alongside pylsp, regardless of which
+  server initialized first). Open is idempotent per server — the per-server `Initialized` event
+  retriggers `notebook_lsp_open` and only the new server actually receives it.
+- **Shadow concatenated document** — pylsp only concatenates notebook cells internally for
+  *completion* and *definition*; hover, signature-help, and references run against the lone cell
+  and can't see cross-cell context. So those three requests are routed through a **shadow
+  document**: all code cells joined with `\n` (`notebook::concat_source`, with the focused cell's
+  live buffer text substituted) synced as a plain text doc under `notebook::concat_virtual_path`
+  (`{stem}__concat.py` — a URI only, never written to disk) to just the server that owns the
+  feature (`LspManager::request_via_shadow_doc`), with the cursor position offset by the cell's
+  start line. References results in the shadow doc map back to cells via
+  `notebook::cell_for_concat_line` in `jump_to_location`.
+- **pylsp jedi options**: `build_init_options` always sends `auto_import_modules: []` — pylsp's
+  default (`["numpy"]`) makes jedi resolve numpy by importing it, which cannot enumerate numpy's
+  lazily-bound submodules (`np.random`/`np.fft`/`np.ma` would return zero completions/hovers/
+  signatures). Static analysis handles numpy correctly.
 - **Python venv is required, never the system interpreter** — `lsp_manager::detect_python_venv` walks up from the
   file's/notebook's location for `.venv`/`venv`/`.env`/`env`; the path is passed to the server as the jedi
   environment. If no venv is found, the Python language server is **not started** (no autocomplete is preferred
@@ -207,17 +233,25 @@ src/
   selection.rs        — Selection { anchor, head } (char indices into rope)
   mode.rs             — Mode enum: Normal, Insert, Select, Command, Goto,
                         FindChar, Search, Jump, Fold, Prompt
-  command.rs          — Command enum: every editor action as a named variant
-                        Command::parse() maps `:` input → Command
-                        Command::name() gives the canonical string name
+  command.rs          — Command enum + parse()/name()/palette_entries(), all
+                        generated from ONE `commands!` macro table (canonical
+                        name, aliases, palette description per row). Add a command
+                        by adding a row; argument-taking variants (GotoLine/
+                        WriteAs/Shell) get bespoke parsing in Command::parse().
   exec/               — execute(app, cmd): the only place that mutates state in
-                        response to commands. Split by concern:
-    mod.rs            — execute() dispatch + buffers/files/folding/kernel handlers
+                        response to commands. The execute() match is largely a
+                        routing table; bodies live in the submodules below.
+    mod.rs            — execute() dispatch + buffers/files/folding handlers
     text.rs           — text-editing command helpers (delete/change/paste/comment…)
     search.rs         — incremental search match computation + jump
     lsp.rs            — LSP request dispatch, event handling, did_change, jumps,
                         code actions / workspace-edit application
-    notebook.rs       — cell load/save/stash, notebook LSP open/close/reopen
+    pickers.rs        — popup pickers + grep front-ends (command palette, file/
+                        buffer/symbol/diagnostic pickers, grep buffer/project)
+    notebook.rs       — cell load/save/stash, notebook LSP open/close/reopen,
+                        kernel exec/restart/interrupt, structural-edit helpers
+                        (ensure_focused_visible / after_structural_edit bundle the
+                        focus-fixup ritual; insert_new_cell / delete_cell / convert_cell)
   keymap.rs           — KeyBinding type + Keymap (HashMap-based, overrideable)
                         Separate notebook_navigate / notebook_edit maps
   input.rs            — Thin key dispatch; notebook mode + popups take priority
@@ -268,8 +302,11 @@ docs/
 
 ### Key invariants
 - The `exec/` module is the only place that mutates `App` state in response to commands
-- `Command::parse()` and `Command::name()` must stay in sync — every variant needs both
-- When adding a new `Command` variant: add to `parse()`, add to `exec::execute()`, add a row to `docs/commands.md`
+- `Command::parse()`, `name()`, and the palette are generated from the single
+  `commands!` table in `command.rs`, so they cannot drift. A test
+  (`palette_entries_round_trip_through_parse`) enforces that every palette entry parses back.
+- When adding a new `Command` variant: add a row to the `commands!` table (name +
+  aliases + optional `palette:`), add an arm to `exec::execute()`, add a row to `docs/commands.md`
 - Insert-mode edits use `buffer.insert_raw` / `buffer.remove_raw` (no per-keystroke undo snapshot).
   `begin_insert_edit()` in `input.rs` snapshots once per Insert session; `EnterNormal` in `exec/mod.rs` resets the flag.
 - `exec::update_scroll` is the authoritative scroll function; the run loop calls it once per

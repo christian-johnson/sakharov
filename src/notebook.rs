@@ -615,6 +615,82 @@ pub fn cell_virtual_path(nb_path: &Path, lang: &str, idx: usize) -> PathBuf {
     dir.join(format!("{stem}__cell{idx}.{ext}"))
 }
 
+/// If `path` is one of this notebook's virtual cell paths, return its cell index.
+///
+/// LSP responses (go-to-definition / references / etc.) for a notebook come back
+/// keyed by these virtual cell paths, which don't exist on disk. Callers use this
+/// to jump to the cell in-place rather than trying to open the (nonexistent) file.
+/// Comparison goes through `lsp::diagnostic_key` so relative/absolute forms agree.
+pub fn cell_index_for_virtual_path(nb: &Notebook, path: &Path) -> Option<usize> {
+    let target = crate::lsp::diagnostic_key(path);
+    let lang = &nb.metadata.kernel_language;
+    (0..nb.cells.len()).find(|&idx| {
+        crate::lsp::diagnostic_key(&cell_virtual_path(&nb.path, lang, idx)) == target
+    })
+}
+
+/// Virtual path of the notebook's shadow concatenated document.
+///
+/// Hover / signature-help / references requests are answered with full
+/// cross-cell context by syncing all code cells, joined into one plain text
+/// document, under this path (a URI only — nothing is ever written to disk)
+/// and querying it instead of the single-cell virtual doc. See
+/// `LspManager::request_via_shadow_doc`.
+pub fn concat_virtual_path(nb_path: &Path, lang: &str) -> PathBuf {
+    let ext = crate::lang::lang_to_ext(lang);
+    let stem = nb_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "notebook".into());
+    notebook_dir(nb_path).join(format!("{stem}__concat.{ext}"))
+}
+
+/// Join all code cells into one source string (cells separated by a newline,
+/// matching how pylsp concatenates notebooks internally). Returns the text and
+/// a `(cell_idx, start_line)` entry per code cell, in cell order.
+///
+/// `focused_override` substitutes the given rope for one cell's stored source —
+/// while editing, `app.buffer` is ahead of `nb.cells[focused].source`, and the
+/// shadow document must reflect what the user actually sees.
+pub fn concat_source(
+    nb: &Notebook,
+    focused_override: Option<(usize, &Rope)>,
+) -> (String, Vec<(usize, usize)>) {
+    let mut text = String::new();
+    let mut map = Vec::new();
+    let mut line = 0usize;
+    for (idx, cell) in nb.cells.iter().enumerate() {
+        if cell.cell_type != CellType::Code {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        map.push((idx, line));
+        let src = match focused_override {
+            Some((focus_idx, rope)) if focus_idx == idx => rope.to_string(),
+            _ => cell.source.to_string(),
+        };
+        line += src.matches('\n').count() + 1;
+        text.push_str(&src);
+    }
+    (text, map)
+}
+
+/// Map a line in the shadow concatenated document back to
+/// `(cell_idx, cell-relative line)`.
+pub fn cell_for_concat_line(
+    nb: &Notebook,
+    focused_override: Option<(usize, &Rope)>,
+    line: usize,
+) -> Option<(usize, usize)> {
+    let (_, map) = concat_source(nb, focused_override);
+    map.iter()
+        .rev()
+        .find(|&&(_, start)| start <= line)
+        .map(|&(idx, start)| (idx, line - start))
+}
+
 // ---------------------------------------------------------------------------
 // Python kernel resolution
 // ---------------------------------------------------------------------------
@@ -954,4 +1030,78 @@ pub fn push_error_output(outputs: &mut Vec<Output>, traceback: &str) {
         evalue: evalue.to_owned(),
         traceback: lines,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nb_with(cells: Vec<(CellType, &str)>) -> Notebook {
+        Notebook {
+            path: PathBuf::from("/tmp/test.ipynb"),
+            metadata: NotebookMeta { kernel_language: "python".into() },
+            cells: cells
+                .into_iter()
+                .map(|(cell_type, src)| Cell {
+                    id: String::new(),
+                    cell_type,
+                    source: Rope::from_str(src),
+                    outputs: vec![],
+                    execution_count: None,
+                    rendered: false,
+                })
+                .collect(),
+            modified: false,
+            kernel: None,
+        }
+    }
+
+    #[test]
+    fn concat_skips_markdown_and_tracks_offsets() {
+        let nb = nb_with(vec![
+            (CellType::Code, "import numpy as np\n"), // lines 0-1 (trailing \n -> empty line 1)
+            (CellType::Markdown, "# heading\n"),      // excluded
+            (CellType::Code, "x = 1\ny = 2"),         // starts at line 2
+        ]);
+        let (text, map) = concat_source(&nb, None);
+        assert_eq!(text, "import numpy as np\n\nx = 1\ny = 2");
+        assert_eq!(map, vec![(0, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn concat_focused_override_replaces_cell_source() {
+        let nb = nb_with(vec![
+            (CellType::Code, "a = 1"),
+            (CellType::Code, "stale"),
+        ]);
+        let fresh = Rope::from_str("fresh = True\nmore = 2");
+        let (text, map) = concat_source(&nb, Some((1, &fresh)));
+        assert_eq!(text, "a = 1\nfresh = True\nmore = 2");
+        assert_eq!(map, vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn concat_line_maps_back_to_cell() {
+        let nb = nb_with(vec![
+            (CellType::Code, "import numpy as np\n"), // concat lines 0-1
+            (CellType::Markdown, "skip"),
+            (CellType::Code, "x = 1\ny = 2"),         // concat lines 2-3
+        ]);
+        assert_eq!(cell_for_concat_line(&nb, None, 0), Some((0, 0)));
+        assert_eq!(cell_for_concat_line(&nb, None, 2), Some((2, 0)));
+        assert_eq!(cell_for_concat_line(&nb, None, 3), Some((2, 1)));
+    }
+
+    #[test]
+    fn concat_round_trips_cell_starts() {
+        let nb = nb_with(vec![
+            (CellType::Code, "def foo(a, b):\n    return a + b\n"),
+            (CellType::Code, "foo(\n"),
+            (CellType::Code, "z = 3"),
+        ]);
+        let (_, map) = concat_source(&nb, None);
+        for &(idx, start) in &map {
+            assert_eq!(cell_for_concat_line(&nb, None, start), Some((idx, 0)));
+        }
+    }
 }

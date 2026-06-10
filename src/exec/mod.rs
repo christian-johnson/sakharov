@@ -1,11 +1,12 @@
 mod lsp;
 pub(crate) mod notebook;
+mod pickers;
 mod search;
 mod text;
 
 pub use lsp::{
-    apply_code_action, jump_to_location, lsp_did_change, process_lsp_events,
-    refresh_completion_doc,
+    apply_code_action, jump_to_location, lsp_did_change, lsp_signature_help,
+    process_lsp_events, refresh_completion_doc,
 };
 pub use search::{search_compute_matches, search_jump};
 
@@ -18,9 +19,7 @@ use crate::{
     lsp_manager::LspRequestKind,
     mode::{FindDir, Mode},
     motion,
-    notebook::{Cell, CellType},
     selection::Selection,
-    symbols,
 };
 
 // ---------------------------------------------------------------------------
@@ -179,203 +178,13 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::SelectAll    => app.selection = motion::select_all(&app.buffer.rope),
 
         // --- Popup / UI ---
-        Command::OpenCommandPalette => {
-            let recency = crate::history::recency_map(app);
-            app.popup = Some(crate::popup::Popup::command_palette(
-                crate::popup::command_palette_items(),
-                recency,
-            ));
-            return;
-        }
-        Command::GrepBuffer => {
-            let rope = &app.buffer.rope;
-            let path = app.buffer.path.clone().unwrap_or_default();
-            let items: Vec<crate::popup::ListItem> = rope
-                .lines()
-                .enumerate()
-                .map(|(line_idx, line)| {
-                    let label = line.to_string()
-                        .trim_end_matches(&['\r', '\n'][..])
-                        .to_owned();
-                    crate::popup::ListItem::navigate(
-                        label,
-                        format!("Line {}", line_idx + 1),
-                        &path,
-                        line_idx,
-                        0,
-                    )
-                })
-                .collect();
-            app.popup = Some(crate::popup::Popup::grep(
-                "grep buffer",
-                items,
-                app.search.query.clone(),
-            ));
-            return;
-        }
-        Command::GrepProject => {
-            let root = app.buffer.path.as_deref()
-                .and_then(|p| p.parent())
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-            // Try ripgrep first, fall back to grep.  Cache the availability
-            // check so we don't spawn a process on every invocation.
-            let rg_available = rg_is_available();
-
-            let output = if rg_available {
-                std::process::Command::new("rg")
-                    .args(["--line-number", "--no-heading", "--color=never", "--with-filename", "."])
-                    .current_dir(&root)
-                    .output()
-            } else {
-                std::process::Command::new("grep")
-                    .args(["-rn", "-I", "."])
-                    .arg(".")
-                    .current_dir(&root)
-                    .output()
-            };
-
-            let items: Vec<crate::popup::ListItem> = match output {
-                Ok(out) => {
-                    let text = String::from_utf8_lossy(&out.stdout);
-                    text.lines()
-                        .filter_map(|line| {
-                            // format: file:lineno:content
-                            let mut parts = line.splitn(3, ':');
-                            let file = parts.next()?;
-                            let lineno_str = parts.next()?;
-                            let content = parts.next().unwrap_or("").trim_end_matches(&['\r', '\n'][..]);
-                            let lineno: usize = lineno_str.parse().ok()?;
-                            let path = root.join(file);
-                            Some(crate::popup::ListItem::navigate(
-                                content.to_owned(),
-                                format!("{}:{}", file, lineno),
-                                &path,
-                                lineno.saturating_sub(1),
-                                0,
-                            ))
-                        })
-                        .collect()
-                }
-                Err(_) => {
-                    app.message = Some("grep not available".into());
-                    return;
-                }
-            };
-
-            app.popup = Some(crate::popup::Popup::grep(
-                "grep project",
-                items,
-                app.search.query.clone(),
-            ));
-            return;
-        }
-        Command::OpenBufferPicker => {
-            let current = app.buffer.path.clone();
-            let items: Vec<crate::popup::ListItem> = app
-                .open_buffers
-                .iter()
-                .filter_map(|p| {
-                    let name = p.file_name()?.to_string_lossy().into_owned();
-                    let detail = p.to_string_lossy().into_owned();
-                    Some(crate::popup::ListItem::navigate(name, detail, p, 0, 0))
-                })
-                .collect();
-            if items.is_empty() {
-                app.message = Some("No open buffers".into());
-            } else {
-                let mut popup = crate::popup::Popup::navigate("buffers", items);
-                if let crate::popup::PopupContent::List(ref mut state) = popup.content {
-                    if let Some(cur) = &current {
-                        let cur_str = cur.to_string_lossy();
-                        if let Some(idx) = state
-                            .items
-                            .iter()
-                            .position(|it| it.detail.as_deref() == Some(cur_str.as_ref()))
-                        {
-                            state.selected = idx;
-                        }
-                    }
-                }
-                app.popup = Some(popup);
-            }
-            return;
-        }
-        Command::OpenSymbolPicker => {
-            let lang = app.current_language().unwrap_or("").to_owned();
-            let path = app.buffer.path.clone().unwrap_or_else(|| {
-                std::path::PathBuf::from(format!("untitled.{}", crate::lang::lang_to_ext(&lang)))
-            });
-            let syms = symbols::extract_symbols(&app.buffer.rope, &lang);
-            if syms.is_empty() {
-                app.message = Some("No symbols found".into());
-            } else {
-                let items: Vec<crate::popup::ListItem> = syms
-                    .iter()
-                    .map(|s| crate::popup::ListItem::navigate(
-                        format!("{} {}", s.kind, s.name),
-                        format!("line {}", s.line + 1),
-                        &path,
-                        s.line,
-                        s.col,
-                    ))
-                    .collect();
-                app.popup = Some(crate::popup::Popup::navigate("symbols", items));
-            }
-            return;
-        }
-        Command::OpenFilePicker => {
-            let picker_cmd = app.config.editor.file_picker.clone();
-            if let Some(cmd) = picker_cmd {
-                open_file_external_picker(app, &cmd);
-            } else {
-                open_file_picker_popup(app);
-            }
-            return;
-        }
-        Command::OpenDiagnosticPicker => {
-            let mut items: Vec<crate::popup::ListItem> = Vec::new();
-            for (path_str, diags) in &app.lsp.diagnostics {
-                let path = std::path::PathBuf::from(path_str);
-                let file = path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path_str.clone());
-                for d in diags {
-                    let sev = match d.severity {
-                        crate::lsp_manager::DiagnosticSeverity::Error => "error",
-                        crate::lsp_manager::DiagnosticSeverity::Warning => "warning",
-                        crate::lsp_manager::DiagnosticSeverity::Information => "info",
-                        crate::lsp_manager::DiagnosticSeverity::Hint => "hint",
-                    };
-                    items.push(crate::popup::ListItem::navigate(
-                        d.message.clone(),
-                        format!("{file}:{} [{sev}]", d.line + 1),
-                        &path,
-                        d.line,
-                        d.col_start,
-                    ));
-                }
-            }
-            if items.is_empty() {
-                app.message = Some("No diagnostics".into());
-            } else {
-                items.sort_by(|a, b| {
-                    let sev_rank = |detail: &Option<String>| -> u8 {
-                        match detail.as_deref().and_then(|d| d.split('[').nth(1)) {
-                            Some(s) if s.starts_with("error") => 0,
-                            Some(s) if s.starts_with("warning") => 1,
-                            _ => 2,
-                        }
-                    };
-                    sev_rank(&a.detail).cmp(&sev_rank(&b.detail))
-                        .then_with(|| a.detail.cmp(&b.detail))
-                });
-                app.popup = Some(crate::popup::Popup::navigate("diagnostics", items));
-            }
-            return;
-        }
+        Command::OpenCommandPalette  => { pickers::command_palette(app);  return; }
+        Command::GrepBuffer          => { pickers::grep_buffer(app);      return; }
+        Command::GrepProject         => { pickers::grep_project(app);     return; }
+        Command::OpenBufferPicker    => { pickers::buffer_picker(app);    return; }
+        Command::OpenSymbolPicker    => { pickers::symbol_picker(app);    return; }
+        Command::OpenFilePicker      => { pickers::file_picker(app);      return; }
+        Command::OpenDiagnosticPicker => { pickers::diagnostic_picker(app); return; }
 
         // --- Sub-mode entries ---
         Command::EnterGotoMode => {
@@ -412,8 +221,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
             let positions =
                 jump::visible_word_starts(&app.buffer.rope, app.scroll_row, app.viewport_height);
             let jump_keys: Vec<char> = app.config.ui.jump_keys.chars().collect();
-            app.jump_labels = jump::generate_labels(&positions, &jump_keys);
-            app.jump_typed = String::new();
+            app.jump.labels = jump::generate_labels(&positions, &jump_keys);
+            app.jump.typed = String::new();
             app.popup = None;
             app.mode = Mode::Jump { extend };
             return;
@@ -538,6 +347,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.selection = Selection::point(app.selection.head);
             }
             app.mode = Mode::Normal;
+            // The call-signature hint only makes sense while typing arguments.
+            app.signature_help = None;
             return;
         }
         Command::EnterSelect => {
@@ -760,7 +571,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 notebook::save_focused_cell(app);
                 notebook::notebook_lsp_close(app);
                 app.notebook = None;
-                app.notebook_cell_edit = None;
+                app.cell_focused_edit = false;
             } else if let (Some(ref lang), Some(ref old_path)) =
                 (app.lsp_language.clone(), app.buffer.path.clone())
             {
@@ -882,102 +693,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::NotebookExecuteCell => {
-            notebook::save_focused_cell(app);
-            // "Executing" a Markdown cell just formats it: flip to the rendered
-            // view and return to navigation (no kernel involvement).
-            let is_markdown = app.notebook.as_ref().and_then(|(nb, state)| {
-                nb.cells.get(state.focused_cell).map(|c| c.cell_type == CellType::Markdown)
-            }).unwrap_or(false);
-            if is_markdown {
-                if let Some((ref mut nb, ref state)) = app.notebook {
-                    let idx = state.focused_cell;
-                    if idx < nb.cells.len() {
-                        nb.cells[idx].rendered = true;
-                    }
-                }
-                app.mode = Mode::Normal;
-                app.message = Some("Rendered markdown".into());
-                return;
-            }
-            // One cell at a time: the persistent kernel is a single REPL.
-            let busy = app.notebook.as_ref()
-                .map(|(_, state)| state.executing_cell.is_some())
-                .unwrap_or(false);
-            if busy {
-                app.message = Some("Kernel busy — wait or :interrupt-kernel".into());
-                return;
-            }
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let nb_dir = crate::notebook::notebook_dir(&nb.path);
-                if nb.kernel.is_none()
-                    || !nb.kernel.as_mut().map(|k| k.is_alive()).unwrap_or(false)
-                {
-                    match nb.start_kernel(&nb_dir) {
-                        Ok(found_venv) => {
-                            if !found_venv {
-                                app.message = Some(
-                                    "Kernel started (no venv found — using system python3)".into(),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            app.message = Some(format!("Kernel start failed: {e}"));
-                            return;
-                        }
-                    }
-                }
-                let idx = state.focused_cell;
-                if idx < nb.cells.len() {
-                    let code = nb.cells[idx].source.to_string();
-                    nb.cells[idx].outputs.clear();
-                    if let Some(ref mut session) = nb.kernel {
-                        // Fire-and-forget: output streams back via process_kernel_events.
-                        match session.start_execution(&code) {
-                            Ok(()) => {
-                                state.executing_cell = Some(idx);
-                                nb.modified = true;
-                                app.message = Some(format!("Running cell [{}]…", idx + 1));
-                            }
-                            Err(e) => {
-                                app.message = Some(format!("Kernel error: {e}"));
-                                nb.kernel = None;
-                            }
-                        }
-                    }
-                }
-            }
-            // Old output image Arcs were just freed; drop their Kitty cache
-            // entries so freshly-streamed images upload cleanly.
-            app.kitty_image_ids.clear();
+            notebook::execute_focused_cell(app);
             return;
         }
         Command::NotebookRestartKernel => {
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                nb.kernel = None;
-                state.executing_cell = None;
-                let nb_dir = crate::notebook::notebook_dir(&nb.path);
-                match nb.start_kernel(&nb_dir) {
-                    Ok(found_venv) => {
-                        app.message = Some(if found_venv {
-                            "Kernel restarted".into()
-                        } else {
-                            "Kernel restarted (no venv found — using system python3)".into()
-                        });
-                    }
-                    Err(e) => app.message = Some(format!("Kernel restart failed: {e}")),
-                }
-            }
+            notebook::restart_kernel(app);
             return;
         }
         Command::NotebookInterruptKernel => {
-            if let Some((ref nb, _)) = app.notebook {
-                if let Some(ref session) = nb.kernel {
-                    session.interrupt();
-                    app.message = Some("Kernel interrupted".into());
-                } else {
-                    app.message = Some("No kernel running".into());
-                }
-            }
+            notebook::interrupt_kernel(app);
             return;
         }
         Command::NotebookExecuteAndAdvance => {
@@ -1000,11 +724,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.cells = cells;
                     nb.modified = true;
                     state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
                 }
-                notebook::load_focused_cell(app);
-                notebook::notebook_lsp_reopen(app);
-                app.mode = Mode::Normal;
+                notebook::after_structural_edit(app);
             } else {
                 app.message = Some("Nothing to undo".into());
             }
@@ -1025,138 +746,31 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     nb.cells = cells;
                     nb.modified = true;
                     state.focused_cell = focused.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
                 }
-                notebook::load_focused_cell(app);
-                notebook::notebook_lsp_reopen(app);
-                app.mode = Mode::Normal;
+                notebook::after_structural_edit(app);
             } else {
                 app.message = Some("Nothing to redo".into());
             }
             return;
         }
         Command::NotebookNewCellBelow => {
-            notebook::save_focused_cell(app);
-            notebook::push_cell_snapshot(app);
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let new_idx = (state.focused_cell + 1).min(nb.cells.len());
-                nb.cells.insert(new_idx, Cell {
-                    id: notebook::new_cell_id(),
-                    cell_type: CellType::Code,
-                    source: Rope::new(),
-                    outputs: vec![],
-                    execution_count: None,
-                    rendered: false,
-                });
-                state.focused_cell = new_idx;
-                nb.modified = true;
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
-            }
-            notebook::load_focused_cell(app);
-            notebook::notebook_lsp_reopen(app);
-            app.mode = Mode::Normal;
+            notebook::insert_new_cell(app, false);
             return;
         }
         Command::NotebookNewCellAbove => {
-            notebook::save_focused_cell(app);
-            notebook::push_cell_snapshot(app);
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                let new_idx = state.focused_cell;
-                nb.cells.insert(new_idx, Cell {
-                    id: notebook::new_cell_id(),
-                    cell_type: CellType::Code,
-                    source: Rope::new(),
-                    outputs: vec![],
-                    execution_count: None,
-                    rendered: false,
-                });
-                nb.modified = true;
-                state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
-            }
-            notebook::load_focused_cell(app);
-            notebook::notebook_lsp_reopen(app);
-            app.mode = Mode::Normal;
+            notebook::insert_new_cell(app, true);
             return;
         }
         Command::NotebookDeleteCell => {
-            notebook::save_focused_cell(app);
-            notebook::push_cell_snapshot(app);
-            if let Some((ref mut nb, ref mut state)) = app.notebook {
-                if !nb.cells.is_empty() {
-                    nb.cells.remove(state.focused_cell);
-                    nb.modified = true;
-                    state.focused_cell =
-                        state.focused_cell.min(nb.cells.len().saturating_sub(1));
-                    state.ensure_focused_visible(&nb.cells, app.viewport_height, &app.buffer.rope, app.config.notebook.image_rows, app.cell_pixel_size, app.viewport_width.saturating_sub(2) as u16);
-                }
-            }
-            let _ = crate::kitty::clear_images();
-            app.kitty_image_ids.clear();
-            notebook::load_focused_cell(app);
-            notebook::notebook_lsp_reopen(app);
-            app.mode = Mode::Normal;
+            notebook::delete_cell(app);
             return;
         }
         Command::NotebookClearOutputs => {
-            // Collect the Kitty IDs for this cell's images before dropping them,
-            // then delete those specific placements.  Using per-ID deletion
-            // (a=d,i=N) is more reliable than the catch-all a=d across terminals.
-            if let Some((ref mut nb, ref state)) = app.notebook {
-                let idx = state.focused_cell;
-                if idx < nb.cells.len() {
-                    if app.graphics_terminal.supports_graphics() {
-                        use crate::notebook::Output;
-                        let ids: Vec<u32> = nb.cells[idx].outputs.iter()
-                            .filter_map(|o| {
-                                let png = match o {
-                                    Output::DisplayData { data } => data.image_png.as_ref(),
-                                    Output::ExecuteResult { data, .. } => data.image_png.as_ref(),
-                                    _ => None,
-                                }?;
-                                let ptr_key = std::sync::Arc::as_ptr(png) as usize;
-                                let kid = app.kitty_image_ids.remove(&ptr_key)?;
-                                Some(kid)
-                            })
-                            .collect();
-                        let _ = crate::kitty::delete_images(&ids);
-                    }
-                    nb.cells[idx].outputs.clear();
-                    nb.modified = true;
-                }
-            }
+            notebook::clear_outputs(app);
             return;
         }
         Command::NotebookCellToMarkdown | Command::NotebookCellToCode => {
-            let to_markdown = matches!(cmd, Command::NotebookCellToMarkdown);
-            notebook::save_focused_cell(app);
-            notebook::push_cell_snapshot(app);
-            if let Some((ref mut nb, ref state)) = app.notebook {
-                let idx = state.focused_cell;
-                if idx < nb.cells.len() {
-                    let cell = &mut nb.cells[idx];
-                    cell.cell_type = if to_markdown {
-                        CellType::Markdown
-                    } else {
-                        CellType::Code
-                    };
-                    // Outputs / execution counts only belong to code cells.
-                    cell.outputs.clear();
-                    cell.execution_count = None;
-                    // Show the source for editing; the user re-runs to render.
-                    cell.rendered = false;
-                    nb.modified = true;
-                }
-            }
-            // The cell's LSP language id changed (python ↔ markdown) and its
-            // virtual document must be reopened under the new language.
-            notebook::load_focused_cell(app);
-            notebook::notebook_lsp_reopen(app);
-            app.mode = Mode::Normal;
-            app.message = Some(if to_markdown {
-                "Cell → markdown".into()
-            } else {
-                "Cell → code".into()
-            });
+            notebook::convert_cell(app, matches!(cmd, Command::NotebookCellToMarkdown));
             return;
         }
 
@@ -1185,28 +799,22 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         // --- Cell edit overlay ---
         Command::NotebookOpenCellEdit => {
-            if let Some(ref mut session) = app.notebook_cell_edit {
-                session.focused_edit = true;
-            }
+            app.cell_focused_edit = true;
             app.mode = Mode::Normal;
             return;
         }
         Command::NotebookCloseCellEdit => {
-            if let Some(ref mut session) = app.notebook_cell_edit {
-                session.focused_edit = false;
-            }
+            app.cell_focused_edit = false;
             app.mode = Mode::Normal;
-            if let Some(ref session) = app.notebook_cell_edit {
-                if let Some(path) = app.buffer.path.clone() {
-                    if app.lsp.notebook_sync_supported(&session.language) {
-                        let notebook_uri = crate::lsp::path_to_uri(&session.notebook_path);
-                        let cell_uri = crate::lsp::path_to_uri(&path);
-                        let text = app.buffer.rope.to_string();
-                        app.lsp.notebook_did_change_cell(
-                            &session.language, &notebook_uri, &cell_uri, &text,
-                        );
-                    }
-                }
+            // Flush the edited cell to the LSP servers (notebook-sync or
+            // per-cell plain doc, chosen per server by the manager).
+            let nb_info = app.notebook.as_ref()
+                .map(|(nb, _)| (nb.metadata.kernel_language.clone(), nb.path.clone()));
+            if let (Some((lang, nb_path)), Some(path)) = (nb_info, app.buffer.path.clone()) {
+                let notebook_uri = crate::lsp::path_to_uri(&nb_path);
+                let cell_uri = crate::lsp::path_to_uri(&path);
+                let text = app.buffer.rope.to_string();
+                app.lsp.notebook_did_change_cell(&lang, &notebook_uri, &cell_uri, &text);
             }
             return;
         }
@@ -1445,15 +1053,8 @@ fn switch_focused_cell(app: &mut App, new_idx: usize) {
     if let Some((ref nb, ref mut state)) = app.notebook {
         let last = nb.cells.len().saturating_sub(1);
         state.focused_cell = new_idx.min(last);
-        state.ensure_focused_visible(
-            &nb.cells,
-            app.viewport_height,
-            &app.buffer.rope,
-            app.config.notebook.image_rows,
-            app.cell_pixel_size,
-            app.viewport_width.saturating_sub(2) as u16,
-        );
     }
+    notebook::ensure_focused_visible(app);
     notebook::load_focused_cell(app);
 }
 
@@ -1519,13 +1120,7 @@ fn navigate_buffer(app: &mut App, delta: i32) {
 /// Open a `.ipynb` file as a notebook, replacing whatever is currently open.
 /// Called when the user selects a notebook from the buffer picker.
 pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
-    use crate::{
-        app::CellEditSession,
-        buffer::Buffer,
-        highlight::Highlighter,
-        notebook::Notebook,
-        notebook_state::NotebookState,
-    };
+    use crate::{notebook::Notebook, notebook_state::NotebookState};
 
     // Save scratch content when leaving it.
     save_current_special_buffer(app);
@@ -1560,31 +1155,16 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     };
 
     let lang = nb.metadata.kernel_language.clone();
-    let vpath = crate::notebook::cell_virtual_path(&nb.path, &lang, 0);
-
-    let mut buf = Buffer::new_empty();
-    if let Some(cell) = nb.cells.first() {
-        buf.rope = cell.source.clone();
-    }
-    buf.path = Some(vpath.clone());
-
-    let session = nb.cells.first().map(|_| CellEditSession {
-        cell_index: 0,
-        language: lang.clone(),
-        notebook_path: nb.path.clone(),
-        focused_edit: false,
-    });
-
-    app.buffer = buf;
     app.notebook = Some((nb, NotebookState::new()));
-    app.notebook_cell_edit = session;
-    app.selection = Selection::point(0);
-    app.scroll_row = 0;
-    app.scroll_col = 0;
+    app.cell_focused_edit = false;
     app.mode = Mode::Normal;
-    app.lsp_language = Some(lang.clone());
-    app.highlighter = Highlighter::new(Some(&vpath));
-    recompute_highlights(app);
+    app.lsp_language = Some(lang);
+    // Load cell 0 into the buffer — this sets the buffer/path/highlighter,
+    // resets the selection + scroll, and opens the cell with the LSP.
+    notebook::load_focused_cell(app);
+    // Register the whole notebook with a notebook-aware server. When the server
+    // is still initializing this is a no-op; the Initialized event re-runs it.
+    notebook::notebook_lsp_open(app);
 
     register_buffer(&mut app.open_buffers, path);
 
@@ -1667,7 +1247,7 @@ pub fn process_kernel_events(app: &mut App) {
         }
     }
     if refresh_images {
-        app.kitty_image_ids.clear();
+        app.graphics.image_ids.clear();
     }
 }
 
@@ -1725,7 +1305,7 @@ pub fn update_scroll(app: &mut App) {
         // text-buffer behaviour you'd expect, rather than letting the cursor
         // slide off the bottom of the screen.
         let image_rows = app.config.notebook.image_rows;
-        let cell_px = app.cell_pixel_size;
+        let cell_px = app.graphics.cell_pixel_size;
         let avail_cols = app.viewport_width.saturating_sub(2) as u16;
         let mut new_scroll_row = app.scroll_row;
         if let Some((nb, state)) = app.notebook.as_mut() {
@@ -1883,159 +1463,6 @@ fn wrap_scroll_row_for_cursor(
 fn unicode_display_width(c: char) -> usize {
     use unicode_width::UnicodeWidthChar;
     c.width().unwrap_or(1)
-}
-
-// ---------------------------------------------------------------------------
-// File picker helpers
-// ---------------------------------------------------------------------------
-
-fn rg_is_available() -> bool {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::process::Command::new("rg")
-            .arg("--version")
-            .output()
-            .is_ok()
-    })
-}
-
-/// Open a fuzzy-filterable file list popup from the project root.
-fn open_file_picker_popup(app: &mut App) {
-    let root = std::env::current_dir()
-        .unwrap_or_else(|_| {
-            app.buffer.path.as_deref()
-                .and_then(|p| p.parent())
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_path_buf())
-                .unwrap_or_default()
-        });
-
-    let max_files = app.config.editor.file_picker_max_files;
-    let max_depth = app.config.editor.file_picker_max_depth;
-    let mut items: Vec<crate::popup::ListItem> = Vec::new();
-    collect_files(&root, &root, &mut items, 0, max_depth, max_files);
-    items.sort_by(|a, b| a.label.cmp(&b.label));
-
-    if items.is_empty() {
-        app.message = Some("No files found".into());
-        return;
-    }
-
-    app.popup = Some(crate::popup::Popup::navigate("open file", items));
-}
-
-/// Recursively collect files under `dir` relative to `base`, skipping noise.
-fn collect_files(
-    base: &std::path::Path,
-    dir: &std::path::Path,
-    items: &mut Vec<crate::popup::ListItem>,
-    depth: usize,
-    max_depth: usize,
-    max_files: usize,
-) {
-    if depth > max_depth || items.len() >= max_files {
-        return;
-    }
-
-    let Ok(read_dir) = std::fs::read_dir(dir) else { return };
-
-    let mut entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        if items.len() >= max_files {
-            break;
-        }
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        if name_str.starts_with('.') {
-            continue;
-        }
-
-        if path.is_dir() {
-            if matches!(
-                name_str.as_ref(),
-                "target" | "node_modules" | "__pycache__" | "dist" | "build" | "out"
-            ) {
-                continue;
-            }
-            collect_files(base, &path, items, depth + 1, max_depth, max_files);
-        } else {
-            let rel = path.strip_prefix(base).unwrap_or(&path);
-            let label = rel.to_string_lossy().into_owned();
-            let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-            items.push(crate::popup::ListItem::navigate(label, abs.to_string_lossy(), &abs, 0, 0));
-        }
-    }
-}
-
-/// Suspend the TUI, run an external picker command, then resume.
-///
-/// The command receives:
-///   SV_PICKER_FILE  — path to a temp file; write the chosen file path there
-///                     (preferred for TUI pickers like yazi that own the screen)
-///   SV_CURRENT_DIR  — directory of the currently open buffer
-///
-/// If SV_PICKER_FILE is non-empty after the command exits, that path is used.
-/// Otherwise the command's stdout is used (works well with fzf).
-fn open_file_external_picker(app: &mut App, cmd: &str) {
-    use crossterm::{execute, terminal};
-    use std::io::{self, Write};
-
-    let tmp_path = std::env::temp_dir()
-        .join(format!("sv-picker-{}.txt", std::process::id()));
-
-    let current_dir = app.buffer.path.as_deref()
-        .and_then(|p| p.parent())
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    // Suspend TUI so the external picker has the full terminal.
-    let _ = terminal::disable_raw_mode();
-    let mut stdout = io::stdout();
-    let _ = execute!(stdout, crossterm::terminal::LeaveAlternateScreen);
-    let _ = stdout.flush();
-
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .env("SV_PICKER_FILE", &tmp_path)
-        .env("SV_CURRENT_DIR", &current_dir)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .output();
-
-    // Resume TUI.
-    let _ = execute!(stdout, crossterm::terminal::EnterAlternateScreen);
-    let _ = terminal::enable_raw_mode();
-    crate::theme::initialize_color_cache();
-
-    // Determine chosen path: temp file wins over stdout.
-    let chosen = if tmp_path.exists() {
-        let content = std::fs::read_to_string(&tmp_path).unwrap_or_default();
-        let _ = std::fs::remove_file(&tmp_path);
-        content.trim().to_owned()
-    } else {
-        match output {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-            Err(e) => {
-                app.message = Some(format!("File picker error: {e}"));
-                return;
-            }
-        }
-    };
-
-    if !chosen.is_empty() {
-        let path = std::path::PathBuf::from(&chosen);
-        lsp::open_file_at(app, &path, 0, 0);
-    }
-
-    app.needs_clear = true;
 }
 
 // ---------------------------------------------------------------------------

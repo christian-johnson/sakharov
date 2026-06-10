@@ -368,8 +368,8 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             }
         } else if !is_continuation {
             // Jump label overlay — only on first sub-row (non-fold) lines.
-            if matches!(app.mode, crate::mode::Mode::Jump { .. }) && !app.jump_labels.is_empty() {
-                let typed_len = app.jump_typed.len();
+            if matches!(app.mode, crate::mode::Mode::Jump { .. }) && !app.jump.labels.is_empty() {
+                let typed_len = app.jump.typed.len();
                 let jump_pending = Style::default()
                     .fg(Color::Black)
                     .bg(Color::Rgb(255, 160, 0))
@@ -379,8 +379,8 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                     .bg(Color::Green)
                     .add_modifier(Modifier::BOLD);
 
-                for &(pos, ref label) in &app.jump_labels {
-                    if !label.starts_with(app.jump_typed.as_str()) {
+                for &(pos, ref label) in &app.jump.labels {
+                    if !label.starts_with(app.jump.typed.as_str()) {
                         continue;
                     }
                     if pos < line_start_char {
@@ -525,55 +525,59 @@ fn tab_stop(col: usize, tab_width: usize) -> usize {
 // Status bar
 // ---------------------------------------------------------------------------
 
-fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    // When in a cell-edit overlay, show the notebook + cell context instead of
-    // the virtual buffer path.
-    let filename = if let Some(ref session) = app.notebook_cell_edit {
-        let nb_name = session.notebook_path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("notebook");
-        let ext = lang_to_ext(&session.language);
-        format!("{nb_name}  ·  cell [{}].{ext}", session.cell_index + 1)
-    } else {
-        app.buffer.display_name()
-    };
-
+/// Build the status-line [`Ctx`](crate::statusline::Ctx) from the current app
+/// state. Shared by the plain editor / focused-cell overlay (this module) and
+/// the multi-cell notebook view (`app::run_loop`); only the chosen module
+/// *layout* differs between those call sites, not the data.
+///
+/// Position fields are always read from `app.buffer.rope` — in the notebook view
+/// the focused cell's text lives there too. When a notebook is open, the
+/// filename gains cell context and diagnostics are summed across every cell.
+pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
     let rope = &app.buffer.rope;
     let cursor_pos = app.selection.head.min(rope.len_chars());
-    let line_idx = if rope.len_chars() == 0 {
-        0
-    } else {
-        rope.char_to_line(cursor_pos)
-    };
-    let line_start = if rope.len_chars() == 0 {
-        0
-    } else {
-        rope.line_to_char(line_idx)
-    };
+    let line_idx = if rope.len_chars() == 0 { 0 } else { rope.char_to_line(cursor_pos) };
+    let line_start = if rope.len_chars() == 0 { 0 } else { rope.line_to_char(line_idx) };
     let col = cursor_pos.saturating_sub(line_start) + 1;
-
     let total_lines = rope.len_lines().max(1);
     let scroll_pct = (line_idx * 100) / total_lines;
 
-    // Diagnostic counts for the current file (split by severity for coloring).
-    let (diag_errors, diag_warnings) = if let Some(ref path) = app.buffer.path {
-        let path_str = crate::lsp::diagnostic_key(path);
-        if let Some(diags) = app.lsp.diagnostics.get(&path_str) {
-            let e = diags.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
-            let w = diags.iter().filter(|d| d.severity == DiagnosticSeverity::Warning).count();
-            (e, w)
-        } else {
-            (0, 0)
+    let count_diags = |key: &str, e: &mut usize, w: &mut usize| {
+        if let Some(diags) = app.lsp.diagnostics.get(key) {
+            *e += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
+            *w += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Warning).count();
         }
-    } else {
-        (0, 0)
     };
 
-    let ctx = crate::statusline::Ctx {
+    let (mut diag_errors, mut diag_warnings) = (0usize, 0usize);
+    let (filename, modified, cell, kernel) = if let Some((nb, state)) = app.notebook.as_ref() {
+        let nb_name = nb.path.file_stem().and_then(|s| s.to_str()).unwrap_or("notebook");
+        let ext = lang_to_ext(&nb.metadata.kernel_language);
+        let filename = format!("{nb_name}  ·  cell [{}].{ext}", state.focused_cell + 1);
+        // Diagnostics are reported per virtual cell path; sum across them all.
+        for idx in 0..nb.cells.len() {
+            let vpath = crate::notebook::cell_virtual_path(&nb.path, &nb.metadata.kernel_language, idx);
+            count_diags(&crate::lsp::diagnostic_key(&vpath), &mut diag_errors, &mut diag_warnings);
+        }
+        let kernel = Some(match nb.kernel.as_ref().map(|k| &k.status) {
+            Some(crate::notebook::KernelStatus::Idle) => crate::statusline::KernelView::Idle,
+            Some(crate::notebook::KernelStatus::Busy) => crate::statusline::KernelView::Busy,
+            Some(crate::notebook::KernelStatus::Dead) => crate::statusline::KernelView::Dead,
+            None => crate::statusline::KernelView::None,
+        });
+        (filename, nb.modified, Some((state.focused_cell + 1, nb.cells.len().max(1))), kernel)
+    } else {
+        if let Some(ref path) = app.buffer.path {
+            count_diags(&crate::lsp::diagnostic_key(path), &mut diag_errors, &mut diag_warnings);
+        }
+        (app.buffer.display_name(), app.buffer.modified, None, None)
+    };
+
+    crate::statusline::Ctx {
         mode_label: app.mode.label().to_string(),
         mode_color: theme::mode_color(&app.mode, &app.config.theme.modes),
         filename,
-        modified: app.buffer.modified,
+        modified,
         branch: app.git_branch.clone(),
         diag_errors,
         diag_warnings,
@@ -581,9 +585,13 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         col,
         scroll_pct,
         spinner: app.spinner.glyph(),
-        cell: None,
-        kernel: None,
-    };
+        cell,
+        kernel,
+    }
+}
+
+fn render_status(frame: &mut Frame, app: &App, area: Rect) {
+    let ctx = status_ctx(app);
     crate::statusline::render(
         frame,
         area,
@@ -611,10 +619,10 @@ pub fn render_command_nb(frame: &mut Frame, app: &App, area: Rect) {
 fn render_command(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
         Mode::Jump { .. } => {
-            if app.jump_typed.is_empty() {
+            if app.jump.typed.is_empty() {
                 "Jump: type label chars...".to_string()
             } else {
-                format!("Jump: {}_", app.jump_typed)
+                format!("Jump: {}_", app.jump.typed)
             }
         }
         Mode::Command => format!(":{}", app.command_buf),
@@ -641,7 +649,13 @@ fn render_command(frame: &mut Frame, app: &App, area: Rect) {
                 )
             }
         }
-        _ => app.message.clone().unwrap_or_default(),
+        // A transient message wins; otherwise show the active call signature
+        // (Insert mode only — it's cleared elsewhere) so argument hints are visible.
+        _ => app
+            .message
+            .clone()
+            .or_else(|| app.signature_help.clone())
+            .unwrap_or_default(),
     };
     let cmd_widget = SingleLineWidget {
         text,

@@ -20,6 +20,7 @@ use crate::{
 pub enum LspRequestKind {
     Completion,
     Hover,
+    SignatureHelp,
     Definition,
     References,
     TypeDefinition,
@@ -31,6 +32,9 @@ fn request_feature(kind: LspRequestKind) -> &'static str {
     match kind {
         LspRequestKind::Completion     => "completion",
         LspRequestKind::Hover          => "hover",
+        // Signature help has no dedicated config feature; it rides on the
+        // general (all-features) server alongside hover/completion.
+        LspRequestKind::SignatureHelp  => "hover",
         LspRequestKind::Definition     => "definition",
         LspRequestKind::References     => "references",
         LspRequestKind::TypeDefinition => "type-definition",
@@ -58,6 +62,9 @@ pub enum LspEvent {
     },
     /// Hover response — show documentation popup.
     HoverResult { content: String },
+    /// Signature-help response — call-argument hint for the minibuffer.
+    /// `None` when the cursor is not inside a call the server recognises.
+    SignatureHelpResult { signature: Option<String> },
     /// Definition / type-definition / implementation response.
     DefinitionResult { location: Option<LspLocation> },
     /// References response — may be multiple locations.
@@ -337,6 +344,7 @@ impl LspManager {
                 let _ = match kind {
                     LspRequestKind::Completion    => servers[idx].client.request_completion(&uri, line, character),
                     LspRequestKind::Hover         => servers[idx].client.request_hover(&uri, line, character),
+                    LspRequestKind::SignatureHelp => servers[idx].client.request_signature_help(&uri, line, character),
                     LspRequestKind::Definition    => servers[idx].client.request_definition(&uri, line, character),
                     LspRequestKind::References    => servers[idx].client.request_references(&uri, line, character),
                     LspRequestKind::TypeDefinition  => servers[idx].client.request_type_definition(&uri, line, character),
@@ -380,33 +388,22 @@ impl LspManager {
         false
     }
 
-    /// True if `path` has been opened on any server for `language`.
-    pub fn is_doc_open(&self, language: &str, path: &std::path::Path) -> bool {
-        let uri = path_to_uri(path);
-        self.servers
-            .get(language)
-            .map(|ss| ss.iter().any(|s| s.client.is_doc_open(&uri)))
-            .unwrap_or(false)
-    }
-
-    /// True if any server for `language` advertised `notebookDocumentSync`.
-    pub fn notebook_sync_supported(&self, language: &str) -> bool {
-        self.servers
-            .get(language)
-            .map(|ss| ss.iter().any(|s| s.client.supports_notebook_sync()))
-            .unwrap_or(false)
-    }
-
-    /// Send `notebookDocument/didOpen` via the first server supporting notebook sync.
+    /// Send the notebook to every initialized server: `notebookDocument/didOpen`
+    /// to servers advertising notebook sync, per-cell `textDocument/didOpen` to the
+    /// rest. Idempotent per server (skips servers that already have the notebook /
+    /// cell open), so the per-server `Initialized` retrigger can call it repeatedly.
     pub fn notebook_did_open(
         &mut self,
         language: &str,
         notebook_uri: &str,
         cells: &[NotebookCell],
     ) -> bool {
-        let Some(idx) = self.notebook_client_idx(language) else { return false };
-        // Check initialized (immutable, released before mutable borrows below).
-        if !self.servers.get(language).map(|ss| ss[idx].client.initialized).unwrap_or(false) {
+        let any_ready = self
+            .servers
+            .get(language)
+            .map(|ss| ss.iter().any(|s| s.client.initialized))
+            .unwrap_or(false);
+        if !any_ready {
             return false;
         }
         // Update notebook state — drop before borrowing servers mutably.
@@ -417,13 +414,31 @@ impl LspManager {
             entry.1
         };
         if let Some(servers) = self.servers.get_mut(language) {
-            servers[idx].client.notebook_did_open(notebook_uri, version, cells);
-            return true;
+            for server in servers.iter_mut() {
+                if !server.client.initialized {
+                    continue;
+                }
+                if server.client.supports_notebook_sync() {
+                    if !server.client.is_doc_open(notebook_uri) {
+                        server.client.notebook_did_open(notebook_uri, version, cells);
+                    }
+                } else {
+                    for cell in cells.iter().filter(|c| c.kind == 2) {
+                        if server.client.is_doc_open(&cell.uri) {
+                            server.client.did_change(&cell.uri, &cell.text);
+                        } else {
+                            server.client.did_open(&cell.uri, &cell.language_id, &cell.text);
+                        }
+                    }
+                }
+            }
         }
-        false
+        true
     }
 
-    /// Send `notebookDocument/didChange` for one cell via the notebook-sync server.
+    /// Propagate one cell's new text to every initialized server:
+    /// `notebookDocument/didChange` where the server has the notebook open,
+    /// plain `textDocument/didChange` on the cell's virtual doc otherwise.
     pub fn notebook_did_change_cell(
         &mut self,
         language: &str,
@@ -431,8 +446,12 @@ impl LspManager {
         cell_uri: &str,
         text: &str,
     ) -> bool {
-        let Some(idx) = self.notebook_client_idx(language) else { return false };
-        if !self.servers.get(language).map(|ss| ss[idx].client.initialized).unwrap_or(false) {
+        let any_ready = self
+            .servers
+            .get(language)
+            .map(|ss| ss.iter().any(|s| s.client.initialized))
+            .unwrap_or(false);
+        if !any_ready {
             return false;
         }
         let nb_version = {
@@ -441,23 +460,90 @@ impl LspManager {
             entry.1
         };
         if let Some(servers) = self.servers.get_mut(language) {
-            servers[idx].client.notebook_did_change_cell(notebook_uri, nb_version, cell_uri, text);
-            return true;
+            for server in servers.iter_mut() {
+                if !server.client.initialized {
+                    continue;
+                }
+                if server.client.supports_notebook_sync() {
+                    if server.client.is_doc_open(notebook_uri) {
+                        server.client.notebook_did_change_cell(notebook_uri, nb_version, cell_uri, text);
+                    }
+                } else if server.client.is_doc_open(cell_uri) {
+                    server.client.did_change(cell_uri, text);
+                } else {
+                    server.client.did_open(cell_uri, language, text);
+                }
+            }
         }
-        false
+        true
     }
 
-    /// Send `notebookDocument/didClose` and clear tracking state.
+    /// Send `notebookDocument/didClose` (or per-cell `didClose` for servers
+    /// without notebook sync) and clear tracking state.
     pub fn notebook_did_close(&mut self, language: &str, notebook_uri: &str) {
         // Remove returns owned cell_uris, releasing the borrow before we touch servers.
         let cell_uris = self.notebook_state.remove(notebook_uri).map(|(uris, _)| uris);
         if let Some(cell_uris) = cell_uris {
-            if let Some(idx) = self.notebook_client_idx(language) {
-                if let Some(servers) = self.servers.get_mut(language) {
-                    servers[idx].client.notebook_did_close(notebook_uri, &cell_uris);
+            if let Some(servers) = self.servers.get_mut(language) {
+                for server in servers.iter_mut() {
+                    if server.client.supports_notebook_sync() {
+                        if server.client.is_doc_open(notebook_uri) {
+                            server.client.notebook_did_close(notebook_uri, &cell_uris);
+                        }
+                    } else {
+                        for uri in &cell_uris {
+                            if server.client.is_doc_open(uri) {
+                                server.client.did_close(uri);
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// Sync `text` into a shadow document on the server that handles `kind`,
+    /// then send the request against it at (line, character).
+    ///
+    /// Used for notebook hover / signature-help / references: pylsp only
+    /// concatenates cells for completion and definition, so cross-cell context
+    /// is invisible to the other requests when made on a cell URI. The shadow
+    /// document is the whole notebook joined into one virtual text document —
+    /// a URI only, never written to disk — giving those requests full context.
+    pub fn request_via_shadow_doc(
+        &mut self,
+        kind: LspRequestKind,
+        language: &str,
+        shadow_path: &std::path::Path,
+        text: &str,
+        line: u32,
+        character: u32,
+    ) -> bool {
+        if !matches!(
+            kind,
+            LspRequestKind::Hover | LspRequestKind::SignatureHelp | LspRequestKind::References
+        ) {
+            return false;
+        }
+        let feature = request_feature(kind);
+        let Some(idx) = self.server_idx_for_feature(language, feature) else {
+            return false;
+        };
+        let uri = path_to_uri(shadow_path);
+        let Some(servers) = self.servers.get_mut(language) else { return false };
+        let client = &mut servers[idx].client;
+        if client.is_doc_open(&uri) {
+            client.did_change(&uri, text);
+        } else {
+            client.did_open(&uri, language, text);
+        }
+        let _ = match kind {
+            LspRequestKind::Hover => client.request_hover(&uri, line, character),
+            LspRequestKind::SignatureHelp => client.request_signature_help(&uri, line, character),
+            LspRequestKind::References => client.request_references(&uri, line, character),
+            _ => unreachable!(),
+        };
+        true
     }
 
     /// Drain all pending server messages and return semantic events.
@@ -532,20 +618,6 @@ impl LspManager {
         None
     }
 
-    /// Return the index of the server used for notebook sync operations.
-    fn notebook_client_idx(&self, language: &str) -> Option<usize> {
-        let servers = self.servers.get(language)?;
-        // Prefer a server that supports notebook sync.
-        for (i, s) in servers.iter().enumerate() {
-            if s.client.initialized && s.client.supports_notebook_sync() {
-                return Some(i);
-            }
-        }
-        // Fall back to first initialized server.
-        servers.iter().enumerate()
-            .find(|(_, s)| s.client.initialized)
-            .map(|(i, _)| i)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +665,11 @@ fn process_message(
                     // when the server returns null (no docs for this position).
                     let content = parse_hover_result(&result).unwrap_or_default();
                     Some(LspEvent::HoverResult { content })
+                }
+                PendingKind::SignatureHelp => {
+                    Some(LspEvent::SignatureHelpResult {
+                        signature: parse_signature_help(&result),
+                    })
                 }
                 PendingKind::Definition
                 | PendingKind::TypeDefinition
@@ -702,6 +779,63 @@ fn parse_documentation(item: &Value) -> Option<String> {
     doc.get("value").and_then(|v| v.as_str()).map(str::to_owned)
 }
 
+/// Extract the active signature's label from a `textDocument/signatureHelp`
+/// result, with the active parameter marked. Returns `None` when the cursor is
+/// not inside a recognised call.
+fn parse_signature_help(val: &Value) -> Option<String> {
+    let signatures = val.get("signatures")?.as_array()?;
+    if signatures.is_empty() {
+        return None;
+    }
+    let active_sig = val.get("activeSignature").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let sig = signatures.get(active_sig).or_else(|| signatures.first())?;
+    let label = sig.get("label")?.as_str()?.to_owned();
+
+    // Mark the active parameter with ‹…› so the user can see which arg they're on.
+    let active_param = sig
+        .get("activeParameter")
+        .or_else(|| val.get("activeParameter"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    if let Some(pidx) = active_param {
+        if let Some(params) = sig.get("parameters").and_then(|p| p.as_array()) {
+            if let Some(param) = params.get(pidx) {
+                // A parameter's `label` is either a string or an [start, end] range
+                // into the signature label.
+                if let Some(plabel) = param.get("label").and_then(|l| l.as_str()) {
+                    if let Some(pos) = label.find(plabel) {
+                        let mut marked = String::with_capacity(label.len() + 2);
+                        marked.push_str(&label[..pos]);
+                        marked.push('‹');
+                        marked.push_str(plabel);
+                        marked.push('›');
+                        marked.push_str(&label[pos + plabel.len()..]);
+                        return Some(marked);
+                    }
+                } else if let Some(range) = param.get("label").and_then(|l| l.as_array()) {
+                    if let (Some(s), Some(e)) = (
+                        range.first().and_then(|v| v.as_u64()).map(|n| n as usize),
+                        range.get(1).and_then(|v| v.as_u64()).map(|n| n as usize),
+                    ) {
+                        // Range is in UTF-16 code units; for ASCII signatures this
+                        // matches byte offsets. Guard against out-of-range slicing.
+                        if s <= e && e <= label.len() && label.is_char_boundary(s) && label.is_char_boundary(e) {
+                            let mut marked = String::with_capacity(label.len() + 2);
+                            marked.push_str(&label[..s]);
+                            marked.push('‹');
+                            marked.push_str(&label[s..e]);
+                            marked.push('›');
+                            marked.push_str(&label[e..]);
+                            return Some(marked);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(label)
+}
+
 fn parse_hover_result(val: &Value) -> Option<String> {
     let contents = val.get("contents")?;
 
@@ -809,6 +943,12 @@ fn build_init_options(
     match language {
         "python" => {
             let mut jedi: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            // pylsp defaults this to ["numpy"], which makes jedi resolve numpy by
+            // importing it instead of static analysis — and that path cannot
+            // enumerate numpy's lazily-bound submodules (np.random / np.fft /
+            // np.ma return zero completions, hovers, and signatures). Static
+            // analysis handles numpy fine, so turn auto-import off.
+            jedi.insert("auto_import_modules".into(), serde_json::json!([]));
             if let Some(p) = venv_python {
                 jedi.insert(
                     "environment".into(),
@@ -919,4 +1059,50 @@ fn completion_kind_name(kind: u64) -> String {
         _  => "item",
     }
     .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_signature_help;
+    use serde_json::json;
+
+    #[test]
+    fn signature_help_marks_active_parameter() {
+        // A typical pylsp response for `randn(` with the cursor on the first arg.
+        let resp = json!({
+            "signatures": [{
+                "label": "randn(d0, d1, ...)",
+                "parameters": [{ "label": "d0" }, { "label": "d1" }],
+            }],
+            "activeSignature": 0,
+            "activeParameter": 0,
+        });
+        assert_eq!(parse_signature_help(&resp).as_deref(), Some("randn(‹d0›, d1, ...)"));
+    }
+
+    #[test]
+    fn signature_help_supports_range_parameter_labels() {
+        // Parameters can be [start, end] offsets into the label instead of strings.
+        let resp = json!({
+            "signatures": [{
+                "label": "f(a, b)",
+                "parameters": [{ "label": [2, 3] }, { "label": [5, 6] }],
+            }],
+            "activeSignature": 0,
+            "activeParameter": 1,
+        });
+        assert_eq!(parse_signature_help(&resp).as_deref(), Some("f(a, ‹b›)"));
+    }
+
+    #[test]
+    fn signature_help_empty_is_none() {
+        assert_eq!(parse_signature_help(&json!({ "signatures": [] })), None);
+        assert_eq!(parse_signature_help(&json!(null)), None);
+    }
+
+    #[test]
+    fn signature_help_without_active_param_returns_bare_label() {
+        let resp = json!({ "signatures": [{ "label": "g()" }] });
+        assert_eq!(parse_signature_help(&resp).as_deref(), Some("g()"));
+    }
 }

@@ -1,11 +1,67 @@
 use crate::{
-    app::{App, CellEditSession},
+    app::App,
     buffer::Buffer,
     highlight::Highlighter,
     lsp::{path_to_uri, NotebookCell},
     notebook::CellType,
     selection::Selection,
 };
+
+/// Keep the focused cell on-screen, reading the viewport/image settings off
+/// `app`. Wraps the long [`NotebookState::ensure_focused_visible`] argument list
+/// so call sites don't repeat it.
+pub(super) fn ensure_focused_visible(app: &mut App) {
+    let image_rows = app.config.notebook.image_rows;
+    let cell_px = app.graphics.cell_pixel_size;
+    let viewport_height = app.viewport_height;
+    let available_cols = app.viewport_width.saturating_sub(2) as u16;
+    if let Some((nb, state)) = app.notebook.as_mut() {
+        state.ensure_focused_visible(
+            &nb.cells,
+            viewport_height,
+            &app.buffer.rope,
+            image_rows,
+            cell_px,
+            available_cols,
+        );
+    }
+}
+
+/// The fix-up ritual every structural cell change (add / delete / convert /
+/// structural undo-redo) must run: keep the focused cell visible, reload it into
+/// `app.buffer`, resync the notebook with the LSP (cell URIs shift on add/delete),
+/// and return to Normal mode.
+pub(super) fn after_structural_edit(app: &mut App) {
+    ensure_focused_visible(app);
+    load_focused_cell(app);
+    notebook_lsp_reopen(app);
+    app.mode = crate::mode::Mode::Normal;
+}
+
+/// Insert a fresh empty code cell above or below the focused cell, focus it, and
+/// run the structural-edit fix-up. Shared by the new-cell-above/below commands.
+pub(super) fn insert_new_cell(app: &mut App, above: bool) {
+    save_focused_cell(app);
+    push_cell_snapshot(app);
+    if let Some((nb, state)) = app.notebook.as_mut() {
+        let new_idx = if above {
+            state.focused_cell
+        } else {
+            (state.focused_cell + 1).min(nb.cells.len())
+        };
+        nb.cells.insert(new_idx, crate::notebook::Cell {
+            id: new_cell_id(),
+            cell_type: CellType::Code,
+            source: ropey::Rope::new(),
+            outputs: vec![],
+            execution_count: None,
+            rendered: false,
+        });
+        state.focused_cell = new_idx;
+        nb.modified = true;
+    }
+    after_structural_edit(app);
+}
 
 /// Snapshot the full cell list before a structural mutation (undo support).
 pub(super) fn push_cell_snapshot(app: &mut App) {
@@ -49,18 +105,15 @@ pub fn load_focused_cell(app: &mut App) {
         app.scroll_row = 0;
         app.scroll_col = 0;
         app.insert_session_active = false;
-
-        app.notebook_cell_edit = Some(CellEditSession {
-            cell_index: idx,
-            language: language.clone(),
-            notebook_path,
-            focused_edit: false,
-        });
+        // Loading a cell never starts in the full-screen overlay.
+        app.cell_focused_edit = false;
 
         app.highlighter = Highlighter::new(Some(&virtual_path));
         super::recompute_highlights(app);
 
-        // Ensure the LSP server is running.
+        // Ensure the LSP server is running. Cell documents themselves are synced
+        // by notebook_lsp_open / lsp_did_change, which handle both notebook-sync
+        // and plain-doc servers per server.
         if let Some(server_config) = app.config.language_servers.get(&language).cloned() {
             let nb_dir = app.notebook.as_ref()
                 .and_then(|(nb, _)| nb.path.parent()
@@ -68,33 +121,22 @@ pub fn load_focused_cell(app: &mut App) {
                     .map(|p| p.to_path_buf()));
             app.lsp.ensure_server(&language, &server_config, nb_dir.as_deref());
         }
-
-        if let Some(ref session) = app.notebook_cell_edit {
-            if !app.lsp.notebook_sync_supported(&session.language) {
-                let text = app.buffer.rope.to_string();
-                if app.lsp.is_doc_open(&session.language, &virtual_path) {
-                    app.lsp.did_change(&session.language, &virtual_path, &text);
-                } else {
-                    app.lsp.did_open(&session.language, &virtual_path, &text);
-                }
-            }
-        }
     }
 }
 
 /// Stash the current notebook into `app.notebook_buffers` so it can be restored
 /// when the user navigates back.  Syncs the focused cell, closes LSP documents,
-/// and clears `app.notebook` / `app.notebook_cell_edit`.
+/// and clears `app.notebook` / the focused-edit flag.
 pub fn stash_current_notebook(app: &mut App) {
     save_focused_cell(app);
     notebook_lsp_close(app);
     let _ = crate::kitty::clear_images();
-    app.kitty_image_ids.clear();
+    app.graphics.image_ids.clear();
     if let Some((nb, state)) = app.notebook.take() {
         let key = nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone());
         app.notebook_buffers.insert(key, (nb, state));
     }
-    app.notebook_cell_edit = None;
+    app.cell_focused_edit = false;
 }
 
 /// Restore a previously stashed notebook.  Returns `true` and updates all app
@@ -111,7 +153,180 @@ pub fn restore_stashed_notebook(app: &mut App, path: &std::path::Path) -> bool {
     app.mode = crate::mode::Mode::Normal;
     load_focused_cell(app);
     super::recompute_highlights(app);
+    // The stash closed the notebook on the LSP; re-register all cells so
+    // cross-cell completion/diagnostics/definition work again.
+    notebook_lsp_open(app);
     true
+}
+
+/// Execute the focused cell. Markdown cells "execute" by rendering (no kernel);
+/// code cells start a kernel if needed and stream output asynchronously.
+pub(super) fn execute_focused_cell(app: &mut App) {
+    save_focused_cell(app);
+
+    // "Executing" a Markdown cell just renders it (no kernel involvement).
+    let is_markdown = app.notebook.as_ref().and_then(|(nb, state)| {
+        nb.cells.get(state.focused_cell).map(|c| c.cell_type == CellType::Markdown)
+    }).unwrap_or(false);
+    if is_markdown {
+        if let Some((nb, state)) = app.notebook.as_mut() {
+            let idx = state.focused_cell;
+            if idx < nb.cells.len() {
+                nb.cells[idx].rendered = true;
+            }
+        }
+        app.mode = crate::mode::Mode::Normal;
+        app.message = Some("Rendered markdown".into());
+        return;
+    }
+
+    // One cell at a time: the persistent kernel is a single REPL.
+    let busy = app.notebook.as_ref()
+        .map(|(_, state)| state.executing_cell.is_some())
+        .unwrap_or(false);
+    if busy {
+        app.message = Some("Kernel busy — wait or :interrupt-kernel".into());
+        return;
+    }
+
+    if let Some((nb, state)) = app.notebook.as_mut() {
+        let nb_dir = crate::notebook::notebook_dir(&nb.path);
+        if nb.kernel.is_none() || !nb.kernel.as_mut().map(|k| k.is_alive()).unwrap_or(false) {
+            match nb.start_kernel(&nb_dir) {
+                Ok(found_venv) => {
+                    if !found_venv {
+                        app.message = Some(
+                            "Kernel started (no venv found — using system python3)".into(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    app.message = Some(format!("Kernel start failed: {e}"));
+                    return;
+                }
+            }
+        }
+        let idx = state.focused_cell;
+        if idx < nb.cells.len() {
+            let code = nb.cells[idx].source.to_string();
+            nb.cells[idx].outputs.clear();
+            if let Some(ref mut session) = nb.kernel {
+                // Fire-and-forget: output streams back via process_kernel_events.
+                match session.start_execution(&code) {
+                    Ok(()) => {
+                        state.executing_cell = Some(idx);
+                        nb.modified = true;
+                        app.message = Some(format!("Running cell [{}]…", idx + 1));
+                    }
+                    Err(e) => {
+                        app.message = Some(format!("Kernel error: {e}"));
+                        nb.kernel = None;
+                    }
+                }
+            }
+        }
+    }
+    // Old output image Arcs were just freed; drop their Kitty cache entries so
+    // freshly-streamed images upload cleanly.
+    app.graphics.image_ids.clear();
+}
+
+/// Kill and restart the kernel, clearing all in-memory execution state.
+pub(super) fn restart_kernel(app: &mut App) {
+    if let Some((nb, state)) = app.notebook.as_mut() {
+        nb.kernel = None;
+        state.executing_cell = None;
+        let nb_dir = crate::notebook::notebook_dir(&nb.path);
+        match nb.start_kernel(&nb_dir) {
+            Ok(found_venv) => {
+                app.message = Some(if found_venv {
+                    "Kernel restarted".into()
+                } else {
+                    "Kernel restarted (no venv found — using system python3)".into()
+                });
+            }
+            Err(e) => app.message = Some(format!("Kernel restart failed: {e}")),
+        }
+    }
+}
+
+/// Send SIGINT to the running kernel.
+pub(super) fn interrupt_kernel(app: &mut App) {
+    if let Some((nb, _)) = app.notebook.as_ref() {
+        if let Some(ref session) = nb.kernel {
+            session.interrupt();
+            app.message = Some("Kernel interrupted".into());
+        } else {
+            app.message = Some("No kernel running".into());
+        }
+    }
+}
+
+/// Clear the focused cell's outputs, deleting any Kitty image placements first.
+pub(super) fn clear_outputs(app: &mut App) {
+    if let Some((nb, state)) = app.notebook.as_mut() {
+        let idx = state.focused_cell;
+        if idx < nb.cells.len() {
+            if app.graphics.terminal.supports_graphics() {
+                use crate::notebook::Output;
+                // Per-ID deletion (a=d,i=N) is more reliable than catch-all a=d.
+                let ids: Vec<u32> = nb.cells[idx].outputs.iter()
+                    .filter_map(|o| {
+                        let png = match o {
+                            Output::DisplayData { data } => data.image_png.as_ref(),
+                            Output::ExecuteResult { data, .. } => data.image_png.as_ref(),
+                            _ => None,
+                        }?;
+                        let ptr_key = std::sync::Arc::as_ptr(png) as usize;
+                        app.graphics.image_ids.remove(&ptr_key)
+                    })
+                    .collect();
+                let _ = crate::kitty::delete_images(&ids);
+            }
+            nb.cells[idx].outputs.clear();
+            nb.modified = true;
+        }
+    }
+}
+
+/// Convert the focused cell between code and markdown, clearing code-only state
+/// and resyncing the LSP under the new language id.
+pub(super) fn convert_cell(app: &mut App, to_markdown: bool) {
+    save_focused_cell(app);
+    push_cell_snapshot(app);
+    if let Some((nb, state)) = app.notebook.as_mut() {
+        let idx = state.focused_cell;
+        if idx < nb.cells.len() {
+            let cell = &mut nb.cells[idx];
+            cell.cell_type = if to_markdown { CellType::Markdown } else { CellType::Code };
+            // Outputs / execution counts only belong to code cells.
+            cell.outputs.clear();
+            cell.execution_count = None;
+            // Show the source for editing; the user re-runs to render.
+            cell.rendered = false;
+            nb.modified = true;
+        }
+    }
+    // The cell's LSP language id changed (python ↔ markdown) and its virtual
+    // document must be reopened under the new language.
+    after_structural_edit(app);
+    app.message = Some(if to_markdown { "Cell → markdown".into() } else { "Cell → code".into() });
+}
+
+/// Delete the focused cell (a no-op on an empty notebook).
+pub(super) fn delete_cell(app: &mut App) {
+    save_focused_cell(app);
+    push_cell_snapshot(app);
+    if let Some((nb, state)) = app.notebook.as_mut() {
+        if !nb.cells.is_empty() {
+            nb.cells.remove(state.focused_cell);
+            nb.modified = true;
+            state.focused_cell = state.focused_cell.min(nb.cells.len().saturating_sub(1));
+        }
+    }
+    let _ = crate::kitty::clear_images();
+    app.graphics.image_ids.clear();
+    after_structural_edit(app);
 }
 
 /// Generate a simple unique cell ID.
@@ -146,11 +361,12 @@ fn build_notebook_cells(nb: &crate::notebook::Notebook) -> Vec<NotebookCell> {
     }).collect()
 }
 
-/// Send `notebookDocument/didOpen` for the currently-loaded notebook.
+/// Register the currently-loaded notebook with every initialized server
+/// (`notebookDocument/didOpen` or per-cell `didOpen`, chosen per server).
 pub fn notebook_lsp_open(app: &mut App) {
     if let Some((ref nb, _)) = app.notebook {
         let lang = nb.metadata.kernel_language.clone();
-        if !app.lsp.is_ready(&lang) || !app.lsp.notebook_sync_supported(&lang) {
+        if !app.lsp.is_ready(&lang) {
             return;
         }
         let notebook_uri = path_to_uri(&nb.path);
@@ -164,6 +380,10 @@ pub(super) fn notebook_lsp_close(app: &mut App) {
         let lang = nb.metadata.kernel_language.clone();
         let notebook_uri = path_to_uri(&nb.path);
         app.lsp.notebook_did_close(&lang, &notebook_uri);
+        // Also drop the shadow concatenated document used for hover/signature/
+        // references requests, wherever it was lazily opened.
+        let shadow = crate::notebook::concat_virtual_path(&nb.path, &lang);
+        app.lsp.did_close(&lang, &shadow);
     }
 }
 

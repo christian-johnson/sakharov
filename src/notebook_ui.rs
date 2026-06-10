@@ -30,10 +30,10 @@ pub struct ActiveCellView<'a> {
     pub mode: &'a Mode,
     /// Per-mode color overrides from the loaded config.
     pub mode_colors: &'a crate::config::ModeColorsConfig,
-    /// Jump-mode labels to overlay on the cell source (`app.jump_labels`).
+    /// Jump-mode labels to overlay on the cell source (`app.jump.labels`).
     /// Empty slice when not in Jump mode.
     pub jump_labels: &'a [(usize, String)],
-    /// Characters typed so far in Jump mode (`app.jump_typed`).
+    /// Characters typed so far in Jump mode (`app.jump.typed`).
     pub jump_typed: &'a str,
 }
 

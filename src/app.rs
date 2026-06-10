@@ -17,7 +17,6 @@ use crate::{
     input,
     keymap::Keymap,
     kitty,
-    lang::lang_to_ext,
     lsp_manager::{DiagnosticSeverity, LspManager},
     mode::Mode,
     notebook::Notebook,
@@ -120,18 +119,65 @@ impl Default for SearchState {
 }
 
 // ---------------------------------------------------------------------------
-// Cell edit session
+// Grouped sub-state
 // ---------------------------------------------------------------------------
 
-/// Tracks the notebook cell currently loaded into `app.buffer`.
-pub struct CellEditSession {
-    pub cell_index: usize,
-    /// Kernel language, e.g. `"python"` — becomes the LSP `languageId`.
-    pub language: String,
-    /// Path of the parent notebook — becomes the `notebookDocument` URI.
-    pub notebook_path: std::path::PathBuf,
-    /// True while the full-screen cell overlay (Enter from notebook nav) is active.
-    pub focused_edit: bool,
+/// Terminal-graphics (Kitty/WezTerm) image state.
+pub struct GraphicsState {
+    /// Which terminal graphics backend is available (Kitty, WezTerm, or none).
+    /// Detected once at startup from environment variables.
+    pub terminal: kitty::GraphicsTerminal,
+    /// Image draw requests collected by the last notebook render pass.
+    pub pending: Vec<ImageRequest>,
+    /// Maps Arc-pointer-as-usize → Kitty image ID so pixel data is uploaded
+    /// only once per image.  Must be cleared whenever outputs change or the
+    /// terminal is resized (Kitty evicts pixel cache on resize).
+    pub image_ids: std::collections::HashMap<usize, u32>,
+    /// Counter for assigning unique Kitty image IDs (wraps at u32::MAX).
+    pub next_id: u32,
+    /// Terminal size at the last frame images were uploaded.  Used to detect
+    /// resizes that invalidate Kitty's pixel cache.
+    pub last_size: (u16, u16),
+    /// Actual terminal cell pixel dimensions `(cell_h_px, cell_w_px)` queried
+    /// from the OS via TIOCGWINSZ.  Used to size image placeholders precisely
+    /// so they match what Kitty renders.  `None` until first successful query.
+    pub cell_pixel_size: Option<(u16, u16)>,
+}
+
+impl Default for GraphicsState {
+    fn default() -> Self {
+        Self {
+            terminal: kitty::GraphicsTerminal::detect(),
+            pending: Vec::new(),
+            image_ids: std::collections::HashMap::new(),
+            next_id: 1,
+            last_size: (0, 0),
+            cell_pixel_size: None,
+        }
+    }
+}
+
+/// LSP completion-popup bookkeeping.
+#[derive(Default)]
+pub struct CompletionState {
+    /// Word prefix at which the last completion popup was dismissed due to no
+    /// matches.  While the current prefix extends this value, we skip firing new
+    /// completion requests — typing more characters can only reduce results further.
+    /// Cleared on Backspace, non-identifier chars, and trigger chars (`.` / `:`).
+    pub suppressed_prefix: Option<String>,
+    /// Absolute `items` index of the completion item awaiting a
+    /// `completionItem/resolve` reply (for the `K` doc panel). At most one
+    /// resolve is in flight; the reply fills this item's documentation.
+    pub pending_resolve: Option<usize>,
+}
+
+/// `gw` label-jump transient state.
+#[derive(Default)]
+pub struct JumpState {
+    /// (char_pos, label) pairs computed when entering Jump mode.
+    pub labels: Vec<(usize, String)>,
+    /// Characters typed so far in Jump mode (used to filter labels).
+    pub typed: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,27 +204,13 @@ pub struct App {
     pub keymap: Keymap,
     /// Loaded notebook + UI state, present when a `.ipynb` file is opened.
     pub notebook: Option<(Notebook, NotebookState)>,
-    /// Image draw requests collected by the last notebook render pass.
-    pub pending_images: Vec<ImageRequest>,
-    /// Maps Arc-pointer-as-usize → Kitty image ID so pixel data is uploaded
-    /// only once per image.  Must be cleared whenever outputs change or the
-    /// terminal is resized (Kitty evicts pixel cache on resize).
-    pub kitty_image_ids: std::collections::HashMap<usize, u32>,
-    /// Counter for assigning unique Kitty image IDs (wraps at u32::MAX).
-    pub next_kitty_id: u32,
-    /// Terminal size at the last frame images were uploaded.  Used to detect
-    /// resizes that invalidate Kitty's pixel cache.
-    pub kitty_last_size: (u16, u16),
-    /// Actual terminal cell pixel dimensions `(cell_h_px, cell_w_px)` queried
-    /// from the OS via TIOCGWINSZ.  Used to size image placeholders precisely
-    /// so they match what Kitty renders.  `None` until first successful query.
-    pub cell_pixel_size: Option<(u16, u16)>,
-    /// Which terminal graphics backend is available (Kitty, WezTerm, or none).
-    /// Detected once at startup from environment variables.
-    pub graphics_terminal: kitty::GraphicsTerminal,
-    /// Tracks which cell is loaded in `buffer` and whether the full-screen
-    /// overlay is active. Always `Some` while a notebook is open.
-    pub notebook_cell_edit: Option<CellEditSession>,
+    /// Terminal-graphics (Kitty/WezTerm) image state.
+    pub graphics: GraphicsState,
+    /// True while the full-screen focused-cell overlay (Enter from notebook nav)
+    /// is active. Only meaningful while a notebook is open. The cell currently
+    /// loaded into `buffer` is identified by the open notebook's
+    /// `state.focused_cell` — see [`App::notebook_language`] / cell virtual paths.
+    pub cell_focused_edit: bool,
     /// Active floating popup overlay, if any.
     pub popup: Option<crate::popup::Popup>,
     /// LSP client manager — one server per language.
@@ -198,12 +230,10 @@ pub struct App {
     /// Current git branch name (read at startup, refreshed on write).
     pub git_branch: Option<String>,
     /// Code actions returned by the last LSP `textDocument/codeAction` request.
-    /// Indexed by popup item payload (as a string-encoded usize).
+    /// Indexed by the popup item's `ConfirmPayload::CodeAction(idx)`.
     pub pending_code_actions: Vec<serde_json::Value>,
-    /// (char_pos, label) pairs computed when entering Jump mode.
-    pub jump_labels: Vec<(usize, String)>,
-    /// Characters typed so far in Jump mode (used to filter labels).
-    pub jump_typed: String,
+    /// `gw` label-jump transient state.
+    pub jump: JumpState,
     /// Set after suspending and resuming the terminal (e.g. external file picker).
     /// Causes the render loop to call `terminal.clear()` once to force a full repaint.
     pub needs_clear: bool,
@@ -228,15 +258,11 @@ pub struct App {
     pub special_buffer_ropes: std::collections::HashMap<String, ropey::Rope>,
     /// When true, the next `FormattingResult` event will also trigger a save.
     pub pending_format_save: bool,
-    /// Word prefix at which the last completion popup was dismissed due to no
-    /// matches.  While the current prefix extends this value, we skip firing new
-    /// completion requests — typing more characters can only reduce results further.
-    /// Cleared on Backspace, non-identifier chars, and trigger chars (`.` / `:`).
-    pub completion_suppressed_prefix: Option<String>,
-    /// Absolute `items` index of the completion item awaiting a
-    /// `completionItem/resolve` reply (for the `K` doc panel). At most one
-    /// resolve is in flight; the reply fills this item's documentation.
-    pub pending_completion_resolve: Option<usize>,
+    /// LSP completion-popup bookkeeping (suppression prefix + in-flight resolve).
+    pub completion: CompletionState,
+    /// Active call signature shown in the minibuffer while typing arguments in
+    /// Insert mode (from `textDocument/signatureHelp`). `None` when not in a call.
+    pub signature_help: Option<String>,
     /// In-memory stash of notebooks that have been navigated away from.
     /// Keyed by the canonicalized `.ipynb` path.  When the user navigates back
     /// to a notebook, its state is restored from here rather than reloading from
@@ -264,17 +290,20 @@ pub struct App {
 impl App {
     /// Returns true when the focused-cell full-screen overlay is active.
     pub fn notebook_focused_edit(&self) -> bool {
-        self.notebook_cell_edit
+        self.notebook.is_some() && self.cell_focused_edit
+    }
+
+    /// The kernel language of the open notebook (e.g. `"python"`), if any.
+    /// This is the LSP `languageId` for every code cell.
+    pub fn notebook_language(&self) -> Option<&str> {
+        self.notebook
             .as_ref()
-            .map_or(false, |s| s.focused_edit)
+            .map(|(nb, _)| nb.metadata.kernel_language.as_str())
     }
 
     /// The language id for the document currently in the editor buffer.
     pub fn current_language(&self) -> Option<&str> {
-        if let Some(ref session) = self.notebook_cell_edit {
-            return Some(&session.language);
-        }
-        self.lsp_language.as_deref()
+        self.notebook_language().or(self.lsp_language.as_deref())
     }
 
     /// Create a new App, loading `path` if provided.
@@ -295,29 +324,15 @@ impl App {
         };
 
         // For notebooks, pre-load cell 0 into the buffer so editing works immediately.
-        let (buffer, notebook_cell_edit, lsp_language) = if let Some((ref nb, _)) = notebook {
+        let (buffer, lsp_language) = if let Some((ref nb, _)) = notebook {
             let lang = nb.metadata.kernel_language.clone();
-            let ext = lang_to_ext(&lang);
-            let stem = nb.path.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "notebook".into());
-            let dir = nb.path.parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let vpath = dir.join(format!("{stem}__cell0.{ext}"));
+            let vpath = crate::notebook::cell_virtual_path(&nb.path, &lang, 0);
             let mut buf = Buffer::new_empty();
             if let Some(cell) = nb.cells.first() {
                 buf.rope = cell.source.clone();
             }
-            buf.path = Some(vpath.clone());
-            let session = nb.cells.first().map(|_cell| CellEditSession {
-                cell_index: 0,
-                language: lang.clone(),
-                notebook_path: nb.path.clone(),
-                focused_edit: false,
-            });
-            (buf, session, Some(lang))
+            buf.path = Some(vpath);
+            (buf, Some(lang))
         } else {
             let buf = match path {
                 Some(p) => Buffer::from_path(p).unwrap_or_else(|_| {
@@ -328,7 +343,7 @@ impl App {
                 None => Buffer::new_empty(),
             };
             let lang = language_for_path(buf.path.as_deref()).map(str::to_owned);
-            (buf, None, lang)
+            (buf, lang)
         };
 
         let mut highlighter = Highlighter::new(buffer.path.as_deref());
@@ -381,13 +396,8 @@ impl App {
             config,
             keymap,
             notebook,
-            pending_images: Vec::new(),
-            kitty_image_ids: std::collections::HashMap::new(),
-            next_kitty_id: 1,
-            kitty_last_size: (0, 0),
-            cell_pixel_size: None,
-            graphics_terminal: kitty::GraphicsTerminal::detect(),
-            notebook_cell_edit,
+            graphics: GraphicsState::default(),
+            cell_focused_edit: false,
             popup: None,
             lsp: LspManager::new(),
             lsp_language,
@@ -398,8 +408,7 @@ impl App {
             git_diff,
             git_branch: crate::git::current_branch(),
             pending_code_actions: Vec::new(),
-            jump_labels: Vec::new(),
-            jump_typed: String::new(),
+            jump: JumpState::default(),
             needs_clear: false,
             highlights_dirty: false,
             diag_by_line: std::collections::HashMap::new(),
@@ -412,8 +421,8 @@ impl App {
             messages_log: Vec::new(),
             last_logged_message: None,
             pending_format_save: false,
-            completion_suppressed_prefix: None,
-            pending_completion_resolve: None,
+            completion: CompletionState::default(),
+            signature_help: None,
             notebook_buffers: std::collections::HashMap::new(),
             recovery,
             pending_recoveries: std::collections::VecDeque::new(),
@@ -426,10 +435,7 @@ impl App {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
                     "*scratch*".to_string(),
-                    ropey::Rope::from_str(
-                        ";; This buffer is for notes you don't want to save.\n\
-                         ;; Use it for scratch text.\n",
-                    ),
+                    ropey::Rope::from_str(crate::exec::SCRATCH_INTRO),
                 );
                 m
             },
@@ -577,7 +583,7 @@ fn run_loop(
         // Used to size image placeholders to match Kitty's rendering exactly.
         if let Ok(ws) = crossterm::terminal::window_size() {
             if ws.columns > 0 && ws.rows > 0 && ws.width > 0 && ws.height > 0 {
-                app.cell_pixel_size = Some((ws.height / ws.rows, ws.width / ws.columns));
+                app.graphics.cell_pixel_size = Some((ws.height / ws.rows, ws.width / ws.columns));
             }
         }
         crate::exec::update_scroll(app);
@@ -657,12 +663,12 @@ fn run_loop(
                             scroll_row: app.scroll_row,
                             mode: &app.mode,
                             mode_colors: &app.config.theme.modes,
-                            jump_labels: &app.jump_labels,
-                            jump_typed: &app.jump_typed,
+                            jump_labels: &app.jump.labels,
+                            jump_typed: &app.jump.typed,
                         };
                         let (images, cursor_pos) =
-                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook, app.cell_pixel_size);
-                        app.pending_images = images;
+                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook, app.graphics.cell_pixel_size);
+                        app.graphics.pending = images;
                         nb_cursor = cursor_pos;
 
                         let status_area = ratatui::layout::Rect {
@@ -677,53 +683,10 @@ fn run_loop(
                             width: size.width,
                             height: 1,
                         };
-                        let kernel = match nb.kernel.as_ref().map(|k| &k.status) {
-                            Some(crate::notebook::KernelStatus::Idle) => crate::statusline::KernelView::Idle,
-                            Some(crate::notebook::KernelStatus::Busy) => crate::statusline::KernelView::Busy,
-                            Some(crate::notebook::KernelStatus::Dead) => crate::statusline::KernelView::Dead,
-                            None => crate::statusline::KernelView::None,
-                        };
-
-                        // Diagnostics summed across all cells' virtual paths.
-                        let (mut diag_errors, mut diag_warnings) = (0usize, 0usize);
-                        for idx in 0..nb.cells.len() {
-                            let vpath = crate::notebook::cell_virtual_path(
-                                &nb.path, &nb.metadata.kernel_language, idx,
-                            );
-                            if let Some(diags) = app.lsp.diagnostics.get(&crate::lsp::diagnostic_key(&vpath)) {
-                                use crate::lsp_manager::DiagnosticSeverity;
-                                diag_errors += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
-                                diag_warnings += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Warning).count();
-                            }
-                        }
-
-                        // Focused-cell cursor position (for the position/scroll modules).
-                        let rope = &app.buffer.rope;
-                        let cpos = app.selection.head.min(rope.len_chars());
-                        let line_idx = if rope.len_chars() == 0 { 0 } else { rope.char_to_line(cpos) };
-                        let line_start = if rope.len_chars() == 0 { 0 } else { rope.line_to_char(line_idx) };
-                        let total_lines = rope.len_lines().max(1);
-
-                        let filename = nb.path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("notebook.ipynb")
-                            .to_string();
-
-                        let ctx = crate::statusline::Ctx {
-                            mode_label: app.mode.label().to_string(),
-                            mode_color: crate::theme::mode_color(&app.mode, &app.config.theme.modes),
-                            filename,
-                            modified: nb.modified,
-                            branch: app.git_branch.clone(),
-                            diag_errors,
-                            diag_warnings,
-                            line: line_idx + 1,
-                            col: cpos.saturating_sub(line_start) + 1,
-                            scroll_pct: (line_idx * 100) / total_lines,
-                            spinner: app.spinner.glyph(),
-                            cell: Some((state.focused_cell + 1, nb.cells.len().max(1))),
-                            kernel: Some(kernel),
-                        };
+                        // Status-line context is built the same way for both the
+                        // plain editor and the notebook view (see ui::status_ctx);
+                        // only the module *layout* differs (notebook variant here).
+                        let ctx = ui::status_ctx(app);
                         crate::statusline::render(
                             f, status_area, &ctx,
                             &app.config.statusline.notebook.left,
@@ -742,39 +705,39 @@ fn run_loop(
             // If the terminal was resized, Kitty evicts its pixel cache, so
             // any cached image IDs are invalid — flush them before placing.
             let cur_size = (app.viewport_width as u16, app.viewport_height as u16);
-            if cur_size != app.kitty_last_size {
-                app.kitty_image_ids.clear();
-                app.kitty_last_size = cur_size;
+            if cur_size != app.graphics.last_size {
+                app.graphics.image_ids.clear();
+                app.graphics.last_size = cur_size;
             }
 
             // Clear visible placements so images that scrolled off screen
             // (or were replaced) disappear.  q=2 suppresses OK responses.
             // Always clear in notebook mode so that cell-output clears take
             // effect even when kitty_image_ids was just emptied by the command.
-            if app.graphics_terminal.supports_graphics()
+            if app.graphics.terminal.supports_graphics()
                 && (app.notebook.is_some()
-                    || !app.pending_images.is_empty()
-                    || !app.kitty_image_ids.is_empty())
+                    || !app.graphics.pending.is_empty()
+                    || !app.graphics.image_ids.is_empty())
             {
                 let _ = kitty::clear_images();
             }
 
-            if app.graphics_terminal.supports_graphics()
-                && !app.pending_images.is_empty()
+            if app.graphics.terminal.supports_graphics()
+                && !app.graphics.pending.is_empty()
                 && app.popup.is_none()
             {
-                let images = std::mem::take(&mut app.pending_images);
+                let images = std::mem::take(&mut app.graphics.pending);
                 for req in &images {
                     let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
-                    if let Some(&kid) = app.kitty_image_ids.get(&ptr_key) {
+                    if let Some(&kid) = app.graphics.image_ids.get(&ptr_key) {
                         // Pixel data already cached in the terminal — re-place cheaply.
                         let _ = kitty::place_image(req.col, req.row, kid, req.rows, req.cols);
                     } else {
                         // First time seeing this image — upload pixel data once.
-                        let kid = app.next_kitty_id;
-                        app.next_kitty_id = if app.next_kitty_id == u32::MAX { 1 } else { app.next_kitty_id + 1 };
+                        let kid = app.graphics.next_id;
+                        app.graphics.next_id = if app.graphics.next_id == u32::MAX { 1 } else { app.graphics.next_id + 1 };
                         let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, &req.png_data);
-                        app.kitty_image_ids.insert(ptr_key, kid);
+                        app.graphics.image_ids.insert(ptr_key, kid);
                     }
                 }
 
@@ -790,7 +753,7 @@ fn run_loop(
                     let _ = out.flush();
                 }
             } else {
-                app.pending_images.clear();
+                app.graphics.pending.clear();
             }
         } else {
             // Plain text editor or full-screen focused-cell overlay.

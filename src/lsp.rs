@@ -27,6 +27,8 @@ pub enum PendingKind {
     /// `completionItem/resolve` — enrich a completion item with documentation.
     CompletionResolve,
     Hover,
+    /// `textDocument/signatureHelp` — call-argument hints shown in the minibuffer.
+    SignatureHelp,
     Definition,
     References,
     TypeDefinition,
@@ -201,6 +203,13 @@ impl LspClient {
         }), PendingKind::Hover)
     }
 
+    pub fn request_signature_help(&mut self, uri: &str, line: u32, character: u32) -> u64 {
+        self.send_request("textDocument/signatureHelp", json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character }
+        }), PendingKind::SignatureHelp)
+    }
+
     pub fn request_definition(&mut self, uri: &str, line: u32, character: u32) -> u64 {
         self.send_request("textDocument/definition", json!({
             "textDocument": { "uri": uri },
@@ -279,6 +288,9 @@ impl LspClient {
     }
 
     pub fn notebook_did_open(&mut self, notebook_uri: &str, version: i32, cells: &[NotebookCell]) {
+        // Track the notebook itself so `is_doc_open(notebook_uri)` answers whether
+        // THIS server has the notebook open (notebook sync is per-server state).
+        self.doc_versions.insert(notebook_uri.to_owned(), version);
         let nb_cells: Vec<Value> = cells
             .iter()
             .map(|c| json!({"kind": c.kind, "document": c.uri}))
@@ -340,6 +352,7 @@ impl LspClient {
     }
 
     pub fn notebook_did_close(&mut self, notebook_uri: &str, cell_uris: &[String]) {
+        self.doc_versions.remove(notebook_uri);
         let cell_docs: Vec<Value> = cell_uris
             .iter()
             .map(|uri| {
