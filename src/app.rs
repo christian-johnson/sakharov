@@ -258,6 +258,11 @@ pub struct App {
     /// to a notebook, its state is restored from here rather than reloading from
     /// disk, so unsaved edits are preserved across buffer switches.
     pub notebook_buffers: std::collections::HashMap<std::path::PathBuf, (Notebook, NotebookState)>,
+    /// In-memory stash of plain-file buffers navigated away from, keyed by
+    /// canonicalized path.  Preserves unsaved edits and undo history across
+    /// buffer switches (the file is otherwise reloaded from disk).  Entries
+    /// are removed when restored or when the buffer is closed with `:bd`.
+    pub file_buffers: std::collections::HashMap<std::path::PathBuf, Buffer>,
     /// Crash-recovery bookkeeping (recovery dir, debounce, written-file index).
     pub recovery: crate::recovery::Recovery,
     /// Recovery prompts queued at startup / on open, shown one at a time.
@@ -413,6 +418,7 @@ impl App {
             completion: CompletionState::default(),
             signature_help: None,
             notebook_buffers: std::collections::HashMap::new(),
+            file_buffers: std::collections::HashMap::new(),
             recovery,
             pending_recoveries: std::collections::VecDeque::new(),
             active_recovery: None,

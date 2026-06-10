@@ -243,6 +243,22 @@ fn collect_entries(app: &App) -> Vec<Entry> {
         }
     }
 
+    // Stashed plain-file buffers (navigated away from but still in memory).
+    for (path, buf) in &app.file_buffers {
+        if !buf.modified {
+            continue;
+        }
+        entries.push(Entry {
+            key: path_key(path),
+            record: RecoveryRecord {
+                kind: "file".into(),
+                original_path: Some(abs_string(path)),
+                saved_at_unix: now,
+                content: buf.rope.to_string(),
+            },
+        });
+    }
+
     // Stashed notebooks (navigated away from but still in memory).
     for (path, (nb, _)) in &app.notebook_buffers {
         let is_active = app

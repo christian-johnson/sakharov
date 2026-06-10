@@ -78,14 +78,15 @@ These commands enter a sub-mode that awaits a second key.
 
 | Command | Default Key | Vim Alias | Description |
 |---------|-------------|-----------|-------------|
-| `write` | `ctrl+s` | `:w` | Write (save) current file (`save` is a backward-compat alias) |
+| `write` | `ctrl+s` | `:w` | Write (save) current file; refuses if the file changed on disk since it was loaded (`save` is a backward-compat alias) |
+| `write-force` | — | `:w!` | Write current file, overwriting any external changes |
 | `write-as <path>` | — | `:w <path>` | Write to a new path |
 | `new-file` | — | `:new`, `:newfile` | Prompt in the minibuffer for a filename, then create a new empty file in the current buffer's directory (cwd for special buffers) and switch to it |
 | `new-notebook` | — | `:new-nb`, `:newnotebook` | Prompt in the minibuffer for a filename, then create a new empty `.ipynb` notebook in the current buffer's directory (cwd for special buffers) and open it (`.ipynb` appended if omitted) |
 | `open-file-picker` | `ctrl+o` | `:e` | Open a file (built-in fuzzy picker, or external via `editor.file_picker` config) |
-| `quit` | — | `:q` | Quit (fails if there are unsaved changes) |
+| `quit` | — | `:q` | Quit (fails if *any* buffer in the session — active or stashed — has unsaved changes) |
 | `force-quit` | — | `:q!` | Quit without saving |
-| `write-quit` | — | `:wq`, `:x` | Write then quit |
+| `write-quit` | — | `:wq`, `:x` | Write the active buffer, then quit if no other buffer has unsaved changes |
 | `buffer-close` | — | `:bd` | Close the current buffer; warns if modified |
 | `buffer-force-close` | — | `:bd!` | Close the current buffer, discarding unsaved changes |
 | `buffer-next` | `L` | `:bn` | Switch to the next open buffer |

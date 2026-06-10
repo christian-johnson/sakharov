@@ -210,11 +210,28 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   default (`["numpy"]`) makes jedi resolve numpy by importing it, which cannot enumerate numpy's
   lazily-bound submodules (`np.random`/`np.fft`/`np.ma` would return zero completions/hovers/
   signatures). Static analysis handles numpy correctly.
-- **Python venv is required, never the system interpreter** — `lsp_manager::detect_python_venv` walks up from the
-  file's/notebook's location for `.venv`/`venv`/`.env`/`env`; the path is passed to the server as the jedi
-  environment. If no venv is found, the Python language server is **not started** (no autocomplete is preferred
-  over autocomplete resolved against the wrong/system environment). The notebook *kernel* (`find_python_executable`)
-  is separate and still falls back to system `python3` for execution.
+- **Python venv is required, never the system interpreter** — `notebook::venv_python_up` (the single
+  venv discovery shared by the LSP and the kernel) walks up from the file's/notebook's location for
+  `.venv`/`venv`/`.env`/`env`; the path is passed to the server as the jedi environment. If no venv is
+  found, the Python language server is **not started** (no autocomplete is preferred over autocomplete
+  resolved against the wrong/system environment). The notebook *kernel* (`find_python_executable`)
+  uses the same discovery but still falls back to system `python3` for execution.
+
+### Data safety (Phase B hardening)
+- **Buffer switching never loses edits**: plain-file buffers are stashed in memory
+  (`app.file_buffers`, keyed by canonical path — rope, modified flag, *and* undo history) when
+  navigated away from, and restored on return; notebooks were already stashed in
+  `app.notebook_buffers`. `:bd` removes the stash entry.
+- **`:q` sweeps every buffer** (`exec::unsaved_buffer_names`): the active buffer/notebook, stashed
+  notebooks, and stashed plain files. Any unsaved one blocks quit (`:q!` forces). `:wq` saves the
+  active buffer and refuses to quit while others are dirty. Special buffers are exempt by design.
+- **Saves are atomic** (`buffer::atomic_write`: temp file + fsync + rename, permissions preserved)
+  for both plain files and notebooks — a crash mid-save can't truncate the file.
+- **External-modification check**: `Buffer::save` records the file's mtime at load/save and refuses
+  a plain `:w` when the file changed on disk since (message suggests `:w!` / `Command::WriteForce`).
+  `Buffer::refresh_disk_mtime` re-arms the check after a shell formatter legitimately rewrites the file.
+- **LSP URIs are percent-encoded** (`lsp::path_to_uri`/`uri_to_path`) so paths with spaces or
+  non-ASCII work; `diagnostic_key` round-trips through the same transform.
 
 ### Known rough edges / not yet implemented
 - No split panes

@@ -501,9 +501,47 @@ pub fn resolve_path(path: &std::path::Path) -> std::path::PathBuf {
     abs.canonicalize().unwrap_or(abs)
 }
 
-/// Convert a filesystem path to an LSP `file://` URI.
+/// Percent-encode a filesystem path for use in a `file://` URI.
+/// Keeps RFC 3986 unreserved characters and `/`; encodes everything else
+/// (spaces, non-ASCII, …) byte-wise as `%XX`.
+fn percent_encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for &b in path.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'.' | b'_' | b'~' | b'/' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Decode `%XX` escapes in a URI path back to bytes (lossy on invalid UTF-8).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            // `.get` also guards against non-char-boundary slices after `%`.
+            if let Some(b) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Convert a filesystem path to an LSP `file://` URI (percent-encoded).
 pub fn path_to_uri(path: &std::path::Path) -> String {
-    format!("file://{}", resolve_path(path).display())
+    format!(
+        "file://{}",
+        percent_encode_path(&resolve_path(path).to_string_lossy())
+    )
 }
 
 /// String key under which diagnostics for `path` are stored.
@@ -517,7 +555,8 @@ pub fn diagnostic_key(path: &std::path::Path) -> String {
 }
 
 pub fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
-    uri.strip_prefix("file://").map(std::path::PathBuf::from)
+    uri.strip_prefix("file://")
+        .map(|p| std::path::PathBuf::from(percent_decode(p)))
 }
 
 /// Convert a rope char-index to an LSP `(line, character)` position.
@@ -576,5 +615,16 @@ mod tests {
         // round-trip through the URI transform.
         let vpath = std::env::temp_dir().join("sv_nb__cell0.py");
         assert_eq!(diagnostic_key(&vpath), store_key(&vpath));
+    }
+
+    #[test]
+    fn uri_round_trips_spaces_and_non_ascii() {
+        let p = std::env::temp_dir().join("my nötebook (v2).ipynb");
+        let uri = path_to_uri(&p);
+        // The URI itself must not contain raw spaces (breaks LSP servers).
+        assert!(!uri.contains(' '), "uri must be percent-encoded: {uri}");
+        // …and must decode back to the same path / diagnostic key.
+        assert_eq!(uri_to_path(&uri).unwrap(), resolve_path(&p));
+        assert_eq!(diagnostic_key(&p), store_key(&p));
     }
 }

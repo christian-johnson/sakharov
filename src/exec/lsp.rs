@@ -506,11 +506,17 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
         return;
     }
 
+    let Some(path_str) = path.to_str() else {
+        app.message = Some(format!("Cannot open: {}", path.display()));
+        return;
+    };
+
     // Save scratch content when leaving it.
     super::save_current_special_buffer(app);
 
     // If a notebook is open, tear it down cleanly before loading a plain file.
-    if app.notebook.is_some() {
+    let had_notebook = app.notebook.is_some();
+    if had_notebook {
         // Preserve the .ipynb path in the buffer list before stashing.
         if let Some((ref nb, _)) = app.notebook {
             let nb_path = nb.path.clone();
@@ -528,17 +534,24 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
         app.lsp.did_close(lang, old_path);
     }
 
-    let new_buffer = match path.to_str() {
-        Some(s) => Buffer::from_path(s).unwrap_or_else(|_| {
+    // Keep the outgoing plain buffer's unsaved edits (and undo history) in
+    // memory.  After a notebook teardown `app.buffer` holds stale cell text
+    // under a virtual path — never stash that.
+    if !had_notebook {
+        super::stash_current_file_buffer(app);
+    }
+
+    // Restore the target from its stash when we've visited it before;
+    // otherwise load from disk.
+    let stashed = super::take_stashed_file_buffer(app, path);
+    let from_stash = stashed.is_some();
+    let new_buffer = stashed.unwrap_or_else(|| {
+        Buffer::from_path(path_str).unwrap_or_else(|_| {
             let mut b = Buffer::new_empty();
             b.path = Some(path.to_path_buf());
             b
-        }),
-        None => {
-            app.message = Some(format!("Cannot open: {}", path.display()));
-            return;
-        }
-    };
+        })
+    });
 
     app.buffer = new_buffer;
     app.selection = Selection::point(0);
@@ -575,7 +588,11 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     app.message = Some(format!("Opened {} (line {})", name, line + 1));
 
     // If a recovery file from a previous crash exists for this path, offer it.
-    crate::recovery::offer_on_open(app, path);
+    // Skipped when restoring from the in-session stash: the stash already
+    // carries the unsaved edits the recovery file mirrors.
+    if !from_stash {
+        crate::recovery::offer_on_open(app, path);
+    }
 }
 
 /// Apply a code action selected from the popup.
@@ -682,7 +699,7 @@ fn apply_workspace_edit(app: &mut App, edit: Value) {
 
 /// Perform a plain buffer save (no format step) — used by the format-on-save path.
 fn do_save(app: &mut App) {
-    match app.buffer.save(None) {
+    match app.buffer.save(None, false) {
         Ok(()) => {
             app.message = Some(format!("Saved {}", app.buffer.display_name()));
             if let Some(ref path) = app.buffer.path.clone() {

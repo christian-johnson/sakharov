@@ -79,6 +79,7 @@ commands! {
     units: {
         // --- File / application ---
         Write => "write", aliases: ["save"], palette: "Write file  [ctrl+s, :w]";
+        WriteForce => "write-force", aliases: ["w!"], palette: "Write file, overwriting external changes  [:w!]";
         Quit => "quit", aliases: ["q"], palette: "Quit  [:q]";
         ForceQuit => "force-quit", aliases: ["q!"], palette: "Quit without saving  [:q!]";
         WriteQuit => "write-quit", aliases: ["wq", "x"], palette: "Write and quit  [:wq]";

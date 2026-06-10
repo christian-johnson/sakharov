@@ -26,6 +26,39 @@ pub struct Buffer {
     undo_stack: VecDeque<Rope>,
     /// Redo stack: states pushed when undo is performed.
     redo_stack: Vec<Rope>,
+    /// The file's mtime as of the last load/save.  Used to detect external
+    /// modification before overwriting on save.  `None` for new/unsaved files.
+    disk_mtime: Option<std::time::SystemTime>,
+}
+
+/// Read a path's mtime, or `None` when it doesn't exist / can't be statted.
+fn mtime_of(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Atomically replace `path` with `text`: write to a temp file in the same
+/// directory, fsync, preserve the target's permissions, then rename over it.
+/// A crash mid-save can never leave a truncated file behind.
+pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("file"));
+    name.push(format!(".sv-tmp{}", std::process::id()));
+    let tmp = path.with_file_name(name);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+    }
+    // Keep the target's permissions (a plain create would reset them).
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 impl Buffer {
@@ -37,6 +70,7 @@ impl Buffer {
             modified: false,
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
+            disk_mtime: None,
         }
     }
 
@@ -48,13 +82,22 @@ impl Buffer {
         let path = PathBuf::from(path);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
+        let disk_mtime = mtime_of(&path);
         Ok(Self {
             rope: Rope::from_str(&text),
             path: Some(path),
             modified: false,
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
+            disk_mtime,
         })
+    }
+
+    /// Re-stat the backing file and record its mtime.  Call after an external
+    /// program (e.g. a shell formatter) legitimately rewrote the file and the
+    /// buffer was reloaded from it.
+    pub fn refresh_disk_mtime(&mut self) {
+        self.disk_mtime = self.path.as_deref().and_then(mtime_of);
     }
 
     /// Save the current rope state for undo before making an edit.
@@ -132,9 +175,12 @@ impl Buffer {
 
     /// Save the buffer to its path, or to `override_path` if given.
     ///
+    /// Refuses to overwrite when the file changed on disk since it was loaded
+    /// (unless `force`), so an external edit is never silently clobbered.
+    ///
     /// # Errors
-    /// Returns an error if writing fails.
-    pub fn save(&mut self, override_path: Option<&str>) -> Result<()> {
+    /// Returns an error if writing fails or the file was externally modified.
+    pub fn save(&mut self, override_path: Option<&str>, force: bool) -> Result<()> {
         let path = if let Some(p) = override_path {
             let pb = PathBuf::from(p);
             self.path = Some(pb.clone());
@@ -145,9 +191,23 @@ impl Buffer {
                 .context("no file path — use :w <path>")?
         };
 
+        // External-modification check applies only when writing back to the
+        // file this buffer was loaded from.
+        if !force && override_path.is_none() {
+            if let Some(loaded) = self.disk_mtime {
+                if mtime_of(&path).is_some_and(|now| now != loaded) {
+                    anyhow::bail!(
+                        "{} changed on disk since it was loaded — :w! to overwrite",
+                        path.display()
+                    );
+                }
+            }
+        }
+
         let text = self.rope.to_string();
-        std::fs::write(&path, text)
+        atomic_write(&path, &text)
             .with_context(|| format!("failed to write {}", path.display()))?;
+        self.disk_mtime = mtime_of(&path);
         self.modified = false;
         Ok(())
     }

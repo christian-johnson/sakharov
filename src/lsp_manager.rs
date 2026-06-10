@@ -193,7 +193,7 @@ impl LspManager {
         // against, so we don't start the Python server at all (no autocomplete
         // is better than autocomplete against the wrong environment).
         let py_venv = if language == "python" {
-            match venv_root.and_then(detect_python_venv) {
+            match venv_root.and_then(crate::notebook::venv_python_up) {
                 Some(p) => Some(p),
                 None => return,
             }
@@ -970,28 +970,6 @@ fn build_init_options(
         }
         _ => None,
     }
-}
-
-/// Find a project virtualenv interpreter by walking up the directory tree from
-/// `start` (the file's own location). Returns the path to the venv's `python`
-/// binary, or `None` if no `.venv`/`venv`/`.env`/`env` exists in any ancestor.
-fn detect_python_venv(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let candidates = ["bin/python3", "bin/python", "Scripts/python.exe"];
-    let venv_dirs = [".venv", "venv", ".env", "env"];
-
-    let mut dir = Some(start.to_path_buf());
-    while let Some(d) = dir {
-        for venv in &venv_dirs {
-            for bin in &candidates {
-                let python = d.join(venv).join(bin);
-                if python.is_file() {
-                    return Some(python);
-                }
-            }
-        }
-        dir = d.parent().map(|p| p.to_path_buf());
-    }
-    None
 }
 
 fn strip_snippet_owned(s: &str) -> String {

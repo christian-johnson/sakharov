@@ -323,9 +323,10 @@ impl KernelSession {
 
     /// Send SIGINT to the child process (Unix/macOS).
     pub fn interrupt(&self) {
-        let _ = std::process::Command::new("kill")
-            .args(["-2", &self.child.id().to_string()])
-            .output();
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(self.child.id() as libc::pid_t, libc::SIGINT);
+        }
     }
 
     /// Returns `true` if the kernel process is still running.
@@ -716,29 +717,42 @@ pub fn find_python_executable(base: &Path) -> (String, bool) {
     }
 
     for root in &roots {
-        let mut dir = Some(root.as_path());
-        while let Some(d) = dir {
-            if let Some(python) = venv_python_in(d) {
-                return (python, true);
-            }
-            dir = d.parent();
+        if let Some(python) = venv_python_up(root) {
+            return (python.to_string_lossy().into_owned(), true);
         }
     }
 
     ("python3".to_string(), false)
 }
 
+/// Walk up the directory tree from `start` looking for a project virtualenv
+/// (`.venv`/`venv`/`.env`/`env`); return the path to its python interpreter.
+///
+/// This is the single venv discovery used by **both** the notebook kernel
+/// (`find_python_executable`) and the Python language server
+/// (`lsp_manager::ensure_server`), so the code the user runs and the
+/// environment jedi resolves against are always the same interpreter.
+pub fn venv_python_up(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        if let Some(python) = venv_python_in(d) {
+            return Some(python);
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 /// If `dir` directly contains a recognised virtualenv layout, return the path
 /// to its python interpreter.
-fn venv_python_in(dir: &Path) -> Option<String> {
-    let venv_names = [".venv", "venv", ".env", "env"];
-    for name in &venv_names {
+fn venv_python_in(dir: &Path) -> Option<PathBuf> {
+    for name in [".venv", "venv", ".env", "env"] {
         let venv = dir.join(name);
-        // Unix layout, then Windows (bin → Scripts).
-        for rel in ["bin/python", "bin/python3", "Scripts/python.exe"] {
+        // Unix layout (python3 preferred), then Windows (bin → Scripts).
+        for rel in ["bin/python3", "bin/python", "Scripts/python.exe"] {
             let candidate = venv.join(rel);
             if candidate.is_file() {
-                return Some(candidate.to_string_lossy().into_owned());
+                return Some(candidate);
             }
         }
     }
@@ -844,9 +858,10 @@ impl Notebook {
     }
 
     /// Serialise the notebook back to `self.path` as valid nbformat 4 JSON.
+    /// The write is atomic (temp + rename) so a crash can't truncate the file.
     pub fn save(&mut self) -> Result<()> {
         let serialised = self.to_nbformat_string()?;
-        std::fs::write(&self.path, serialised)
+        crate::buffer::atomic_write(&self.path, &serialised)
             .with_context(|| format!("writing notebook {}", self.path.display()))?;
         self.modified = false;
         Ok(())

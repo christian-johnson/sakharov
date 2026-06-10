@@ -49,13 +49,12 @@ pub(super) fn save_current_special_buffer(app: &mut App) {
 pub fn switch_to_special_buffer(app: &mut App, name: &str) {
     save_current_special_buffer(app);
 
-    // Stash any open notebook so edits are preserved if the user comes back.
     if app.notebook.is_some() {
+        // Stash the open notebook so edits are preserved if the user comes back.
+        // (After this, `app.buffer` holds stale cell text — do NOT stash it.)
         notebook::stash_current_notebook(app);
-    }
-
-    // Close LSP for the current plain-text buffer (notebooks are handled above).
-    if app.notebook.is_none() {
+    } else {
+        // Plain buffer: close it with the LSP and keep its unsaved edits in memory.
         if let (Some(ref lang), Some(ref old_path)) =
             (app.lsp_language.clone(), app.buffer.path.clone())
         {
@@ -63,6 +62,7 @@ pub fn switch_to_special_buffer(app: &mut App, name: &str) {
                 app.lsp.did_close(lang, old_path);
             }
         }
+        stash_current_file_buffer(app);
     }
 
     let rope = if name == "*scratch*" {
@@ -406,7 +406,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         // --- File / application ---
-        Command::Write => {
+        Command::Write | Command::WriteForce => {
+            let force = matches!(cmd, Command::WriteForce);
             if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
                 app.message = Some("Special buffer — nothing to save".into());
                 return;
@@ -450,7 +451,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     }
                 }
             } else {
-                match app.buffer.save(None) {
+                match app.buffer.save(None, force) {
                     Ok(()) => {
                         app.message = Some(format!("Saved {}", app.buffer.display_name()));
                         if let Some(ref path) = app.buffer.path.clone() {
@@ -469,7 +470,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::WriteAs(path) => {
             let path = path.clone();
-            match app.buffer.save(Some(&path)) {
+            match app.buffer.save(Some(&path), false) {
                 Ok(()) => {
                     app.message = Some(format!("Saved {path}"));
                     if let Some(ref p) = app.buffer.path {
@@ -492,15 +493,18 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::Quit => {
-            let modified = if let Some((ref nb, _)) = app.notebook {
-                nb.modified
-            } else {
-                app.buffer.modified
-            };
-            if modified {
-                app.message = Some("Unsaved changes — use :w to write, :q! to force quit".to_string());
-            } else {
+            // Sweep EVERY buffer in the session, not just the active one — a
+            // modified notebook or file stashed by a buffer switch would
+            // otherwise be silently discarded (and its recovery file deleted
+            // by the clean-exit cleanup).
+            let unsaved = unsaved_buffer_names(app);
+            if unsaved.is_empty() {
                 app.should_quit = true;
+            } else {
+                app.message = Some(format!(
+                    "Unsaved changes in {} — :w to write, :q! to force quit",
+                    unsaved.join(", ")
+                ));
             }
             return;
         }
@@ -509,22 +513,41 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::WriteQuit => {
-            if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
-                app.should_quit = true;
-                return;
-            }
-            if app.notebook.is_some() {
+            // Save the active buffer, then quit only if nothing else in the
+            // session still holds unsaved changes (stashed notebooks/files).
+            let saved = if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
+                true
+            } else if app.notebook.is_some() {
                 notebook::save_focused_cell(app);
                 if let Some((ref mut nb, _)) = app.notebook {
                     match nb.save() {
-                        Ok(()) => app.should_quit = true,
-                        Err(e) => app.message = Some(format!("Error: {e}")),
+                        Ok(()) => true,
+                        Err(e) => {
+                            app.message = Some(format!("Error: {e}"));
+                            false
+                        }
                     }
+                } else {
+                    false
                 }
             } else {
-                match app.buffer.save(None) {
-                    Ok(()) => app.should_quit = true,
-                    Err(e) => app.message = Some(format!("Error: {e}")),
+                match app.buffer.save(None, false) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        app.message = Some(format!("Error: {e}"));
+                        false
+                    }
+                }
+            };
+            if saved {
+                let unsaved = unsaved_buffer_names(app);
+                if unsaved.is_empty() {
+                    app.should_quit = true;
+                } else {
+                    app.message = Some(format!(
+                        "Saved — but unsaved changes remain in {} (:q! to discard)",
+                        unsaved.join(", ")
+                    ));
                 }
             }
             return;
@@ -587,7 +610,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 });
                 app.notebook_buffers.remove(&canon);
                 app.notebook_buffers.remove(p);
+                app.file_buffers.remove(&canon);
+                app.file_buffers.remove(p);
             }
+
+            // Drop the closed buffer's contents now: the buffer-switch below
+            // stashes whatever is in `app.buffer`, and the buffer we just
+            // closed must not be resurrected into the stash.
+            app.buffer = crate::buffer::Buffer::new_empty();
 
             // Pick the next buffer: prefer real files over *Messages*, fall back to *scratch*.
             let next = app.open_buffers.iter()
@@ -1128,12 +1158,15 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     // Stash or close whatever is currently open.
     if app.notebook.is_some() {
         notebook::stash_current_notebook(app);
-    } else if let (Some(ref lang), Some(ref old_path)) =
-        (app.lsp_language.clone(), app.buffer.path.clone())
-    {
-        if !is_special_path(old_path) {
-            app.lsp.did_close(lang, old_path);
+    } else {
+        if let (Some(ref lang), Some(ref old_path)) =
+            (app.lsp_language.clone(), app.buffer.path.clone())
+        {
+            if !is_special_path(old_path) {
+                app.lsp.did_close(lang, old_path);
+            }
         }
+        stash_current_file_buffer(app);
     }
 
     // Restore from stash if we've visited this notebook before (preserves unsaved edits).
@@ -1486,7 +1519,7 @@ fn run_shell_formatter(app: &mut App) -> bool {
     };
 
     // Save current buffer content to disk first so the formatter sees it.
-    if let Err(e) = app.buffer.save(None) {
+    if let Err(e) = app.buffer.save(None, false) {
         app.message = Some(format!("Could not save before formatting: {e}"));
         return true;
     }
@@ -1503,6 +1536,9 @@ fn run_shell_formatter(app: &mut App) -> bool {
                 Ok(content) => {
                     app.buffer.rope = ropey::Rope::from_str(&content);
                     app.buffer.modified = false;
+                    // The formatter rewrote the file; re-stat so the next save's
+                    // external-modification check doesn't false-positive.
+                    app.buffer.refresh_disk_mtime();
                     recompute_highlights(app);
                     lsp::lsp_did_change(app);
                     app.git_diff = crate::git::diff_marks(&path);
@@ -1622,6 +1658,66 @@ pub(crate) fn create_new_notebook(app: &mut App, name: &str) {
     app.message = Some(format!("Created {name}"));
 }
 
+/// Stash the current plain-file buffer so unsaved edits and undo history
+/// survive switching away (the buffer is otherwise reloaded from disk when the
+/// user comes back).  No-op for notebooks (stashed separately via
+/// `notebook::stash_current_notebook`), special buffers, and path-less buffers.
+/// Leaves `app.buffer` empty — every caller immediately replaces it.
+pub(crate) fn stash_current_file_buffer(app: &mut App) {
+    if app.notebook.is_some() {
+        return;
+    }
+    let Some(path) = app.buffer.path.clone() else { return };
+    if is_special_path(&path) {
+        return;
+    }
+    let key = path.canonicalize().unwrap_or(path);
+    let buf = std::mem::replace(&mut app.buffer, crate::buffer::Buffer::new_empty());
+    app.file_buffers.insert(key, buf);
+}
+
+/// Remove and return the stashed buffer for `path`, if one exists.
+pub(crate) fn take_stashed_file_buffer(
+    app: &mut App,
+    path: &std::path::Path,
+) -> Option<crate::buffer::Buffer> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    app.file_buffers.remove(&key)
+}
+
+/// Names of every buffer holding unsaved changes, anywhere in the session:
+/// the active buffer/notebook, stashed notebooks, and stashed plain files.
+/// Special buffers (scratch/messages) are excluded — they are throwaway by
+/// design and covered by crash recovery.
+pub(crate) fn unsaved_buffer_names(app: &App) -> Vec<String> {
+    fn short(p: &std::path::Path) -> String {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.to_string_lossy().into_owned())
+    }
+    let mut names = Vec::new();
+    if let Some((nb, _)) = &app.notebook {
+        if nb.modified {
+            names.push(short(&nb.path));
+        }
+    } else if app.buffer.modified {
+        if let Some(p) = app.buffer.path.as_deref().filter(|p| !is_special_path(p)) {
+            names.push(short(p));
+        }
+    }
+    for (path, (nb, _)) in &app.notebook_buffers {
+        if nb.modified {
+            names.push(short(path));
+        }
+    }
+    for (path, buf) in &app.file_buffers {
+        if buf.modified {
+            names.push(short(path));
+        }
+    }
+    names
+}
+
 /// Append `path` to `open_buffers` if it is not already present (by canonical path).
 fn register_buffer(open_buffers: &mut Vec<std::path::PathBuf>, path: &std::path::Path) {
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -1719,6 +1815,103 @@ mod tests {
         text::delete_selection(&mut app);
         assert_eq!(app.buffer.rope.len_chars(), 0);
         assert_eq!(app.selection.head, 0);
+    }
+
+    #[test]
+    fn buffer_switch_preserves_unsaved_edits() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("stash");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "alpha\n").unwrap();
+        std::fs::write(&b, "beta\n").unwrap();
+
+        lsp::open_file_at(&mut app, &a, 0, 0);
+        // Make an unsaved edit to a.txt.
+        app.buffer.insert(0, "EDIT ");
+        assert!(app.buffer.modified);
+
+        // Switch to b.txt and back — the edit must survive in memory.
+        lsp::open_file_at(&mut app, &b, 0, 0);
+        assert_eq!(app.buffer.rope.to_string(), "beta\n");
+        lsp::open_file_at(&mut app, &a, 0, 0);
+        assert_eq!(app.buffer.rope.to_string(), "EDIT alpha\n");
+        assert!(app.buffer.modified, "modified flag must survive the round trip");
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn quit_blocks_on_stashed_unsaved_buffer() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("quitsweep");
+        let a = dir.join("dirty.txt");
+        let b = dir.join("clean.txt");
+        std::fs::write(&a, "x\n").unwrap();
+        std::fs::write(&b, "y\n").unwrap();
+
+        lsp::open_file_at(&mut app, &a, 0, 0);
+        app.buffer.insert(0, "unsaved ");
+        // Stash the dirty buffer by switching away.
+        lsp::open_file_at(&mut app, &b, 0, 0);
+        assert!(!app.buffer.modified, "active buffer is clean");
+
+        // :q must refuse — the *stashed* buffer has unsaved changes.
+        execute(&mut app, &Command::Quit);
+        assert!(!app.should_quit, "quit must be blocked by stashed dirty buffer");
+        assert!(
+            app.message.as_deref().unwrap_or("").contains("dirty.txt"),
+            "message should name the dirty buffer: {:?}",
+            app.message
+        );
+
+        // :q! still force-quits.
+        execute(&mut app, &Command::ForceQuit);
+        assert!(app.should_quit);
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn save_refuses_external_modification_unless_forced() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("mtime");
+        let f = dir.join("conflict.txt");
+        std::fs::write(&f, "original\n").unwrap();
+
+        lsp::open_file_at(&mut app, &f, 0, 0);
+        app.buffer.insert(0, "mine ");
+
+        // Simulate an external edit (ensure a different mtime).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&f, "theirs\n").unwrap();
+        let bumped = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        let _ = std::fs::File::open(&f).and_then(|h| h.set_modified(bumped));
+
+        execute(&mut app, &Command::Write);
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "theirs\n",
+            ":w must not clobber an externally-modified file"
+        );
+        assert!(app.message.as_deref().unwrap_or("").contains("changed on disk"));
+
+        execute(&mut app, &Command::WriteForce);
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "mine original\n",
+            ":w! must overwrite"
+        );
+
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
