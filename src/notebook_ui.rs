@@ -395,13 +395,16 @@ fn render_cell_content(
     let editing_this = is_focused && matches!(active.mode, Mode::Insert | Mode::Select);
     let show_markdown = cell.cell_type == CellType::Markdown && cell.rendered && !editing_this;
 
-    // Suppress the cursor/selection in the rendered markdown view.
-    let (cursor_char_idx, sel_range, scroll_row) = if is_focused && !show_markdown {
+    // The cursor stays visible in the rendered markdown view too: rendering
+    // only restyles the source text (header colours, bold, …) — it never
+    // transforms it — so char indices map 1:1 to displayed characters and
+    // `j`/`k` passing through the cell keeps a visible cursor.
+    let (cursor_char_idx, sel_range, scroll_row) = if is_focused {
         let lo = active.cursor.min(active.sel_anchor);
         let hi = active.cursor.max(active.sel_anchor);
         (Some(active.cursor), (lo, hi), active.scroll_row)
     } else {
-        (None, (0usize, 0usize), if is_focused { active.scroll_row } else { 0 })
+        (None, (0usize, 0usize), 0)
     };
 
     let source_text = rope.to_string();
@@ -498,7 +501,6 @@ fn render_cell_content(
             let owned_end = if is_last_seg { line_len + 1 } else { segments[k + 1].0 };
 
             // Cursor screen position when the cursor sits on this row.
-            // (Suppressed in the rendered-markdown view: cursor_char_idx is None.)
             if let Some(ci) = cursor_char_idx {
                 if ci >= line_start_char + seg_off && ci < line_start_char + owned_end {
                     // Clamp a cursor on a break-consumed space to the row end.
@@ -1103,6 +1105,67 @@ mod tests {
         let code = make(CellType::Code, false);
         assert_eq!(cell_display_height(&code.source, &code, 40, None, inner_cols, false), 2 + 1);
         assert_eq!(cell_display_height(&code.source, &code, 40, None, inner_cols, true), 2 + expected_rows);
+    }
+
+    /// Navigating through a *rendered* markdown cell must keep the cursor
+    /// visible — the rendered view restyles the source without transforming
+    /// it, so the cursor maps 1:1. (Regression: it used to be suppressed,
+    /// vanishing while `j` passed through markdown cells.)
+    #[test]
+    fn cursor_is_visible_in_rendered_markdown_cell() {
+        let cell = Cell {
+            id: "m".into(),
+            cell_type: CellType::Markdown,
+            source: Rope::from_str("# Heading\n\nSome prose here."),
+            outputs: vec![],
+            execution_count: None,
+            rendered: true,
+        };
+        let nb = Notebook {
+            path: std::path::PathBuf::from("/tmp/cursor-test.ipynb"),
+            metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
+            cells: vec![cell],
+            modified: false,
+            kernel: None,
+        };
+        let state = NotebookState::new();
+        let rope = nb.cells[0].source.clone();
+        let mode = Mode::Normal;
+        let mode_colors = crate::config::ModeColorsConfig::default();
+        let active = ActiveCellView {
+            rope: &rope,
+            cursor: 2, // on the 'H' of "# Heading"
+            sel_anchor: 2,
+            scroll_row: 0,
+            mode: &mode,
+            mode_colors: &mode_colors,
+            jump_labels: &[],
+            jump_typed: "",
+            word_wrap: false,
+        };
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut cursor_pos = None;
+        terminal
+            .draw(|f| {
+                let (_imgs, cursor) = render(
+                    f,
+                    &state,
+                    &nb,
+                    &active,
+                    &std::collections::HashMap::new(),
+                    &crate::config::NotebookConfig::default(),
+                    None,
+                    &mut CellHighlightCache::default(),
+                );
+                cursor_pos = cursor;
+            })
+            .unwrap();
+
+        let (cx, cy) = cursor_pos.expect("cursor must be visible in a rendered markdown cell");
+        // Border (1) + 2-char pad + cursor col 2 within the first line.
+        assert_eq!((cx, cy), (1 + 2 + 2, 1));
     }
 
     #[test]
