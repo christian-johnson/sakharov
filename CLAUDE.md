@@ -170,12 +170,18 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   source (`rendered = false`). `:cell-md` converts a cell to markdown, `:cell-code`
   back to code (clears outputs + reopens the cell's LSP doc under the new language id).
   `Cell.rendered` is runtime-only (not serialised); cells load from disk rendered
-- **Rendered markdown cells word-wrap** at word boundaries to the cell's text width
-  (`notebook_ui::wrap_segments`; a single over-long word hard-breaks). The single
-  predicate `shows_rendered_markdown(cell)` (= markdown && rendered) decides wrapping in
-  **both** the renderer and `cell_display_height`, so cell heights always match what is
-  drawn — that's why Select must reveal the source like Insert does (the height fn can't
-  see the editor mode). Source views (editing) and code cells stay unwrapped, 1 row per line
+- **Notebook cells word-wrap** at word boundaries to the cell's text width
+  (`notebook_ui::wrap_segments`; a single over-long word hard-breaks). Markdown cells
+  always wrap — rendered view *and* editable source view alike; other cells follow the
+  `editor.word_wrap` toggle (`:wrap`). The single predicate `notebook_ui::cell_wraps`
+  decides wrapping in the renderer, `cell_display_height`, **and** the in-cell scroll, so
+  cell heights and scroll offsets always match what is drawn. While a cell wraps,
+  `app.scroll_row` counts *visual* rows within the focused cell (== logical lines when
+  not wrapping); `exec::update_scroll` maps the cursor to its visual row via
+  `cell_cursor_visual_row` and the renderer skips the same row count, so the cursor wraps
+  onto continuation rows instead of running off the right border. Cells have **no
+  horizontal scroll** — a non-wrapped long line (code cell, `:wrap` off) clips at the
+  border; toggle `:wrap` to see it all
 - **Rich display / LaTeX** — the kernel runner evaluates a cell's trailing bare expression
   (like Jupyter's `execute_result`) and prefers a rich repr: `_repr_latex_` is rasterised to
   PNG via matplotlib mathtext and shown through the normal image pipeline (so SymPy output
@@ -297,6 +303,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Highlight recompute is whole-buffer per edit (incremental tree-sitter parsing not adopted yet)
 - Gutter overflows at >9999 lines (cosmetic)
 - Notebook cell rendering assumes width-1 characters (tabs/CJK render at the wrong width inside cells)
+- Notebook cells have no horizontal scroll: with `:wrap` off, a long code-cell line clips at
+  the cell border (markdown cells always wrap, so this only affects code/raw cells)
 
 ## Architecture
 

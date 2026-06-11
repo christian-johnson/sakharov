@@ -15,6 +15,7 @@ pub(super) fn ensure_focused_visible(app: &mut App) {
     let cell_px = app.graphics.cell_pixel_size;
     let viewport_height = app.viewport_height;
     let available_cols = app.viewport_width.saturating_sub(2) as u16;
+    let word_wrap = app.config.editor.word_wrap;
     if let Some((nb, state)) = app.notebook.as_mut() {
         state.ensure_focused_visible(
             &nb.cells,
@@ -23,6 +24,7 @@ pub(super) fn ensure_focused_visible(app: &mut App) {
             image_rows,
             cell_px,
             available_cols,
+            word_wrap,
         );
     }
 }

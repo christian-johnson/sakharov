@@ -87,10 +87,11 @@ pub fn update_scroll(app: &mut App) {
         let image_rows = app.config.notebook.image_rows;
         let cell_px = app.graphics.cell_pixel_size;
         let avail_cols = app.viewport_width.saturating_sub(2) as u16;
+        let nb_word_wrap = app.config.editor.word_wrap;
         let mut new_scroll_row = app.scroll_row;
         if let Some((nb, state)) = app.notebook.as_mut() {
             state.ensure_focused_visible(
-                &nb.cells, visible_rows, rope, image_rows, cell_px, avail_cols,
+                &nb.cells, visible_rows, rope, image_rows, cell_px, avail_cols, nb_word_wrap,
             );
             let focused = state.focused_cell.min(nb.cells.len().saturating_sub(1));
             // Rows consumed above the focused cell's content: each fully-shown
@@ -103,20 +104,35 @@ pub fn update_scroll(app: &mut App) {
                 } else {
                     crate::notebook_ui::cell_display_height(
                         &nb.cells[idx].source, &nb.cells[idx], image_rows, cell_px, avail_cols,
+                        nb_word_wrap,
                     ) as usize
                 };
                 content_top += h + 1;
             }
             content_top += 1; // top border of the focused cell
 
+            // In-cell scroll operates on *visual* rows — when the focused cell
+            // word-wraps (markdown always, others per the toggle), a logical
+            // line spans several rows and the cursor's row must account for
+            // its wrapped sub-row, or it walks off the bottom of the cell.
+            // Without wrapping, visual row == logical line and this reduces to
+            // the previous arithmetic. The renderer skips the same visual-row
+            // count, so the units agree.
+            let wrap_w = nb.cells.get(focused)
+                .filter(|c| crate::notebook_ui::cell_wraps(c, nb_word_wrap))
+                .map(|_| crate::notebook_ui::cell_text_width(avail_cols));
+            let vcursor =
+                crate::notebook_ui::cell_cursor_visual_row(rope, app.selection.head, wrap_w);
+            let total_vrows = crate::notebook_ui::cell_visual_rows(rope, wrap_w);
+
             let avail = visible_rows.saturating_sub(content_top).max(1);
             let so = scroll_off.min(avail.saturating_sub(1) / 2);
-            if line_idx < new_scroll_row + so || new_scroll_row > line_idx {
-                new_scroll_row = line_idx.saturating_sub(so);
-            } else if line_idx + so + 1 > new_scroll_row + avail {
-                new_scroll_row = (line_idx + so + 1).saturating_sub(avail);
+            if vcursor < new_scroll_row + so || new_scroll_row > vcursor {
+                new_scroll_row = vcursor.saturating_sub(so);
+            } else if vcursor + so + 1 > new_scroll_row + avail {
+                new_scroll_row = (vcursor + so + 1).saturating_sub(avail);
             }
-            let max_scroll = total_lines.saturating_sub(1);
+            let max_scroll = total_vrows.saturating_sub(1);
             if new_scroll_row > max_scroll {
                 new_scroll_row = max_scroll;
             }

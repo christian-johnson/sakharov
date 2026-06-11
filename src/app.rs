@@ -811,6 +811,7 @@ fn draw_frame(
                             mode_colors: &app.config.theme.modes,
                             jump_labels: &app.jump.labels,
                             jump_typed: &app.jump.typed,
+                            word_wrap: app.config.editor.word_wrap,
                         };
                         let (images, cursor_pos) =
                             crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook, app.graphics.cell_pixel_size, &mut app.nb_highlight);
