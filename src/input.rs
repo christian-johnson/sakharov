@@ -148,10 +148,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             if let Some(cmds) = cmds {
                 exec::run_many(app, &cmds);
             }
-            // Dropping into Insert on the focused cell: unfold it, reveal a
-            // rendered Markdown cell's source for editing, and push the current
-            // content to the LSP once (Insert keystrokes sync per-character after).
-            if in_notebook && app.mode == Mode::Insert {
+            // Dropping into Insert (or Select) on the focused cell: unfold it,
+            // reveal a rendered Markdown cell's source for editing, and push the
+            // current content to the LSP once (Insert keystrokes sync
+            // per-character after). Select must reveal the source too: the
+            // rendered view word-wraps, so cell heights are only consistent
+            // when `Cell.rendered` alone decides which view is shown.
+            if in_notebook && matches!(app.mode, Mode::Insert | Mode::Select) {
                 if let Some((ref mut nb, ref mut state)) = app.notebook {
                     state.folded_cells.remove(&state.focused_cell);
                     if let Some(cell) = nb.cells.get_mut(state.focused_cell) {

@@ -111,6 +111,64 @@ impl CellHighlightCache {
     }
 }
 
+/// True when the cell currently displays its formatted markdown view.
+///
+/// This is the single predicate deciding word-wrap and wrapped heights, used
+/// by both the renderer and [`cell_display_height`] — they must agree or cell
+/// heights drift from what is actually drawn. (Entering Insert/Select on a
+/// markdown cell flips `rendered` off, so "rendered" implies "not being
+/// edited".)
+fn shows_rendered_markdown(cell: &Cell) -> bool {
+    cell.cell_type == CellType::Markdown && cell.rendered
+}
+
+/// Word-wrap a logical line into visual-row segments of at most `width` chars.
+///
+/// Breaks at the last space within the window when possible (the space is
+/// consumed by the break); a single word longer than `width` is hard-broken.
+/// Returns `(char_offset_within_line, segment)` pairs — always at least one,
+/// so an empty line still occupies one row. Char-based, like the rest of the
+/// cell renderer (the width-1-chars assumption is a known rough edge).
+fn wrap_segments(line: &str, width: usize) -> Vec<(usize, &str)> {
+    let width = width.max(1);
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let n = chars.len();
+    if n <= width {
+        return vec![(0, line)];
+    }
+    let byte_at = |ci: usize| if ci < n { chars[ci].0 } else { line.len() };
+    let mut segs = Vec::new();
+    let mut start = 0usize; // char index of the current segment's first char
+    while n - start > width {
+        let limit = start + width; // exclusive end of a full-width segment
+        // A space at `limit` itself is the ideal break: the segment is exactly
+        // full and the space dies at the boundary.
+        let brk = (start + 1..=limit).rev().find(|&i| chars[i].1 == ' ');
+        let (end, next) = match brk {
+            Some(i) => (i, i + 1),
+            None => (limit, limit),
+        };
+        segs.push((start, &line[byte_at(start)..byte_at(end)]));
+        start = next;
+    }
+    segs.push((start, &line[byte_at(start)..]));
+    segs
+}
+
+/// Total visual rows of a source rope when word-wrapped to `width` chars.
+/// Must mirror the renderer exactly: same line split, same segmentation.
+fn wrapped_source_rows(source: &ropey::Rope, width: usize) -> u16 {
+    let text = source.to_string();
+    let lines: Vec<&str> = if text.is_empty() { vec![""] } else { text.split('\n').collect() };
+    lines.iter().map(|l| wrap_segments(l, width).len()).sum::<usize>() as u16
+}
+
+/// Columns available for cell text given the inner (within-borders) width:
+/// the renderer indents every source line by a 2-char pad.
+fn cell_text_width(inner_cols: u16) -> usize {
+    inner_cols.saturating_sub(2).max(1) as usize
+}
+
 /// A request to render a PNG image via the Kitty graphics protocol.
 pub struct ImageRequest {
     pub col: u16,
@@ -354,6 +412,11 @@ fn render_cell_content(
     let mut cursor_screen: Option<(u16, u16)> = None;
     let pad_len = 2u16; // leading spaces
 
+    // Rendered markdown is prose — word-wrap it to the cell's text width.
+    // The wrap width must match `cell_display_height` (via `cell_text_width`)
+    // or the cell border won't enclose the wrapped content.
+    let wrap_width = show_markdown.then(|| cell_text_width(area.width));
+
     // Running char offset of the current line's start (O(L) total, not O(L²)).
     let mut next_line_start: usize = 0;
     for (line_no, line) in source_lines.iter().enumerate() {
@@ -369,6 +432,7 @@ fn render_cell_content(
         }
 
         // Compute cursor screen position if the cursor is on this line.
+        // (Suppressed in the rendered-markdown view: cursor_char_idx is None.)
         if let Some(ci) = cursor_char_idx {
             let line_len = line.chars().count();
             if ci >= line_start_char && ci <= line_start_char + line_len {
@@ -382,15 +446,35 @@ fn render_cell_content(
             }
         }
 
-        render_source_line(
-            frame,
-            single_row(area, current_row),
-            line,
-            line_no,
-            line_start_char,
-            &line_ctx,
-        );
-        current_row += 1;
+        match wrap_width {
+            Some(w) => {
+                for (seg_off, seg) in wrap_segments(line, w) {
+                    if current_row >= area.bottom() {
+                        break;
+                    }
+                    render_source_line(
+                        frame,
+                        single_row(area, current_row),
+                        seg,
+                        line_no,
+                        line_start_char + seg_off,
+                        &line_ctx,
+                    );
+                    current_row += 1;
+                }
+            }
+            None => {
+                render_source_line(
+                    frame,
+                    single_row(area, current_row),
+                    line,
+                    line_no,
+                    line_start_char,
+                    &line_ctx,
+                );
+                current_row += 1;
+            }
+        }
     }
 
     if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
@@ -515,7 +599,9 @@ pub fn compute_image_rows(
 ///
 /// `source` is the rope whose line count to use — `&cell.source` normally, or
 /// the live editor rope for the focused cell (whose unsaved edits are in
-/// `app.buffer`, ahead of the stored source).  `len_lines()` is O(1) on a Rope.
+/// `app.buffer`, ahead of the stored source).  `len_lines()` is O(1) on a Rope;
+/// rendered markdown cells instead count word-wrapped rows (O(len)) so the
+/// height matches what the renderer draws.
 pub fn cell_display_height(
     source: &ropey::Rope,
     cell: &Cell,
@@ -523,7 +609,11 @@ pub fn cell_display_height(
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
 ) -> u16 {
-    let source_lines = source.len_lines().max(1) as u16;
+    let source_lines = if shows_rendered_markdown(cell) {
+        wrapped_source_rows(source, cell_text_width(available_cols)).max(1)
+    } else {
+        source.len_lines().max(1) as u16
+    };
     let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
         1 + cell.outputs.iter()
             .map(|o| single_output_height_count(o, max_image_rows, cell_pixel_size, available_cols))
@@ -887,6 +977,61 @@ fn single_row(area: Rect, row: u16) -> Rect {
         y: row,
         width: area.width,
         height: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ropey::Rope;
+
+    #[test]
+    fn wrap_segments_breaks_at_word_boundaries() {
+        // Width 10: "hello brave world" → "hello" / "brave" / "world"
+        let segs = wrap_segments("hello brave world", 10);
+        let texts: Vec<&str> = segs.iter().map(|&(_, s)| s).collect();
+        assert_eq!(texts, vec!["hello", "brave", "world"]);
+        // Offsets address the original line (for highlight-span lookup).
+        assert_eq!(segs[1].0, 6);
+        assert_eq!(segs[2].0, 12);
+        // Every segment fits the width.
+        assert!(segs.iter().all(|&(_, s)| s.chars().count() <= 10));
+    }
+
+    #[test]
+    fn wrap_segments_hard_breaks_long_words_and_keeps_short_lines() {
+        let segs = wrap_segments("abcdefghij", 4);
+        let texts: Vec<&str> = segs.iter().map(|&(_, s)| s).collect();
+        assert_eq!(texts, vec!["abcd", "efgh", "ij"]);
+        // Short and empty lines occupy exactly one row.
+        assert_eq!(wrap_segments("short", 80).len(), 1);
+        assert_eq!(wrap_segments("", 80).len(), 1);
+    }
+
+    #[test]
+    fn rendered_markdown_height_counts_wrapped_rows() {
+        let long = "word ".repeat(30); // 150 chars of prose
+        let make = |cell_type, rendered| Cell {
+            id: "t".into(),
+            cell_type,
+            source: Rope::from_str(&long),
+            outputs: vec![],
+            execution_count: None,
+            rendered,
+        };
+
+        let md = make(CellType::Markdown, true);
+        let inner_cols = 42u16; // text width 40 → 150 chars ≈ 4 rows
+        let h = cell_display_height(&md.source, &md, 40, None, inner_cols);
+        let expected_rows = wrapped_source_rows(&md.source, cell_text_width(inner_cols));
+        assert_eq!(h, 2 + expected_rows, "borders + wrapped rows");
+        assert!(expected_rows > 1, "long prose must wrap to several rows");
+
+        // Markdown source view (not rendered) and code cells keep 1 row per line.
+        let md_src = make(CellType::Markdown, false);
+        assert_eq!(cell_display_height(&md_src.source, &md_src, 40, None, inner_cols), 2 + 1);
+        let code = make(CellType::Code, false);
+        assert_eq!(cell_display_height(&code.source, &code, 40, None, inner_cols), 2 + 1);
     }
 }
 

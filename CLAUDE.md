@@ -166,10 +166,16 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - **Markdown cells** render like a regular Jupyter notebook: a markdown cell shows its
   formatted view (same highlighter as `.md` documents, via `markdown::highlight`) when
   `Cell.rendered` is set. `:run` / `Shift+Enter` / `Ctrl+Enter` on a markdown cell "renders" it
-  (`rendered = true`, no kernel involvement); entering Insert on it reveals the source
-  (`rendered = false`). `:cell-md` converts a cell to markdown, `:cell-code`
+  (`rendered = true`, no kernel involvement); entering Insert **or Select** on it reveals the
+  source (`rendered = false`). `:cell-md` converts a cell to markdown, `:cell-code`
   back to code (clears outputs + reopens the cell's LSP doc under the new language id).
   `Cell.rendered` is runtime-only (not serialised); cells load from disk rendered
+- **Rendered markdown cells word-wrap** at word boundaries to the cell's text width
+  (`notebook_ui::wrap_segments`; a single over-long word hard-breaks). The single
+  predicate `shows_rendered_markdown(cell)` (= markdown && rendered) decides wrapping in
+  **both** the renderer and `cell_display_height`, so cell heights always match what is
+  drawn — that's why Select must reveal the source like Insert does (the height fn can't
+  see the editor mode). Source views (editing) and code cells stay unwrapped, 1 row per line
 - **Rich display / LaTeX** — the kernel runner evaluates a cell's trailing bare expression
   (like Jupyter's `execute_result`) and prefers a rich repr: `_repr_latex_` is rasterised to
   PNG via matplotlib mathtext and shown through the normal image pipeline (so SymPy output
