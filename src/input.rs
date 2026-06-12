@@ -60,12 +60,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     let had_completion_popup = app.popup.as_ref()
         .map(|p| p.on_confirm == PopupTarget::InsertText)
         .unwrap_or(false);
+    let had_theme_picker = app.popup.as_ref()
+        .map(|p| p.on_confirm == PopupTarget::SwitchTheme)
+        .unwrap_or(false);
 
     if app.popup.is_some() {
         let action = crate::popup_input::handle_key(app, key);
         match action {
             PopupAction::Dismiss => {
                 app.popup = None;
+                // Leaving the theme picker without confirming: drop the live
+                // preview and restore the committed theme.
+                if had_theme_picker {
+                    exec::revert_theme_preview(app);
+                }
                 return;
             }
             PopupAction::DismissPassthrough => {
@@ -73,12 +81,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     // Keep the popup alive; let the key reach handle_insert.
                 } else {
                     app.popup = None;
+                    if had_theme_picker {
+                        exec::revert_theme_preview(app);
+                    }
                 }
                 // fall through
             }
             PopupAction::ClosePassthrough => {
                 // Always close (even for completion), then let the key fall through.
                 app.popup = None;
+                if had_theme_picker {
+                    exec::revert_theme_preview(app);
+                }
                 // fall through
             }
             PopupAction::Confirm(payload) => {
@@ -93,6 +107,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 // Keep the completion doc panel (if open) in sync with the
                 // current selection; a no-op for every other popup.
                 exec::refresh_completion_doc(app);
+                // Theme picker: live-preview whatever the selection landed on
+                // (j/k navigation, filter edits resetting the selection, …).
+                exec::preview_selected_theme(app);
                 return;
             }
         }

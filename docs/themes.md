@@ -13,8 +13,11 @@ sakharov ships with a set of built-in color themes and loads user themes from
   ```
 
 * **At runtime:** `:theme` opens a fuzzy picker over every available theme
-  (built-in + user files); `:theme <name>` switches directly. Runtime switches
-  last for the session — set `[theme] name` in `config.toml` to persist.
+  (built-in + user files). The picker **live-previews**: the whole editor
+  restyles as you move through the list (or narrow it by typing), Enter keeps
+  the selection, ESC restores the theme you came in with. `:theme <name>`
+  switches directly. Runtime switches last for the session — set
+  `[theme] name` in `config.toml` to persist.
 
 The default (`name = "default"`) is the classic look: no background painting,
 ANSI colors inherited from the terminal's own palette.

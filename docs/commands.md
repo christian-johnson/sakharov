@@ -172,7 +172,7 @@ opened by a relative or absolute path.
 | `open-diagnostic-picker` | — | Fuzzy picker over all LSP diagnostics (`:diagnostics`) |
 | `open-config` | — | Open the user config file for editing (`:config`) |
 | `reload-config` | — | Reload the config from disk without restarting (`:config-reload`) |
-| `open-theme-picker` | — | Fuzzy picker over all color themes, built-in + user (`:theme`, `:themes`) — see [themes.md](themes.md) |
+| `open-theme-picker` | — | Fuzzy picker over all color themes, built-in + user, with live preview as you scroll — ESC restores the current theme (`:theme`, `:themes`); see [themes.md](themes.md) |
 | `theme <name>` | — | Switch directly to a named color theme for the session (`:theme tokyonight`) |
 | `toggle-git-gutter` | — | Toggle visibility of the git gutter indicator column |
 | `toggle-line-numbers` | — | Toggle line number display |

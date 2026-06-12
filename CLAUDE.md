@@ -72,8 +72,12 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   22 built-ins embedded from `config/themes/` (tokyonight ×4, catppuccin ×4, nord ×2,
   rose-pine ×3, dracula, gruvbox ×2, onedark, solarized ×2, kanagawa, everforest, monokai) plus
   user themes in `~/.config/sakharov/themes/*.toml` (a same-name user file shadows a built-in).
-  Selected via `[theme] name = "..."` in config; `:theme` opens a picker, `:theme <name>`
-  switches directly (session-only; the message names the config key that persists it). Any
+  Selected via `[theme] name = "..."` in config; `:theme` opens a picker with **live
+  preview** (every selection move re-applies the highlighted theme via
+  `exec::preview_selected_theme` on `PopupAction::Continue`; ESC/dismiss reverts to the
+  committed `config.theme.name` via `revert_theme_preview`, Enter commits through
+  `apply_theme`), `:theme <name>` switches directly (session-only; the message names the
+  config key that persists it). Any
   theme key can be overridden under `[theme]` in config.toml — deep-merged over the chosen
   theme and kept across `:theme` switches. Resolution derives unset keys: syntax fallback
   chains (`number`→`constant`, `property`→`variable`→fg), bg/fg blends for the chrome once

@@ -56,6 +56,32 @@ pub fn apply_theme(app: &mut App, name: &str) {
     }
 }
 
+/// Live-preview the theme currently selected in the theme picker, without
+/// committing it (no `config.theme.name` update, no message).  Called after
+/// every handled key while the picker is open, so scrolling the list restyles
+/// the editor in real time.  Errors (e.g. an unparsable user theme file) are
+/// ignored — the previous theme simply stays active.
+pub fn preview_selected_theme(app: &mut App) {
+    let Some(popup) = app.popup.as_ref() else { return };
+    if popup.on_confirm != crate::popup::PopupTarget::SwitchTheme {
+        return;
+    }
+    let crate::popup::PopupContent::List(ref state) = popup.content else { return };
+    let Some(name) = state.selected_item().map(|it| it.label.clone()) else { return };
+    let _ = crate::theme::load_and_set(&name, &app.config.theme.overrides);
+}
+
+/// Restore the committed theme (`config.theme.name`) after the theme picker
+/// is dismissed without confirming a selection.
+pub fn revert_theme_preview(app: &mut App) {
+    let name = app.config.theme.name.clone();
+    if let Err(e) = crate::theme::load_and_set(&name, &app.config.theme.overrides) {
+        // The committed theme should always load (it loaded before the
+        // preview); surface the anomaly rather than dying.
+        app.messages.show(format!("Theme error: {e}"));
+    }
+}
+
 /// Execute a single command against the application state.
 pub fn execute(app: &mut App, cmd: &Command) {
     let extend = app.mode == Mode::Select;
