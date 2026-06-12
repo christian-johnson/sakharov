@@ -144,10 +144,52 @@ pub(super) fn show_buffer_completions(app: &mut App) {
     open_completion_popup(app, items, prefix);
 }
 
+/// Minimum interval between signature-help requests (configurable via
+/// `editor.lsp_signature_throttle_ms`, 0 = no throttle). Inside a call the
+/// hint refreshes on every keystroke; for a notebook each refresh rebuilds and
+/// retransmits the whole concatenated notebook, so cap the rate and let
+/// `pump_signature_help` fire one trailing refresh for the final cursor state.
+fn sig_help_throttle(app: &App) -> std::time::Duration {
+    std::time::Duration::from_millis(app.config.editor.lsp_signature_throttle_ms)
+}
+
+/// Trailing edge of the signature-help throttle, called once per frame from
+/// the run loop: fires a deferred refresh once the throttle window elapses,
+/// so the active-parameter marker always settles on the latest keystroke.
+pub fn pump_signature_help(app: &mut App) {
+    if !app.sig_help_deferred {
+        return;
+    }
+    if app.mode != Mode::Insert {
+        app.sig_help_deferred = false;
+        return;
+    }
+    let window_elapsed = app
+        .sig_help_last
+        .map(|t| t.elapsed() >= sig_help_throttle(app))
+        .unwrap_or(true);
+    if window_elapsed {
+        // lsp_signature_help clears the deferred flag and re-arms the throttle.
+        lsp_signature_help(app);
+    }
+}
+
 /// Request `textDocument/signatureHelp` at the cursor so the active call's
 /// argument list can be shown in the minibuffer. No-op (and clears any stale
 /// signature) when no language server is ready for the current document.
+/// Rate-limited to one request per throttle window; calls inside the window
+/// are deferred to `pump_signature_help` (trailing edge).
 pub fn lsp_signature_help(app: &mut App) {
+    let throttle = sig_help_throttle(app);
+    if !throttle.is_zero()
+        && app.sig_help_last.is_some_and(|t| t.elapsed() < throttle)
+    {
+        app.sig_help_deferred = true;
+        return;
+    }
+    app.sig_help_last = Some(std::time::Instant::now());
+    app.sig_help_deferred = false;
+
     let lang = app.current_language().unwrap_or("").to_owned();
     if lang.is_empty() || !app.lsp.is_ready(&lang) {
         app.signature_help = None;
@@ -167,7 +209,57 @@ pub fn lsp_signature_help(app: &mut App) {
     app.lsp.request(LspRequestKind::SignatureHelp, &lang, &path, &rope, char_idx);
 }
 
-/// Notify the LSP server of a buffer change (called after each Insert-mode edit).
+/// `lsp_did_change` for a single insertion of `inserted` at char index `at`
+/// (the Insert-mode hot path): sends a range delta to incremental-sync servers
+/// instead of stringifying and retransmitting the whole document on every
+/// keystroke. Notebook cells keep the existing full-cell sync — cells are
+/// small and the notebook protocol replaces cell text wholesale.
+pub fn lsp_did_change_insert(app: &mut App, at: usize, inserted: &str) {
+    if app.notebook.is_some() {
+        return lsp_did_change(app);
+    }
+    // Deltas are only valid if the server's copy is exactly the pre-edit
+    // document. Command edits (open-line, delete, paste, undo…) mutate the
+    // buffer without notifying the LSP, so verify the length the server last
+    // saw; on mismatch send the full text instead (which resyncs everything).
+    let len = app.buffer.rope.len_chars();
+    let expected_old = len.saturating_sub(inserted.chars().count());
+    if app.buffer.lsp_synced_chars != Some(expected_old) {
+        return lsp_did_change(app);
+    }
+    let Some(lang) = app.current_language().map(str::to_owned) else { return };
+    let Some(path) = app.buffer.path.clone() else { return };
+    app.buffer.lsp_synced_chars = Some(len);
+    // The text before `at` is untouched by the edit, so the position of `at`
+    // is identical in the pre- and post-edit document — safe to compute
+    // against the post-edit rope.
+    let start = crate::lsp::char_to_lsp_pos_utf16(&app.buffer.rope, at);
+    app.lsp.did_change_delta(&lang, &path, start, start, inserted, &app.buffer.rope);
+}
+
+/// `lsp_did_change` for a single removal: `removed` was deleted at char index
+/// `at`. See `lsp_did_change_insert` for the delta rationale and the stale-sync
+/// guard.
+pub fn lsp_did_change_remove(app: &mut App, at: usize, removed: &str) {
+    if app.notebook.is_some() {
+        return lsp_did_change(app);
+    }
+    let len = app.buffer.rope.len_chars();
+    let expected_old = len + removed.chars().count();
+    if app.buffer.lsp_synced_chars != Some(expected_old) {
+        return lsp_did_change(app);
+    }
+    let Some(lang) = app.current_language().map(str::to_owned) else { return };
+    let Some(path) = app.buffer.path.clone() else { return };
+    app.buffer.lsp_synced_chars = Some(len);
+    let start = crate::lsp::char_to_lsp_pos_utf16(&app.buffer.rope, at);
+    let end = crate::lsp::advance_lsp_pos_utf16(start, removed);
+    app.lsp.did_change_delta(&lang, &path, start, end, "", &app.buffer.rope);
+}
+
+/// Notify the LSP server of a buffer change (full-text sync). Used by
+/// command-driven edits and as the fallback whenever a range delta can't be
+/// trusted; Insert-mode keystrokes go through `lsp_did_change_insert`/`_remove`.
 pub fn lsp_did_change(app: &mut App) {
     let lang = match app.current_language() {
         Some(l) => l.to_owned(),
@@ -177,6 +269,9 @@ pub fn lsp_did_change(app: &mut App) {
         Some(p) => p,
         None => return,
     };
+    // A full sync makes the server's copy exactly the current rope — re-arm
+    // the incremental path.
+    app.buffer.lsp_synced_chars = Some(app.buffer.rope.len_chars());
     let text = app.buffer.rope.to_string();
 
     if let Some((nb, _)) = app.notebook.as_ref() {
@@ -195,7 +290,11 @@ pub fn lsp_did_change(app: &mut App) {
 /// Returns true when any event was applied (the caller should redraw).
 pub fn process_lsp_events(app: &mut App) -> bool {
     let events = app.lsp.poll();
-    let any = !events.is_empty();
+    let log = app.lsp.take_lifecycle_log();
+    let any = !events.is_empty() || !log.is_empty();
+    for msg in log {
+        app.messages.show(msg);
+    }
     for event in events {
         handle_lsp_event(app, event);
     }

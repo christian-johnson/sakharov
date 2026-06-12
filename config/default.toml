@@ -1,20 +1,37 @@
+# ─── Theme ───────────────────────────────────────────────────────────────────
+#
+# `name` selects a color theme.  "default" inherits the terminal's own colors.
+#
+# Built-in themes:
+#   tokyonight, tokyonight-storm, tokyonight-moon, tokyonight-day,
+#   catppuccin-mocha, catppuccin-macchiato, catppuccin-frappe, catppuccin-latte,
+#   nord, nord-darker, rose-pine, rose-pine-moon, rose-pine-dawn,
+#   dracula, gruvbox, gruvbox-light, onedark, solarized, solarized-light,
+#   kanagawa, everforest, monokai
+#
+# User themes: drop a <name>.toml in ~/.config/sakharov/themes/ (it shadows a
+# built-in of the same name).  See config/themes/example.toml in the sakharov
+# repo for the fully commented schema; `:theme` opens a picker over all themes.
+#
+# Any theme-file key can also be set right here to override the chosen theme,
+# e.g.:
+#
+# [theme.ui]
+# accent = "#ff9e64"
+# [theme.syntax]
+# comment = "#565f89"
 [theme]
-background = "#1e1e2e"
-foreground = "#cdd6f4"
-cursor = "#f5e0dc"
-selection = "#313244"
-line_numbers = "#45475a"
+name = "default"
 
 # Per-mode colors for the status-line chip and the hardware cursor.
 # Each entry is a #rrggbb hex string.  Omit (or leave empty) to use the
-# built-in ANSI fallback for that mode.
+# theme's color for that mode.
 #
 # [theme.modes]
 # normal   = "#5277c3"   # ANSI Blue  (default)
 # insert   = "#26a641"   # ANSI Green (default)
 # select   = "#cdad00"   # ANSI Yellow (default)
 # command  = "#0fb8c9"   # ANSI Cyan  (default)
-# notebook = "#0fb8c9"   # ANSI Cyan  (default)
 # goto     = "#9141ac"   # ANSI Magenta (default, covers g/f/? sub-modes)
 # jump     = "#ffa000"   # orange     (default)
 # fold     = "#ffb060"   # light orange (default)
@@ -39,6 +56,10 @@ file_picker_max_depth = 10
 # after a crash or kill. The file is removed on a clean save and clean quit, so
 # it only lingers when something went wrong. Set false to disable entirely.
 crash_recovery = true
+# Minimum milliseconds between signature-help requests while typing inside a
+# call. A deferred trailing refresh always fires after the window, so the hint
+# settles on the final cursor position. 0 disables the throttle.
+lsp_signature_throttle_ms = 50
 # file_picker = "yazi --chooser-file=$SV_PICKER_FILE"
 # file_picker = "find . -type f | fzf"
 
@@ -157,7 +178,10 @@ right = ["diagnostics", "spinner", "position", "scroll"]
 # Layout used while a notebook (.ipynb) is open.
 [statusline.notebook]
 left  = ["mode", "file"]
-right = ["diagnostics", "cell", "kernel"]
+# `spinner` surfaces background work the kernel chip doesn't cover (in-flight
+# LSP requests, exports). While the kernel chip itself is animating
+# (starting/busy) the standalone spinner is hidden automatically.
+right = ["diagnostics", "spinner", "cell", "kernel"]
 
 # Jupyter notebook settings.
 [notebook]

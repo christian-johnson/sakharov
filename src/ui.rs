@@ -134,6 +134,7 @@ fn build_vis_rows(
 }
 
 fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
+    let th = theme::active();
     // Git gutter is 1 char wide (only for regular files, not notebooks).
     let git_col: u16 = if app.config.editor.git_gutter && app.notebook.is_none() { 1 } else { 0 };
     let line_num_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
@@ -181,17 +182,17 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             // Git mark column (1 char).
             if git_col > 0 {
-                let arrow_style = Style::default().fg(crate::theme::ACCENT);
+                let arrow_style = Style::default().fg(th.accent);
                 if fold_end_opt.is_some() {
                     buf[(gx, y)].set_char('▶').set_style(arrow_style);
                 } else if is_continuation {
                     // Wrap continuation: blank git column.
-                    buf[(gx, y)].set_char(' ').set_style(Style::default().fg(Color::DarkGray));
+                    buf[(gx, y)].set_char(' ').set_style(Style::default().fg(th.line_numbers));
                 } else {
                     let (mark_ch, mark_color) = match app.git_diff.get(&line_idx) {
-                        Some(GutterMark::Added)    => ('+', Color::Green),
-                        Some(GutterMark::Modified) => ('~', Color::Yellow),
-                        None                       => (' ', Color::DarkGray),
+                        Some(GutterMark::Added)    => ('+', th.git_added),
+                        Some(GutterMark::Modified) => ('~', th.git_modified),
+                        None                       => (' ', th.line_numbers),
                     };
                     buf[(gx, y)]
                         .set_char(mark_ch)
@@ -202,7 +203,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             // Line number column (5 chars).
             if line_num_width > 0 && line_idx < total_lines {
-                let num_style = Style::default().fg(Color::DarkGray);
+                let num_style = Style::default().fg(th.line_numbers);
                 if is_continuation {
                     // Wrap continuation: blank line number area.
                     for _ in 0..line_num_width {
@@ -225,7 +226,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                     };
 
                     if fold_end_opt.is_some() && git_col == 0 && line_num_width >= 2 {
-                        let arrow_style = Style::default().fg(crate::theme::ACCENT);
+                        let arrow_style = Style::default().fg(th.accent);
                         buf[(gx, y)].set_char('▶').set_style(arrow_style);
                         gx += 1;
                         for c in line_num_str.chars().skip(1) {
@@ -242,7 +243,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 }
             } else if line_num_width > 0 {
-                let num_style = Style::default().fg(Color::DarkGray);
+                let num_style = Style::default().fg(th.line_numbers);
                 for _ in 0..line_num_width {
                     if gx >= area.left() + gutter_width { break; }
                     buf[(gx, y)].set_char(' ').set_style(num_style);
@@ -291,7 +292,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             if c == '\n' || c == '\r' {
                 if char_idx == cursor_pos && col_offset >= effective_skip && col_offset < effective_skip + content_width {
-                    cells.push((' ', theme::cursor_style(&app.mode, &app.config.theme.modes)));
+                    cells.push((' ', theme::cursor_style(&app.mode)));
                 }
                 break;
             }
@@ -312,7 +313,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             let base_style = highlight::style_at(spans, char_idx);
 
             let style = if char_idx == cursor_pos {
-                theme::cursor_style(&app.mode, &app.config.theme.modes)
+                theme::cursor_style(&app.mode)
             } else if char_idx >= sel_start && char_idx <= sel_end && sel_start != sel_end {
                 theme::selection_style()
             } else {
@@ -350,8 +351,8 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
         // Append fold badge when this row is a fold indicator.
         if let Some(ref badge) = fold_badge {
-            let arrow_style = Style::default().fg(crate::theme::ACCENT);
-            let count_style = Style::default().fg(Color::DarkGray);
+            let arrow_style = Style::default().fg(th.accent);
+            let count_style = Style::default().fg(th.dim);
             for (i, c) in badge.chars().enumerate() {
                 let style = if i < 4 { arrow_style } else { count_style };
                 cells.push((c, style));
@@ -397,9 +398,9 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 let has_error = line_diags.iter().any(|(_, _, s)| *s == DiagnosticSeverity::Error);
                 let has_warn  = line_diags.iter().any(|(_, _, s)| *s == DiagnosticSeverity::Warning);
                 let (ch, color) = if has_error {
-                    ('●', Color::Red)
+                    ('●', th.error)
                 } else if has_warn {
-                    ('◆', Color::Yellow)
+                    ('◆', th.warning)
                 } else {
                     (' ', Color::Reset)
                 };
@@ -535,7 +536,7 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
 
     crate::statusline::Ctx {
         mode_label: app.mode.label().to_string(),
-        mode_color: theme::mode_color(&app.mode, &app.config.theme.modes),
+        mode_color: theme::mode_color(&app.mode),
         filename,
         modified,
         branch: app.git_branch.clone(),

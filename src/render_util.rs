@@ -4,7 +4,7 @@
 use ratatui::{
     buffer::Buffer as RatBuffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::Widget,
 };
 use unicode_width::UnicodeWidthChar;
@@ -38,10 +38,10 @@ pub fn apply_diag_underline<'a>(
     match worst {
         Some(DiagnosticSeverity::Error) => style
             .add_modifier(Modifier::UNDERLINED)
-            .underline_color(Color::Red),
+            .underline_color(crate::theme::active().error),
         Some(_) => style
             .add_modifier(Modifier::UNDERLINED)
-            .underline_color(Color::Yellow),
+            .underline_color(crate::theme::active().warning),
         None => style,
     }
 }
@@ -49,13 +49,16 @@ pub fn apply_diag_underline<'a>(
 /// The two styles for `gw` jump-label overlays: (pending, confirmed).
 /// "Confirmed" chars are the prefix the user has already typed.
 pub fn jump_label_styles() -> (Style, Style) {
+    let th = crate::theme::active();
+    let pending_bg = th.modes.jump;
+    let confirmed_bg = th.success;
     let pending = Style::default()
-        .fg(Color::Black)
-        .bg(crate::theme::JUMP_LABEL_BG)
+        .fg(crate::theme::contrast_fg(pending_bg))
+        .bg(pending_bg)
         .add_modifier(Modifier::BOLD);
     let confirmed = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Green)
+        .fg(crate::theme::contrast_fg(confirmed_bg))
+        .bg(confirmed_bg)
         .add_modifier(Modifier::BOLD);
     (pending, confirmed)
 }

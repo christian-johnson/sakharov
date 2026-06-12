@@ -286,6 +286,12 @@ pub struct App {
     /// Active call signature shown in the minibuffer while typing arguments in
     /// Insert mode (from `textDocument/signatureHelp`). `None` when not in a call.
     pub signature_help: Option<String>,
+    /// When the last signature-help request was sent (throttle anchor).
+    pub sig_help_last: Option<std::time::Instant>,
+    /// A signature-help refresh arrived inside the throttle window and was
+    /// deferred; `exec::pump_signature_help` fires it once the window elapses
+    /// (trailing edge), so the hint still settles on the final cursor state.
+    pub sig_help_deferred: bool,
     /// In-memory stash of notebooks that have been navigated away from.
     /// Keyed by the canonicalized `.ipynb` path.  When the user navigates back
     /// to a notebook, its state is restored from here rather than reloading from
@@ -479,6 +485,8 @@ impl App {
             pending_format_save: false,
             completion: CompletionState::default(),
             signature_help: None,
+            sig_help_last: None,
+            sig_help_deferred: false,
             notebook_buffers: std::collections::HashMap::new(),
             file_buffers: std::collections::HashMap::new(),
             recovery,
@@ -509,6 +517,7 @@ pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str>
 pub fn run(path: Option<&str>) -> Result<()> {
     let config = Config::load();
 
+    crate::theme::init_from_config(&config);
     crate::buffer::configure_max_undo(config.editor.max_undo);
 
     let mut app = App::new(path, config)?;
@@ -663,6 +672,10 @@ fn run_loop(
             }
         }
 
+        // Trailing edge of the signature-help throttle: fire a deferred
+        // refresh once the rate-limit window has elapsed.
+        crate::exec::pump_signature_help(app);
+
         // Background work: anything applied means the screen is stale.
         needs_redraw |= crate::exec::process_lsp_events(app);
         needs_redraw |= crate::exec::process_kernel_events(app);
@@ -760,6 +773,7 @@ fn draw_frame(
 
         if app.show_splash {
             terminal.draw(|f| {
+                crate::theme::fill_background(f);
                 let size = f.area();
                 // In command mode the user is typing a command — show the
                 // command input bar at the bottom and shrink the splash area.
@@ -798,6 +812,7 @@ fn draw_frame(
             // the block cursor sitting on top of an image).
             let mut nb_cursor: Option<(u16, u16)> = None;
             terminal.draw(|f| {
+                crate::theme::fill_background(f);
                 let size = f.area();
 
                 if size.height >= 3 {
@@ -808,7 +823,6 @@ fn draw_frame(
                             sel_anchor: app.selection.anchor,
                             scroll_row: app.scroll_row,
                             mode: &app.mode,
-                            mode_colors: &app.config.theme.modes,
                             jump_labels: &app.jump.labels,
                             jump_typed: &app.jump.typed,
                             word_wrap: app.config.editor.word_wrap,
@@ -905,6 +919,7 @@ fn draw_frame(
         } else {
             // Plain text editor or full-screen focused-cell overlay.
             terminal.draw(|f| {
+                crate::theme::fill_background(f);
                 ui::render(f, app);
                 if let Some(ref popup) = app.popup {
                     let cursor_pos = ui::cursor_screen_pos(app, f.area());
@@ -916,7 +931,7 @@ fn draw_frame(
         // Only write cursor-shape OSC sequences when the mode actually changes.
         if app.last_rendered_mode.as_ref() != Some(&app.mode) {
             app.last_rendered_mode = Some(app.mode.clone());
-            set_cursor_shape(&app.mode, &app.config.theme.modes);
+            set_cursor_shape(&app.mode);
         }
     }
     Ok(())
@@ -941,11 +956,11 @@ fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
-fn set_cursor_shape(mode: &Mode, colors: &crate::config::ModeColorsConfig) {
+fn set_cursor_shape(mode: &Mode) {
     use crossterm::cursor::SetCursorStyle;
     use std::io::Write;
     let _ = execute!(io::stdout(), SetCursorStyle::SteadyBlock);
-    if let Some(color_spec) = crate::theme::color_to_osc_spec(crate::theme::mode_color(mode, colors)) {
+    if let Some(color_spec) = crate::theme::color_to_osc_spec(crate::theme::mode_color(mode)) {
         let mut stdout = io::stdout();
         let _ = write!(stdout, "\x1b]12;{}\x07", color_spec);
         let _ = stdout.flush();

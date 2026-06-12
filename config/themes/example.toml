@@ -1,0 +1,141 @@
+# ─── sakharov theme — fully commented reference ──────────────────────────────
+#
+# This file documents every key a theme can set.  To make your own theme:
+#
+#   1. copy this file to  ~/.config/sakharov/themes/<my-theme>.toml
+#   2. set  [theme] name = "<my-theme>"  in your config.toml
+#      (or pick it at runtime with  :theme)
+#
+# EVERY KEY IS OPTIONAL.  You only need a handful of colors to get a complete,
+# coherent theme — anything you leave out is derived:
+#
+#   * syntax colors fall back along sensible chains (number → constant,
+#     namespace → type, property → variable, …)
+#   * once `ui.background` is set, all unset "chrome" (status line, popups,
+#     selection, line numbers, notebook cells) is blended automatically from
+#     your background/foreground
+#   * a theme that sets nothing at all is exactly the built-in "default"
+#     theme: colors inherited from the terminal
+#
+# A perfectly good minimal theme is just:
+#
+#     [ui]
+#     background = "#1a1b26"
+#     foreground = "#c0caf5"
+#     [syntax]
+#     comment  = "#565f89"
+#     keyword  = "#bb9af7"
+#     function = "#7aa2f7"
+#     string   = "#9ece6a"
+#     type     = "#2ac3de"
+#     constant = "#ff9e64"
+#
+# Color values may be:
+#   "#rrggbb"        — 24-bit hex
+#   "blue", "light-magenta", … — ANSI names (track the terminal's palette)
+#   a [palette] key  — see below
+#   "none"           — explicitly unset (use the terminal default; only
+#                      meaningful for ui.background / ui.foreground)
+
+# Display name, shown in the theme picker.  Defaults to the file name.
+name = "Example"
+
+# ─── [palette] — optional named colors ───────────────────────────────────────
+# Define your base colors once, reference them by name everywhere below.
+[palette]
+bg     = "#1a1b26"
+fg     = "#c0caf5"
+red    = "#f7768e"
+orange = "#ff9e64"
+yellow = "#e0af68"
+green  = "#9ece6a"
+cyan   = "#7dcfff"
+blue   = "#7aa2f7"
+purple = "#bb9af7"
+grey   = "#565f89"
+
+# ─── [ui] — editor chrome ────────────────────────────────────────────────────
+[ui]
+background   = "bg"        # editor background ("none" = terminal's own)
+foreground   = "fg"        # default text
+dim          = "grey"      # hints, separators, fold counts  (← syntax.comment)
+line_numbers = "#3b4261"   # gutter line numbers             (← blend of bg/fg)
+selection    = "#283457"   # selection background            (← blend of bg/fg)
+# selection_text = ""      # text over a selection           (← keep foreground)
+accent       = "orange"    # fold arrows / badges            (← orange)
+
+error        = "red"       # diagnostics, errors             (← ANSI red)
+warning      = "yellow"    #                                 (← ANSI yellow)
+info         = "cyan"      # spinners, busy indicators       (← ANSI cyan)
+success      = "green"     # ok states                       (← ANSI green)
+# git_added    = ""        # git gutter '+'                  (← success)
+# git_modified = ""        # git gutter '~'                  (← warning)
+
+statusline      = "#16161e"  # status-bar background         (← blend of bg/fg)
+# statusline_text = ""       # status-bar text               (← foreground)
+
+popup           = "#16161e"  # picker/completion/docs background (← blend)
+# popup_text      = ""       # popup text                    (← foreground)
+popup_border    = "#3b4261"  # popup borders + scrollbar     (← blend)
+# popup_border_focus = ""    # focused completion border     (← info)
+popup_selection = "#292e42"  # selected row background       (← blend)
+# popup_match     = ""       # matched filter characters     (← accent)
+
+# ─── [modes] — status-line chip + cursor color per mode ─────────────────────
+# These also tint the powerline segments and the block cursor.
+[modes]
+normal  = "blue"     # (← syntax.function)
+insert  = "green"    # (← ui.success)
+select  = "yellow"   # (← ui.warning)
+command = "cyan"     # (← ui.info)
+goto    = "purple"   # g/f// sub-modes                       (← syntax.keyword)
+jump    = "orange"   # gw label-jump; also the label color   (← ui.accent)
+fold    = "orange"   # z fold sub-mode                       (← ui.accent)
+
+# ─── [syntax] — tree-sitter highlighting ─────────────────────────────────────
+# The eight in the first block carry most of the visual identity.
+[syntax]
+comment     = "grey"
+keyword     = "purple"    # always rendered bold
+function    = "blue"      # also covers methods + builtins
+string      = "green"
+type        = "cyan"      # also covers builtins
+constant    = "orange"
+number      = "#ff9e64"   # (← constant)
+variable    = "fg"        # (← foreground)
+
+property    = "cyan"      # struct fields, object keys      (← variable)
+parameter   = "#e0af68"   # function parameters             (← variable)
+operator    = "#89ddff"   # (← punctuation)
+punctuation = "#a9b1d6"   # brackets, delimiters            (← foreground)
+namespace   = "cyan"      # module paths                    (← type)
+attribute   = "yellow"    # decorators / annotations        (← constant)
+tag         = "red"       # HTML/markup tags                (← keyword)
+label       = "blue"      # (← keyword)
+constructor = "cyan"      # (← type)
+
+# ─── [markdown] — .md/.qmd and notebook markdown cells ──────────────────────
+# Headings are always bold; links underlined; quotes italic.
+[markdown]
+heading1 = "purple"   # (← syntax.keyword)
+heading2 = "blue"     # (← syntax.function)
+heading3 = "cyan"     # (← syntax.type)
+heading4 = "green"    # (← syntax.string)
+heading5 = "yellow"   # (← ui.warning)
+heading6 = "grey"     # (← ui.dim)
+# bold   = ""         # (← foreground)
+# italic = ""         # (← unstyled italic)
+code     = "green"    # inline `code` + fenced blocks       (← syntax.string)
+link     = "blue"     # (← syntax.function)
+quote    = "grey"     # (← ui.dim)
+list     = "orange"   # bullets / numbers / task boxes      (← syntax.constant)
+
+# ─── [notebook] — Jupyter cell chrome ────────────────────────────────────────
+[notebook]
+cell_background   = "#1e1f2e"  # cell interior              (← blend of bg/fg)
+output_background = "bg"       # output area, recessed      (← ui.background)
+# cell_selection  = ""         # selection inside cells     (← ui.selection)
+border            = "#3b4261"  # not-yet-run cell border    (← ui.line_numbers)
+border_running    = "cyan"     # executing                  (← ui.info)
+border_ok         = "green"    # ran successfully           (← ui.success)
+border_error      = "red"      # failed                     (← ui.error)

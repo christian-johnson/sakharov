@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -149,6 +149,13 @@ pub struct LspManager {
     server_diagnostics: HashMap<String, Vec<Diagnostic>>,
     /// Open notebooks: notebook_uri → (code_cell_uris, current_notebook_version).
     notebook_state: HashMap<String, (Vec<String>, i32)>,
+    /// Server-lifecycle log lines (venv discovery, launched/failed/ready),
+    /// drained once per frame by `exec::lsp::process_lsp_events` into *Messages*.
+    lifecycle_log: Vec<String>,
+    /// Each distinct lifecycle line is logged at most once per session —
+    /// `ensure_server` runs on every cell/buffer switch, so unconditional
+    /// logging would spam (e.g. the no-venv line on every cell navigation).
+    logged: HashSet<String>,
 }
 
 impl LspManager {
@@ -158,7 +165,20 @@ impl LspManager {
             diagnostics: HashMap::new(),
             server_diagnostics: HashMap::new(),
             notebook_state: HashMap::new(),
+            lifecycle_log: Vec::new(),
+            logged: HashSet::new(),
         }
+    }
+
+    fn log_once(&mut self, msg: String) {
+        if self.logged.insert(msg.clone()) {
+            self.lifecycle_log.push(msg);
+        }
+    }
+
+    /// Drain pending lifecycle log lines (for the *Messages* log).
+    pub fn take_lifecycle_log(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.lifecycle_log)
     }
 
     /// Start language server(s) for `language` unless they are already running.
@@ -179,6 +199,17 @@ impl LspManager {
             specs.push((&extra.command, &extra.args, extra.init_options.as_ref(), &extra.features));
         }
 
+        // Whether a feature-scoped server owns diagnostics / formatting. pylsp's
+        // lint and format plugins then only duplicate that work on every
+        // keystroke (the user's ruff already covers it), so build_init_options
+        // turns them off — jedi intelligence is unaffected.
+        let diagnostics_elsewhere = specs
+            .iter()
+            .any(|(_, _, _, features)| features.iter().any(|f| f == "diagnostics"));
+        let format_elsewhere = specs
+            .iter()
+            .any(|(_, _, _, features)| features.iter().any(|f| f == "format"));
+
         let cwd = std::env::current_dir().ok();
         let workspace_root = cwd.as_deref().or(root_path);
         let root_uri = workspace_root
@@ -194,8 +225,20 @@ impl LspManager {
         // is better than autocomplete against the wrong environment).
         let py_venv = if language == "python" {
             match venv_root.and_then(crate::notebook::venv_python_up) {
-                Some(p) => Some(p),
-                None => return,
+                Some(p) => {
+                    self.log_once(format!("LSP: python environment {}", p.display()));
+                    Some(p)
+                }
+                None => {
+                    let searched = venv_root
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(unknown dir)".into());
+                    self.log_once(format!(
+                        "Python LSP not started: no virtualenv (.venv/venv/.env/env) \
+                         in {searched} or any parent"
+                    ));
+                    return;
+                }
             }
         } else {
             None
@@ -211,12 +254,19 @@ impl LspManager {
             }
 
             let init_opts = init_options.cloned().or_else(|| {
-                build_init_options(language, venv_root, py_venv.as_deref())
+                build_init_options(
+                    language,
+                    venv_root,
+                    py_venv.as_deref(),
+                    diagnostics_elsewhere,
+                    format_elsewhere,
+                )
             });
 
             match LspClient::start(command, args) {
                 Ok(mut client) => {
                     client.initialize(&root_uri, init_opts.as_ref());
+                    self.log_once(format!("LSP: launched '{command}' ({language})"));
                     let server = ManagedServer {
                         client,
                         features: features.to_vec(),
@@ -227,8 +277,9 @@ impl LspManager {
                         .or_default()
                         .push(server);
                 }
-                Err(_) => {
+                Err(e) => {
                     // Server binary not installed or failed to start — soft degradation.
+                    self.log_once(format!("LSP: failed to launch '{command}' ({language}): {e}"));
                 }
             }
         }
@@ -253,6 +304,37 @@ impl LspManager {
         if let Some(servers) = self.servers.get_mut(language) {
             for server in servers.iter_mut() {
                 if server.client.initialized {
+                    server.client.did_change(&uri, text);
+                }
+            }
+        }
+    }
+
+    /// Single-edit `didChange`: a range delta (`start..end` replaced by
+    /// `new_text`, UTF-16 LSP positions in the pre-edit document) to servers
+    /// that negotiated incremental sync, a full-text didChange to the rest.
+    /// `rope` is the post-edit document — stringified at most once, and only
+    /// when some server actually needs the full text.
+    pub fn did_change_delta(
+        &mut self,
+        language: &str,
+        path: &std::path::Path,
+        start: (u32, u32),
+        end: (u32, u32),
+        new_text: &str,
+        rope: &ropey::Rope,
+    ) {
+        let uri = path_to_uri(path);
+        let mut full: Option<String> = None;
+        if let Some(servers) = self.servers.get_mut(language) {
+            for server in servers.iter_mut() {
+                if !server.client.initialized {
+                    continue;
+                }
+                if server.client.supports_incremental_sync() {
+                    server.client.did_change_incremental(&uri, start, end, new_text);
+                } else {
+                    let text = full.get_or_insert_with(|| rope.to_string());
                     server.client.did_change(&uri, text);
                 }
             }
@@ -452,6 +534,18 @@ impl LspManager {
         if !any_ready {
             return false;
         }
+        // Only code cells are transmitted to servers (markup cells are omitted
+        // from the notebookDocument/didOpen payload entirely), so a change to a
+        // markdown/raw cell must not be synced either — servers would reject or
+        // crash on a didChange for a cell they were never told about.
+        let is_code_cell = self
+            .notebook_state
+            .get(notebook_uri)
+            .map(|(uris, _)| uris.iter().any(|u| u == cell_uri))
+            .unwrap_or(false);
+        if !is_code_cell {
+            return false;
+        }
         let nb_version = {
             let entry = self.notebook_state.entry(notebook_uri.to_owned()).or_insert((vec![], 0));
             entry.1 += 1;
@@ -530,11 +624,9 @@ impl LspManager {
         let uri = path_to_uri(shadow_path);
         let Some(servers) = self.servers.get_mut(language) else { return false };
         let client = &mut servers[idx].client;
-        if client.is_doc_open(&uri) {
-            client.did_change(&uri, text);
-        } else {
-            client.did_open(&uri, language, text);
-        }
+        // Fingerprint-gated: retransmits the concatenated notebook only when
+        // its content actually changed since the last shadow-doc request.
+        client.sync_full_doc(&uri, language, text);
         let _ = match kind {
             LspRequestKind::Hover => client.request_hover(&uri, line, character),
             LspRequestKind::SignatureHelp => client.request_signature_help(&uri, line, character),
@@ -556,6 +648,7 @@ impl LspManager {
                 };
                 for msg in msgs {
                     let server = &mut self.servers.get_mut(&lang).unwrap()[idx];
+                    let command = server.command.clone();
                     if let Some(evt) = process_message(
                         &mut server.client,
                         &lang,
@@ -564,6 +657,9 @@ impl LspManager {
                         &mut self.diagnostics,
                         &mut self.server_diagnostics,
                     ) {
+                        if matches!(evt, LspEvent::Initialized { .. }) {
+                            self.log_once(format!("LSP: '{command}' ready ({lang})"));
+                        }
                         events.push(evt);
                     }
                 }
@@ -937,6 +1033,8 @@ fn build_init_options(
     language: &str,
     root: Option<&std::path::Path>,
     venv_python: Option<&std::path::Path>,
+    diagnostics_elsewhere: bool,
+    format_elsewhere: bool,
 ) -> Option<serde_json::Value> {
     match language {
         "python" => {
@@ -960,13 +1058,25 @@ fn build_init_options(
                 );
             }
 
-            Some(serde_json::json!({
-                "pylsp": {
-                    "plugins": {
-                        "jedi": jedi
-                    }
+            let mut plugins: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            plugins.insert("jedi".into(), serde_json::Value::Object(jedi));
+            // pylsp runs its lint plugins on EVERY didChange — that work is
+            // pure duplication (and per-keystroke latency in the process that
+            // also answers completions) when a feature-scoped server such as
+            // `ruff server` owns diagnostics / formatting. jedi_* plugins
+            // (completion, hover, signatures, definitions) stay enabled.
+            if diagnostics_elsewhere {
+                for plugin in ["pycodestyle", "pyflakes", "mccabe", "pylint", "flake8", "pydocstyle"] {
+                    plugins.insert(plugin.into(), serde_json::json!({ "enabled": false }));
                 }
-            }))
+            }
+            if format_elsewhere {
+                for plugin in ["autopep8", "yapf"] {
+                    plugins.insert(plugin.into(), serde_json::json!({ "enabled": false }));
+                }
+            }
+
+            Some(serde_json::json!({ "pylsp": { "plugins": plugins } }))
         }
         _ => None,
     }
@@ -1039,8 +1149,43 @@ fn completion_kind_name(kind: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_signature_help;
+    use super::{build_init_options, parse_signature_help, LspManager};
     use serde_json::json;
+
+    /// pylsp's lint/format plugins are disabled exactly when a feature-scoped
+    /// server owns diagnostics/format; jedi stays enabled either way, and a
+    /// pylsp-only setup (no scoped servers) keeps pylsp's defaults untouched.
+    #[test]
+    fn pylsp_plugins_disabled_only_when_feature_owned_elsewhere() {
+        let opts = build_init_options("python", None, None, true, true).unwrap();
+        let plugins = &opts["pylsp"]["plugins"];
+        assert_eq!(plugins["pyflakes"]["enabled"], json!(false));
+        assert_eq!(plugins["pycodestyle"]["enabled"], json!(false));
+        assert_eq!(plugins["autopep8"]["enabled"], json!(false));
+        assert!(plugins["jedi"].is_object(), "jedi config must survive");
+
+        let opts = build_init_options("python", None, None, false, false).unwrap();
+        let plugins = &opts["pylsp"]["plugins"];
+        assert!(plugins.get("pyflakes").is_none(), "pylsp-only setup keeps lint defaults");
+        assert!(plugins.get("autopep8").is_none());
+        assert!(plugins["jedi"].is_object());
+    }
+
+    #[test]
+    fn python_without_venv_logs_once_and_starts_nothing() {
+        let cfg: crate::config::LanguageServerConfig =
+            serde_json::from_value(json!({ "command": "pylsp" })).unwrap();
+        let mut mgr = LspManager::new();
+        let dir = std::path::Path::new("/nonexistent-sakharov-test-dir");
+        mgr.ensure_server("python", &cfg, Some(dir));
+        // A second call (cell navigation re-runs ensure_server) must not repeat the line.
+        mgr.ensure_server("python", &cfg, Some(dir));
+        let log = mgr.take_lifecycle_log();
+        assert_eq!(log.len(), 1, "expected exactly one no-venv line, got {log:?}");
+        assert!(log[0].contains("no virtualenv"), "unexpected log line: {}", log[0]);
+        assert!(!mgr.is_ready("python"));
+        assert!(mgr.take_lifecycle_log().is_empty(), "log should drain");
+    }
 
     #[test]
     fn signature_help_marks_active_parameter() {

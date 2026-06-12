@@ -28,8 +28,6 @@ pub struct ActiveCellView<'a> {
     pub scroll_row: usize,
     /// Current editor mode — determines cursor highlight style.
     pub mode: &'a Mode,
-    /// Per-mode color overrides from the loaded config.
-    pub mode_colors: &'a crate::config::ModeColorsConfig,
     /// Jump-mode labels to overlay on the cell source (`app.jump.labels`).
     /// Empty slice when not in Jump mode.
     pub jump_labels: &'a [(usize, String)],
@@ -323,10 +321,11 @@ fn render_cells(
         let type_label = cell_type_label(cell, &nb.metadata.kernel_language);
         let title = format!(" {count_str} {type_label} ");
 
+        let th = crate::theme::active();
         let title_style = if is_focused {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default().fg(th.fg()).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(th.dim)
         };
 
         let block = Block::default()
@@ -334,7 +333,7 @@ fn render_cells(
             .borders(Borders::ALL)
             .border_type(if is_focused { BorderType::Thick } else { BorderType::Rounded })
             .border_style(Style::default().fg(border_color))
-            .style(Style::default().bg(crate::theme::CELL_BG));
+            .style(Style::default().bg(th.cell_bg));
 
         let inner = block.inner(cell_rect);
         frame.render_widget(block, cell_rect);
@@ -445,7 +444,6 @@ fn render_cell_content(
         cursor_pos: cursor_char_idx,
         sel_range,
         mode: active.mode,
-        mode_colors: active.mode_colors,
         highlight_spans,
         use_highlight: kind != CellKind::Plain,
         diag_ranges: &cell_diag_ranges,
@@ -537,7 +535,7 @@ fn render_cell_content(
             frame.render_widget(
                 SingleLineWidget {
                     text: " \u{2500}\u{2500} output \u{2500}\u{2500}".to_string(),
-                    style: Style::default().fg(Color::DarkGray),
+                    style: Style::default().fg(crate::theme::active().dim),
                 },
                 single_row(area, current_row),
             );
@@ -586,9 +584,10 @@ fn render_folded_cell_summary_rope(
     let y = row.y;
     let mut x = row.x;
 
-    let content_style = Style::default().fg(Color::Rgb(120, 120, 150));
-    let arrow_style = Style::default().fg(crate::theme::ACCENT);
-    let count_style = Style::default().fg(Color::DarkGray);
+    let th = crate::theme::active();
+    let content_style = Style::default().fg(th.dim);
+    let arrow_style = Style::default().fg(th.accent);
+    let count_style = Style::default().fg(th.dim);
 
     for c in format!("  {content}").chars() {
         if x >= row.right() { break; }
@@ -711,21 +710,22 @@ fn single_output_height_count(
     }
 }
 
-/// Returns the border colour reflecting the cell's execution state.
-/// Dark blue = not yet run, bright blue = running, Green = success, Red = errored.
+/// Returns the border colour reflecting the cell's execution state
+/// (theme `[notebook]` colors): not yet run, running, success, errored.
 fn cell_border_color(cell: &Cell, executing_cell: Option<usize>, cell_idx: usize) -> Color {
+    let th = crate::theme::active();
     if executing_cell == Some(cell_idx) {
-        // Bright blue while the cell streams output, distinct from the dim blue
-        // of an un-run cell.
-        return Color::LightBlue;
+        // Brighter while the cell streams output, distinct from the dim
+        // border of an un-run cell.
+        return th.nb_border_running;
     }
     if cell.outputs.iter().any(|o| matches!(o, Output::Error { .. })) {
-        return Color::Red;
+        return th.nb_border_error;
     }
     if cell.execution_count.is_some() {
-        return Color::Green;
+        return th.nb_border_ok;
     }
-    Color::Blue
+    th.nb_border
 }
 
 fn cell_type_label(cell: &Cell, kernel_language: &str) -> String {
@@ -741,7 +741,6 @@ struct SourceLineCtx<'a> {
     cursor_pos: Option<usize>,
     sel_range: (usize, usize),
     mode: &'a Mode,
-    mode_colors: &'a crate::config::ModeColorsConfig,
     highlight_spans: &'a [(usize, usize, usize)],
     /// When true, render characters with their highlight spans (code cells, and
     /// rendered markdown cells); when false, render as plain gray source text.
@@ -792,8 +791,11 @@ fn render_source_line(
         return;
     }
     let content_area = Rect { x: content_x, y: area.y, width: content_width, height: 1 };
-    let cursor_style = crate::theme::cursor_style(ctx.mode, ctx.mode_colors);
-    let selection_style = Style::default().bg(crate::theme::CELL_SELECTION_BG).fg(Color::White);
+    let th = crate::theme::active();
+    let cursor_style = crate::theme::cursor_style(ctx.mode);
+    let selection_style = Style::default()
+        .bg(th.cell_selection_bg)
+        .fg(th.selection_fg.unwrap_or_else(|| th.fg()));
     let (sel_lo, sel_hi) = ctx.sel_range;
     let has_selection = sel_lo != sel_hi;
 
@@ -809,7 +811,11 @@ fn render_source_line(
         let base_style = if ctx.use_highlight {
             highlight::style_at(ctx.highlight_spans, char_idx)
         } else {
-            Style::default().fg(Color::Gray)
+            // Plain (raw) cell text: slightly de-emphasized.
+            Style::default().fg(match th.foreground {
+                Some(_) => th.dim,
+                None => Color::Gray,
+            })
         };
         let style = if ctx.cursor_pos == Some(char_idx) {
             cursor_style
@@ -865,10 +871,11 @@ fn render_output(
     nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
 ) {
+    let th = crate::theme::active();
     match output {
         Output::Stream { name, text } => {
             let style = if name == "stderr" {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(th.warning)
             } else {
                 Style::default()
             };
@@ -895,7 +902,7 @@ fn render_output(
                 frame.render_widget(
                     SingleLineWidget {
                         text: format!("  ... ({extra} more lines)"),
-                        style: Style::default().fg(Color::DarkGray),
+                        style: Style::default().fg(th.dim),
                     },
                     row_area,
                 );
@@ -913,7 +920,7 @@ fn render_output(
                 frame.render_widget(
                     SingleLineWidget {
                         text: format!("  {ename}: {evalue}"),
-                        style: Style::default().fg(Color::Red),
+                        style: Style::default().fg(th.error),
                     },
                     row_area,
                 );
@@ -927,7 +934,7 @@ fn render_output(
                 frame.render_widget(
                     SingleLineWidget {
                         text: format!("  {tb_line}"),
-                        style: Style::default().fg(Color::DarkGray),
+                        style: Style::default().fg(th.dim),
                     },
                     row_area,
                 );
@@ -1004,12 +1011,13 @@ fn render_mime_data(
                     height: 1,
                 };
                 let label = if r == 0 { "  ▸ image ".to_string() } else { String::new() };
+                let th = crate::theme::active();
                 frame.render_widget(
                     SingleLineWidget {
                         text: label,
                         style: Style::default()
-                            .bg(Color::Rgb(10, 10, 20))
-                            .fg(Color::DarkGray),
+                            .bg(th.output_bg)
+                            .fg(th.dim),
                     },
                     row_area,
                 );
@@ -1032,7 +1040,7 @@ fn render_mime_data(
             frame.render_widget(
                 SingleLineWidget {
                     text: format!("  {line}"),
-                    style: Style::default().fg(Color::Cyan),
+                    style: Style::default().fg(crate::theme::active().info),
                 },
                 row_area,
             );
@@ -1131,14 +1139,12 @@ mod tests {
         let state = NotebookState::new();
         let rope = nb.cells[0].source.clone();
         let mode = Mode::Normal;
-        let mode_colors = crate::config::ModeColorsConfig::default();
         let active = ActiveCellView {
             rope: &rope,
             cursor: 2, // on the 'H' of "# Heading"
             sel_anchor: 2,
             scroll_row: 0,
             mode: &mode,
-            mode_colors: &mode_colors,
             jump_labels: &[],
             jump_typed: "",
             word_wrap: false,

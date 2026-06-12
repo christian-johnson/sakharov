@@ -12,8 +12,9 @@ pub use buffers::{is_special_path, open_as_notebook, switch_to_special_buffer};
 pub use export::{poll_export, ExportJob};
 pub(crate) use buffers::{create_new_file, create_new_notebook, SCRATCH_INTRO};
 pub use lsp::{
-    apply_code_action, jump_to_location, lsp_did_change, lsp_signature_help,
-    process_lsp_events, refresh_completion_doc,
+    apply_code_action, jump_to_location, lsp_did_change, lsp_did_change_insert,
+    lsp_did_change_remove, lsp_signature_help, process_lsp_events, pump_signature_help,
+    refresh_completion_doc,
 };
 pub use scroll::{normalize_cursor_folds, update_scroll};
 pub use search::{search_compute_matches, search_jump};
@@ -39,6 +40,21 @@ use crate::{
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Switch to the named theme (built-in or user theme file), keeping the
+/// `[theme]` config overrides applied on top.  The choice lasts for the
+/// session; the message points at the config key that persists it.
+pub fn apply_theme(app: &mut App, name: &str) {
+    match crate::theme::load_and_set(name, &app.config.theme.overrides) {
+        Ok(display) => {
+            app.config.theme.name = name.to_string();
+            app.messages.show(format!(
+                "Theme: {display}  (persist with `name = \"{name}\"` under [theme] in :config)"
+            ));
+        }
+        Err(e) => app.messages.show(format!("Theme error: {e}")),
+    }
+}
 
 /// Execute a single command against the application state.
 pub fn execute(app: &mut App, cmd: &Command) {
@@ -122,6 +138,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::OpenSymbolPicker    => { pickers::symbol_picker(app);    return; }
         Command::OpenFilePicker      => { pickers::file_picker(app);      return; }
         Command::OpenDiagnosticPicker => { pickers::diagnostic_picker(app); return; }
+        Command::OpenThemePicker     => { pickers::theme_picker(app);      return; }
+        Command::SwitchTheme(name)   => { apply_theme(app, name);          return; }
 
         // --- Sub-mode entries ---
         Command::EnterGotoMode => {
@@ -879,6 +897,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             let config = crate::config::Config::load();
             let mut keymap = crate::keymap::Keymap::default_bindings();
             keymap.apply_custom_bindings(&config.keys);
+            crate::theme::init_from_config(&config);
             app.config = config;
             app.keymap = keymap;
             app.messages.show("Config reloaded");

@@ -1,0 +1,53 @@
+# Solarized Dark — after Ethan Schoonover's Solarized
+name = "Solarized Dark"
+
+[palette]
+base03  = "#002b36"
+base02  = "#073642"
+base01  = "#586e75"
+base00  = "#657b83"
+base0   = "#839496"
+base1   = "#93a1a1"
+yellow  = "#b58900"
+orange  = "#cb4b16"
+red     = "#dc322f"
+magenta = "#d33682"
+violet  = "#6c71c4"
+blue    = "#268bd2"
+cyan    = "#2aa198"
+green   = "#859900"
+
+[ui]
+background      = "base03"
+foreground      = "base0"
+dim             = "base01"
+line_numbers    = "base01"
+selection       = "base02"
+accent          = "orange"
+error           = "red"
+warning         = "yellow"
+info            = "blue"
+success         = "green"
+statusline      = "base02"
+popup           = "base02"
+popup_border    = "base01"
+popup_selection = "#0a4a5a"
+
+[syntax]
+comment     = "base01"
+keyword     = "green"
+function    = "blue"
+string      = "cyan"
+type        = "yellow"
+constant    = "magenta"
+variable    = "base0"
+property    = "blue"
+operator    = "base0"
+punctuation = "base00"
+namespace   = "violet"
+attribute   = "orange"
+tag         = "blue"
+
+[modes]
+normal = "blue"
+goto   = "violet"

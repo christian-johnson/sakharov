@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -38,6 +38,7 @@ const LABEL_COL: usize = 18; // right-pad labels to this width
 const FOOTER: &str = "press any key to start";
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let th = crate::theme::active();
     let banner_rows = BANNER.len() as u16;
     let action_rows = ACTIONS.len() as u16;
     // banner + gap + actions + gap + footer
@@ -55,10 +56,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         area.x
     };
 
-    let banner_color = crate::theme::mode_color(
-        &crate::mode::Mode::Normal,
-        &app.config.theme.modes,
-    );
+    let banner_color = crate::theme::mode_color(&crate::mode::Mode::Normal);
 
     // ── Banner ──────────────────────────────────────────────────────────────
     for (i, row) in BANNER.iter().enumerate() {
@@ -98,10 +96,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         };
 
         let line = Line::from(vec![
-            Span::styled("  ▸  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(action.label, Style::default().fg(Color::White)),
-            Span::styled(format!(" {} ", dots), Style::default().fg(Color::DarkGray)),
-            Span::styled(hint, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("  ▸  ", Style::default().fg(th.dim)),
+            Span::styled(action.label, Style::default().fg(th.fg())),
+            Span::styled(format!(" {} ", dots), Style::default().fg(th.dim)),
+            Span::styled(hint, Style::default().fg(th.info).add_modifier(Modifier::BOLD)),
         ]);
 
         let w = area.width.saturating_sub(actions_x - area.x);
@@ -122,7 +120,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         };
         let w = area.width.saturating_sub(footer_x - area.x);
         frame.render_widget(
-            Paragraph::new(FOOTER).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(FOOTER).style(Style::default().fg(th.dim)),
             Rect { x: footer_x, y: footer_y, width: w, height: 1 },
         );
     }

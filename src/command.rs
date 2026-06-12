@@ -212,6 +212,7 @@ commands! {
         ToggleWordWrap => "toggle-word-wrap", aliases: ["word-wrap", "wrap"], palette: "Toggle soft word-wrap  [:wrap]";
         OpenConfig => "open-config", aliases: ["config"], palette: "Open config file in editor  [:config]";
         ReloadConfig => "reload-config", aliases: ["config-reload"], palette: "Reload config from disk  [:config-reload]";
+        OpenThemePicker => "open-theme-picker", aliases: ["themes"], palette: "Choose color theme  [:theme]";
 
         // --- Dashboard ---
         ShowDashboard => "show-dashboard", aliases: ["dashboard", "home", "splash"], palette: "Show the welcome / dashboard screen  [:dashboard]";
@@ -225,6 +226,8 @@ commands! {
         Shell(String) => "shell", palette: "Run a shell command  [:shell <cmd>]";
         // Render the current notebook / markdown document via Quarto.
         ExportDocument(String) => "export", palette: "Export via Quarto to pdf/html/docx…  [:export <fmt>]";
+        // Switch to a named color theme (`:theme <name>`; bare `:theme` opens the picker).
+        SwitchTheme(String) => "theme";
         // A list of commands executed in sequence (composition / scripting).
         Sequence(Vec<Command>) => "sequence";
     }
@@ -275,6 +278,11 @@ impl Command {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;
                 Some(Command::GotoLine(n))
             }
+            // `:theme <name>` switches directly; bare `:theme` opens the picker.
+            "theme" => match arg {
+                Some(name) if !name.is_empty() => Some(Command::SwitchTheme(name.to_string())),
+                _ => Some(Command::OpenThemePicker),
+            },
             _ => Self::parse_unit(cmd),
         }
     }

@@ -20,6 +20,7 @@ pub(crate) fn parse_hex_color(s: &str) -> Option<Color> {
 /// Top-level configuration structure.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default)]
     pub theme: ThemeConfig,
     pub editor: EditorConfig,
     #[serde(default)]
@@ -95,18 +96,31 @@ pub struct ModeColorsConfig {
     pub fold: String,
 }
 
+/// The `[theme]` section: which theme to use, plus inline overrides.
+///
+/// `name` selects a built-in theme, or a `<name>.toml` file in
+/// `~/.config/sakharov/themes/`.  Every other key in the section (including
+/// nested tables like `[theme.ui]`, `[theme.syntax]`, `[theme.modes]`) uses the
+/// theme-file schema (see `config/themes/example.toml`) and is deep-merged
+/// *over* the chosen theme, so individual colors can be overridden without
+/// editing the theme file.
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)] // background/foreground/etc. parse from TOML but are not yet wired to the renderer
 pub struct ThemeConfig {
-    pub background: String,
-    pub foreground: String,
-    pub cursor: String,
-    pub selection: String,
-    pub line_numbers: String,
-    /// Per-mode chip / cursor colors.  Each entry is optional; unset entries
-    /// use the built-in ANSI fallback for that mode.
-    #[serde(default)]
-    pub modes: ModeColorsConfig,
+    /// Theme name; `"default"` is the classic terminal-inherited look.
+    #[serde(default = "default_theme_name")]
+    pub name: String,
+    /// Everything else in `[theme]`, kept raw for the merge in
+    /// [`crate::theme::load_and_set`].
+    #[serde(flatten)]
+    pub overrides: toml::map::Map<String, toml::Value>,
+}
+
+fn default_theme_name() -> String { "default".into() }
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self { name: default_theme_name(), overrides: toml::map::Map::new() }
+    }
 }
 
 /// Editor behaviour configuration.
@@ -159,6 +173,13 @@ pub struct EditorConfig {
     /// Set to false to disable recovery entirely (e.g. for sensitive trees).
     #[serde(default = "default_crash_recovery")]
     pub crash_recovery: bool,
+    /// Minimum milliseconds between signature-help requests while typing inside
+    /// a call (the hint refreshes per keystroke; for notebooks each refresh
+    /// retransmits the concatenated shadow document). A deferred trailing
+    /// refresh always fires after the window, so the hint settles on the final
+    /// cursor position. `0` disables the throttle entirely.
+    #[serde(default = "default_lsp_signature_throttle_ms")]
+    pub lsp_signature_throttle_ms: u64,
 }
 
 fn default_expand_tabs() -> bool { true }
@@ -166,6 +187,7 @@ fn default_max_undo() -> usize { 200 }
 fn default_file_picker_max_files() -> usize { 2000 }
 fn default_file_picker_max_depth() -> usize { 10 }
 fn default_crash_recovery() -> bool { true }
+fn default_lsp_signature_throttle_ms() -> u64 { 50 }
 
 /// UI / interaction configuration.
 #[derive(Debug, Deserialize, Clone)]
@@ -494,7 +516,7 @@ impl Config {
 
 /// Deep-merge `over` into `base`.  Tables are merged recursively;
 /// any other type is replaced by `over`.
-fn deep_merge(base: toml::Value, over: toml::Value) -> toml::Value {
+pub(crate) fn deep_merge(base: toml::Value, over: toml::Value) -> toml::Value {
     use toml::Value::Table;
     match (base, over) {
         (Table(mut b), Table(o)) => {
@@ -589,7 +611,10 @@ mod tests {
         let cfg: Config = toml::from_str(DEFAULT_CONFIG).expect("default.toml parses");
         assert_eq!(cfg.statusline.left, vec!["mode", "git", "file"]);
         assert!(cfg.statusline.right.contains(&"diagnostics".to_string()));
-        assert_eq!(cfg.statusline.notebook.right, vec!["diagnostics", "cell", "kernel"]);
+        assert_eq!(
+            cfg.statusline.notebook.right,
+            vec!["diagnostics", "spinner", "cell", "kernel"]
+        );
     }
 
     /// A partial user `[statusline]` override replaces only the keys it sets and

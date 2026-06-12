@@ -29,6 +29,13 @@ pub struct Buffer {
     /// The file's mtime as of the last load/save.  Used to detect external
     /// modification before overwriting on save.  `None` for new/unsaved files.
     disk_mtime: Option<std::time::SystemTime>,
+    /// Length (chars) of this document as of the last LSP sync.  The
+    /// incremental-didChange path checks it before sending a range delta: a
+    /// mismatch means an edit happened that never notified the LSP (command
+    /// edits like open-line / delete / paste / undo don't), so the server's
+    /// copy is stale and the edit falls back to a full-text resync.
+    /// `None` until the first sync.
+    pub lsp_synced_chars: Option<usize>,
 }
 
 /// Read a path's mtime, or `None` when it doesn't exist / can't be statted.
@@ -71,6 +78,7 @@ impl Buffer {
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
             disk_mtime: None,
+            lsp_synced_chars: None,
         }
     }
 
@@ -90,6 +98,7 @@ impl Buffer {
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
             disk_mtime,
+            lsp_synced_chars: None,
         })
     }
 

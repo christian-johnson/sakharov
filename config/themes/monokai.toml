@@ -1,0 +1,51 @@
+# Monokai — after the classic TextMate / Sublime theme
+name = "Monokai"
+
+[palette]
+bg        = "#272822"
+bg_dark   = "#1e1f1c"
+selection = "#49483e"
+fg        = "#f8f8f2"
+comment   = "#75715e"
+line_nr   = "#90908a"
+pink      = "#f92672"
+green     = "#a6e22e"
+yellow    = "#e6db74"
+blue      = "#66d9ef"
+purple    = "#ae81ff"
+orange    = "#fd971f"
+
+[ui]
+background      = "bg"
+foreground      = "fg"
+dim             = "comment"
+line_numbers    = "#75715e"
+selection       = "selection"
+accent          = "orange"
+error           = "pink"
+warning         = "orange"
+info            = "blue"
+success         = "green"
+statusline      = "bg_dark"
+popup           = "bg_dark"
+popup_border    = "comment"
+popup_selection = "selection"
+
+[syntax]
+comment     = "comment"
+keyword     = "pink"
+function    = "green"
+string      = "yellow"
+type        = "blue"
+constant    = "purple"
+variable    = "fg"
+parameter   = "orange"
+operator    = "pink"
+punctuation = "fg"
+namespace   = "blue"
+tag         = "pink"
+attribute   = "green"
+
+[modes]
+normal = "blue"
+goto   = "purple"

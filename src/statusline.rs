@@ -68,11 +68,13 @@ impl Segment {
 
 /// The status-bar background / default text style.
 fn base_style() -> Style {
-    Style::default().bg(Color::DarkGray).fg(Color::White)
+    let th = crate::theme::active();
+    Style::default().bg(th.statusline_bg).fg(th.statusline_fg)
 }
 
 fn dim_style() -> Style {
-    Style::default().bg(Color::DarkGray).fg(Color::Rgb(170, 170, 170))
+    let th = crate::theme::active();
+    Style::default().bg(th.statusline_bg).fg(th.statusline_dim)
 }
 
 /// Parse a `#rrggbb` hex color string into a ratatui `Color`.
@@ -89,7 +91,9 @@ fn parse_hex_color(s: &str) -> Option<Color> {
 }
 
 /// The bar's base background color — used for separator tinting and padding.
-const BAR_BG: Color = Color::DarkGray;
+fn bar_bg() -> Color {
+    crate::theme::active().statusline_bg
+}
 
 /// Ensure a module's segment list has a leading space on the first segment and
 /// a trailing space on the last.  Skips sides that already have a space so
@@ -130,32 +134,24 @@ fn powerline_glyphs(sep: &str) -> (char, char) {
 }
 
 /// Background color for a named module.  Looks up `styles` first, then falls
-/// back to `mode_color` for the mode chip and `BAR_BG` for everything else.
+/// back to `mode_color` for the mode chip and the bar background for everything else.
 fn module_bg(name: &str, ctx: &Ctx, styles: &HashMap<String, String>) -> Color {
     if let Some(c) = styles.get(name).and_then(|s| parse_hex_color(s)) {
         return c;
     }
-    if name == "mode" { ctx.mode_color } else { BAR_BG }
+    if name == "mode" { ctx.mode_color } else { bar_bg() }
 }
 
 /// Pick a contrasting foreground for a given background.
 fn fg_for_bg(bg: Color) -> Color {
-    let lum: f32 = match bg {
-        Color::Rgb(r, g, b) => {
-            r as f32 * 0.299 + g as f32 * 0.587 + b as f32 * 0.114
-        }
-        Color::White | Color::Yellow | Color::LightYellow
-        | Color::Green | Color::LightGreen | Color::Cyan | Color::LightCyan => 180.0,
-        _ => 0.0,
-    };
-    if lum > 128.0 { Color::Black } else { Color::White }
+    crate::theme::contrast_fg(bg)
 }
 
 /// Apply a module's background color to all its segments.  When the bg is the
 /// default bar color the existing foreground (semantic red/yellow/cyan) is
 /// preserved; when a custom bg is set both fg and bg are overridden for contrast.
 fn apply_module_bg(segs: &mut [Segment], bg: Color) {
-    let custom = !matches!(bg, Color::DarkGray);
+    let custom = bg != bar_bg();
     let fg = if custom { Some(fg_for_bg(bg)) } else { None };
     for seg in segs.iter_mut() {
         seg.style = seg.style.bg(bg);
@@ -168,6 +164,7 @@ fn apply_module_bg(segs: &mut [Segment], bg: Color) {
 /// Expand a single module name into styled segments.  Unknown names render as
 /// literal text so they can double as separators / decoration.
 fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
+    let th = crate::theme::active();
     let base = base_style();
     match name {
         "mode" => vec![Segment::new(
@@ -192,7 +189,7 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
             if ctx.diag_errors > 0 {
                 segs.push(Segment::new(
                     format!("\u{25cf}{}", ctx.diag_errors),
-                    base.fg(Color::Red),
+                    base.fg(th.error),
                 ));
             }
             if ctx.diag_warnings > 0 {
@@ -201,7 +198,7 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
                 }
                 segs.push(Segment::new(
                     format!("\u{25c6}{}", ctx.diag_warnings),
-                    base.fg(Color::Yellow),
+                    base.fg(th.warning),
                 ));
             }
             segs
@@ -209,7 +206,7 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
         "position" | "pos" => vec![Segment::new(format!("{}:{}", ctx.line, ctx.col), base)],
         "scroll" | "scroll_percent" => vec![Segment::new(format!("{}%", ctx.scroll_pct), base)],
         "spinner" => match ctx.spinner {
-            Some(g) => vec![Segment::new(g.to_string(), base.fg(Color::Cyan))],
+            Some(g) => vec![Segment::new(g.to_string(), base.fg(th.info))],
             None => vec![],
         },
         "cell" | "cell_position" => match ctx.cell {
@@ -223,7 +220,7 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
                     Some(g) => format!("[{g} starting]"),
                     None => "[starting]".to_string(),
                 };
-                vec![Segment::new(label, base.fg(Color::Yellow))]
+                vec![Segment::new(label, base.fg(th.warning))]
             }
             Some(KernelView::Idle) => vec![Segment::new("[idle]", dim_style())],
             Some(KernelView::Busy) => {
@@ -232,9 +229,9 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
                     Some(g) => format!("[{g} busy]"),
                     None => "[busy]".to_string(),
                 };
-                vec![Segment::new(label, base.fg(Color::Cyan))]
+                vec![Segment::new(label, base.fg(th.info))]
             }
-            Some(KernelView::Dead) => vec![Segment::new("[dead]", base.fg(Color::Red))],
+            Some(KernelView::Dead) => vec![Segment::new("[dead]", base.fg(th.error))],
             Some(KernelView::None) => vec![Segment::new("[no kernel]", dim_style())],
             None => vec![],
         },
@@ -322,7 +319,7 @@ fn build_group_powerline(
         // which transitions back to the bar background).
         for (i, (segs, bg)) in entries.iter().enumerate() {
             out.extend(segs.iter().cloned());
-            let next_bg = entries.get(i + 1).map(|(_, c)| *c).unwrap_or(BAR_BG);
+            let next_bg = entries.get(i + 1).map(|(_, c)| *c).unwrap_or_else(bar_bg);
             out.push(Segment::new(
                 left_glyph.to_string(),
                 Style::default().fg(*bg).bg(next_bg),
@@ -334,7 +331,7 @@ fn build_group_powerline(
         // what lies to its left (bar bg for the first module, previous module's
         // bg for subsequent ones).
         for (i, (segs, bg)) in entries.iter().enumerate() {
-            let prev_bg = if i == 0 { BAR_BG } else { entries[i - 1].1 };
+            let prev_bg = if i == 0 { bar_bg() } else { entries[i - 1].1 };
             out.push(Segment::new(
                 right_glyph.to_string(),
                 Style::default().fg(*bg).bg(prev_bg),
@@ -383,12 +380,38 @@ pub fn render(
     separator: &str,
     styles: &HashMap<String, String>,
 ) {
+    let kernel_folds = kernel_folds_spinner(ctx, left, right);
+    let strip = |names: &[String]| -> Vec<String> {
+        names.iter().filter(|n| n.as_str() != "spinner").cloned().collect()
+    };
+    let (l_stripped, r_stripped);
+    let (left, right) = if kernel_folds {
+        l_stripped = strip(left);
+        r_stripped = strip(right);
+        (l_stripped.as_slice(), r_stripped.as_slice())
+    } else {
+        (left, right)
+    };
+
     let left_segs = build_group(left, ctx, separator, styles, true);
     let right_segs = build_group(right, ctx, separator, styles, false);
     frame.render_widget(
         StatusLineWidget { left: left_segs, right: right_segs },
         area,
     );
+}
+
+/// True when the standalone `spinner` module should be dropped because a
+/// `kernel` module in the layout is already folding the live spinner into its
+/// starting/busy chip — one boiling glyph is enough. In every other kernel
+/// state the standalone spinner still surfaces non-kernel background work
+/// (in-flight LSP requests, exports).
+fn kernel_folds_spinner(ctx: &Ctx, left: &[String], right: &[String]) -> bool {
+    matches!(
+        ctx.kernel,
+        Some(KernelView::Starting) | Some(KernelView::Busy)
+    ) && ctx.spinner.is_some()
+        && left.iter().chain(right.iter()).any(|m| m == "kernel")
 }
 
 struct StatusLineWidget {
@@ -446,5 +469,60 @@ impl ratatui::widgets::Widget for StatusLineWidget {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(kernel: Option<KernelView>, spinner: Option<char>) -> Ctx {
+        Ctx {
+            mode_label: "NOR".into(),
+            mode_color: Color::White,
+            filename: "f".into(),
+            modified: false,
+            branch: None,
+            diag_errors: 0,
+            diag_warnings: 0,
+            line: 1,
+            col: 1,
+            scroll_pct: 0,
+            spinner,
+            cell: None,
+            kernel,
+        }
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The standalone spinner is suppressed exactly when a kernel module in
+    /// the layout is animating (starting/busy); idle/dead/absent kernels keep
+    /// it visible so LSP/export activity still shows.
+    #[test]
+    fn standalone_spinner_suppressed_only_while_kernel_chip_animates() {
+        let layout = names(&["diagnostics", "spinner", "cell", "kernel"]);
+        let busy = ctx(Some(KernelView::Busy), Some('⠓'));
+        assert!(kernel_folds_spinner(&busy, &[], &layout));
+        let starting = ctx(Some(KernelView::Starting), Some('⠓'));
+        assert!(kernel_folds_spinner(&starting, &[], &layout));
+
+        let idle = ctx(Some(KernelView::Idle), Some('⠓'));
+        assert!(!kernel_folds_spinner(&idle, &[], &layout));
+        let none = ctx(Some(KernelView::None), Some('⠓'));
+        assert!(!kernel_folds_spinner(&none, &[], &layout));
+        let plain = ctx(None, Some('⠓'));
+        assert!(!kernel_folds_spinner(&plain, &[], &layout));
+
+        // No kernel module in the layout -> never suppress.
+        let no_kernel_layout = names(&["diagnostics", "spinner", "pos"]);
+        let busy = ctx(Some(KernelView::Busy), Some('⠓'));
+        assert!(!kernel_folds_spinner(&busy, &[], &no_kernel_layout));
+
+        // Spinner dormant -> nothing to suppress.
+        let dormant = ctx(Some(KernelView::Busy), None);
+        assert!(!kernel_folds_spinner(&dormant, &[], &layout));
     }
 }

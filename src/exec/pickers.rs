@@ -160,6 +160,35 @@ pub(super) fn symbol_picker(app: &mut App) {
     app.popup = Some(crate::popup::Popup::navigate("symbols", items));
 }
 
+/// Fuzzy picker over all available color themes (built-in + user theme files).
+/// Pre-selects the active theme.
+pub(super) fn theme_picker(app: &mut App) {
+    let items: Vec<crate::popup::ListItem> = crate::theme::available_themes()
+        .into_iter()
+        .map(|entry| {
+            let detail = match &entry.display {
+                Some(d) if *d != entry.name => format!("{d}  ·  {}", entry.source),
+                _ => entry.source.clone(),
+            };
+            crate::popup::ListItem {
+                label: entry.name.clone(),
+                detail: Some(detail),
+                payload: Some(crate::popup::ConfirmPayload::Choice(entry.name)),
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    let mut popup = crate::popup::Popup::theme_picker(items);
+    if let crate::popup::PopupContent::List(ref mut state) = popup.content {
+        let current = &app.config.theme.name;
+        if let Some(idx) = state.items.iter().position(|it| &it.label == current) {
+            state.selected = idx;
+        }
+    }
+    app.popup = Some(popup);
+}
+
 /// Picker over all current LSP diagnostics, sorted by severity.
 pub(super) fn diagnostic_picker(app: &mut App) {
     use crate::lsp_manager::DiagnosticSeverity;

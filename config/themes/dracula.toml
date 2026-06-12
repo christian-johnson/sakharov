@@ -1,0 +1,51 @@
+# Dracula — after dracula/dracula-theme
+name = "Dracula"
+
+[palette]
+bg        = "#282a36"
+bg_dark   = "#21222c"
+current   = "#44475a"
+fg        = "#f8f8f2"
+comment   = "#6272a4"
+cyan      = "#8be9fd"
+green     = "#50fa7b"
+orange    = "#ffb86c"
+pink      = "#ff79c6"
+purple    = "#bd93f9"
+red       = "#ff5555"
+yellow    = "#f1fa8c"
+
+[ui]
+background      = "bg"
+foreground      = "fg"
+dim             = "comment"
+line_numbers    = "comment"
+selection       = "current"
+accent          = "purple"
+error           = "red"
+warning         = "orange"
+info            = "cyan"
+success         = "green"
+statusline      = "bg_dark"
+popup           = "bg_dark"
+popup_border    = "comment"
+popup_selection = "current"
+
+[syntax]
+comment     = "comment"
+keyword     = "pink"
+function    = "green"
+string      = "yellow"
+type        = "cyan"
+constant    = "purple"
+variable    = "fg"
+parameter   = "orange"
+operator    = "pink"
+punctuation = "fg"
+namespace   = "cyan"
+tag         = "pink"
+attribute   = "green"
+
+[modes]
+normal = "purple"
+goto   = "pink"

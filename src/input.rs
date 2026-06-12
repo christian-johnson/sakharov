@@ -219,10 +219,11 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             let pos = app.selection.head;
             if pos > 0 {
                 begin_insert_edit(app);
+                let removed: String = app.buffer.rope.slice(pos - 1..pos).to_string();
                 app.buffer.remove_raw(pos - 1, pos);
                 app.selection = Selection::point(pos - 1);
                 exec::recompute_highlights(app);
-                exec::lsp_did_change(app);
+                exec::lsp_did_change_remove(app, pos - 1, &removed);
                 // Shorter prefix may now match items, so allow popups again.
                 app.completion.suppressed_prefix = None;
             }
@@ -232,12 +233,13 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             let len = app.buffer.rope.len_chars();
             if pos < len {
                 begin_insert_edit(app);
+                let removed: String = app.buffer.rope.slice(pos..pos + 1).to_string();
                 app.buffer.remove_raw(pos, pos + 1);
                 app.selection = Selection::point(
                     pos.min(app.buffer.rope.len_chars().saturating_sub(1)),
                 );
                 exec::recompute_highlights(app);
-                exec::lsp_did_change(app);
+                exec::lsp_did_change_remove(app, pos, &removed);
             }
         }
         KeyCode::Enter => {
@@ -251,10 +253,12 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             } else {
                 None
             };
-            if let Some(cont) = md_cont {
+            let inserted = if let Some(cont) = md_cont {
                 let cont_len = cont.chars().count();
-                app.buffer.insert_raw(pos, &format!("\n{cont}"));
+                let to_insert = format!("\n{cont}");
+                app.buffer.insert_raw(pos, &to_insert);
                 app.selection = Selection::point(pos + 1 + cont_len);
+                to_insert
             } else if crate::indent::is_bracket_pair(&app.buffer.rope, pos) {
                 // {|} → {\n    |\n} : expand bracket pair onto three lines.
                 let inner = crate::indent::for_new_line(&app.buffer.rope, pos, &unit);
@@ -263,14 +267,17 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                 let to_insert = format!("\n{inner}\n{base}");
                 app.buffer.insert_raw(pos, &to_insert);
                 app.selection = Selection::point(pos + 1 + inner_len);
+                to_insert
             } else {
                 let ind = crate::indent::for_new_line(&app.buffer.rope, pos, &unit);
                 let ind_len = ind.chars().count();
-                app.buffer.insert_raw(pos, &format!("\n{ind}"));
+                let to_insert = format!("\n{ind}");
+                app.buffer.insert_raw(pos, &to_insert);
                 app.selection = Selection::point(pos + 1 + ind_len);
-            }
+                to_insert
+            };
             exec::recompute_highlights(app);
-            exec::lsp_did_change(app);
+            exec::lsp_did_change_insert(app, pos, &inserted);
         }
         KeyCode::Left => {
             app.selection = motion::move_left(&app.buffer.rope, app.selection, false);
@@ -293,7 +300,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             app.buffer.insert_raw(pos, &unit);
             app.selection = Selection::point(pos + unit.chars().count());
             exec::recompute_highlights(app);
-            exec::lsp_did_change(app);
+            exec::lsp_did_change_insert(app, pos, &unit);
         }
         KeyCode::Null => {
             exec::execute(app, &Command::LspRequestCompletion);
@@ -317,7 +324,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                             app.buffer.remove_raw(pos, del_end);
                             app.selection = Selection::point(pos);
                             exec::recompute_highlights(app);
-                            exec::lsp_did_change(app);
+                            exec::lsp_did_change_remove(app, pos, &text);
                         }
                     }
                     exec::update_scroll(app);
@@ -331,7 +338,7 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             app.buffer.insert_raw(pos, s);
             app.selection = Selection::point(pos + 1);
             exec::recompute_highlights(app);
-            exec::lsp_did_change(app);
+            exec::lsp_did_change_insert(app, pos, s);
             if c == '.' || c == ':' {
                 // Trigger characters always fire a fresh completion request.
                 app.completion.suppressed_prefix = None;
@@ -697,6 +704,9 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
         }
         PopupTarget::RestoreRecovery => {
             crate::recovery::handle_choice(app, payload.as_text());
+        }
+        PopupTarget::SwitchTheme => {
+            exec::apply_theme(app, payload.as_text());
         }
         PopupTarget::Navigate => {
             if let ConfirmPayload::Navigate { path, line, col } = payload {

@@ -42,8 +42,12 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   | `cell` | `cell_position` | `current/total` cell index | notebook only |
   | `kernel` | — | `[⠿ starting]` / `[idle]` / `[⠿ busy]` / `[dead]` / `[no kernel]` | notebook only |
 
-  `kernel` folds the live spinner into itself when busy; no need for both `kernel` and
-  `spinner` in the notebook layout. `cell` and `kernel` produce nothing in the plain editor.
+  `kernel` folds the live spinner into itself when starting/busy. The default notebook layout
+  includes the standalone `spinner` module anyway — it surfaces background work the kernel chip
+  doesn't cover (in-flight LSP requests, exports) — and `statusline::render` automatically drops
+  the standalone module while a `kernel` module in the layout is animating
+  (`kernel_folds_spinner`), so the two never show together. `cell` and `kernel` produce nothing
+  in the plain editor.
 
   **Separator / powerline** — `separator = ">"` (or `"/"`, `"\\"`, `"round"`) activates
   powerline mode: filled transition glyphs (Nerd Fonts required) tinted with adjacent module
@@ -62,13 +66,30 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   per tick rather than cycling fixed frames. Advanced once per frame from the run loop via
   `Spinner::update(background_active)`; surfaced via the `spinner` module (and folded into the
   `kernel` module's `[⠿ busy]` indicator)
+- **Themes** (`theme.rs` + `config/themes/`): every renderer color comes from the resolved,
+  process-wide active `Theme` (`theme::active()`, an `Arc` behind an `RwLock`).  Themes are TOML
+  files (`[palette]`/`[ui]`/`[syntax]`/`[markdown]`/`[modes]`/`[notebook]`, all keys optional) —
+  22 built-ins embedded from `config/themes/` (tokyonight ×4, catppuccin ×4, nord ×2,
+  rose-pine ×3, dracula, gruvbox ×2, onedark, solarized ×2, kanagawa, everforest, monokai) plus
+  user themes in `~/.config/sakharov/themes/*.toml` (a same-name user file shadows a built-in).
+  Selected via `[theme] name = "..."` in config; `:theme` opens a picker, `:theme <name>`
+  switches directly (session-only; the message names the config key that persists it). Any
+  theme key can be overridden under `[theme]` in config.toml — deep-merged over the chosen
+  theme and kept across `:theme` switches. Resolution derives unset keys: syntax fallback
+  chains (`number`→`constant`, `property`→`variable`→fg), bg/fg blends for the chrome once
+  `ui.background` is set, and finally the classic terminal-ANSI defaults — `"default"` is
+  exactly the old terminal-inherited look, no background painting (a test pins this).
+  `config/themes/example.toml` is the fully commented schema reference (kept valid by a
+  test); user docs in `docs/themes.md`
 - Block cursor (white in Normal, cyan in Insert); hardware cursor positioned via `frame.set_cursor_position`
 - Ctrl+S saves; Ctrl+C shows quit hint
 - Config at `~/.config/sakharov/config.toml` — deep-merged over compiled-in `config/default.toml`.
   Search order: `$XDG_CONFIG_HOME`, then `~/.config`, then platform-native `dirs::config_dir()`.
-  Covers theme colours + `[theme.modes]` per-mode chip/cursor colors, `tab_width`, `expand_tabs`,
+  Covers `[theme]` (theme `name` + inline color overrides, incl. `[theme.modes]` per-mode
+  chip/cursor colors), `tab_width`, `expand_tabs`,
   line numbers (absolute + relative), `scroll_off`, `git_gutter`, `word_wrap`, `max_undo`,
-  `crash_recovery`, format-on-save, file-picker limits/external command, UI popup sizing +
+  `crash_recovery`, `lsp_signature_throttle_ms`, format-on-save, file-picker limits/external
+  command, UI popup sizing +
   `jump_keys` + `symbol_icons` + `command_history`, `[statusline]` modeline layout (left/right
   module lists, `separator`, `[statusline.styles]` color overrides, separate notebook variant),
   notebook (`image_rows`/output caps), `[language_servers]`, `[formatters]`,
@@ -244,6 +265,12 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   servers that don't (so e.g. ruff's diagnostics stay live alongside pylsp, regardless of which
   server initialized first). Open is idempotent per server — the per-server `Initialized` event
   retriggers `notebook_lsp_open` and only the new server actually receives it.
+  **Markup (markdown/raw) cells are never transmitted** — they are omitted from BOTH
+  `notebookDocument.cells` and `cellTextDocuments` (`lsp::notebook_did_open_params`), and
+  `notebook_did_change_cell` drops changes for cells not in the opened code-cell list. Listing
+  a cell without its backing text document crashes pylsp's notebook handling
+  (`cell_document.line_count` on `None`), which used to kill **every** LSP request against any
+  notebook containing a markdown cell (a unit test pins the payload shape).
 - **Shadow concatenated document** — pylsp only concatenates notebook cells internally for
   *completion* and *definition*; hover, signature-help, and references run against the lone cell
   and can't see cross-cell context. So those three requests are routed through a **shadow
@@ -257,12 +284,45 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   default (`["numpy"]`) makes jedi resolve numpy by importing it, which cannot enumerate numpy's
   lazily-bound submodules (`np.random`/`np.fft`/`np.ma` would return zero completions/hovers/
   signatures). Static analysis handles numpy correctly.
+- **LSP performance** (all behavior-preserving):
+  - **Writes are off the UI thread** — each `LspClient` owns a writer thread; `send_request`/
+    `send_notification` enqueue a `serde_json::Value` on a channel (ordering preserved), the
+    thread serializes + writes + flushes. A wedged server pipe can no longer stall typing.
+    `Drop` closes the channel and joins the writer (flushing the `exit` notification) before kill.
+  - **Completion / signature-help / hover requests supersede their predecessor**
+    (`LspClient::supersede_pending`): the stale id is dropped from `pending` (its response is
+    ignored) and `$/cancelRequest` is sent, so at most one such request is in flight per server
+    and a typing burst can't queue stale jedi work ahead of the request that matters.
+  - **Incremental `textDocument/didChange`** for Insert-mode keystrokes in plain files:
+    `exec::lsp_did_change_insert/_remove` send a range delta (UTF-16 positions via
+    `lsp::char_to_lsp_pos_utf16`) to servers advertising incremental sync, full text to the rest
+    (`LspManager::did_change_delta`). **Guard invariant**: deltas are only valid against an
+    exactly-synced server copy, but command edits (open-line, delete, paste, undo…) mutate the
+    buffer without notifying the LSP. `Buffer::lsp_synced_chars` records the char-length as of
+    the last sync; on mismatch the delta functions fall back to `lsp_did_change` (full text),
+    which re-arms the guard. Notebook cells keep full-cell sync (cells are small).
+  - **Signature help is throttled** (`editor.lsp_signature_throttle_ms`, default 50, 0 = off):
+    inside a call it used to re-request on every keystroke — for a notebook that rebuilt +
+    retransmitted the whole concatenated shadow doc each time. Requests inside the window set
+    `app.sig_help_deferred`; `exec::pump_signature_help` (run loop, once per frame) fires the
+    trailing refresh, so the hint always settles on the final cursor position.
+  - **Shadow-doc sync is fingerprint-gated** (`LspClient::sync_full_doc`): the concatenated
+    notebook is retransmitted only when its content hash changed since the last request.
+  - **pylsp lint/format plugins are disabled when another configured server owns the feature**
+    (`build_init_options`): a `features = ["diagnostics"]` server (e.g. `ruff server`) disables
+    pycodestyle/pyflakes/mccabe/pylint/flake8/pydocstyle; `"format"` disables autopep8/yapf.
+    jedi plugins always stay on. A pylsp-only setup (no feature-scoped servers) is untouched.
 - **Python venv is required, never the system interpreter** — `notebook::venv_python_up` (the single
   venv discovery shared by the LSP and the kernel) walks up from the file's/notebook's location for
   `.venv`/`venv`/`.env`/`env`; the path is passed to the server as the jedi environment. If no venv is
   found, the Python language server is **not started** (no autocomplete is preferred over autocomplete
   resolved against the wrong/system environment). The notebook *kernel* (`find_python_executable`)
   uses the same discovery but still falls back to system `python3` for execution.
+- **LSP lifecycle is logged to *Messages*** — venv discovery result (path found, or "no virtualenv
+  … not started"), each server launched / failed-to-launch (with the spawn error), and each server
+  ready (initialize handshake complete). Lines are deduped once per session
+  (`LspManager::log_once` — `ensure_server` re-runs on every cell/buffer switch) and drained once
+  per frame by `exec::lsp::process_lsp_events` into `app.messages`.
 
 ### Data safety (Phase B hardening)
 - **Buffer switching never loses edits**: plain-file buffers are stashed in memory
@@ -359,7 +419,12 @@ src/
   highlight.rs        — tree-sitter-highlight integration; produces Vec<Span>.
                         Highlighter dispatches to markdown.rs for .md/.qmd (highlight + fold_ranges).
                         MD_* highlight-index constants (markup names appended to HIGHLIGHT_NAMES)
-  theme.rs            — highlight index → ratatui Style (incl. MD_* markup); terminal color queries
+  theme.rs            — theming engine: ThemeSpec (TOML schema) → resolved Theme (every
+                        renderer color + a Style per highlight index incl. MD_* markup),
+                        process-wide active theme (theme::active()/set_active), built-in
+                        registry (embeds config/themes/*.toml), user themes dir, derivation
+                        rules, fill_background, mode/cursor/selection styles, contrast_fg;
+                        terminal OSC color queries
   lang.rs             — language id ↔ file extension mapping
   symbols.rs          — tree-sitter symbol extraction (buffer completions, picker)
   render_util.rs      — helpers shared by ui.rs and notebook_ui.rs: SingleLineWidget,
@@ -400,8 +465,12 @@ docs/
 - The `exec/` module is the only place that mutates `App` state in response to commands
 - Minibuffer messages go through `app.messages.show(...)` (see `app::Messages`), which appends
   to the *Messages* log at show time — never write a message field directly
-- Renderer colors that aren't syntax/theme-config-driven live as constants in `theme.rs`
-  (`POPUP_BG`, `ACCENT`, `CELL_BG`, …) — don't scatter new `Color::Rgb` literals in the renderers
+- **Every renderer color comes from the active theme** — grab `let th = theme::active();` and
+  use its fields (`th.popup_bg`, `th.accent`, `th.error`, …); never write `Color::Rgb`/ANSI
+  literals in renderers. A new kind of colored element gets a `Theme` field (with a documented
+  derivation fallback in `theme::resolve`, + a `ThemeSpec` key if themes should set it
+  directly), not a constant. The `"default"` theme must keep reproducing the classic
+  terminal look (`default_theme_matches_classic_look` test)
 - `Command::parse()`, `name()`, and the palette are generated from the single
   `commands!` table in `command.rs`, so they cannot drift. A test
   (`palette_entries_round_trip_through_parse`) enforces that every palette entry parses back.
@@ -409,6 +478,11 @@ docs/
   aliases + optional `palette:`), add an arm to `exec::execute()`, add a row to `docs/commands.md`
 - Insert-mode edits use `buffer.insert_raw` / `buffer.remove_raw` (no per-keystroke undo snapshot).
   `begin_insert_edit()` in `input.rs` snapshots once per Insert session; `EnterNormal` in `exec/mod.rs` resets the flag.
+- **LSP sync after edits**: Insert-mode keystroke sites call `exec::lsp_did_change_insert/_remove`
+  (incremental range delta); every other mutation path either calls `exec::lsp_did_change`
+  (full text) or relies on the `Buffer::lsp_synced_chars` length guard to force a full resync on
+  the next Insert keystroke. When adding a new edit path, prefer calling `lsp_did_change` —
+  an equal-length unsynced mutation is the one case the guard cannot detect.
 - `exec::update_scroll` is the authoritative scroll function; the run loop calls it once per
   frame (after refreshing `viewport_height`/`viewport_width`) so scroll always reflects the
   current terminal size. It has two paths: the plain-editor fold/wrap-aware path, and a

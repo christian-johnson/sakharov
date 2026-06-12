@@ -52,6 +52,8 @@ pub enum PopupTarget {
     ApplyCodeAction,
     /// Resolve a crash-recovery prompt ([`ConfirmPayload::Choice`]).
     RestoreRecovery,
+    /// Switch to the theme named by the confirmed item's [`ConfirmPayload::Choice`].
+    SwitchTheme,
 }
 
 /// Typed data carried by a confirmed [`ListItem`]. Replaces the old
@@ -618,6 +620,17 @@ impl Popup {
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.75),
             on_confirm: PopupTarget::Navigate,
+        }
+    }
+
+    /// Fuzzy-filterable theme list; confirms by switching to the selected theme.
+    pub fn theme_picker(items: Vec<ListItem>) -> Self {
+        Self {
+            title: Some("themes".into()),
+            content: PopupContent::List(ListState::new(items)),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.55),
+            on_confirm: PopupTarget::SwitchTheme,
         }
     }
 
