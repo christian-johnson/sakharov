@@ -286,6 +286,22 @@ pub fn lsp_did_change(app: &mut App) {
     app.lsp.did_change(&lang, &path, &text);
 }
 
+/// Fire a one-shot warm-up completion for the freshly-opened plain-file buffer.
+/// pylsp/jedi parses a file's imports lazily on the first request, so the cold
+/// cache otherwise stalls the user's *first* completion/hover by seconds; this
+/// pulls that cost forward to open time. `LspManager::prewarm` no-ops after the
+/// first call per document and only fires when a completion server has the doc
+/// open. Skipped for notebooks (their per-cell / shadow-doc sync warms via use).
+fn prewarm_current(app: &mut App, language: &str) {
+    if app.notebook.is_some() {
+        return;
+    }
+    if let Some(path) = app.buffer.path.clone() {
+        app.lsp
+            .prewarm(language, &path, &app.buffer.rope, app.selection.head);
+    }
+}
+
 /// Drain LSP events and apply them to the editor state.
 /// Returns true when any event was applied (the caller should redraw).
 pub fn process_lsp_events(app: &mut App) -> bool {
@@ -319,10 +335,15 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                     let text = app.buffer.rope.to_string();
                     app.lsp.did_open(&language, &path, &text);
                 }
+                prewarm_current(app, &language);
             }
         }
         LspEvent::Diagnostics => {
             super::rebuild_diag_cache(app);
+        }
+        LspEvent::PrewarmComplete { .. } => {
+            // Nothing to apply — the warm-up's only effect is the now-hot server
+            // cache. The completion line is logged by `LspManager::poll`.
         }
         LspEvent::CompletionResult { items } => {
             if app.mode == Mode::Insert {
@@ -676,6 +697,7 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
         if app.lsp.is_ready(lang) {
             let text = app.buffer.rope.to_string();
             app.lsp.did_open(lang, path, &text);
+            prewarm_current(app, lang);
         }
     }
 

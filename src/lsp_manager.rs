@@ -70,6 +70,10 @@ pub enum LspEvent {
     CodeActionsResult { actions: Vec<serde_json::Value> },
     /// Formatting result — apply these TextEdits to the buffer.
     FormattingResult { edits: Vec<serde_json::Value> },
+    /// A pre-warm completion round-trip finished — the server's analysis cache
+    /// is now hot. Carries nothing to apply; `LspManager::poll` logs it (with
+    /// timing) to *Messages*.
+    PrewarmComplete { language: String },
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +160,11 @@ pub struct LspManager {
     /// `ensure_server` runs on every cell/buffer switch, so unconditional
     /// logging would spam (e.g. the no-venv line on every cell navigation).
     logged: HashSet<String>,
+    /// Document URIs already pre-warmed this session — warm-up fires once per
+    /// document (the server keeps its cache hot afterwards).
+    prewarmed: HashSet<String>,
+    /// In-flight pre-warm request id → start instant, for round-trip timing.
+    prewarm_started: HashMap<u64, std::time::Instant>,
 }
 
 impl LspManager {
@@ -167,6 +176,8 @@ impl LspManager {
             notebook_state: HashMap::new(),
             lifecycle_log: Vec::new(),
             logged: HashSet::new(),
+            prewarmed: HashSet::new(),
+            prewarm_started: HashMap::new(),
         }
     }
 
@@ -436,6 +447,43 @@ impl LspManager {
         false
     }
 
+    /// Fire a one-shot throwaway completion on the completion server to warm its
+    /// analysis cache, once per document. pylsp/jedi parses a file's imports
+    /// lazily on the first request, so without this the cold-cache cost lands on
+    /// the user's first real completion/hover; pre-warming pulls it forward to
+    /// file-open time instead. The response is discarded (`PendingKind::Prewarm`),
+    /// but the in-flight request drives the status-bar spinner. Returns true if a
+    /// warm-up was dispatched.
+    pub fn prewarm(
+        &mut self,
+        language: &str,
+        path: &std::path::Path,
+        rope: &ropey::Rope,
+        char_idx: usize,
+    ) -> bool {
+        let uri = path_to_uri(path);
+        if self.prewarmed.contains(&uri) {
+            return false;
+        }
+        let Some(idx) = self.server_idx_for_feature(language, "completion") else {
+            return false;
+        };
+        // Only warm a document the completion server actually has open.
+        let Some(servers) = self.servers.get_mut(language) else {
+            return false;
+        };
+        if !servers[idx].client.is_doc_open(&uri) {
+            return false;
+        }
+        let (line, character) = char_to_lsp_pos(rope, char_idx);
+        let id = servers[idx].client.request_prewarm(&uri, line, character);
+        self.prewarmed.insert(uri);
+        self.prewarm_started.insert(id, std::time::Instant::now());
+        self.lifecycle_log
+            .push(format!("LSP: pre-warming {language} language server…"));
+        true
+    }
+
     /// True if the completion server for `language` advertised
     /// `completionProvider.resolveProvider`, i.e. it can enrich items with docs.
     pub fn completion_resolve_supported(&self, language: &str) -> bool {
@@ -647,6 +695,12 @@ impl LspManager {
                     self.servers.get_mut(&lang).unwrap()[idx].client.poll()
                 };
                 for msg in msgs {
+                    // Capture the response id before `msg` is consumed, so a
+                    // pre-warm completion can be timed by its request id.
+                    let msg_id = match &msg {
+                        ServerMessage::Response { id, .. } => Some(*id),
+                        _ => None,
+                    };
                     let server = &mut self.servers.get_mut(&lang).unwrap()[idx];
                     let command = server.command.clone();
                     if let Some(evt) = process_message(
@@ -657,8 +711,20 @@ impl LspManager {
                         &mut self.diagnostics,
                         &mut self.server_diagnostics,
                     ) {
-                        if matches!(evt, LspEvent::Initialized { .. }) {
-                            self.log_once(format!("LSP: '{command}' ready ({lang})"));
+                        match &evt {
+                            LspEvent::Initialized { .. } => {
+                                self.log_once(format!("LSP: '{command}' ready ({lang})"));
+                            }
+                            LspEvent::PrewarmComplete { language } => {
+                                let dur = msg_id
+                                    .and_then(|id| self.prewarm_started.remove(&id))
+                                    .map(|t| format!(" in {:.1}s", t.elapsed().as_secs_f64()))
+                                    .unwrap_or_default();
+                                self.lifecycle_log.push(format!(
+                                    "LSP: {language} language server warmed{dur} — completions ready"
+                                ));
+                            }
+                            _ => {}
                         }
                         events.push(evt);
                     }
@@ -783,6 +849,9 @@ fn process_message(
                     let edits = result.as_array().cloned().unwrap_or_default();
                     Some(LspEvent::FormattingResult { edits })
                 }
+                PendingKind::Prewarm => Some(LspEvent::PrewarmComplete {
+                    language: language.to_owned(),
+                }),
                 PendingKind::ExecuteCommand => None,
             }
         }
@@ -1149,8 +1218,56 @@ fn completion_kind_name(kind: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_init_options, parse_signature_help, LspManager};
+    use super::{build_init_options, parse_signature_help, LspManager, ManagedServer};
+    use crate::lsp::{path_to_uri, LspClient, PendingKind};
     use serde_json::json;
+
+    /// Inject a fake initialized all-features server (backed by `cat`) so the
+    /// completion-routing / doc-open paths can be exercised without a real LSP.
+    fn manager_with_ready_server(language: &str) -> LspManager {
+        let mut client = LspClient::start("cat", &[]).expect("spawn cat");
+        client.initialized = true; // skip the real initialize handshake
+        let mut mgr = LspManager::new();
+        mgr.servers.insert(
+            language.to_owned(),
+            vec![ManagedServer { client, features: vec![], command: "cat".into() }],
+        );
+        mgr
+    }
+
+    /// Pre-warm fires exactly once per document, only after the doc is open, and
+    /// queues a discardable `Prewarm` request plus a *Messages* log line.
+    #[test]
+    fn prewarm_fires_once_per_open_document() {
+        let mut mgr = manager_with_ready_server("python");
+        let rope = ropey::Rope::from_str("import os\n");
+        let path = std::path::Path::new("/tmp/sv_prewarm_test.py");
+
+        // Doc not opened yet → nothing to warm.
+        assert!(!mgr.prewarm("python", path, &rope, 0));
+
+        // Open it, then warm: the first call dispatches, the second is gated.
+        mgr.did_open("python", path, "import os\n");
+        assert!(mgr.prewarm("python", path, &rope, 0));
+        assert!(!mgr.prewarm("python", path, &rope, 0), "second warm is gated");
+
+        // A Prewarm request is in flight (drives the spinner) and the start of
+        // warm-up was logged for *Messages*.
+        let uri = path_to_uri(path);
+        assert!(mgr.servers["python"][0].client.is_doc_open(&uri));
+        let pending_prewarms = mgr.servers["python"][0]
+            .client
+            .pending
+            .values()
+            .filter(|k| **k == PendingKind::Prewarm)
+            .count();
+        assert_eq!(pending_prewarms, 1);
+        let log = mgr.take_lifecycle_log();
+        assert!(
+            log.iter().any(|l| l.contains("pre-warming python")),
+            "expected a pre-warming log line, got {log:?}"
+        );
+    }
 
     /// pylsp's lint/format plugins are disabled exactly when a feature-scoped
     /// server owns diagnostics/format; jedi stays enabled either way, and a

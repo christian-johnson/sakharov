@@ -35,6 +35,11 @@ pub enum PendingKind {
     Implementation,
     CodeAction,
     Formatting,
+    /// Throwaway completion fired right after `didOpen` to warm the server's
+    /// analysis cache (pylsp/jedi parses imports lazily on the first request).
+    /// The response is discarded — it exists only to move cold-cache latency
+    /// off the user's first real interaction onto the moment the file opens.
+    Prewarm,
     /// Fire-and-forget server command — response is discarded.
     ExecuteCommand,
 }
@@ -256,6 +261,18 @@ impl LspClient {
             "position": { "line": line, "character": character },
             "context": { "triggerKind": 1 }
         }), PendingKind::Completion)
+    }
+
+    /// Fire a warm-up completion whose response is discarded (`PendingKind::Prewarm`).
+    /// Returns the request id so the manager can time the round-trip. Unlike
+    /// `request_completion` this does NOT supersede a pending real completion —
+    /// it's a one-shot at open time and must not cancel user-driven requests.
+    pub fn request_prewarm(&mut self, uri: &str, line: u32, character: u32) -> u64 {
+        self.send_request("textDocument/completion", json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+            "context": { "triggerKind": 1 }
+        }), PendingKind::Prewarm)
     }
 
     /// Resolve a completion item (fetch its documentation). The request params
