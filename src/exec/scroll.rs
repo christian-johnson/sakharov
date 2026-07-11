@@ -55,6 +55,22 @@ pub(super) fn normalize_cursor_folds_directional(app: &mut App, pre_exec_line: u
 /// authoritative scroll function.
 pub fn update_scroll(app: &mut App) {
     let visible_rows = app.viewport_height;
+    let scroll_off = app.config.editor.scroll_off;
+
+    // Seamless, row-granular notebook scroll.  The whole notebook is one
+    // vertical stack of cells (each `height` rows, separated by a 1-row gap);
+    // the viewport is a window into it anchored by `(scroll_cell,
+    // scroll_offset)`.  We locate the cursor's absolute row in that stack —
+    // inside the source, or (when `output_row` is set) inside the cell's
+    // output block — and nudge the anchor just enough to keep it within the
+    // scroll-off margin.  Because the anchor is measured in rows, scrolling
+    // moves one line at a time instead of jumping a whole cell.  (The
+    // full-screen focused-cell overlay falls through to the plain path.)
+    if app.notebook.is_some() && !app.notebook_focused_edit() {
+        notebook_update_scroll(app, visible_rows, scroll_off);
+        return;
+    }
+
     let git_col = if app.config.editor.git_gutter && app.notebook.is_none() { 1usize } else { 0 };
     let gutter_width = if app.config.editor.line_numbers { 5 + git_col } else { git_col };
     let visible_cols = app.viewport_width.saturating_sub(gutter_width);
@@ -73,72 +89,9 @@ pub fn update_scroll(app: &mut App) {
     let pos = app.selection.head.min(rope.len_chars());
     let line_idx = rope.char_to_line(pos);
     let total_lines = rope.len_lines();
-    let scroll_off = app.config.editor.scroll_off;
     let tab_width = app.config.editor.tab_width;
 
-    if app.notebook.is_some() && !app.notebook_focused_edit() {
-        // Editing within the focused cell.  The cell is in `app.buffer`, but it
-        // does not fill the viewport: cells above it (and its own top border)
-        // push its content downward.  We first keep the focused cell visible at
-        // the cell granularity, then scroll *within* the cell so the cursor
-        // stays inside the rows actually available below that offset — the same
-        // text-buffer behaviour you'd expect, rather than letting the cursor
-        // slide off the bottom of the screen.
-        let image_rows = app.config.notebook.image_rows;
-        let cell_px = app.graphics.cell_pixel_size;
-        let avail_cols = app.viewport_width.saturating_sub(2) as u16;
-        let nb_word_wrap = app.config.editor.word_wrap;
-        let mut new_scroll_row = app.scroll_row;
-        if let Some((nb, state)) = app.notebook.as_mut() {
-            state.ensure_focused_visible(
-                &nb.cells, visible_rows, rope, image_rows, cell_px, avail_cols, nb_word_wrap,
-            );
-            let focused = state.focused_cell.min(nb.cells.len().saturating_sub(1));
-            // Rows consumed above the focused cell's content: each fully-shown
-            // preceding cell plus the 1-row inter-cell gap, then the focused
-            // cell's own top border.
-            let mut content_top = 0usize;
-            for idx in state.scroll_cell..focused {
-                let h = if state.is_cell_folded(idx) {
-                    3
-                } else {
-                    crate::notebook_ui::cell_display_height(
-                        &nb.cells[idx].source, &nb.cells[idx], image_rows, cell_px, avail_cols,
-                        nb_word_wrap,
-                    ) as usize
-                };
-                content_top += h + 1;
-            }
-            content_top += 1; // top border of the focused cell
-
-            // In-cell scroll operates on *visual* rows — when the focused cell
-            // word-wraps (markdown always, others per the toggle), a logical
-            // line spans several rows and the cursor's row must account for
-            // its wrapped sub-row, or it walks off the bottom of the cell.
-            // Without wrapping, visual row == logical line and this reduces to
-            // the previous arithmetic. The renderer skips the same visual-row
-            // count, so the units agree.
-            let wrap_w = nb.cells.get(focused)
-                .filter(|c| crate::notebook_ui::cell_wraps(c, nb_word_wrap))
-                .map(|_| crate::notebook_ui::cell_text_width(avail_cols));
-            let vcursor =
-                crate::notebook_ui::cell_cursor_visual_row(rope, app.selection.head, wrap_w);
-            let total_vrows = crate::notebook_ui::cell_visual_rows(rope, wrap_w);
-
-            let avail = visible_rows.saturating_sub(content_top).max(1);
-            let so = scroll_off.min(avail.saturating_sub(1) / 2);
-            if vcursor < new_scroll_row + so || new_scroll_row > vcursor {
-                new_scroll_row = vcursor.saturating_sub(so);
-            } else if vcursor + so + 1 > new_scroll_row + avail {
-                new_scroll_row = (vcursor + so + 1).saturating_sub(avail);
-            }
-            let max_scroll = total_vrows.saturating_sub(1);
-            if new_scroll_row > max_scroll {
-                new_scroll_row = max_scroll;
-            }
-        }
-        app.scroll_row = new_scroll_row;
-    } else {
+    {
         // Normalize scroll_row so it never points inside a hidden fold region.
         app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
 
@@ -190,6 +143,130 @@ pub fn update_scroll(app: &mut App) {
     if display_col >= app.scroll_col + visible_cols {
         app.scroll_col = display_col.saturating_sub(visible_cols) + 1;
     }
+}
+
+/// Row-granular notebook scroll (see the call site in [`update_scroll`]).
+///
+/// Models the notebook as one tall stack: cell `i` occupies `heights[i]` rows
+/// followed by a 1-row gap.  The scroll anchor `(scroll_cell, scroll_offset)`
+/// is the absolute row of the first visible row.  We find the cursor's
+/// absolute row, move the anchor the minimum needed to keep it inside the
+/// scroll-off margin, clamp against the document end, then translate the new
+/// absolute top back into `(scroll_cell, scroll_offset)`.
+fn notebook_update_scroll(app: &mut App, viewport: usize, scroll_off: usize) {
+    let cell_px = app.graphics.cell_pixel_size;
+    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
+    let word_wrap = app.config.editor.word_wrap;
+    let nb_config = app.config.notebook.clone();
+    let cursor = app.selection.head;
+
+    if viewport == 0 {
+        return;
+    }
+
+    let Some((nb, state)) = app.notebook.as_mut() else { return };
+    if nb.cells.is_empty() {
+        state.scroll_cell = 0;
+        state.scroll_offset = 0;
+        state.output_row = None;
+        return;
+    }
+    let focused = state.focused_cell.min(nb.cells.len() - 1);
+
+    // Per-cell heights, exactly as the renderer draws them (focused cell uses
+    // the live buffer rope; folded cells collapse to 3 rows).
+    let heights: Vec<usize> = nb.cells.iter().enumerate().map(|(idx, cell)| {
+        let folded = state.is_cell_folded(idx) && idx != focused;
+        let source = if idx == focused { &app.buffer.rope } else { &cell.source };
+        crate::notebook_ui::nb_cell_height(
+            cell, folded, source, &nb_config, cell_px, avail_cols, word_wrap,
+        )
+    }).collect();
+
+    // Absolute row of each cell's top border (height + 1-row gap between cells).
+    let cell_top = |idx: usize| -> usize {
+        heights[..idx].iter().map(|h| h + 1).sum()
+    };
+
+    // Cursor's row within the focused cell.
+    let focused_cell = &nb.cells[focused];
+    let within = if state.is_cell_folded(focused) {
+        1 // the single summary row
+    } else {
+        let wrap_w = crate::notebook_ui::cell_wraps(focused_cell, word_wrap)
+            .then(|| crate::notebook_ui::cell_text_width(avail_cols));
+        let src_rows = crate::notebook_ui::cell_visual_rows(&app.buffer.rope, wrap_w);
+        match state.output_row {
+            Some(r) => {
+                // border + all source rows + divider + output row r
+                let out_rows = crate::notebook_ui::cell_output_rows(
+                    focused_cell, &nb_config, cell_px, avail_cols,
+                );
+                if out_rows == 0 {
+                    // Outputs vanished (e.g. cleared) — fall back to the source.
+                    state.output_row = None;
+                    1 + crate::notebook_ui::cell_cursor_visual_row(
+                        &app.buffer.rope, cursor, wrap_w,
+                    )
+                } else {
+                    let r = r.min(out_rows - 1);
+                    state.output_row = Some(r);
+                    1 + src_rows + 1 + r
+                }
+            }
+            None => {
+                1 + crate::notebook_ui::cell_cursor_visual_row(&app.buffer.rope, cursor, wrap_w)
+            }
+        }
+    };
+    let cursor_abs = cell_top(focused) + within;
+
+    // Total document rows (drop the trailing gap after the last cell).
+    let total_rows: usize = heights.iter().map(|h| h + 1).sum::<usize>().saturating_sub(1);
+
+    // Current anchor as an absolute row.
+    let cur_top = cell_top(state.scroll_cell.min(nb.cells.len() - 1))
+        + state.scroll_offset.min(heights[state.scroll_cell.min(nb.cells.len() - 1)]);
+
+    let so = scroll_off.min(viewport.saturating_sub(1) / 2);
+    let mut new_top = cur_top;
+    if cursor_abs < cur_top + so {
+        new_top = cursor_abs.saturating_sub(so);
+    } else if cursor_abs + so + 1 > cur_top + viewport {
+        new_top = (cursor_abs + so + 1).saturating_sub(viewport);
+    }
+    // Don't scroll past the end of the document (leave the last rows pinned to
+    // the bottom), but never hide the cursor to do so.
+    let max_top = total_rows.saturating_sub(viewport);
+    if new_top > max_top {
+        new_top = max_top;
+    }
+    if new_top > cursor_abs {
+        new_top = cursor_abs;
+    }
+
+    // Translate the absolute top back into (scroll_cell, scroll_offset).
+    let (sc, so_rows) = abs_row_to_anchor(&heights, new_top);
+    state.scroll_cell = sc;
+    state.scroll_offset = so_rows;
+}
+
+/// Convert an absolute document row into a `(scroll_cell, scroll_offset)`
+/// anchor.  A row that lands on an inter-cell gap snaps to the next cell's
+/// top (offset 0), so the viewport never opens on a leading gap row.
+fn abs_row_to_anchor(heights: &[usize], abs_row: usize) -> (usize, usize) {
+    let mut top = 0usize;
+    for (idx, &h) in heights.iter().enumerate() {
+        if abs_row < top + h {
+            return (idx, abs_row - top);
+        }
+        if abs_row == top + h {
+            // On the gap row after cell `idx`: show the next cell at the top.
+            return ((idx + 1).min(heights.len() - 1), 0);
+        }
+        top += h + 1;
+    }
+    (heights.len().saturating_sub(1), 0)
 }
 
 /// Count visual rows from `from` (inclusive) to `to` (exclusive), accounting

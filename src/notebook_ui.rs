@@ -24,8 +24,10 @@ pub struct ActiveCellView<'a> {
     pub cursor: usize,
     /// Selection anchor (= `app.selection.anchor`). Equal to cursor when no selection.
     pub sel_anchor: usize,
-    /// First visible line inside the cell (= `app.scroll_row`).
-    pub scroll_row: usize,
+    /// When `Some(r)`, the cursor sits on visual row `r` of the focused cell's
+    /// output block (see `NotebookState::output_row`); the source cursor is
+    /// hidden and a block cursor is drawn on that output row instead.
+    pub output_row: Option<usize>,
     /// Current editor mode — determines cursor highlight style.
     pub mode: &'a Mode,
     /// Jump-mode labels to overlay on the cell source (`app.jump.labels`).
@@ -216,6 +218,10 @@ pub struct ImageRequest {
     /// Explicit column width passed as `c=` in the protocol.  Required for
     /// WezTerm, which doesn't auto-compute width from aspect ratio like Kitty.
     pub cols: u16,
+    /// Vertical source-rectangle crop `(y_px, h_px)` when the image is clipped
+    /// at the viewport edge — the visible band is shown at its natural scale
+    /// instead of squashing the whole image into the remaining rows.
+    pub crop: Option<crate::kitty::ImageCrop>,
     /// Shared reference to the raw PNG bytes — cloning this is O(1).
     pub png_data: std::sync::Arc<Vec<u8>>,
 }
@@ -275,6 +281,11 @@ fn render_cells(
     let mut current_row = area.top();
     let mut focused_cell_screen_pos: Option<(u16, u16)> = None;
 
+    // Rows of the first visible cell hidden above the viewport top — the
+    // row-granular half of the scroll anchor (see NotebookState::scroll_offset).
+    // Consumed by the first rendered cell; every later cell starts at 0.
+    let mut skip = state.scroll_offset as u16;
+
     for (cell_idx, cell) in nb.cells.iter().enumerate() {
         if cell_idx < state.scroll_cell {
             continue;
@@ -283,79 +294,42 @@ fn render_cells(
             break;
         }
 
-        let remaining = area.bottom().saturating_sub(current_row);
-        if remaining < 3 {
-            break; // need at least border-top + 1 content row + border-bottom
-        }
-
         let is_focused = cell_idx == state.focused_cell;
         let is_folded = state.is_cell_folded(cell_idx);
         // Inner column width available for cell content (subtract left+right borders).
         let inner_cols = area.width.saturating_sub(2).max(4);
         // Folded cells always get the compact height regardless of focus.
         // For the focused non-folded cell, use the live buffer rope height.
-        let cell_height = if is_folded {
-            3u16.min(remaining) // border-top + 1 summary line + border-bottom
-        } else {
-            let source = if is_focused { active.rope } else { &cell.source };
-            cell_display_height(
-                source, cell, nb_config.image_rows, cell_pixel_size, inner_cols, active.word_wrap,
-            )
-            .min(remaining)
-        };
+        let source = if is_focused { active.rope } else { &cell.source };
+        let full_height = nb_cell_height(
+            cell, is_folded, source, nb_config, cell_pixel_size, inner_cols, active.word_wrap,
+        ) as u16;
 
-        let cell_rect = Rect {
-            x: area.x,
-            y: current_row,
-            width: area.width,
-            height: cell_height,
-        };
+        // Clip: `clip_top` rows are scrolled off above the viewport; the
+        // visible slice is further capped by the rows left before the bottom.
+        let clip_top = skip.min(full_height);
+        skip = 0;
+        let visible = (full_height - clip_top).min(area.bottom() - current_row);
 
-        // Border colour encodes cell execution state
-        let border_color = cell_border_color(cell, state.executing_cell, cell_idx);
-
-        // Cell title sits inside the top border line
-        let count_str = cell.execution_count
-            .map(|n| format!("[{n}]"))
-            .unwrap_or_else(|| "[ ]".to_string());
-        let type_label = cell_type_label(cell, &nb.metadata.kernel_language);
-        let title = format!(" {count_str} {type_label} ");
-
-        let th = crate::theme::active();
-        let title_style = if is_focused {
-            Style::default().fg(th.fg()).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(th.dim)
-        };
-
-        let block = Block::default()
-            .title(ratatui::text::Span::styled(title, title_style))
-            .borders(Borders::ALL)
-            .border_type(if is_focused { BorderType::Thick } else { BorderType::Rounded })
-            .border_style(Style::default().fg(border_color))
-            .style(Style::default().bg(th.cell_bg));
-
-        let inner = block.inner(cell_rect);
-        frame.render_widget(block, cell_rect);
-
-        if inner.height > 0 {
-            if is_folded {
-                // For the focused cell, use the live rope so unsaved edits are shown.
-                let rope_for_summary = if is_focused { active.rope } else { &cell.source };
-                render_folded_cell_summary_rope(frame, rope_for_summary, &cell.outputs, inner);
-            } else {
-                let cursor_screen = render_cell_content(
-                    frame, nb, cell, cell_idx, is_focused, inner, active,
-                    lsp_diagnostics, &mut image_requests, cache, nb_config,
-                    cell_pixel_size,
-                );
-                if is_focused {
-                    focused_cell_screen_pos = cursor_screen;
-                }
+        if visible > 0 {
+            let cell_rect = Rect {
+                x: area.x,
+                y: current_row,
+                width: area.width,
+                height: visible,
+            };
+            let cursor_screen = render_cell(
+                frame, state, nb, cell, cell_idx, is_focused, is_folded, clip_top,
+                full_height, cell_rect, active, lsp_diagnostics, &mut image_requests,
+                cache, nb_config, cell_pixel_size,
+            );
+            if is_focused {
+                focused_cell_screen_pos = cursor_screen;
             }
+            current_row += visible;
         }
 
-        current_row += cell_height + 1; // +1 blank gap between cells
+        current_row += 1; // blank gap row between cells
     }
 
     // Position the hardware cursor inside the focused cell.
@@ -366,7 +340,93 @@ fn render_cells(
     (image_requests, focused_cell_screen_pos)
 }
 
+/// Render one cell, possibly clipped at the viewport edges: `clip_top` rows of
+/// the cell are scrolled off above the screen, and `cell_rect.height` may stop
+/// short of `full_height` when the cell runs past the bottom.  Clipped edges
+/// lose their border line — the cell visibly continues past the screen edge.
+/// Returns the cursor screen position when it falls inside the visible slice.
+#[allow(clippy::too_many_arguments)]
+fn render_cell(
+    frame: &mut Frame,
+    state: &NotebookState,
+    nb: &Notebook,
+    cell: &Cell,
+    cell_idx: usize,
+    is_focused: bool,
+    is_folded: bool,
+    clip_top: u16,
+    full_height: u16,
+    cell_rect: Rect,
+    active: &ActiveCellView<'_>,
+    lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
+    image_requests: &mut Vec<ImageRequest>,
+    cache: &mut CellHighlightCache,
+    nb_config: &crate::config::NotebookConfig,
+    cell_pixel_size: Option<(u16, u16)>,
+) -> Option<(u16, u16)> {
+    let th = crate::theme::active();
+    // Border colour encodes cell execution state
+    let border_color = cell_border_color(cell, state.executing_cell, cell_idx);
+
+    let top_visible = clip_top == 0;
+    let bottom_visible = clip_top + cell_rect.height == full_height;
+    let mut borders = Borders::LEFT | Borders::RIGHT;
+    if top_visible {
+        borders |= Borders::TOP;
+    }
+    if bottom_visible {
+        borders |= Borders::BOTTOM;
+    }
+
+    let mut block = Block::default()
+        .borders(borders)
+        .border_type(if is_focused { BorderType::Thick } else { BorderType::Rounded })
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(th.cell_bg));
+
+    // Cell title sits inside the top border line (absent while scrolled off).
+    if top_visible {
+        let count_str = cell.execution_count
+            .map(|n| format!("[{n}]"))
+            .unwrap_or_else(|| "[ ]".to_string());
+        let type_label = cell_type_label(cell, &nb.metadata.kernel_language);
+        let title = format!(" {count_str} {type_label} ");
+        let title_style = if is_focused {
+            Style::default().fg(th.fg()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(th.dim)
+        };
+        block = block.title(ratatui::text::Span::styled(title, title_style));
+    }
+
+    let inner = block.inner(cell_rect);
+    frame.render_widget(block, cell_rect);
+    if inner.height == 0 {
+        return None;
+    }
+
+    // Content rows hidden above the viewport: everything above minus the
+    // (1-row) top border.
+    let content_skip = clip_top.saturating_sub(1) as usize;
+
+    if is_folded {
+        if content_skip == 0 {
+            // For the focused cell, use the live rope so unsaved edits are shown.
+            let rope_for_summary = if is_focused { active.rope } else { &cell.source };
+            render_folded_cell_summary_rope(frame, rope_for_summary, &cell.outputs, inner);
+        }
+        return None;
+    }
+
+    render_cell_content(
+        frame, nb, cell, cell_idx, is_focused, inner, active, lsp_diagnostics,
+        image_requests, cache, nb_config, cell_pixel_size, content_skip,
+    )
+}
+
 /// Render source lines and outputs inside a cell's bordered inner area.
+/// `skip_rows` content rows (source + divider + output, in visual rows) are
+/// scrolled off above the viewport and consumed without drawing.
 /// Returns the screen (col, row) of the cursor when `is_focused` is true.
 #[allow(clippy::too_many_arguments)]
 fn render_cell_content(
@@ -382,6 +442,7 @@ fn render_cell_content(
     cache: &mut CellHighlightCache,
     nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
+    skip_rows: usize,
 ) -> Option<(u16, u16)> {
     // For the focused cell, use the live buffer rope; otherwise use stored source.
     let rope: &ropey::Rope = if is_focused { active.rope } else { &cell.source };
@@ -397,13 +458,15 @@ fn render_cell_content(
     // The cursor stays visible in the rendered markdown view too: rendering
     // only restyles the source text (header colours, bold, …) — it never
     // transforms it — so char indices map 1:1 to displayed characters and
-    // `j`/`k` passing through the cell keeps a visible cursor.
-    let (cursor_char_idx, sel_range, scroll_row) = if is_focused {
+    // `j`/`k` passing through the cell keeps a visible cursor.  While the
+    // cursor traverses the output block (`active.output_row`) the source
+    // cursor is hidden — the block cursor is drawn on the output row instead.
+    let (cursor_char_idx, sel_range) = if is_focused && active.output_row.is_none() {
         let lo = active.cursor.min(active.sel_anchor);
         let hi = active.cursor.max(active.sel_anchor);
-        (Some(active.cursor), (lo, hi), active.scroll_row)
+        (Some(active.cursor), (lo, hi))
     } else {
-        (None, (0usize, 0usize), 0)
+        (None, (0usize, 0usize))
     };
 
     let source_text = rope.to_string();
@@ -462,10 +525,9 @@ fn render_cell_content(
     // enclose the wrapped content.
     let wrap_width = cell_wraps(cell, active.word_wrap).then(|| cell_text_width(area.width));
 
-    // `scroll_row` counts *visual* rows within the cell (== logical lines
-    // when not wrapping); `exec::update_scroll` maintains it in the same
-    // units via `cell_cursor_visual_row`.
-    let mut skip_rows = scroll_row;
+    // Visual rows still to consume before drawing (the clip handed down by
+    // `render_cell` — rows scrolled off above the viewport).
+    let mut skip_rows = skip_rows;
     // Running char offset of the current line's start (O(L) total, not O(L²)).
     let mut next_line_start: usize = 0;
     'lines: for (line_no, line) in source_lines.iter().enumerate() {
@@ -531,7 +593,10 @@ fn render_cell_content(
     }
 
     if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
-        if current_row < area.bottom() {
+        // Divider row (not part of the output-row index space).
+        if skip_rows > 0 {
+            skip_rows -= 1;
+        } else if current_row < area.bottom() {
             frame.render_widget(
                 SingleLineWidget {
                     text: " \u{2500}\u{2500} output \u{2500}\u{2500}".to_string(),
@@ -541,15 +606,66 @@ fn render_cell_content(
             );
             current_row += 1;
         }
+        let mut out_ctx = OutputCtx {
+            skip: skip_rows,
+            row_idx: 0,
+            cursor_row: if is_focused { active.output_row } else { None },
+            cursor_style: crate::theme::cursor_style(active.mode),
+            cursor_pos: None,
+        };
         for output in &cell.outputs {
             if current_row >= area.bottom() {
                 break;
             }
-            render_output(frame, output, area, &mut current_row, image_requests, nb_config, cell_pixel_size);
+            render_output(
+                frame, output, area, &mut current_row, image_requests, nb_config,
+                cell_pixel_size, &mut out_ctx,
+            );
+        }
+        if out_ctx.cursor_pos.is_some() {
+            cursor_screen = out_ctx.cursor_pos;
         }
     }
 
     cursor_screen
+}
+
+/// Shared bookkeeping while rendering a cell's output block: the scroll clip
+/// still to consume, the running output-row index (0 = first row after the
+/// divider — the index space of `NotebookState::output_row`), and the output
+/// cursor when the focused cell's cursor traverses its outputs.
+struct OutputCtx {
+    /// Visual output rows still hidden above the viewport.
+    skip: usize,
+    /// Index of the next output visual row.
+    row_idx: usize,
+    /// Output row the cursor sits on (focused cell only).
+    cursor_row: Option<usize>,
+    cursor_style: Style,
+    /// Screen position of the output cursor once its row has been drawn.
+    cursor_pos: Option<(u16, u16)>,
+}
+
+impl OutputCtx {
+    /// Account for one output text row.  Returns `None` when the row is
+    /// hidden by the scroll clip, otherwise whether the cursor sits on it.
+    fn advance(&mut self) -> Option<bool> {
+        let idx = self.row_idx;
+        self.row_idx += 1;
+        if self.skip > 0 {
+            self.skip -= 1;
+            return None;
+        }
+        Some(self.cursor_row == Some(idx))
+    }
+
+    /// Paint the block cursor on the first content column of a drawn output
+    /// row and remember its position for the hardware cursor.
+    fn place_cursor(&mut self, frame: &mut Frame, x: u16, y: u16) {
+        let buf = frame.buffer_mut();
+        buf[(x, y)].set_style(self.cursor_style);
+        self.cursor_pos = Some((x, y));
+    }
 }
 
 /// Render a single summary line for a folded (collapsed) cell.
@@ -659,7 +775,7 @@ pub fn compute_image_rows(
 pub fn cell_display_height(
     source: &ropey::Rope,
     cell: &Cell,
-    max_image_rows: u16,
+    nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
     word_wrap: bool,
@@ -669,44 +785,87 @@ pub fn cell_display_height(
     } else {
         source.len_lines().max(1) as u16
     };
-    let output_h: u16 = if cell.cell_type == CellType::Code && !cell.outputs.is_empty() {
-        1 + cell.outputs.iter()
-            .map(|o| single_output_height_count(o, max_image_rows, cell_pixel_size, available_cols))
-            .sum::<u16>()
-    } else {
-        0
-    };
+    let out_rows = cell_output_rows(cell, nb_config, cell_pixel_size, available_cols);
+    let output_h = if out_rows > 0 { 1 + out_rows as u16 } else { 0 }; // 1 = divider row
     2 + source_lines + output_h // 2 = top border + bottom border
+}
+
+/// Display height of cell `idx` exactly as the notebook renderer draws it —
+/// folded cells collapse to 3 rows, everything else via [`cell_display_height`].
+/// The single height model shared by the renderer and the seamless-scroll math
+/// in `exec::update_scroll`; they must agree row-for-row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nb_cell_height(
+    cell: &Cell,
+    folded: bool,
+    source: &ropey::Rope,
+    nb_config: &crate::config::NotebookConfig,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+    word_wrap: bool,
+) -> usize {
+    if folded {
+        3 // top border + 1 summary line + bottom border
+    } else {
+        cell_display_height(source, cell, nb_config, cell_pixel_size, available_cols, word_wrap)
+            as usize
+    }
+}
+
+/// Total visual rows of a cell's output block, *excluding* the `── output ──`
+/// divider row (0 for markdown/raw cells or when there are no outputs).
+/// Output row indices — `NotebookState::output_row`, the renderer's output
+/// cursor — count within this range.
+pub(crate) fn cell_output_rows(
+    cell: &Cell,
+    nb_config: &crate::config::NotebookConfig,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+) -> usize {
+    if cell.cell_type != CellType::Code {
+        return 0;
+    }
+    cell.outputs
+        .iter()
+        .map(|o| single_output_height_count(o, nb_config, cell_pixel_size, available_cols) as usize)
+        .sum()
+}
+
+/// Rows shown for a truncated line list: at most `max` lines plus one
+/// "… (N more lines)" indicator row.  Shared by the height model and the
+/// renderer so they cannot drift.
+fn truncated_rows(total: usize, max: usize) -> usize {
+    total.min(max) + usize::from(total > max)
 }
 
 fn single_output_height_count(
     output: &Output,
-    max_image_rows: u16,
+    nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
 ) -> u16 {
     match output {
         Output::Stream { text, .. } => {
-            let n = text.lines().count();
-            let shown = n.min(20);
-            let extra = if n > 20 { 1 } else { 0 };
-            (shown + extra).max(1) as u16
+            truncated_rows(text.lines().count(), nb_config.max_output_lines) as u16
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
             if let Some(png) = &data.image_png {
                 if let Some((pw, ph)) = png_pixel_size(png) {
-                    compute_image_rows(pw, ph, available_cols, cell_pixel_size, max_image_rows)
+                    compute_image_rows(pw, ph, available_cols, cell_pixel_size, nb_config.image_rows)
                 } else {
-                    max_image_rows
+                    nb_config.image_rows
                 }
             } else {
                 data.text_plain
                     .as_deref()
-                    .map(|t| t.lines().count().clamp(1, 20))
+                    .map(|t| truncated_rows(t.lines().count(), nb_config.max_output_lines))
                     .unwrap_or(0) as u16
             }
         }
-        Output::Error { traceback, .. } => 1 + traceback.len().min(5) as u16,
+        Output::Error { traceback, .. } => {
+            // 1 = the "ename: evalue" headline row.
+            (1 + truncated_rows(traceback.len(), nb_config.max_traceback_lines)) as u16
+        }
     }
 }
 
@@ -862,6 +1021,35 @@ fn render_source_line(
     );
 }
 
+/// Draw one output text row, honouring the scroll clip and output cursor in
+/// `octx`.  A skipped (scrolled-off) row is accounted for but not drawn and
+/// does not advance `current_row`.  Returns false when the viewport bottom is
+/// reached (caller should stop).
+fn draw_output_row(
+    frame: &mut Frame,
+    area: Rect,
+    current_row: &mut u16,
+    octx: &mut OutputCtx,
+    text: String,
+    style: Style,
+) -> bool {
+    match octx.advance() {
+        None => true, // scrolled off above — consumed, keep going
+        Some(is_cursor) => {
+            if *current_row >= area.bottom() {
+                return false;
+            }
+            frame.render_widget(SingleLineWidget { text, style }, single_row(area, *current_row));
+            if is_cursor {
+                octx.place_cursor(frame, area.x, *current_row);
+            }
+            *current_row += 1;
+            true
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_output(
     frame: &mut Frame,
     output: &Output,
@@ -870,6 +1058,7 @@ fn render_output(
     image_requests: &mut Vec<ImageRequest>,
     nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
+    octx: &mut OutputCtx,
 ) {
     let th = crate::theme::active();
     match output {
@@ -883,62 +1072,40 @@ fn render_output(
             let max_lines = nb_config.max_output_lines;
             let to_show = lines.len().min(max_lines);
             for line in &lines[..to_show] {
-                if *current_row >= area.bottom() {
-                    break;
+                if !draw_output_row(frame, area, current_row, octx, format!("  {line}"), style) {
+                    return;
                 }
-                let row_area = single_row(area, *current_row);
-                frame.render_widget(
-                    SingleLineWidget {
-                        text: format!("  {line}"),
-                        style,
-                    },
-                    row_area,
-                );
-                *current_row += 1;
             }
-            if lines.len() > max_lines && *current_row < area.bottom() {
+            if lines.len() > max_lines {
                 let extra = lines.len() - max_lines;
-                let row_area = single_row(area, *current_row);
-                frame.render_widget(
-                    SingleLineWidget {
-                        text: format!("  ... ({extra} more lines)"),
-                        style: Style::default().fg(th.dim),
-                    },
-                    row_area,
+                draw_output_row(
+                    frame, area, current_row, octx,
+                    format!("  ... ({extra} more lines)"),
+                    Style::default().fg(th.dim),
                 );
-                *current_row += 1;
             }
         }
 
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-            render_mime_data(frame, data, area, current_row, image_requests, nb_config.image_rows, cell_pixel_size);
+            render_mime_data(frame, data, area, current_row, image_requests, nb_config, cell_pixel_size, octx);
         }
 
         Output::Error { ename, evalue, traceback } => {
-            if *current_row < area.bottom() {
-                let row_area = single_row(area, *current_row);
-                frame.render_widget(
-                    SingleLineWidget {
-                        text: format!("  {ename}: {evalue}"),
-                        style: Style::default().fg(th.error),
-                    },
-                    row_area,
-                );
-                *current_row += 1;
+            if !draw_output_row(
+                frame, area, current_row, octx,
+                format!("  {ename}: {evalue}"),
+                Style::default().fg(th.error),
+            ) {
+                return;
             }
             for tb_line in traceback.iter().take(nb_config.max_traceback_lines) {
-                if *current_row >= area.bottom() {
-                    break;
+                if !draw_output_row(
+                    frame, area, current_row, octx,
+                    format!("  {tb_line}"),
+                    Style::default().fg(th.dim),
+                ) {
+                    return;
                 }
-                let row_area = single_row(area, *current_row);
-                frame.render_widget(
-                    SingleLineWidget {
-                        text: format!("  {tb_line}"),
-                        style: Style::default().fg(th.dim),
-                    },
-                    row_area,
-                );
-                *current_row += 1;
             }
         }
     }
@@ -972,79 +1139,106 @@ fn estimated_image_cols(png_w: u32, png_h: u32, rows: u16, cell_pixel_size: Opti
     cols.clamp(4, 512) as u16
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_mime_data(
     frame: &mut Frame,
     data: &MimeData,
     area: Rect,
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
-    image_rows: u16,
+    nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
+    octx: &mut OutputCtx,
 ) {
     if let Some(png) = &data.image_png {
-        let available = area.bottom().saturating_sub(*current_row);
         // Compute rows from image aspect ratio so the display height scales with
         // figsize.  image_rows acts as a cap, not a fixed height.
         let natural_rows = if let Some((pw, ph)) = png_pixel_size(png) {
-            compute_image_rows(pw, ph, area.width, cell_pixel_size, image_rows)
+            compute_image_rows(pw, ph, area.width, cell_pixel_size, nb_config.image_rows)
         } else {
-            image_rows
+            nb_config.image_rows
         };
-        let reserved = natural_rows.min(available);
-        if reserved > 0 {
+        // The image spans `natural_rows` output rows.  When it straddles the
+        // viewport edge, crop the source vertically so the visible band keeps
+        // its natural scale rather than squashing the whole figure.
+        let skip_top = octx.skip.min(natural_rows as usize) as u16; // rows off the top
+        octx.skip = octx.skip.saturating_sub(natural_rows as usize);
+        // Reserve the image's row-index span so a following output's cursor
+        // index stays aligned (the cursor never lands *inside* an image row).
+        let img_first_idx = octx.row_idx;
+        octx.row_idx += natural_rows as usize;
+
+        let remaining_after_skip = natural_rows - skip_top;
+        let available = area.bottom().saturating_sub(*current_row);
+        let shown = remaining_after_skip.min(available);
+        if shown > 0 {
             let image_top = *current_row;
 
             // Placeholder width = the same column count Kitty will use so the
             // dark background matches the rendered image footprint exactly.
             let placeholder_cols = if let Some((pw, ph)) = png_pixel_size(png) {
-                estimated_image_cols(pw, ph, reserved, cell_pixel_size).min(area.width)
+                estimated_image_cols(pw, ph, natural_rows, cell_pixel_size).min(area.width)
             } else {
                 area.width
             };
 
             // Draw a dark placeholder block; Kitty will paint over it.
-            for r in 0..reserved {
-                let row_area = Rect {
-                    x: area.x,
-                    y: image_top + r,
-                    width: placeholder_cols,
-                    height: 1,
-                };
-                let label = if r == 0 { "  ▸ image ".to_string() } else { String::new() };
-                let th = crate::theme::active();
+            let th = crate::theme::active();
+            for r in 0..shown {
+                let row_area = Rect { x: area.x, y: image_top + r, width: placeholder_cols, height: 1 };
+                let label = if skip_top == 0 && r == 0 { "  ▸ image ".to_string() } else { String::new() };
                 frame.render_widget(
-                    SingleLineWidget {
-                        text: label,
-                        style: Style::default()
-                            .bg(th.output_bg)
-                            .fg(th.dim),
-                    },
+                    SingleLineWidget { text: label, style: Style::default().bg(th.output_bg).fg(th.dim) },
                     row_area,
                 );
             }
+
+            // Vertical source crop (in image pixels) when clipped at either edge.
+            let crop = png_pixel_size(png).and_then(|(_, ph)| {
+                if skip_top == 0 && shown == natural_rows {
+                    None // whole image visible
+                } else {
+                    let y = (skip_top as u32 * ph) / natural_rows as u32;
+                    let h = (shown as u32 * ph) / natural_rows as u32;
+                    Some((y, h.max(1)))
+                }
+            });
+
             image_requests.push(ImageRequest {
                 col: area.x,
                 row: image_top,
-                rows: reserved,
+                rows: shown,
                 cols: placeholder_cols,
+                crop,
                 png_data: png.clone(),
             });
-            *current_row += reserved;
+
+            // Output cursor sitting on a visible image row → park it there.
+            if let Some(cr) = octx.cursor_row {
+                if cr >= img_first_idx + skip_top as usize && cr < img_first_idx + (skip_top + shown) as usize {
+                    let y = image_top + (cr - img_first_idx) as u16 - skip_top;
+                    octx.cursor_pos = Some((area.x, y));
+                }
+            }
+            *current_row += shown;
         }
     } else if let Some(text) = &data.text_plain {
-        for line in text.lines() {
-            if *current_row >= area.bottom() {
-                break;
+        let lines: Vec<&str> = text.lines().collect();
+        let max_lines = nb_config.max_output_lines;
+        let to_show = lines.len().min(max_lines);
+        let info = Style::default().fg(crate::theme::active().info);
+        for line in &lines[..to_show] {
+            if !draw_output_row(frame, area, current_row, octx, format!("  {line}"), info) {
+                return;
             }
-            let row_area = single_row(area, *current_row);
-            frame.render_widget(
-                SingleLineWidget {
-                    text: format!("  {line}"),
-                    style: Style::default().fg(crate::theme::active().info),
-                },
-                row_area,
+        }
+        if lines.len() > max_lines {
+            let extra = lines.len() - max_lines;
+            let _ = draw_output_row(
+                frame, area, current_row, octx,
+                format!("  ... ({extra} more lines)"),
+                Style::default().fg(crate::theme::active().dim),
             );
-            *current_row += 1;
         }
     }
 }
@@ -1099,20 +1293,21 @@ mod tests {
         };
 
         let inner_cols = 42u16; // text width 40 → 150 chars ≈ 4 rows
+        let cfg = crate::config::NotebookConfig::default();
         let expected_rows = wrapped_source_rows(&Rope::from_str(&long), cell_text_width(inner_cols));
         assert!(expected_rows > 1, "long prose must wrap to several rows");
 
         // Markdown wraps in both the rendered view and the source view —
         // word_wrap toggle irrelevant.
         let md = make(CellType::Markdown, true);
-        assert_eq!(cell_display_height(&md.source, &md, 40, None, inner_cols, false), 2 + expected_rows);
+        assert_eq!(cell_display_height(&md.source, &md, &cfg, None, inner_cols, false), 2 + expected_rows);
         let md_src = make(CellType::Markdown, false);
-        assert_eq!(cell_display_height(&md_src.source, &md_src, 40, None, inner_cols, false), 2 + expected_rows);
+        assert_eq!(cell_display_height(&md_src.source, &md_src, &cfg, None, inner_cols, false), 2 + expected_rows);
 
         // Code cells follow the word_wrap toggle.
         let code = make(CellType::Code, false);
-        assert_eq!(cell_display_height(&code.source, &code, 40, None, inner_cols, false), 2 + 1);
-        assert_eq!(cell_display_height(&code.source, &code, 40, None, inner_cols, true), 2 + expected_rows);
+        assert_eq!(cell_display_height(&code.source, &code, &cfg, None, inner_cols, false), 2 + 1);
+        assert_eq!(cell_display_height(&code.source, &code, &cfg, None, inner_cols, true), 2 + expected_rows);
     }
 
     /// Navigating through a *rendered* markdown cell must keep the cursor
@@ -1143,7 +1338,7 @@ mod tests {
             rope: &rope,
             cursor: 2, // on the 'H' of "# Heading"
             sel_anchor: 2,
-            scroll_row: 0,
+            output_row: None,
             mode: &mode,
             jump_labels: &[],
             jump_typed: "",
@@ -1172,6 +1367,77 @@ mod tests {
         let (cx, cy) = cursor_pos.expect("cursor must be visible in a rendered markdown cell");
         // Border (1) + 2-char pad + cursor col 2 within the first line.
         assert_eq!((cx, cy), (1 + 2 + 2, 1));
+    }
+
+    /// A scrolled (clipped) tall cell whose output block includes an image
+    /// and an error must render without panicking, and a cropped image
+    /// request must be emitted when the image straddles the viewport edge.
+    #[test]
+    fn clipped_cell_with_image_and_error_renders() {
+        use crate::notebook::{MimeData, Output};
+        // Minimal 4×80 PNG so png_pixel_size() returns real dimensions.
+        let png = {
+            let mut v = vec![0u8; 24];
+            v[16..20].copy_from_slice(&80u32.to_be_bytes());
+            v[20..24].copy_from_slice(&600u32.to_be_bytes());
+            std::sync::Arc::new(v)
+        };
+        let cell = Cell {
+            id: "c".into(),
+            cell_type: CellType::Code,
+            source: Rope::from_str(&(0..40).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n")),
+            outputs: vec![
+                Output::DisplayData { data: MimeData { text_plain: None, image_png: Some(png) } },
+                Output::Error {
+                    ename: "E".into(),
+                    evalue: "v".into(),
+                    traceback: vec!["t1".into(), "t2".into()],
+                },
+            ],
+            execution_count: Some(1),
+            rendered: false,
+        };
+        let nb = Notebook {
+            path: std::path::PathBuf::from("/tmp/clip-test.ipynb"),
+            metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
+            cells: vec![cell],
+            modified: false,
+            kernel: None,
+        };
+        let mut state = NotebookState::new();
+        // Scroll deep into the cell so the top border + many rows are clipped
+        // and the image lands right at the viewport edge.
+        state.scroll_offset = 38;
+        let rope = nb.cells[0].source.clone();
+        let mode = Mode::Normal;
+        let active = ActiveCellView {
+            rope: &rope,
+            cursor: rope.len_chars(),
+            sel_anchor: rope.len_chars(),
+            output_row: Some(5),
+            mode: &mode,
+            jump_labels: &[],
+            jump_typed: "",
+            word_wrap: false,
+        };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut imgs = Vec::new();
+        terminal
+            .draw(|f| {
+                let (images, _cursor) = render(
+                    f, &state, &nb, &active,
+                    &std::collections::HashMap::new(),
+                    &crate::config::NotebookConfig::default(),
+                    Some((18, 9)),
+                    &mut CellHighlightCache::default(),
+                );
+                imgs = images;
+            })
+            .unwrap();
+        // The image is partially scrolled off, so its request carries a crop.
+        assert!(imgs.iter().any(|r| r.crop.is_some()),
+            "a clipped image must be emitted with a vertical crop");
     }
 
     #[test]

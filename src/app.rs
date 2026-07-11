@@ -576,8 +576,15 @@ pub fn run(path: Option<&str>) -> Result<()> {
     // instead of collapsing into a bare Enter. DISAMBIGUATE_ESCAPE_CODES is the
     // safe level for this — it disambiguates modified special keys without
     // altering how ordinary text (incl. shifted symbols) is reported.
+    //
+    // The support query can go unanswered (the reply lost in startup output,
+    // a slow ssh hop timing out the poll), so on terminals *known* to
+    // implement the protocol — Kitty and Ghostty — the flags are pushed even
+    // when the query fails. WezTerm is not forced: it only speaks the protocol
+    // when the user enables it, and then it answers the query anyway.
     let kbd_support = terminal::supports_keyboard_enhancement();
-    if matches!(kbd_support, Ok(true)) {
+    let kbd_known_good = app.graphics.terminal.implements_kitty_keyboard();
+    if matches!(kbd_support, Ok(true)) || kbd_known_good {
         use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
         if execute!(stdout, PushKeyboardEnhancementFlags(flags)).is_ok() {
@@ -587,7 +594,8 @@ pub fn run(path: Option<&str>) -> Result<()> {
     // Surface what was negotiated when key debugging is on (SV_DEBUG_KEYS=1).
     if std::env::var_os("SV_DEBUG_KEYS").is_some() {
         app.messages.show(format!(
-            "keyboard enhancement: support={kbd_support:?} active={}  (logging keys to {})",
+            "keyboard enhancement: support={kbd_support:?} terminal={:?} active={}  (logging keys to {})",
+            app.graphics.terminal,
             KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst),
             key_debug_log_path().display(),
         ));
@@ -821,7 +829,7 @@ fn draw_frame(
                             rope: &app.buffer.rope,
                             cursor: app.selection.head,
                             sel_anchor: app.selection.anchor,
-                            scroll_row: app.scroll_row,
+                            output_row: app.notebook.as_ref().and_then(|(_, s)| s.output_row),
                             mode: &app.mode,
                             jump_labels: &app.jump.labels,
                             jump_typed: &app.jump.typed,
@@ -892,12 +900,12 @@ fn draw_frame(
                     let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
                     if let Some(&kid) = app.graphics.image_ids.get(&ptr_key) {
                         // Pixel data already cached in the terminal — re-place cheaply.
-                        let _ = kitty::place_image(req.col, req.row, kid, req.rows, req.cols);
+                        let _ = kitty::place_image(req.col, req.row, kid, req.rows, req.cols, req.crop);
                     } else {
                         // First time seeing this image — upload pixel data once.
                         let kid = app.graphics.next_id;
                         app.graphics.next_id = if app.graphics.next_id == u32::MAX { 1 } else { app.graphics.next_id + 1 };
-                        let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, &req.png_data);
+                        let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, req.crop, &req.png_data);
                         app.graphics.image_ids.insert(ptr_key, kid);
                     }
                 }

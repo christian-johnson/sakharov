@@ -150,11 +150,18 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   Normal/Insert/Select modes, exactly like a plain buffer. While a notebook is open a small
   override map shadows the normal bindings: `J`/`K` move to the next/previous cell, and
   `Ctrl+E` executes the focused cell (`Shift+Enter`/`Ctrl+Enter` also execute, but only on
-  terminals with keyboard-enhancement reporting — see `app::run`; otherwise a modified Enter
+  terminals with keyboard-enhancement reporting — see `app::run`; the Kitty keyboard protocol
+  is force-enabled on Kitty and Ghostty even when the support query goes unanswered
+  (`GraphicsTerminal::implements_kitty_keyboard`), so Shift/Ctrl+Enter work out of the box;
+  WezTerm relies on the query since its support is opt-in; otherwise a modified Enter
   arrives as a bare Enter). Cell-execution keys are handled in `input::handle_key` before mode
   dispatch so they fire from Insert too. A plain `j` on a cell's last
-  line crosses into the next cell (and `k` on the first line into the previous one), so
-  vertical motion flows continuously across cells. Cell management (new/delete/clear-outputs/
+  line steps into that cell's **output block** (so long errors/streams scroll into view) and
+  then into the next cell; `k` is the exact inverse (climb the output block back to the source,
+  then up into the previous cell — landing on *its* last output row when it has one). The
+  output cursor is `NotebookState.output_row` (`Some(visual_row)` while browsing outputs, reset
+  to `None` by any command other than `j`/`k`); a block cursor is drawn on that output row and
+  the source cursor is hidden. Cell management (new/delete/clear-outputs/
   cell-type/structural-undo) has no default key — use the command palette or `:` command line
 - **Persistent kernel session** — one Python subprocess per notebook; namespace shared across all cells
   - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in notebook dir and cwd before falling back to `python3`
@@ -199,14 +206,24 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   (`notebook_ui::wrap_segments`; a single over-long word hard-breaks). Markdown cells
   always wrap — rendered view *and* editable source view alike; other cells follow the
   `editor.word_wrap` toggle (`:wrap`). The single predicate `notebook_ui::cell_wraps`
-  decides wrapping in the renderer, `cell_display_height`, **and** the in-cell scroll, so
-  cell heights and scroll offsets always match what is drawn. While a cell wraps,
-  `app.scroll_row` counts *visual* rows within the focused cell (== logical lines when
-  not wrapping); `exec::update_scroll` maps the cursor to its visual row via
-  `cell_cursor_visual_row` and the renderer skips the same row count, so the cursor wraps
-  onto continuation rows instead of running off the right border. Cells have **no
+  decides wrapping in the renderer, `cell_display_height`, **and** the scroll math, so
+  cell heights and scroll offsets always match what is drawn. Cells have **no
   horizontal scroll** — a non-wrapped long line (code cell, `:wrap` off) clips at the
   border; toggle `:wrap` to see it all
+- **Seamless, row-granular notebook scroll** — the whole notebook is one vertical stack of
+  cells (each `nb_cell_height` rows tall, separated by a 1-row gap) and the viewport is a
+  window into it, anchored by `(NotebookState.scroll_cell, scroll_offset)` measured in
+  *visual rows* (not whole cells). `exec::scroll::notebook_update_scroll` finds the cursor's
+  absolute row in that stack — in the source, or (when `output_row` is set) in the output
+  block — and nudges the anchor the minimum needed to keep it within `scroll_off`, so
+  scrolling moves one line at a time instead of jumping a cell. The renderer
+  (`notebook_ui::render_cell`) draws the first cell clipped by `scroll_offset` and clips the
+  last cell at the viewport bottom — a clipped edge drops its border line, so the cell visibly
+  continues past the screen edge. `nb_cell_height` is the single height model shared by the
+  renderer and the scroll math; `cell_output_rows` sizes the output block (config-driven
+  `max_output_lines` / `max_traceback_lines` / `image_rows` truncation, mirrored by the
+  renderer via `truncated_rows`). (The old per-cell `ensure_focused_visible` + in-cell
+  `app.scroll_row` model is gone — `app.scroll_row` is now used only by the plain editor.)
 - **Rich display / LaTeX** — the kernel runner evaluates a cell's trailing bare expression
   (like Jupyter's `execute_result`) and prefers a rich repr: `_repr_latex_` is rasterised to
   PNG via matplotlib mathtext and shown through the normal image pipeline (so SymPy output
@@ -221,10 +238,15 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   completion with duration (`format_duration` in `exec/mod.rs`)
 - `o/O` new cell below/above, `d` delete cell, `x` clear outputs
 - Saves back to valid nbformat 4 JSON (`:w`)
-- **Kitty/WezTerm graphics** — matplotlib figures captured automatically via Agg backend; displayed
-  using the Kitty graphics protocol with aspect-ratio-correct sizing. Image height scales naturally
-  with `figsize`; `image_rows` in config acts as a cap (default 40). Terminal detection via env
-  vars; images suppressed in unsupporting terminals.
+- **Kitty/Ghostty/WezTerm graphics** — matplotlib figures captured automatically via Agg backend;
+  displayed using the Kitty graphics protocol with aspect-ratio-correct sizing. Image height scales
+  naturally with `figsize`; `image_rows` in config acts as a cap (default 40). Terminal detection is
+  by env var (`GraphicsTerminal::detect` — Kitty via `KITTY_WINDOW_ID`/`TERM`, Ghostty via
+  `TERM`=`xterm-ghostty`/`TERM_PROGRAM`/`GHOSTTY_RESOURCES_DIR`, WezTerm via `TERM_PROGRAM`/
+  `WEZTERM_UNIX_SOCKET`); images suppressed in unsupporting terminals. An image straddling the
+  viewport edge is **vertically cropped** (`ImageRequest.crop` → the protocol's `y=`/`h=` source
+  rectangle) so the visible band keeps its natural scale instead of squashing the whole figure —
+  this is what makes images scroll smoothly with the seamless notebook scroll.
 - **`gw` jump mode works inside notebook cells** — labels overlaid on the focused cell
 - All notebook commands accessible via `:` (e.g. `:run`, `:restart-kernel`, `:notebook-next-cell`)
 
@@ -397,6 +419,7 @@ src/
                         stashes (plain-file & via notebook), open_as_notebook,
                         new-file/new-notebook, unsaved_buffer_names quit sweep
     scroll.rs         — update_scroll (the single authoritative scroll fn) +
+                        notebook_update_scroll (row-granular cell-stack scroll) +
                         wrap helpers + fold-aware cursor normalisation
     export.rs         — Quarto export (:export): background `quarto render` + poll_export
     format.rs         — external shell formatters ([formatters.<lang>])
@@ -456,10 +479,13 @@ src/
                         reader thread stream KernelMessages (async, non-blocking)
                         KernelStatus enum; find_python_executable for venv detection
                         cell_virtual_path() = LSP document identity for a cell
-  notebook_state.rs   — NotebookState: focused_cell, cursor_pos, scroll_cell, mode, undo
-                        ensure_focused_visible() keeps focused cell in a 15-cell window
+  notebook_state.rs   — NotebookState: focused_cell, (scroll_cell, scroll_offset) row-granular
+                        scroll anchor, output_row (output-block cursor), exec queue, undo
+                        snapshots, folded cells
   notebook_ui.rs      — ratatui rendering for notebooks; returns Vec<ImageRequest>
-  kitty.rs            — Kitty terminal graphics protocol: render_image, clear_images
+  kitty.rs            — Kitty graphics protocol (Kitty/Ghostty/WezTerm): upload/place/crop
+                        images, clear/delete; GraphicsTerminal detection + keyboard-protocol
+                        capability
 
 docs/
   commands.md    — full command reference (keep this up to date with command.rs)
@@ -489,14 +515,16 @@ docs/
   an equal-length unsynced mutation is the one case the guard cannot detect.
 - `exec::update_scroll` is the authoritative scroll function; the run loop calls it once per
   frame (after refreshing `viewport_height`/`viewport_width`) so scroll always reflects the
-  current terminal size. It has two paths: the plain-editor fold/wrap-aware path, and a
-  **notebook editing path** (whenever a notebook is open and not in the full-screen overlay).
-  The notebook path runs `ensure_focused_visible` to keep the focused cell on-screen at cell
-  granularity, then scrolls *within* the focused cell (`app.scroll_row`) using the rows actually
-  available below the cell's content-top offset (preceding cells + gaps + top border), so the
-  cursor tracks like a text buffer instead of sliding off the bottom. Because scroll always
-  follows the cursor/focused cell now, the command-only `notebook-scroll-down`/`-up` nudges snap
-  back to the focused cell.
+  current terminal size. It has two paths: the plain-editor fold/wrap-aware path
+  (maintaining `app.scroll_row`/`scroll_col`), and the **notebook path** (`notebook_update_scroll`,
+  whenever a notebook is open and not in the full-screen overlay). The notebook path treats the
+  notebook as one row-tall stack and maintains the `(scroll_cell, scroll_offset)` row anchor plus
+  `output_row` so the cursor — in source *or* in the output block — tracks like a text buffer,
+  scrolling one visual row at a time. `nb_cell_height` / `cell_output_rows` in `notebook_ui`
+  are the shared height model: the scroll math and the renderer MUST agree row-for-row, so any
+  change to how a cell (or its output block) is sized must go through those two functions.
+  Because scroll always follows the cursor now, the command-only `notebook-scroll-down`/`-up`
+  nudges snap back to the focused cell on the next frame.
 - **LSP document identity**: a document's URI is `lsp::path_to_uri(path)` (absolute +
   canonicalized, with a plain-absolute fallback for nonexistent virtual cell paths).
   Diagnostics arrive keyed by the URI the server echoes back, so any code looking up

@@ -97,47 +97,38 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
     };
 
+    // Browsing a cell's output block (`output_row`) is a transient state owned
+    // by continued vertical motion; any other command snaps the cursor back to
+    // the cell source.
+    if !matches!(cmd, Command::MoveUp | Command::MoveDown) {
+        if let Some((_, state)) = app.notebook.as_mut() {
+            state.output_row = None;
+        }
+    }
+
     match cmd {
         // --- Motions ---
         Command::MoveLeft         => app.selection = motion::move_left(&app.buffer.rope, app.selection, extend),
         Command::MoveRight        => app.selection = motion::move_right(&app.buffer.rope, app.selection, extend),
         Command::MoveUp => {
-            // In a notebook, `k` on the first line of a cell crosses into the
-            // previous cell, landing on its last line (column preserved).
-            if app.notebook.is_some() && !app.notebook_focused_edit() && !extend {
-                let rope = &app.buffer.rope;
-                let pos = app.selection.head.min(rope.len_chars());
-                let on_first_line = rope.len_chars() == 0 || rope.char_to_line(pos) == 0;
-                let focused = app.notebook.as_ref().map(|(_, s)| s.focused_cell).unwrap_or(0);
-                if on_first_line && focused > 0 {
-                    let col = motion::col_of(rope, pos);
-                    switch_focused_cell(app, focused - 1);
-                    let last_line = app.buffer.rope.len_lines().saturating_sub(1);
-                    place_cursor_at_line(app, last_line, col);
-                    update_scroll(app);
-                    return;
-                }
+            // In a notebook, vertical motion flows continuously: through the
+            // focused cell's source, up through the previous cell's output
+            // block, and into its source — see `notebook_move_up`.
+            if app.notebook.is_some() && !app.notebook_focused_edit() && !extend
+                && notebook_move_up(app)
+            {
+                return;
             }
             app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
         }
         Command::MoveDown => {
-            // In a notebook, `j` on the last line of a cell crosses into the
-            // next cell, landing on its first line (column preserved).
-            if app.notebook.is_some() && !app.notebook_focused_edit() && !extend {
-                let rope = &app.buffer.rope;
-                let pos = app.selection.head.min(rope.len_chars());
-                let on_last_line =
-                    rope.len_chars() == 0 || rope.char_to_line(pos) + 1 >= rope.len_lines();
-                let (focused, count) = app.notebook.as_ref()
-                    .map(|(nb, s)| (s.focused_cell, nb.cells.len()))
-                    .unwrap_or((0, 0));
-                if on_last_line && focused + 1 < count {
-                    let col = motion::col_of(rope, pos);
-                    switch_focused_cell(app, focused + 1);
-                    place_cursor_at_line(app, 0, col);
-                    update_scroll(app);
-                    return;
-                }
+            // In a notebook, `j` past the last source line descends into the
+            // cell's output block (so long errors/streams scroll into view),
+            // then crosses into the next cell — see `notebook_move_down`.
+            if app.notebook.is_some() && !app.notebook_focused_edit() && !extend
+                && notebook_move_down(app)
+            {
+                return;
             }
             app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
         }
@@ -992,6 +983,118 @@ pub fn execute(app: &mut App, cmd: &Command) {
     update_scroll(app);
 }
 
+/// Visual rows in cell `cell_idx`'s output block (0 for none), sized exactly
+/// as the renderer draws it.  Used by the output-block navigation below.
+fn nb_output_rows(app: &App, cell_idx: usize) -> usize {
+    let cell_px = app.graphics.cell_pixel_size;
+    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
+    app.notebook
+        .as_ref()
+        .and_then(|(nb, _)| nb.cells.get(cell_idx))
+        .map(|cell| {
+            crate::notebook_ui::cell_output_rows(cell, &app.config.notebook, cell_px, avail_cols)
+        })
+        .unwrap_or(0)
+}
+
+/// `j` inside a notebook: continue past the last source line into the cell's
+/// output block, then into the next cell.  Returns true when it handled the
+/// motion (the caller must not run the ordinary source `move_down`).
+fn notebook_move_down(app: &mut App) -> bool {
+    let (focused, count) = match app.notebook.as_ref() {
+        Some((nb, s)) => (s.focused_cell, nb.cells.len()),
+        None => return false,
+    };
+    let output_row = app.notebook.as_ref().and_then(|(_, s)| s.output_row);
+
+    if let Some(r) = output_row {
+        let out_rows = nb_output_rows(app, focused);
+        if r + 1 < out_rows {
+            if let Some((_, s)) = app.notebook.as_mut() {
+                s.output_row = Some(r + 1);
+            }
+            update_scroll(app);
+            return true;
+        }
+        // Past the last output row → next cell's first source line.
+        if focused + 1 < count {
+            if let Some((_, s)) = app.notebook.as_mut() {
+                s.output_row = None;
+            }
+            switch_focused_cell(app, focused + 1);
+            place_cursor_at_line(app, 0, 0);
+            update_scroll(app);
+        }
+        return true; // consumed even when pinned at the very bottom
+    }
+
+    // On the source: only the last line descends into the output block.
+    let rope = &app.buffer.rope;
+    let pos = app.selection.head.min(rope.len_chars());
+    let on_last_line = rope.len_chars() == 0 || rope.char_to_line(pos) + 1 >= rope.len_lines();
+    if !on_last_line {
+        return false;
+    }
+    if nb_output_rows(app, focused) > 0 {
+        if let Some((_, s)) = app.notebook.as_mut() {
+            s.output_row = Some(0);
+        }
+        update_scroll(app);
+        return true;
+    }
+    // No outputs: cross straight into the next cell (column preserved).
+    if focused + 1 < count {
+        let col = motion::col_of(rope, pos);
+        switch_focused_cell(app, focused + 1);
+        place_cursor_at_line(app, 0, col);
+        update_scroll(app);
+        return true;
+    }
+    false
+}
+
+/// `k` inside a notebook: the inverse of [`notebook_move_down`] — climb the
+/// output block back to the source, then up into the previous cell (landing on
+/// its last output row when it has outputs, else its last source line).
+fn notebook_move_up(app: &mut App) -> bool {
+    let focused = match app.notebook.as_ref() {
+        Some((_, s)) => s.focused_cell,
+        None => return false,
+    };
+    let output_row = app.notebook.as_ref().and_then(|(_, s)| s.output_row);
+
+    if let Some(r) = output_row {
+        if let Some((_, s)) = app.notebook.as_mut() {
+            // r == 0 climbs back onto the source (cursor already sits on the
+            // last source line it descended from).
+            s.output_row = if r > 0 { Some(r - 1) } else { None };
+        }
+        update_scroll(app);
+        return true;
+    }
+
+    // On the source: only the first line crosses into the previous cell.
+    let rope = &app.buffer.rope;
+    let pos = app.selection.head.min(rope.len_chars());
+    let on_first_line = rope.len_chars() == 0 || rope.char_to_line(pos) == 0;
+    if !on_first_line || focused == 0 {
+        return false;
+    }
+    let col = motion::col_of(rope, pos);
+    switch_focused_cell(app, focused - 1);
+    let last_line = app.buffer.rope.len_lines().saturating_sub(1);
+    place_cursor_at_line(app, last_line, col);
+    // Land in the previous cell's output block when it has one.
+    let prev_out = nb_output_rows(app, focused - 1);
+    if prev_out > 0 {
+        if let Some((_, s)) = app.notebook.as_mut() {
+            s.output_row = Some(prev_out - 1);
+        }
+    }
+    update_scroll(app);
+    true
+}
+
 /// Switch the focused notebook cell to `new_idx` (clamped to the valid range),
 /// flushing the current cell to the LSP and notebook model first and loading the
 /// target cell into `app.buffer`. The cursor lands at the start of the new cell;
@@ -1007,7 +1110,6 @@ fn switch_focused_cell(app: &mut App, new_idx: usize) {
         let last = nb.cells.len().saturating_sub(1);
         state.focused_cell = new_idx.min(last);
     }
-    notebook::ensure_focused_visible(app);
     notebook::load_focused_cell(app);
 }
 
@@ -1528,6 +1630,121 @@ mod tests {
         assert!(app.messages.log.iter().any(|m| m.starts_with("Kernel ready")));
         assert!(app.messages.log.iter().any(|m| m.contains("Cell [1] finished")));
         assert!(app.messages.log.iter().any(|m| m.contains("Cell [2] finished")));
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// `j`/`k` traverse a cell's output block (so long errors scroll into
+    /// view) and cross cleanly into neighbouring cells, and the row-granular
+    /// scroll keeps the browsed row on screen.
+    #[test]
+    fn notebook_output_block_navigation() {
+        use crate::notebook::Output;
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 12;
+        app.viewport_width = 80;
+
+        let dir = unique_tmp_dir("outnav");
+        let target = dir.join("outnav.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "outnav");
+
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("a\nb");
+            // Error output: 1 headline row + 3 traceback rows = 4 output rows.
+            nb.cells[0].outputs = vec![Output::Error {
+                ename: "ValueError".into(),
+                evalue: "boom".into(),
+                traceback: vec!["tb1".into(), "tb2".into(), "tb3".into()],
+            }];
+            let mut second = nb.cells[0].clone();
+            second.id = crate::notebook::new_cell_id();
+            second.source = Rope::from_str("c\nd");
+            second.outputs = vec![];
+            nb.cells.push(second);
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+
+        // Cursor on the last source line, then `j` descends into the outputs.
+        app.selection = Selection::point(2); // the 'b'
+        for expected in 0..4 {
+            execute(&mut app, &Command::MoveDown);
+            assert_eq!(
+                app.notebook.as_ref().unwrap().1.output_row,
+                Some(expected),
+                "j should step through output row {expected}"
+            );
+            assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+        }
+        // One more `j` crosses into cell 1's source (output browsing ends).
+        execute(&mut app, &Command::MoveDown);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 1);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, None);
+
+        // `k` climbs back into cell 0's output block at its last row…
+        execute(&mut app, &Command::MoveUp);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, Some(3));
+        // …then up through the outputs and back onto the source.
+        for expected in [2usize, 1, 0] {
+            execute(&mut app, &Command::MoveUp);
+            assert_eq!(app.notebook.as_ref().unwrap().1.output_row, Some(expected));
+        }
+        execute(&mut app, &Command::MoveUp);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, None,
+            "k off the top of the output block returns to the source");
+
+        // Any non-vertical command snaps output browsing off.
+        app.selection = Selection::point(2);
+        execute(&mut app, &Command::MoveDown); // into output_row 0
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, Some(0));
+        execute(&mut app, &Command::MoveLineStart);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, None,
+            "a horizontal motion resets output browsing");
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// The notebook scroll anchor is row-granular: paging down a tall cell
+    /// advances `scroll_offset` one row at a time rather than jumping cells.
+    #[test]
+    fn notebook_scroll_is_row_granular() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 8;
+        app.viewport_width = 80;
+        app.config.editor.scroll_off = 2;
+
+        let dir = unique_tmp_dir("rowscroll");
+        let target = dir.join("rowscroll.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "rowscroll");
+
+        // One tall cell: 30 source lines, taller than the 8-row viewport.
+        let src: String = (0..30).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str(&src);
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+        update_scroll(&mut app);
+        assert_eq!(app.notebook.as_ref().unwrap().1.scroll_offset, 0);
+
+        // Walk the cursor down; scroll_offset must climb gradually (never in a
+        // single whole-cell jump) and stay bounded by the cursor position.
+        let mut last = 0usize;
+        for _ in 0..25 {
+            execute(&mut app, &Command::MoveDown);
+            let off = app.notebook.as_ref().unwrap().1.scroll_offset;
+            assert!(off >= last, "scroll must not jump backwards while moving down");
+            assert!(off <= last + 1, "scroll must advance one row at a time (was {last}, now {off})");
+            last = off;
+        }
+        assert!(last > 0, "scrolling a tall cell must move the anchor");
 
         let _ = std::fs::remove_file(&target);
     }

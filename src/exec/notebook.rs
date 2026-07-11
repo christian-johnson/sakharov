@@ -7,34 +7,12 @@ use crate::{
     selection::Selection,
 };
 
-/// Keep the focused cell on-screen, reading the viewport/image settings off
-/// `app`. Wraps the long [`NotebookState::ensure_focused_visible`] argument list
-/// so call sites don't repeat it.
-pub(super) fn ensure_focused_visible(app: &mut App) {
-    let image_rows = app.config.notebook.image_rows;
-    let cell_px = app.graphics.cell_pixel_size;
-    let viewport_height = app.viewport_height;
-    let available_cols = app.viewport_width.saturating_sub(2) as u16;
-    let word_wrap = app.config.editor.word_wrap;
-    if let Some((nb, state)) = app.notebook.as_mut() {
-        state.ensure_focused_visible(
-            &nb.cells,
-            viewport_height,
-            &app.buffer.rope,
-            image_rows,
-            cell_px,
-            available_cols,
-            word_wrap,
-        );
-    }
-}
-
 /// The fix-up ritual every structural cell change (add / delete / convert /
-/// structural undo-redo) must run: keep the focused cell visible, reload it into
-/// `app.buffer`, resync the notebook with the LSP (cell URIs shift on add/delete),
-/// and return to Normal mode.
+/// structural undo-redo) must run: reload the focused cell into `app.buffer`,
+/// resync the notebook with the LSP (cell URIs shift on add/delete), and
+/// return to Normal mode.  Scroll follows the focused cell automatically —
+/// `exec::update_scroll` re-anchors it every frame.
 pub(super) fn after_structural_edit(app: &mut App) {
-    ensure_focused_visible(app);
     load_focused_cell(app);
     notebook_lsp_reopen(app);
     app.mode = crate::mode::Mode::Normal;
