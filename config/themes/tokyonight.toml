@@ -2,8 +2,8 @@
 name = "Tokyo Night"
 
 [palette]
-bg        = "#1a1b26"
-bg_dark   = "#16161e"
+bg        = "#141218"
+bg_dark   = "#2b292f"
 bg_hl     = "#292e42"
 fg        = "#c0caf5"
 fg_dark   = "#a9b1d6"
@@ -33,7 +33,7 @@ info            = "cyan"
 success         = "green"
 statusline      = "bg_dark"
 popup           = "bg_dark"
-popup_border    = "line_nr"
+popup_border    = "grey"
 popup_selection = "bg_hl"
 
 [syntax]

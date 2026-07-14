@@ -96,6 +96,7 @@ fn render_completion_doc(
     };
     let block = Block::default()
         .title(" docs ")
+        .title_style(title_style(&th))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_fg))
@@ -240,7 +241,7 @@ fn render_list_popup(
             .border_style(Style::default().fg(th.popup_border_focus))
             .style(Style::default().bg(th.popup_bg));
         match &popup.title {
-            Some(t) => block.title(format!(" {t} ")),
+            Some(t) => block.title(format!(" {t} ")).title_style(title_style(&th)),
             None => block,
         }
     } else {
@@ -275,7 +276,7 @@ fn render_list_popup(
                     if x >= inner.right() { break; }
                     buf[(x, filter_y)]
                         .set_char(c)
-                        .set_style(Style::default().fg(th.dim).bg(th.popup_bg));
+                        .set_style(Style::default().fg(th.popup_dim).bg(th.popup_bg));
                     x += 1;
                 }
             } else {
@@ -284,7 +285,7 @@ fn render_list_popup(
                     if x >= inner.right() { break; }
                     buf[(x, filter_y)]
                         .set_char(c)
-                        .set_style(Style::default().fg(th.dim).bg(th.popup_bg));
+                        .set_style(Style::default().fg(th.popup_dim).bg(th.popup_bg));
                     x += 1;
                 }
                 for c in state.effective_filter().chars() {
@@ -312,7 +313,7 @@ fn render_list_popup(
         }
 
         let sep_y = inner.top() + 1;
-        let sep_style = Style::default().fg(th.dim).bg(th.popup_bg);
+        let sep_style = Style::default().fg(th.popup_dim).bg(th.popup_bg);
         for col in inner.left()..inner.right() {
             buf[(col, sep_y)].set_char('\u{2500}').set_style(sep_style);
         }
@@ -433,7 +434,7 @@ fn render_list_popup(
 
         // Detail (right-aligned)
         if let Some(ref detail) = item.detail {
-            let detail_style = Style::default().fg(th.dim).bg(row_bg);
+            let detail_style = Style::default().fg(th.popup_dim).bg(row_bg);
             let max_detail_right = inner.right().saturating_sub(scrollbar_width);
             // Available space between label end and right edge
             let avail = max_detail_right.saturating_sub(label_end + 2);
@@ -521,7 +522,7 @@ fn render_text_popup(
         let py = rect.bottom() - 1;
         let px_end = rect.right().saturating_sub(1);
         let px_start = px_end.saturating_sub(pct_str.len() as u16);
-        let pct_style = Style::default().fg(th.dim).bg(th.popup_bg);
+        let pct_style = Style::default().fg(th.popup_dim).bg(th.popup_bg);
         for (px, c) in (px_start..px_end).zip(pct_str.chars()) {
             buf[(px, py)].set_char(c).set_style(pct_style);
         }
@@ -541,6 +542,7 @@ fn render_key_hints_popup(
     // Build a block with the prefix as the title (e.g. " g ")
     let block = Block::default()
         .title(format!(" {} ", state.prefix))
+        .title_style(title_style(&th))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(th.popup_border))
@@ -556,13 +558,15 @@ fn render_key_hints_popup(
     // Compute the max key label width for column alignment.
     let max_key_w = state.hints.iter().map(|(k, _)| k.len()).max().unwrap_or(1);
 
+    // Keys use the same accent as the picker match highlight (`popup_match`) so
+    // the emphasis colour is identical across every popup surface.
     let key_style = Style::default()
-        .fg(th.warning)
+        .fg(th.popup_match)
         .add_modifier(Modifier::BOLD);
     let desc_style = Style::default()
         .fg(th.popup_fg);
     let sep_style = Style::default()
-        .fg(th.dim);
+        .fg(th.popup_dim);
 
     for (row, (key, desc)) in state.hints.iter().enumerate() {
         if row as u16 >= inner.height {
@@ -628,9 +632,50 @@ fn build_block(popup: &Popup) -> Block<'static> {
         .border_style(border_style)
         .style(bg_style);
     if let Some(ref title) = popup.title {
-        block.title(format!(" {title} "))
+        block.title(format!(" {title} ")).title_style(title_style(&th))
     } else {
         block
+    }
+}
+
+/// Style for a popup title. Ratatui paints titles over the border cells, so
+/// without an explicit style the title inherits the (often dim) border colour —
+/// this makes it a readable, bold heading instead.
+fn title_style(th: &crate::theme::Theme) -> Style {
+    Style::default()
+        .fg(th.popup_fg)
+        .bg(th.popup_bg)
+        .add_modifier(Modifier::BOLD)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Widget;
+
+    /// Ratatui applies the (empty) title style *over* the already-drawn border
+    /// cells, so a titled block with no explicit title style renders its title
+    /// in the dim border colour. Assert the command-palette title is painted in
+    /// the readable popup foreground, not the border colour.
+    #[test]
+    fn popup_title_uses_readable_foreground_not_border_color() {
+        crate::theme::load_and_set("tokyonight", &toml::map::Map::new()).unwrap();
+        let th = crate::theme::active();
+        assert_ne!(th.popup_fg, th.popup_border, "test premise");
+
+        let popup = Popup::command_palette(Vec::new(), Default::default());
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        build_block(&popup).render(area, &mut buf);
+
+        // Title " command palette " sits on the top border row (y = 0).
+        let title_cell = (0..area.width)
+            .map(|x| &buf[(x, 0)])
+            .find(|c| c.symbol() == "c")
+            .expect("title text 'command palette' on the top border row");
+        assert_eq!(title_cell.fg, th.popup_fg);
+        assert_ne!(title_cell.fg, th.popup_border);
     }
 }
 

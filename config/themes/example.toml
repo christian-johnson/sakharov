@@ -76,6 +76,7 @@ statusline      = "#16161e"  # status-bar background         (← blend of bg/fg
 
 popup           = "#16161e"  # picker/completion/docs background (← blend)
 # popup_text      = ""       # popup text                    (← foreground)
+# popup_dim       = ""       # descriptions/hints/separators (← popup_text→popup blend)
 popup_border    = "#3b4261"  # popup borders + scrollbar     (← blend)
 # popup_border_focus = ""    # focused completion border     (← info)
 popup_selection = "#292e42"  # selected row background       (← blend)

@@ -105,6 +105,12 @@ pub struct UiSpec {
     pub popup: Option<String>,
     #[serde(default)]
     pub popup_text: Option<String>,
+    /// Secondary (dimmed) text inside popups: item descriptions, the filter
+    /// prompt, separators, hint rows. Falls back to a readable muted blend of
+    /// `popup_text` toward `popup` (kept well above the editor `dim`, which is
+    /// too faint on the popup background).
+    #[serde(default)]
+    pub popup_dim: Option<String>,
     #[serde(default)]
     pub popup_border: Option<String>,
     /// Border of a *focused* completion popup. Falls back to `info`.
@@ -264,6 +270,7 @@ pub struct Theme {
     pub statusline_dim: Color,
     pub popup_bg: Color,
     pub popup_fg: Color,
+    pub popup_dim: Color,
     pub popup_border: Color,
     pub popup_border_focus: Color,
     pub popup_selection_bg: Color,
@@ -472,6 +479,14 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         &[c(&spec.ui.popup_text), foreground],
         if themed { fg } else { Color::Rgb(200, 200, 200) },
     );
+    // Secondary popup text. The editor `dim` is tuned for the editor background
+    // and reads far too faint on the (often lighter) popup background, so derive
+    // a dedicated muted tone by blending the popup fg toward its bg. `default`
+    // keeps the classic DarkGray.
+    let popup_dim = pick(
+        &[c(&spec.ui.popup_dim)],
+        if themed { blend(popup_fg, popup_bg, 0.32) } else { Color::DarkGray },
+    );
     let popup_border = pick(
         &[c(&spec.ui.popup_border)],
         shade(0.35, Color::Rgb(100, 100, 180)),
@@ -616,6 +631,7 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         statusline_dim,
         popup_bg,
         popup_fg,
+        popup_dim,
         popup_border,
         popup_border_focus,
         popup_selection_bg,
@@ -1241,6 +1257,52 @@ mod tests {
         assert!(th.background.is_some());
         assert_eq!(th.accent, Color::Rgb(0xff, 0x9e, 0x64)); // palette "orange"
         assert_eq!(th.modes.goto, Color::Rgb(0xbb, 0x9a, 0xf7)); // palette "purple"
+    }
+
+    /// WCAG relative-luminance contrast ratio between two RGB colors.
+    #[cfg(test)]
+    fn contrast_ratio(a: Color, b: Color) -> f32 {
+        fn lum(c: Color) -> f32 {
+            let Color::Rgb(r, g, b) = c else { return 0.0 };
+            let f = |x: u8| {
+                let s = x as f32 / 255.0;
+                if s <= 0.03928 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+        }
+        let (la, lb) = (lum(a), lum(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Secondary popup text (`popup_dim`) must stay readable on the popup
+    /// background — the editor `dim` was too faint there (~2.3:1). Guards the
+    /// derivation so a future change can't quietly regress popup legibility.
+    #[test]
+    fn popup_dim_is_readable_on_popup_bg() {
+        for name in ["tokyonight", "catppuccin-mocha", "gruvbox", "nord", "dracula"] {
+            let spec: ThemeSpec = find_theme_value(name).unwrap().try_into().unwrap();
+            let th = resolve(&spec, name);
+            let r = contrast_ratio(th.popup_dim, th.popup_bg);
+            assert!(
+                r >= 4.0,
+                "{name}: popup_dim {:?} on popup_bg {:?} is only {r:.2}:1",
+                th.popup_dim,
+                th.popup_bg
+            );
+        }
+    }
+
+    /// The key-hint popup (`g` menu) emphasises keys with the same accent the
+    /// pickers use for matched characters, so the emphasis colour is identical
+    /// across popup surfaces (see `render_key_hints_popup`).
+    #[test]
+    fn key_hint_accent_matches_picker_highlight() {
+        let spec: ThemeSpec = find_theme_value("tokyonight").unwrap().try_into().unwrap();
+        let th = resolve(&spec, "tokyonight");
+        // Both surfaces now read `popup_match`; they must therefore agree, and
+        // must differ from the old `warning` colour this used to be.
+        assert_ne!(th.popup_match, th.warning);
     }
 
     #[test]
