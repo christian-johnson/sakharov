@@ -571,6 +571,13 @@ pub fn run(path: Option<&str>) -> Result<()> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
+    // Bracketed paste: without it the terminal replays a paste as ordinary
+    // keystrokes, so every embedded newline runs the Enter handler and
+    // auto-indent stacks on top of the pasted line's own indentation — a block
+    // pasted into Insert mode staircases to the right. With it enabled the
+    // whole paste arrives as one `Event::Paste` and is inserted verbatim.
+    execute!(stdout, crossterm::event::EnableBracketedPaste)?;
+
     // Opt into the kitty keyboard protocol when the terminal supports it, so
     // modified keys like Shift+Enter / Ctrl+Enter are reported as distinct events
     // instead of collapsing into a bare Enter. DISAMBIGUATE_ESCAPE_CODES is the
@@ -668,6 +675,10 @@ fn run_loop(
                             input::handle_key(app, key);
                             needs_redraw = true;
                         }
+                    }
+                    Event::Paste(text) => {
+                        input::handle_paste(app, &text);
+                        needs_redraw = true;
                     }
                     Event::Resize(_, _) => {
                         needs_redraw = true;
@@ -954,6 +965,7 @@ fn restore_terminal() -> Result<()> {
     if KEYBOARD_ENHANCED.swap(false, std::sync::atomic::Ordering::SeqCst) {
         let _ = execute!(stdout, crossterm::event::PopKeyboardEnhancementFlags);
     }
+    let _ = execute!(stdout, crossterm::event::DisableBracketedPaste);
     execute!(
         stdout,
         LeaveAlternateScreen,

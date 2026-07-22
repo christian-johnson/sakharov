@@ -98,9 +98,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
     };
 
     // Browsing a cell's output block (`output_row`) is a transient state owned
-    // by continued vertical motion; any other command snaps the cursor back to
-    // the cell source.
-    if !matches!(cmd, Command::MoveUp | Command::MoveDown) {
+    // by continued vertical motion — including paging, which is just a run of
+    // single steps; any other command snaps the cursor back to the cell source.
+    if !matches!(cmd, Command::MoveUp | Command::MoveDown | Command::PageUp | Command::PageDown) {
         if let Some((_, state)) = app.notebook.as_mut() {
             state.output_row = None;
         }
@@ -114,9 +114,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             // In a notebook, vertical motion flows continuously: through the
             // focused cell's source, up through the previous cell's output
             // block, and into its source — see `notebook_move_up`.
-            if app.notebook.is_some() && !app.notebook_focused_edit() && !extend
-                && notebook_move_up(app)
-            {
+            if !extend && notebook_vertical(app) && notebook_move_up(app) {
                 return;
             }
             app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
@@ -125,9 +123,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             // In a notebook, `j` past the last source line descends into the
             // cell's output block (so long errors/streams scroll into view),
             // then crosses into the next cell — see `notebook_move_down`.
-            if app.notebook.is_some() && !app.notebook_focused_edit() && !extend
-                && notebook_move_down(app)
-            {
+            if !extend && notebook_vertical(app) && notebook_move_down(app) {
                 return;
             }
             app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
@@ -190,8 +186,17 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::EnterJumpMode => {
             let extend = app.mode == Mode::Select;
-            let positions =
-                jump::visible_word_starts(&app.buffer.rope, app.scroll_row, app.viewport_height);
+            // Label only what is actually on screen.  In a notebook the
+            // buffer is the focused *cell*, so its visible line range comes
+            // from the cell-stack scroll anchor — `app.scroll_row` belongs to
+            // the plain editor and would label from the top of the cell,
+            // leaving a scrolled long cell with no visible labels at all.
+            let (first_line, rows) = if app.notebook.is_some() && !app.notebook_focused_edit() {
+                scroll::notebook_visible_source_lines(app).unwrap_or((0, 0))
+            } else {
+                (app.scroll_row, app.viewport_height)
+            };
+            let positions = jump::visible_word_starts(&app.buffer.rope, first_line, rows);
             let jump_keys: Vec<char> = app.config.ui.jump_keys.chars().collect();
             app.jump.labels = jump::generate_labels(&positions, &jump_keys);
             app.jump.typed = String::new();
@@ -351,13 +356,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- Code folding ---
         Command::EnterFoldMode => {
             app.mode = crate::mode::Mode::Fold;
-            app.popup = Some(crate::popup::Popup::which_key(
-                "z",
-                vec![
-                    ("a".into(), "toggle fold at cursor".into()),
-                    ("A".into(), "toggle all folds".into()),
-                ],
-            ));
+            let mut hints = vec![
+                ("a".into(), "toggle fold at cursor".into()),
+                ("A".into(), "toggle all folds".into()),
+            ];
+            if app.notebook.is_some() {
+                hints.push(("o".into(), "expand/collapse full cell output".into()));
+            }
+            app.popup = Some(crate::popup::Popup::which_key("z", hints));
             return;
         }
         Command::FoldToggle => {
@@ -411,19 +417,17 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 }
             }
             if app.notebook.is_some() {
-                // Flush any in-progress cell edits into nb.cells before serialising.
-                notebook::save_focused_cell(app);
-                if let Some((ref mut nb, _)) = app.notebook {
-                    match nb.save() {
-                        Ok(()) => {
-                            let name = nb.path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("notebook.ipynb")
-                                .to_string();
-                            app.messages.show(format!("Saved {name}"));
-                        }
-                        Err(e) => app.messages.show(format!("Error: {e}")),
+                // Flushes any in-progress cell edits into nb.cells before serialising.
+                match notebook::save_notebook(app) {
+                    Ok(()) => {
+                        let name = app.notebook.as_ref()
+                            .and_then(|(nb, _)| nb.path.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("notebook.ipynb")
+                            .to_string();
+                        app.messages.show(format!("Saved {name}"));
                     }
+                    Err(e) => app.messages.show(format!("Error: {e}")),
                 }
             } else {
                 match app.buffer.save(None, force) {
@@ -487,17 +491,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
             let saved = if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
                 true
             } else if app.notebook.is_some() {
-                notebook::save_focused_cell(app);
-                if let Some((ref mut nb, _)) = app.notebook {
-                    match nb.save() {
-                        Ok(()) => true,
-                        Err(e) => {
-                            app.messages.show(format!("Error: {e}"));
-                            false
-                        }
+                match notebook::save_notebook(app) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        app.messages.show(format!("Error: {e}"));
+                        false
                     }
-                } else {
-                    false
                 }
             } else {
                 match app.buffer.save(None, false) {
@@ -764,6 +763,29 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
+        Command::NotebookToggleOutputExpand => {
+            let Some((nb, state)) = app.notebook.as_mut() else {
+                app.messages.show("Not a notebook");
+                return;
+            };
+            let idx = state.focused_cell;
+            let has_output = nb.cells.get(idx).map(|c| !c.outputs.is_empty()).unwrap_or(false);
+            if !has_output {
+                app.messages.show("Cell has no output");
+                return;
+            }
+            // The cursor may be parked deep in the output block; collapsing
+            // shrinks it under them, so drop back to the source.
+            state.output_row = None;
+            let expanded = state.toggle_output_expand(idx);
+            app.messages.show(if expanded {
+                "Output expanded — j/k scrolls the whole block"
+            } else {
+                "Output collapsed"
+            });
+            update_scroll(app);
+            return;
+        }
         Command::NotebookToggleAllFolds => {
             if let Some((ref nb, ref mut state)) = app.notebook {
                 let count = nb.cells.len();
@@ -843,16 +865,28 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         // --- Page scroll ---
+        // A page is just N vertical steps, so in a notebook it flows across
+        // cells and through output blocks exactly like `j`/`k` — otherwise it
+        // would stall at the edges of the focused cell. In Select mode it
+        // extends the selection to the landing line, same as `j`/`k` (and, as
+        // with them, stays inside the focused cell rather than crossing into
+        // another cell's source, which the selection can't span).
         Command::PageDown => {
             let half = (app.viewport_height / 2).max(1);
             for _ in 0..half {
-                app.selection = motion::move_down(&app.buffer.rope, app.selection, false);
+                if !extend && notebook_vertical(app) && notebook_move_down(app) {
+                    continue;
+                }
+                app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
             }
         }
         Command::PageUp => {
             let half = (app.viewport_height / 2).max(1);
             for _ in 0..half {
-                app.selection = motion::move_up(&app.buffer.rope, app.selection, false);
+                if !extend && notebook_vertical(app) && notebook_move_up(app) {
+                    continue;
+                }
+                app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
             }
         }
 
@@ -983,17 +1017,27 @@ pub fn execute(app: &mut App, cmd: &Command) {
     update_scroll(app);
 }
 
+/// True when vertical motion should flow through the notebook cell stack
+/// rather than staying inside the buffer (i.e. a notebook is open and we're
+/// not in the full-screen single-cell overlay).
+fn notebook_vertical(app: &App) -> bool {
+    app.notebook.is_some() && !app.notebook_focused_edit()
+}
+
 /// Visual rows in cell `cell_idx`'s output block (0 for none), sized exactly
-/// as the renderer draws it.  Used by the output-block navigation below.
+/// as the renderer draws it — including the cell's expand/collapse state, so
+/// `j`/`k` reach every row of an expanded block.  Used by the output-block
+/// navigation below.
 fn nb_output_rows(app: &App, cell_idx: usize) -> usize {
     let cell_px = app.graphics.cell_pixel_size;
     let avail_cols = app.viewport_width.saturating_sub(2) as u16;
-    app.notebook
-        .as_ref()
-        .and_then(|(nb, _)| nb.cells.get(cell_idx))
-        .map(|cell| {
-            crate::notebook_ui::cell_output_rows(cell, &app.config.notebook, cell_px, avail_cols)
-        })
+    let Some((nb, state)) = app.notebook.as_ref() else { return 0 };
+    let limits = crate::notebook_ui::OutputLimits::new(
+        &app.config.notebook, state.is_output_expanded(cell_idx),
+    );
+    nb.cells
+        .get(cell_idx)
+        .map(|cell| crate::notebook_ui::cell_output_rows(cell, limits, cell_px, avail_cols))
         .unwrap_or(0)
 }
 
@@ -1341,6 +1385,61 @@ mod tests {
         app.selection = Selection::point(12);
         update_scroll(&mut app);
         assert_eq!(app.buffer.rope.char_to_line(12), 2);
+    }
+
+    /// `gc` anchors the comment markers to the shallowest indent in the region,
+    /// so commenting a function body keeps the block indented (and round-trips).
+    #[test]
+    fn comment_region_is_indent_aware() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.buffer.path = Some(std::path::PathBuf::from("indent_test.py"));
+        app.lsp_language = Some("python".to_string());
+        let src = "def f():\n    a = 1\n\n    if a:\n        b = 2\n";
+        app.buffer.rope = Rope::from_str(src);
+
+        // Select the body (lines 1..=4), leaving the `def` line alone.
+        let start = app.buffer.rope.line_to_char(1);
+        let end = app.buffer.rope.line_to_char(5) - 1;
+        app.selection = Selection::new(start, end);
+        execute(&mut app, &Command::CommentRegion);
+
+        assert_eq!(
+            app.buffer.rope.to_string(),
+            "def f():\n    # a = 1\n\n    # if a:\n    #     b = 2\n",
+            "markers sit at the region's shallowest indent, relative indent preserved"
+        );
+
+        // Uncommenting restores the original exactly.
+        execute(&mut app, &Command::CommentRegion);
+        assert_eq!(app.buffer.rope.to_string(), src, "comment/uncomment round-trips");
+    }
+
+    /// A bracketed paste is inserted verbatim — no auto-indent on the embedded
+    /// newlines, which is what used to staircase a pasted block to the right.
+    #[test]
+    fn bracketed_paste_inserts_verbatim() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.buffer.path = Some(std::path::PathBuf::from("paste_test.py"));
+        app.buffer.rope = Rope::from_str("def f():\n    ");
+        app.selection = Selection::point(app.buffer.rope.len_chars());
+        app.mode = Mode::Insert;
+
+        crate::input::handle_paste(&mut app, "if a:\r\n    b = 2\r\n");
+        assert_eq!(
+            app.buffer.rope.to_string(),
+            "def f():\n    if a:\n    b = 2\n",
+            "pasted lines keep their own indentation and gain none"
+        );
+        assert_eq!(app.selection.head, app.buffer.rope.len_chars());
+
+        // Outside Insert, a paste replaces the selection (like `P`).
+        app.mode = Mode::Normal;
+        app.buffer.rope = Rope::from_str("abcd");
+        app.selection = Selection::new(1, 2);
+        crate::input::handle_paste(&mut app, "XY");
+        assert_eq!(app.buffer.rope.to_string(), "aXYd");
     }
 
     fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
@@ -1704,6 +1803,209 @@ mod tests {
         execute(&mut app, &Command::MoveLineStart);
         assert_eq!(app.notebook.as_ref().unwrap().1.output_row, None,
             "a horizontal motion resets output browsing");
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// `gw` labels must cover what is *on screen*.  In a cell taller than the
+    /// viewport the top of the cell is scrolled off, and labelling from line 0
+    /// put every label above the viewport — the user saw no labels at all.
+    #[test]
+    fn jump_labels_follow_the_visible_slice_of_a_scrolled_cell() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 10;
+        app.viewport_width = 80;
+        app.config.editor.scroll_off = 2;
+
+        let dir = unique_tmp_dir("nbjump");
+        let target = dir.join("nbjump.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "nbjump");
+
+        // One cell far taller than the viewport, one labellable word per line.
+        let src: String = (0..60).map(|i| format!("word{i}")).collect::<Vec<_>>().join("\n");
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str(&src);
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+
+        // Scroll deep into the cell.
+        app.selection = Selection::point(app.buffer.rope.line_to_char(50));
+        update_scroll(&mut app);
+        assert!(app.notebook.as_ref().unwrap().1.scroll_offset > 0, "cell must be scrolled");
+
+        execute(&mut app, &Command::EnterJumpMode);
+        assert!(!app.jump.labels.is_empty(), "a scrolled cell must still get labels");
+
+        // Every label lies inside the on-screen slice, and never more labels
+        // than the viewport has rows.
+        let (first, count) = scroll::notebook_visible_source_lines(&app).unwrap();
+        assert!(count > 0);
+        for (pos, _) in &app.jump.labels {
+            let line = app.buffer.rope.char_to_line(*pos);
+            assert!(
+                (first..first + count).contains(&line),
+                "label on line {line} is outside the visible range {first}..{}",
+                first + count
+            );
+        }
+        // The cursor's own line is one of them (it is on screen by definition).
+        assert!(app.jump.labels.iter().any(|(p, _)| app.buffer.rope.char_to_line(*p) == 50));
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// Long output is capped by `max_output_lines`, but expanding a cell makes
+    /// every line a real, navigable row so `j` can scroll through the lot.
+    #[test]
+    fn expanded_output_exposes_every_row_to_navigation() {
+        use crate::notebook::Output;
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 12;
+        app.viewport_width = 80;
+        let cap = app.config.notebook.max_output_lines;
+
+        let dir = unique_tmp_dir("nbexpand");
+        let target = dir.join("nbexpand.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "nbexpand");
+
+        let total = cap * 3;
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("a");
+            nb.cells[0].outputs = vec![Output::Stream {
+                name: "stdout".into(),
+                text: (0..total).map(|i| format!("out{i}\n")).collect(),
+            }];
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+
+        // Collapsed: the cap plus one "… N more lines" indicator row.
+        assert_eq!(nb_output_rows(&app, 0), cap + 1);
+
+        execute(&mut app, &Command::NotebookToggleOutputExpand);
+        assert!(app.notebook.as_ref().unwrap().1.is_output_expanded(0));
+        assert_eq!(nb_output_rows(&app, 0), total, "expanding reveals every line");
+
+        // `j` walks from the source through all of them.
+        app.selection = Selection::point(0);
+        for expected in 0..total {
+            execute(&mut app, &Command::MoveDown);
+            assert_eq!(
+                app.notebook.as_ref().unwrap().1.output_row,
+                Some(expected),
+                "j should reach output row {expected} of an expanded block"
+            );
+        }
+
+        // Collapsing again returns the cursor to the source (its row is gone).
+        execute(&mut app, &Command::NotebookToggleOutputExpand);
+        assert!(!app.notebook.as_ref().unwrap().1.is_output_expanded(0));
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, None);
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// Paging in a notebook is a run of vertical steps, so it flows across
+    /// cells and through output blocks instead of stalling at the cell edges.
+    #[test]
+    fn page_down_crosses_notebook_cells() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 12; // half page = 6 steps
+        app.viewport_width = 80;
+
+        let dir = unique_tmp_dir("nbpage");
+        let target = dir.join("nbpage.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "nbpage");
+
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("a\nb\nc");
+            let mut second = nb.cells[0].clone();
+            second.id = crate::notebook::new_cell_id();
+            second.source = Rope::from_str("d\ne\nf");
+            nb.cells.push(second);
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+
+        app.selection = Selection::point(0);
+        execute(&mut app, &Command::PageDown);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 1,
+            "a page down must carry past the end of the first cell");
+
+        execute(&mut app, &Command::PageUp);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0,
+            "a page up must carry back into the previous cell");
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// Paging in Select mode extends the selection to the landing line — it is
+    /// `j`/`k` by the page, so it must not collapse the selection.
+    #[test]
+    fn page_scroll_extends_selection_in_select_mode() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 8; // half page = 4 steps
+        app.viewport_width = 80;
+        app.buffer.rope = Rope::from_str("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\n");
+
+        app.selection = Selection::point(0);
+        app.mode = Mode::Select;
+        execute(&mut app, &Command::PageDown);
+        assert_eq!(app.selection.anchor, 0, "the anchor must stay put");
+        assert_eq!(app.buffer.rope.char_to_line(app.selection.head), 4);
+
+        execute(&mut app, &Command::PageUp);
+        assert_eq!(app.selection.anchor, 0);
+        assert_eq!(app.buffer.rope.char_to_line(app.selection.head), 0);
+
+        // In Normal mode a page is still a plain cursor move (selection collapses).
+        app.mode = Mode::Normal;
+        app.selection = Selection::point(0);
+        execute(&mut app, &Command::PageDown);
+        assert_eq!(app.selection.anchor, app.selection.head,
+            "a page in Normal mode leaves no selection behind");
+    }
+
+    /// Saving a notebook clears the focused cell's buffer-modified flag too —
+    /// otherwise the next keystroke propagates it back onto the notebook and
+    /// the status line shows `[+]` on a file that is clean on disk.
+    #[test]
+    fn notebook_save_clears_the_modified_indicator() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 24;
+        app.viewport_width = 80;
+
+        let dir = unique_tmp_dir("nbsave");
+        let target = dir.join("nbsave.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "nbsave");
+
+        app.buffer.insert(0, "x = 1");
+        assert!(app.buffer.modified);
+
+        execute(&mut app, &Command::Write);
+        assert!(!app.notebook.as_ref().unwrap().0.modified, "notebook is clean after :w");
+        assert!(!app.buffer.modified, "the focused cell's buffer is clean after :w");
+
+        // Every keystroke flushes the buffer back into the cell (input.rs does
+        // this via `sync_buffer_to_notebook`); that must not resurrect the flag.
+        execute(&mut app, &Command::MoveRight);
+        notebook::save_focused_cell(&mut app);
+        assert!(!app.notebook.as_ref().unwrap().0.modified,
+            "moving the cursor must not mark a saved notebook modified");
 
         let _ = std::fs::remove_file(&target);
     }

@@ -162,8 +162,8 @@ commands! {
         GrepProject => "grep-project", aliases: ["grep", "rg"], palette: "Grep project files  [ctrl+g]";
 
         // --- Scroll / view ---
-        PageDown => "page-down", palette: "Scroll half page down  [ctrl+d, PgDn]";
-        PageUp => "page-up", palette: "Scroll half page up  [ctrl+u, PgUp]";
+        PageDown => "page-down", palette: "Scroll half page down  [ctrl+d, PgDn, J in notebooks]";
+        PageUp => "page-up", palette: "Scroll half page up  [ctrl+u, PgUp, K in notebooks]";
         ScrollCursorCenter => "scroll-cursor-center", aliases: ["center", "gz"], palette: "Scroll cursor to centre  [gz]";
 
         // --- LSP ---
@@ -177,8 +177,8 @@ commands! {
         FormatDocument => "format-document", aliases: ["format", "fmt"], palette: "Format buffer via language server  [:fmt]";
 
         // --- Notebook navigation / editing ---
-        NotebookNextCell => "notebook-next-cell", palette: "Next cell  [J]";
-        NotebookPrevCell => "notebook-prev-cell", palette: "Previous cell  [K]";
+        NotebookNextCell => "notebook-next-cell", palette: "Next cell  [N]";
+        NotebookPrevCell => "notebook-prev-cell", palette: "Previous cell  [M]";
         NotebookScrollDown => "notebook-scroll-down";
         NotebookScrollUp => "notebook-scroll-up";
         NotebookExecuteCell => "notebook-execute-cell", aliases: ["run"], palette: "Execute cell  [ctrl+e, shift+enter, :run]";
@@ -203,6 +203,7 @@ commands! {
         FoldToggle => "fold-toggle", aliases: ["za"], palette: "Toggle fold at cursor  [za]";
         FoldToggleAll => "fold-toggle-all", aliases: ["zA"], palette: "Toggle all folds  [zA]";
         NotebookToggleFoldCell => "notebook-toggle-fold-cell", aliases: ["fold-cell"], palette: "Toggle cell fold  [:fold-cell]";
+        NotebookToggleOutputExpand => "notebook-toggle-output-expand", aliases: ["expand-output", "output-expand"], palette: "Show full cell output (no line cap)  [zo, :expand-output]";
         NotebookToggleAllFolds => "notebook-toggle-all-folds", aliases: ["fold-all-cells"], palette: "Toggle all cell folds  [:fold-all-cells]";
 
         // --- Toggles / config ---

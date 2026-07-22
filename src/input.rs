@@ -216,6 +216,96 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 // ---------------------------------------------------------------------------
+// Bracketed paste
+// ---------------------------------------------------------------------------
+
+/// Insert a terminal paste (`Event::Paste`) verbatim.
+///
+/// This is deliberately *not* routed through the per-key handlers: replaying a
+/// paste as keystrokes runs the Enter handler on every embedded newline, so
+/// auto-indent adds the enclosing block's indentation on top of the indentation
+/// the pasted text already carries — each line lands further right than the one
+/// above it. Pasted text is taken exactly as it comes.
+///
+/// Single-line inputs (command line, search, popup filters) get the paste with
+/// newlines flattened to spaces, since they can't hold a line break.
+pub fn handle_paste(app: &mut App, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    app.messages.clear();
+    // Terminals send CRLF for a paste that crossed a Windows clipboard; the
+    // rope is LF-only.
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+
+    // A popup owns the keyboard while it's open — feed its text row instead.
+    if let Some(ref mut popup) = app.popup {
+        if let PopupContent::List(ref mut list) = popup.content {
+            let flat = flatten_lines(&text);
+            if let Some(ref mut search) = list.search {
+                search.push_str(&flat);
+            } else {
+                list.filter.push_str(&flat);
+            }
+            list.selected = 0;
+            list.invalidate_filter_cache();
+        }
+        return;
+    }
+
+    match app.mode {
+        Mode::Command | Mode::Prompt { .. } => {
+            app.command_buf.push_str(&flatten_lines(&text));
+            return;
+        }
+        Mode::Search { forward } => {
+            app.search.query.push_str(&flatten_lines(&text));
+            exec::search_compute_matches(app);
+            if !app.search.matches.is_empty() {
+                exec::search_jump(app, !forward);
+                app.mode = Mode::Search { forward };
+            }
+            return;
+        }
+        Mode::Insert => begin_insert_edit(app),
+        // Outside Insert a paste behaves like `P`: the text lands at the
+        // cursor, replacing the selection when there is one.
+        _ => {
+            app.buffer.begin_edit_session();
+            let (start, end) = (app.selection.start(), app.selection.end());
+            if end > start {
+                let end = (end + 1).min(app.buffer.rope.len_chars());
+                app.buffer.remove_raw(start, end);
+                app.selection = Selection::point(start.min(app.buffer.rope.len_chars()));
+            }
+        }
+    }
+
+    let pos = app.selection.head.min(app.buffer.rope.len_chars());
+    app.buffer.insert_raw(pos, &text);
+    app.selection = Selection::point(pos + text.chars().count());
+    app.clipboard = text.clone();
+    exec::recompute_highlights(app);
+    exec::lsp_did_change(app);
+    exec::update_scroll(app);
+
+    // Keep the focused notebook cell's stored source in sync (the key path
+    // does this after every keystroke; a paste bypasses it).
+    if app.notebook.is_some() && !app.notebook_focused_edit() {
+        sync_buffer_to_notebook(app);
+    }
+}
+
+/// Collapse a multi-line paste onto one line for single-line inputs.
+fn flatten_lines(text: &str) -> String {
+    text.split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// ---------------------------------------------------------------------------
 // Insert mode
 // ---------------------------------------------------------------------------
 
@@ -635,6 +725,9 @@ fn handle_fold(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('a') => exec::execute(app, &Command::FoldToggle),
         KeyCode::Char('A') => exec::execute(app, &Command::FoldToggleAll),
+        KeyCode::Char('o') | KeyCode::Char('c') => {
+            exec::execute(app, &Command::NotebookToggleOutputExpand)
+        }
         KeyCode::Esc => {}
         _ => {}
     }

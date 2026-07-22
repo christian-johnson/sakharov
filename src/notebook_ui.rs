@@ -114,6 +114,33 @@ impl CellHighlightCache {
     }
 }
 
+/// Truncation caps applied to one cell's output block: the configured limits,
+/// or effectively unlimited when the user has expanded that cell's output
+/// (`NotebookState::expanded_outputs`).
+///
+/// The height model ([`cell_output_rows`]) and the renderer must derive these
+/// identically, or cell heights drift from what is actually drawn.
+#[derive(Clone, Copy)]
+pub struct OutputLimits {
+    /// Cap on stream / text-plain output lines.
+    pub max_lines: usize,
+    /// Cap on traceback lines below an error's headline row.
+    pub max_traceback: usize,
+    /// Cap on the rows an image may occupy (never lifted by expansion — an
+    /// image has no truncated tail to reveal).
+    pub image_rows: u16,
+}
+
+impl OutputLimits {
+    pub fn new(cfg: &crate::config::NotebookConfig, expanded: bool) -> Self {
+        Self {
+            max_lines: if expanded { usize::MAX } else { cfg.max_output_lines },
+            max_traceback: if expanded { usize::MAX } else { cfg.max_traceback_lines },
+            image_rows: cfg.image_rows,
+        }
+    }
+}
+
 /// True when a cell's content word-wraps to the cell width.
 ///
 /// Markdown cells always wrap — prose, in both the rendered view and the
@@ -200,6 +227,29 @@ pub(crate) fn cell_cursor_visual_row(rope: &ropey::Rope, cursor: usize, width: O
     }
     let col = pos - rope.line_to_char(line_idx.min(rope.len_lines().saturating_sub(1)));
     vrow + lines.get(line_idx).map(|l| cursor_sub_row(l, width, col)).unwrap_or(0)
+}
+
+/// The logical line owning visual row `vrow` of a (possibly wrapped) cell —
+/// the inverse of [`cell_cursor_visual_row`]'s row accounting.  `width = None`
+/// means no wrapping (visual row == logical line).  A `vrow` past the end
+/// clamps to the last line.
+pub(crate) fn cell_line_at_visual_row(
+    rope: &ropey::Rope,
+    width: Option<usize>,
+    vrow: usize,
+) -> usize {
+    let last = rope.len_lines().saturating_sub(1);
+    let Some(width) = width else { return vrow.min(last) };
+    let text = rope.to_string();
+    let lines: Vec<&str> = if text.is_empty() { vec![""] } else { text.split('\n').collect() };
+    let mut acc = 0usize;
+    for (idx, line) in lines.iter().enumerate() {
+        acc += wrap_segments(line, width).len();
+        if vrow < acc {
+            return idx;
+        }
+    }
+    lines.len().saturating_sub(1)
 }
 
 /// Total visual rows of a cell's source (`width = None` → logical line count).
@@ -301,8 +351,9 @@ fn render_cells(
         // Folded cells always get the compact height regardless of focus.
         // For the focused non-folded cell, use the live buffer rope height.
         let source = if is_focused { active.rope } else { &cell.source };
+        let limits = OutputLimits::new(nb_config, state.is_output_expanded(cell_idx));
         let full_height = nb_cell_height(
-            cell, is_folded, source, nb_config, cell_pixel_size, inner_cols, active.word_wrap,
+            cell, is_folded, source, limits, cell_pixel_size, inner_cols, active.word_wrap,
         ) as u16;
 
         // Clip: `clip_top` rows are scrolled off above the viewport; the
@@ -321,7 +372,7 @@ fn render_cells(
             let cursor_screen = render_cell(
                 frame, state, nb, cell, cell_idx, is_focused, is_folded, clip_top,
                 full_height, cell_rect, active, lsp_diagnostics, &mut image_requests,
-                cache, nb_config, cell_pixel_size,
+                cache, limits, cell_pixel_size,
             );
             if is_focused {
                 focused_cell_screen_pos = cursor_screen;
@@ -361,7 +412,7 @@ fn render_cell(
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     image_requests: &mut Vec<ImageRequest>,
     cache: &mut CellHighlightCache,
-    nb_config: &crate::config::NotebookConfig,
+    limits: OutputLimits,
     cell_pixel_size: Option<(u16, u16)>,
 ) -> Option<(u16, u16)> {
     let th = crate::theme::active();
@@ -420,7 +471,7 @@ fn render_cell(
 
     render_cell_content(
         frame, nb, cell, cell_idx, is_focused, inner, active, lsp_diagnostics,
-        image_requests, cache, nb_config, cell_pixel_size, content_skip,
+        image_requests, cache, limits, cell_pixel_size, content_skip,
     )
 }
 
@@ -440,7 +491,7 @@ fn render_cell_content(
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     image_requests: &mut Vec<ImageRequest>,
     cache: &mut CellHighlightCache,
-    nb_config: &crate::config::NotebookConfig,
+    limits: OutputLimits,
     cell_pixel_size: Option<(u16, u16)>,
     skip_rows: usize,
 ) -> Option<(u16, u16)> {
@@ -612,13 +663,14 @@ fn render_cell_content(
             cursor_row: if is_focused { active.output_row } else { None },
             cursor_style: crate::theme::cursor_style(active.mode),
             cursor_pos: None,
+            limits,
         };
         for output in &cell.outputs {
             if current_row >= area.bottom() {
                 break;
             }
             render_output(
-                frame, output, area, &mut current_row, image_requests, nb_config,
+                frame, output, area, &mut current_row, image_requests,
                 cell_pixel_size, &mut out_ctx,
             );
         }
@@ -644,6 +696,9 @@ struct OutputCtx {
     cursor_style: Style,
     /// Screen position of the output cursor once its row has been drawn.
     cursor_pos: Option<(u16, u16)>,
+    /// Truncation caps for this cell — must be the same ones the height model
+    /// used, or the cell's border won't enclose its output.
+    limits: OutputLimits,
 }
 
 impl OutputCtx {
@@ -775,7 +830,7 @@ pub fn compute_image_rows(
 pub fn cell_display_height(
     source: &ropey::Rope,
     cell: &Cell,
-    nb_config: &crate::config::NotebookConfig,
+    limits: OutputLimits,
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
     word_wrap: bool,
@@ -785,7 +840,7 @@ pub fn cell_display_height(
     } else {
         source.len_lines().max(1) as u16
     };
-    let out_rows = cell_output_rows(cell, nb_config, cell_pixel_size, available_cols);
+    let out_rows = cell_output_rows(cell, limits, cell_pixel_size, available_cols);
     let output_h = if out_rows > 0 { 1 + out_rows as u16 } else { 0 }; // 1 = divider row
     2 + source_lines + output_h // 2 = top border + bottom border
 }
@@ -799,7 +854,7 @@ pub(crate) fn nb_cell_height(
     cell: &Cell,
     folded: bool,
     source: &ropey::Rope,
-    nb_config: &crate::config::NotebookConfig,
+    limits: OutputLimits,
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
     word_wrap: bool,
@@ -807,7 +862,7 @@ pub(crate) fn nb_cell_height(
     if folded {
         3 // top border + 1 summary line + bottom border
     } else {
-        cell_display_height(source, cell, nb_config, cell_pixel_size, available_cols, word_wrap)
+        cell_display_height(source, cell, limits, cell_pixel_size, available_cols, word_wrap)
             as usize
     }
 }
@@ -818,7 +873,7 @@ pub(crate) fn nb_cell_height(
 /// cursor — count within this range.
 pub(crate) fn cell_output_rows(
     cell: &Cell,
-    nb_config: &crate::config::NotebookConfig,
+    limits: OutputLimits,
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
 ) -> usize {
@@ -827,7 +882,7 @@ pub(crate) fn cell_output_rows(
     }
     cell.outputs
         .iter()
-        .map(|o| single_output_height_count(o, nb_config, cell_pixel_size, available_cols) as usize)
+        .map(|o| single_output_height_count(o, limits, cell_pixel_size, available_cols) as usize)
         .sum()
 }
 
@@ -840,31 +895,31 @@ fn truncated_rows(total: usize, max: usize) -> usize {
 
 fn single_output_height_count(
     output: &Output,
-    nb_config: &crate::config::NotebookConfig,
+    limits: OutputLimits,
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
 ) -> u16 {
     match output {
         Output::Stream { text, .. } => {
-            truncated_rows(text.lines().count(), nb_config.max_output_lines) as u16
+            truncated_rows(text.lines().count(), limits.max_lines) as u16
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
             if let Some(png) = &data.image_png {
                 if let Some((pw, ph)) = png_pixel_size(png) {
-                    compute_image_rows(pw, ph, available_cols, cell_pixel_size, nb_config.image_rows)
+                    compute_image_rows(pw, ph, available_cols, cell_pixel_size, limits.image_rows)
                 } else {
-                    nb_config.image_rows
+                    limits.image_rows
                 }
             } else {
                 data.text_plain
                     .as_deref()
-                    .map(|t| truncated_rows(t.lines().count(), nb_config.max_output_lines))
+                    .map(|t| truncated_rows(t.lines().count(), limits.max_lines))
                     .unwrap_or(0) as u16
             }
         }
         Output::Error { traceback, .. } => {
             // 1 = the "ename: evalue" headline row.
-            (1 + truncated_rows(traceback.len(), nb_config.max_traceback_lines)) as u16
+            (1 + truncated_rows(traceback.len(), limits.max_traceback)) as u16
         }
     }
 }
@@ -1056,7 +1111,6 @@ fn render_output(
     area: Rect,
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
-    nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
     octx: &mut OutputCtx,
 ) {
@@ -1069,25 +1123,18 @@ fn render_output(
                 Style::default()
             };
             let lines: Vec<&str> = text.lines().collect();
-            let max_lines = nb_config.max_output_lines;
+            let max_lines = octx.limits.max_lines;
             let to_show = lines.len().min(max_lines);
             for line in &lines[..to_show] {
                 if !draw_output_row(frame, area, current_row, octx, format!("  {line}"), style) {
                     return;
                 }
             }
-            if lines.len() > max_lines {
-                let extra = lines.len() - max_lines;
-                draw_output_row(
-                    frame, area, current_row, octx,
-                    format!("  ... ({extra} more lines)"),
-                    Style::default().fg(th.dim),
-                );
-            }
+            draw_truncation_row(frame, area, current_row, octx, lines.len(), max_lines);
         }
 
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-            render_mime_data(frame, data, area, current_row, image_requests, nb_config, cell_pixel_size, octx);
+            render_mime_data(frame, data, area, current_row, image_requests, cell_pixel_size, octx);
         }
 
         Output::Error { ename, evalue, traceback } => {
@@ -1098,7 +1145,8 @@ fn render_output(
             ) {
                 return;
             }
-            for tb_line in traceback.iter().take(nb_config.max_traceback_lines) {
+            let max_tb = octx.limits.max_traceback;
+            for tb_line in traceback.iter().take(max_tb) {
                 if !draw_output_row(
                     frame, area, current_row, octx,
                     format!("  {tb_line}"),
@@ -1107,8 +1155,32 @@ fn render_output(
                     return;
                 }
             }
+            draw_truncation_row(frame, area, current_row, octx, traceback.len(), max_tb);
         }
     }
+}
+
+/// Draw the "… (N more lines)" row that stands in for a truncated tail, and
+/// point at the command that reveals it.  A no-op when nothing was cut —
+/// exactly mirroring [`truncated_rows`], which reserves the row in the height
+/// model on the same condition.
+fn draw_truncation_row(
+    frame: &mut Frame,
+    area: Rect,
+    current_row: &mut u16,
+    octx: &mut OutputCtx,
+    total: usize,
+    max: usize,
+) {
+    if total <= max {
+        return;
+    }
+    let extra = total - max;
+    draw_output_row(
+        frame, area, current_row, octx,
+        format!("  ... ({extra} more lines — zo to expand)"),
+        Style::default().fg(crate::theme::active().dim),
+    );
 }
 
 /// Read pixel dimensions from a PNG header (bytes 16-23 of the file).
@@ -1146,7 +1218,6 @@ fn render_mime_data(
     area: Rect,
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
-    nb_config: &crate::config::NotebookConfig,
     cell_pixel_size: Option<(u16, u16)>,
     octx: &mut OutputCtx,
 ) {
@@ -1154,9 +1225,9 @@ fn render_mime_data(
         // Compute rows from image aspect ratio so the display height scales with
         // figsize.  image_rows acts as a cap, not a fixed height.
         let natural_rows = if let Some((pw, ph)) = png_pixel_size(png) {
-            compute_image_rows(pw, ph, area.width, cell_pixel_size, nb_config.image_rows)
+            compute_image_rows(pw, ph, area.width, cell_pixel_size, octx.limits.image_rows)
         } else {
-            nb_config.image_rows
+            octx.limits.image_rows
         };
         // The image spans `natural_rows` output rows.  When it straddles the
         // viewport edge, crop the source vertically so the visible band keeps
@@ -1224,7 +1295,7 @@ fn render_mime_data(
         }
     } else if let Some(text) = &data.text_plain {
         let lines: Vec<&str> = text.lines().collect();
-        let max_lines = nb_config.max_output_lines;
+        let max_lines = octx.limits.max_lines;
         let to_show = lines.len().min(max_lines);
         let info = Style::default().fg(crate::theme::active().info);
         for line in &lines[..to_show] {
@@ -1232,14 +1303,7 @@ fn render_mime_data(
                 return;
             }
         }
-        if lines.len() > max_lines {
-            let extra = lines.len() - max_lines;
-            let _ = draw_output_row(
-                frame, area, current_row, octx,
-                format!("  ... ({extra} more lines)"),
-                Style::default().fg(crate::theme::active().dim),
-            );
-        }
+        draw_truncation_row(frame, area, current_row, octx, lines.len(), max_lines);
     }
 }
 
@@ -1294,20 +1358,21 @@ mod tests {
 
         let inner_cols = 42u16; // text width 40 → 150 chars ≈ 4 rows
         let cfg = crate::config::NotebookConfig::default();
+        let limits = OutputLimits::new(&cfg, false);
         let expected_rows = wrapped_source_rows(&Rope::from_str(&long), cell_text_width(inner_cols));
         assert!(expected_rows > 1, "long prose must wrap to several rows");
 
         // Markdown wraps in both the rendered view and the source view —
         // word_wrap toggle irrelevant.
         let md = make(CellType::Markdown, true);
-        assert_eq!(cell_display_height(&md.source, &md, &cfg, None, inner_cols, false), 2 + expected_rows);
+        assert_eq!(cell_display_height(&md.source, &md, limits, None, inner_cols, false), 2 + expected_rows);
         let md_src = make(CellType::Markdown, false);
-        assert_eq!(cell_display_height(&md_src.source, &md_src, &cfg, None, inner_cols, false), 2 + expected_rows);
+        assert_eq!(cell_display_height(&md_src.source, &md_src, limits, None, inner_cols, false), 2 + expected_rows);
 
         // Code cells follow the word_wrap toggle.
         let code = make(CellType::Code, false);
-        assert_eq!(cell_display_height(&code.source, &code, &cfg, None, inner_cols, false), 2 + 1);
-        assert_eq!(cell_display_height(&code.source, &code, &cfg, None, inner_cols, true), 2 + expected_rows);
+        assert_eq!(cell_display_height(&code.source, &code, limits, None, inner_cols, false), 2 + 1);
+        assert_eq!(cell_display_height(&code.source, &code, limits, None, inner_cols, true), 2 + expected_rows);
     }
 
     /// Navigating through a *rendered* markdown cell must keep the cursor
@@ -1367,6 +1432,105 @@ mod tests {
         let (cx, cy) = cursor_pos.expect("cursor must be visible in a rendered markdown cell");
         // Border (1) + 2-char pad + cursor col 2 within the first line.
         assert_eq!((cx, cy), (1 + 2 + 2, 1));
+    }
+
+    /// The height model and the renderer must agree row-for-row: the cell's
+    /// bottom border has to land exactly on the last row `cell_display_height`
+    /// claims.  Regression: a truncated error traceback reserved a
+    /// "… N more lines" row in the height model that the renderer never drew,
+    /// so tall error cells were one row short of their own border — and the
+    /// scroll math (which uses the same model) drifted with them.
+    #[test]
+    fn output_block_height_matches_what_is_drawn() {
+        use crate::notebook::Output;
+        let cfg = crate::config::NotebookConfig::default();
+
+        // Both truncating output kinds, exercised together and separately.
+        let stream = Output::Stream {
+            name: "stdout".into(),
+            text: (0..cfg.max_output_lines * 2).map(|i| format!("o{i}\n")).collect(),
+        };
+        let error = Output::Error {
+            ename: "ValueError".into(),
+            evalue: "boom".into(),
+            traceback: (0..cfg.max_traceback_lines * 2).map(|i| format!("tb{i}")).collect(),
+        };
+
+        for (name, outputs, expanded) in [
+            ("stream", vec![stream.clone()], false),
+            ("error", vec![error.clone()], false),
+            ("both", vec![stream.clone(), error.clone()], false),
+            ("both-expanded", vec![stream, error], true),
+        ] {
+            let cell = Cell {
+                id: "h".into(),
+                cell_type: CellType::Code,
+                source: Rope::from_str("a\nb"),
+                outputs,
+                execution_count: Some(1),
+                rendered: false,
+            };
+            let nb = Notebook {
+                path: std::path::PathBuf::from("/tmp/height-test.ipynb"),
+                metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
+                cells: vec![cell],
+                modified: false,
+                kernel: None,
+            };
+            let mut state = NotebookState::new();
+            if expanded {
+                state.toggle_output_expand(0);
+            }
+            let limits = OutputLimits::new(&cfg, expanded);
+            let rope = nb.cells[0].source.clone();
+            let mode = Mode::Normal;
+            let active = ActiveCellView {
+                rope: &rope,
+                cursor: 0,
+                sel_anchor: 0,
+                output_row: None,
+                mode: &mode,
+                jump_labels: &[],
+                jump_typed: "",
+                word_wrap: false,
+            };
+
+            // Terminal tall enough for the whole cell plus the 2 status rows.
+            let width = 80u16;
+            let expected =
+                cell_display_height(&rope, &nb.cells[0], limits, None, width - 2, false);
+            let backend = ratatui::backend::TestBackend::new(width, expected + 4);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    render(
+                        f, &state, &nb, &active,
+                        &std::collections::HashMap::new(),
+                        &cfg, None, &mut CellHighlightCache::default(),
+                    );
+                })
+                .unwrap();
+
+            // The block always paints its border at the bottom of the rect it
+            // was given, so a height/content mismatch shows up as a blank row
+            // *inside* the cell.  Assert the content reaches the last interior
+            // row (row `expected - 2`: bottom border is `expected - 1`).
+            let buf = terminal.backend().buffer();
+            let row_is_blank = |y: u16| {
+                (1..width - 1).all(|x| buf[(x, y)].symbol() == " ")
+            };
+            let last_content = (1..expected - 1)
+                .rev()
+                .find(|&y| !row_is_blank(y))
+                .unwrap_or_else(|| panic!("{name}: cell drew no content"));
+            assert_eq!(
+                last_content,
+                expected - 2,
+                "{name}: content ends on row {last_content} but the height model \
+                 reserved through {} — the cell has a phantom blank row",
+                expected - 2,
+            );
+        }
     }
 
     /// A scrolled (clipped) tall cell whose output block includes an image

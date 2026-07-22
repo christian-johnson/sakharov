@@ -41,13 +41,24 @@ fn clamp_char(rope: &Rope, idx: usize) -> usize {
     }
 }
 
+/// The index of the line containing `pos`.
+///
+/// Clamps to `len_chars()` — *not* `len_chars() - 1`.  A rope ending in a
+/// newline has a real, addressable final line (`"a\n"` is two lines, the
+/// second empty) whose only position is `len_chars()`; clamping one lower
+/// folds that line onto its predecessor, which made vertical motion off it
+/// a silent no-op and reported the wrong column for it.
+fn line_of(rope: &Rope, pos: usize) -> usize {
+    rope.char_to_line(pos.min(rope.len_chars()))
+}
+
 /// Return the char index of the last non-newline char on the line containing
 /// `pos`, or the line start if the line is empty.
 fn line_end_char(rope: &Rope, pos: usize) -> usize {
     if rope.len_chars() == 0 {
         return 0;
     }
-    let line_idx = rope.char_to_line(pos.min(rope.len_chars().saturating_sub(1)));
+    let line_idx = line_of(rope, pos);
     let line_start = rope.line_to_char(line_idx);
     let line_str = rope.line(line_idx);
     let line_len = line_str.len_chars();
@@ -71,7 +82,7 @@ fn line_start_char(rope: &Rope, pos: usize) -> usize {
     if rope.len_chars() == 0 {
         return 0;
     }
-    let line_idx = rope.char_to_line(pos.min(rope.len_chars().saturating_sub(1)));
+    let line_idx = line_of(rope, pos);
     rope.line_to_char(line_idx)
 }
 
@@ -80,7 +91,7 @@ pub fn col_of(rope: &Rope, pos: usize) -> usize {
     if rope.len_chars() == 0 {
         return 0;
     }
-    let p = pos.min(rope.len_chars().saturating_sub(1));
+    let p = pos.min(rope.len_chars());
     let line_idx = rope.char_to_line(p);
     p - rope.line_to_char(line_idx)
 }
@@ -119,7 +130,7 @@ pub fn move_down(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     if rope.len_chars() == 0 {
         return apply_extend(sel, 0, extend);
     }
-    let line_idx = rope.char_to_line(pos.min(rope.len_chars().saturating_sub(1)));
+    let line_idx = line_of(rope, pos);
     let col = col_of(rope, pos);
     if line_idx + 1 >= rope.len_lines() {
         return apply_extend(sel, pos, extend);
@@ -151,7 +162,7 @@ pub fn move_up(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     if rope.len_chars() == 0 {
         return apply_extend(sel, 0, extend);
     }
-    let line_idx = rope.char_to_line(pos.min(rope.len_chars().saturating_sub(1)));
+    let line_idx = line_of(rope, pos);
     if line_idx == 0 {
         return apply_extend(sel, pos, extend);
     }
@@ -455,14 +466,16 @@ pub fn select_line(rope: &Rope, sel: Selection) -> Selection {
     if rope.len_chars() == 0 {
         return Selection::point(0);
     }
-    let line_idx = rope.char_to_line(sel.head.min(rope.len_chars().saturating_sub(1)));
+    let line_idx = line_of(rope, sel.head);
     let start = rope.line_to_char(line_idx);
     // Include the newline if present
     let end_line = (line_idx + 1).min(rope.len_lines() - 1);
     let end = if line_idx + 1 < rope.len_lines() {
         rope.line_to_char(end_line) - 1
     } else {
-        rope.len_chars().saturating_sub(1)
+        // Last line — up to its final char. On the empty virtual line after a
+        // trailing newline that is the line start itself.
+        rope.len_chars().saturating_sub(1).max(start)
     };
     Selection::new(start, end)
 }
@@ -483,4 +496,50 @@ pub fn goto_line(rope: &Rope, sel: Selection, line_number: usize, extend: bool) 
     let line_idx = line_number.saturating_sub(1).min(rope.len_lines().saturating_sub(1));
     let new_head = rope.line_to_char(line_idx);
     apply_extend(sel, new_head, extend)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rope ending in a newline has a real final line whose only position is
+    /// `len_chars()`.  Clamping char→line lookups to `len_chars() - 1` folded
+    /// that line onto its predecessor, so `k` off it was a silent no-op and its
+    /// column read as the previous line's last column.  (Hit constantly in
+    /// notebook cells: type a comment, press Enter, and the cursor was stuck.)
+    #[test]
+    fn trailing_empty_line_is_addressable() {
+        let rope = Rope::from_str("# comment\n");
+        let last = rope.len_chars(); // 10 — start of the empty second line
+        assert_eq!(rope.len_lines(), 2);
+
+        // The empty line is column 0 of line 1, not column 9 of line 0.
+        assert_eq!(col_of(&rope, last), 0);
+        assert_eq!(line_of(&rope, last), 1);
+
+        // `k` from it climbs to the line above rather than doing nothing.
+        let up = move_up(&rope, Selection::point(last), false);
+        assert_eq!(rope.char_to_line(up.head), 0);
+
+        // `j` onto it, then `k` back off it, round-trips.
+        let down = move_down(&rope, Selection::point(0), false);
+        assert_eq!(down.head, last);
+        assert_eq!(move_up(&rope, down, false).head, 0);
+
+        // Line-wise ops resolve against the empty line, not the one above.
+        assert_eq!(line_start_char(&rope, last), last);
+        assert_eq!(line_end_char(&rope, last), last);
+        let sel = select_line(&rope, Selection::point(last));
+        assert_eq!((sel.anchor, sel.head), (last, last));
+    }
+
+    /// The same clamp applies at the end of a rope with no trailing newline —
+    /// behaviour there must be unchanged.
+    #[test]
+    fn last_line_without_trailing_newline_is_unchanged() {
+        let rope = Rope::from_str("ab\ncd");
+        assert_eq!(col_of(&rope, 4), 1);
+        assert_eq!(move_up(&rope, Selection::point(4), false).head, 1);
+        assert_eq!(move_down(&rope, Selection::point(4), false).head, 4);
+    }
 }

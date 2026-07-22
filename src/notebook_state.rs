@@ -40,6 +40,12 @@ pub struct NotebookState {
     /// Indices of cells that are currently folded (collapsed to one line).
     /// Session-only; not persisted to .ipynb.
     pub folded_cells: BTreeSet<usize>,
+    /// Indices of cells whose output block is shown in full, ignoring the
+    /// `notebook.max_output_lines` / `max_traceback_lines` caps.  Long output
+    /// is collapsed by default so one noisy cell can't bury the notebook;
+    /// expanding it makes every row real, so `j`/`k` scroll through the lot.
+    /// Session-only; not persisted to .ipynb.
+    pub expanded_outputs: BTreeSet<usize>,
 }
 
 impl NotebookState {
@@ -55,12 +61,28 @@ impl NotebookState {
             cell_snapshots: Vec::new(),
             cell_redo: Vec::new(),
             folded_cells: BTreeSet::new(),
+            expanded_outputs: BTreeSet::new(),
         }
     }
 
     /// True if cell `idx` is currently folded.
     pub fn is_cell_folded(&self, idx: usize) -> bool {
         self.folded_cells.contains(&idx)
+    }
+
+    /// True if cell `idx`'s output block is shown untruncated.
+    pub fn is_output_expanded(&self, idx: usize) -> bool {
+        self.expanded_outputs.contains(&idx)
+    }
+
+    /// Toggle full/collapsed output for cell `idx`; returns the new state.
+    pub fn toggle_output_expand(&mut self, idx: usize) -> bool {
+        if !self.expanded_outputs.remove(&idx) {
+            self.expanded_outputs.insert(idx);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn toggle_cell_fold(&mut self, idx: usize) {

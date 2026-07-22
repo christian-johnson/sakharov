@@ -186,10 +186,27 @@ pub(super) fn comment_region(app: &mut App) {
             }
         }
     } else {
-        // Comment: prepend prefix at column 0 on each non-empty line.
-        // Placing markers at col 0 (not after indentation) keeps the code
-        // valid for whitespace-sensitive languages like Python: a commented-out
-        // indented block remains syntactically inert when the comment is removed.
+        // Comment: insert the prefix at the *shallowest* indent in the region,
+        // not at column 0. Anchoring every marker to one column keeps the block's
+        // relative indentation intact (so it still reads as a block, and the
+        // uncomment path restores it exactly), while sitting inside the enclosing
+        // block's indentation — commenting a body inside a Python function no
+        // longer flushes `#` to the left margin.
+        let min_indent = (start_line..=end_line)
+            .filter_map(|li| {
+                let content: String = app.buffer.rope
+                    .line(li)
+                    .chars()
+                    .take_while(|&c| c != '\n' && c != '\r')
+                    .collect();
+                if content.trim_start().is_empty() {
+                    return None; // blank lines don't constrain the column
+                }
+                Some(content.chars().take_while(|c| c.is_whitespace()).count())
+            })
+            .min()
+            .unwrap_or(0);
+
         for li in (start_line..=end_line).rev() {
             let line_start = app.buffer.rope.line_to_char(li);
             let content: String = app.buffer.rope
@@ -200,7 +217,7 @@ pub(super) fn comment_region(app: &mut App) {
             if content.trim_start().is_empty() {
                 continue;
             }
-            app.buffer.insert_raw(line_start, prefix);
+            app.buffer.insert_raw(line_start + min_indent, prefix);
         }
     }
 

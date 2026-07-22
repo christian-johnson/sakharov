@@ -40,13 +40,12 @@ pub(super) fn start_export(app: &mut App, fmt: &str) {
     // Flush unsaved changes so the export matches what's on screen.
     if app.notebook.is_some() {
         super::notebook::save_focused_cell(app);
-        let save_result = match app.notebook.as_mut() {
-            Some((nb, _)) if nb.modified => Some(nb.save()),
-            _ => None,
-        };
-        if let Some(Err(e)) = save_result {
-            app.messages.show(format!("Export aborted — save failed: {e}"));
-            return;
+        let dirty = matches!(app.notebook.as_ref(), Some((nb, _)) if nb.modified);
+        if dirty {
+            if let Err(e) = super::notebook::save_notebook(app) {
+                app.messages.show(format!("Export aborted — save failed: {e}"));
+                return;
+            }
         }
     } else if app.buffer.modified {
         if let Err(e) = app.buffer.save(None, false) {

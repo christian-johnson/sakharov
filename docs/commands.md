@@ -49,7 +49,7 @@ These commands enter a sub-mode that awaits a second key.
 
 | Command | Default Key | Description |
 |---------|-------------|-------------|
-| `comment-region` | `gc` (via Goto mode) | Toggle comment/uncomment for the current selection or line |
+| `comment-region` | `gc` (via Goto mode) | Toggle comment/uncomment for the current selection or line (markers are placed at the region's shallowest indent, so an indented block stays indented) |
 | `indent-region` | `>`, `Ctrl+>` | Indent the selected lines by one indentation unit (alias `:indent`). The unit is language-aware: `[languages.<lang>] indent_width` overrides `editor.tab_width` |
 | `dedent-region` | `<`, `Ctrl+<` | Dedent the selected lines by one indentation unit (alias `:dedent`) |
 | `delete-selection` | `d` | Delete the current selection |
@@ -134,8 +134,8 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 
 | Command | Default Key | Description |
 |---------|-------------|-------------|
-| `page-down` | `ctrl+d`, `PgDn` | Scroll half a page down (cursor moves with viewport) |
-| `page-up` | `ctrl+u`, `PgUp` | Scroll half a page up (cursor moves with viewport) |
+| `page-down` | `ctrl+d`, `PgDn`, `J` (notebooks) | Scroll half a page down (cursor moves with viewport, extending the selection in Select mode; in a notebook it flows across cells and output blocks) |
+| `page-up` | `ctrl+u`, `PgUp`, `K` (notebooks) | Scroll half a page up (cursor moves with viewport, extending the selection in Select mode; in a notebook it flows across cells and output blocks) |
 | `scroll-cursor-center` | `gz` (via Goto mode) | Scroll viewport so the cursor line is vertically centred |
 
 ## LSP
@@ -230,6 +230,7 @@ The cursor is automatically snapped past folds when moving down, and to the fold
 |---------|-------------|-------|-------------|
 | `notebook-toggle-fold-cell` | — | `:fold-cell` | Toggle collapse of the focused cell |
 | `notebook-toggle-all-folds` | — | `:fold-all-cells` | Toggle all cells: fold all if any are expanded, else unfold all |
+| `notebook-toggle-output-expand` | `zo` | `:expand-output`, `:output-expand` | Show the focused cell's output in full, ignoring the `max_output_lines` / `max_traceback_lines` caps |
 
 A folded cell shows: first line of source + `▶ N lines · M outputs` indicator.
 Entering Insert (`i`) on a folded cell auto-unfolds it.
@@ -241,10 +242,18 @@ notebook mode** — the focused cell is edited in place with the ordinary Normal
 Insert / Select modes, exactly like a plain buffer. A few extra bindings apply while
 a notebook is open (they shadow the normal bindings):
 
-- `J` / `K` move to the next / previous cell (like `H`/`L` for buffers).
-- A plain `j` on the last line of a cell crosses into the next cell; `k` on the
-  first line crosses into the previous cell (column preserved) — so vertical motion
-  flows continuously across cells.
+- `J` / `K` scroll half a page down / up — flowing across cells and through output
+  blocks, so they page through the whole notebook rather than one cell.
+- `N` / `M` move to the next / previous cell. (`N` shadows `search-prev` while a
+  notebook is open; `ctrl+p` still works for that.)
+- A plain `j` past a cell's last source line steps into that cell's **output block**
+  — so long errors and streams scroll into view — and then into the next cell
+  (column preserved). `k` is the exact inverse, so vertical motion flows
+  continuously through the whole notebook.
+- Long output is capped at `notebook.max_output_lines` (tracebacks at
+  `max_traceback_lines`) and ends in a `... (N more lines — zo to expand)` row.
+  `zo` (or `:expand-output`) lifts the cap for that cell so `j`/`k` scroll through
+  all of it; `zo` again re-collapses it.
 - `Ctrl+E` executes the focused cell (works on any terminal). `Shift+Enter` /
   `Ctrl+Enter` also execute it, but only on terminals that support keyboard-enhancement
   reporting (kitty protocol) — otherwise a modified Enter is indistinguishable from a
@@ -258,8 +267,8 @@ undo) has no default key — use the command palette (`Space`) or the `:` comman
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
 | `enter-notebook` | — | `:nb`, `:notebook` | Open the current buffer's `.ipynb` as a notebook (no-op if already open) |
-| `notebook-next-cell` | `J` | — | Focus the next cell |
-| `notebook-prev-cell` | `K` | — | Focus the previous cell |
+| `notebook-next-cell` | `N` | — | Focus the next cell |
+| `notebook-prev-cell` | `M` | — | Focus the previous cell |
 | `notebook-scroll-down` | — | — | Scroll the cell viewport down (snaps back to the focused cell) |
 | `notebook-scroll-up` | — | — | Scroll the cell viewport up (snaps back to the focused cell) |
 | `notebook-open-cell-edit` | — | `:open-cell`, `:edit-cell` | Open the focused cell in a full-screen edit overlay |

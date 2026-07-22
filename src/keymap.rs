@@ -287,9 +287,13 @@ impl Keymap {
         // structural undo, clear outputs, cell-type conversion) is available via
         // the command palette and `:` command line.
 
-        // J / K move between cells (supercharged j/k, like H/L for buffers).
-        notebook.insert(KeyBinding::char('J'), vec![Command::NotebookNextCell]);
-        notebook.insert(KeyBinding::char('K'), vec![Command::NotebookPrevCell]);
+        // J / K page through the notebook (half a screen at a time, flowing
+        // across cells and output blocks) — the motion you reach for most in a
+        // long notebook. N / M step to the next / previous cell.
+        notebook.insert(KeyBinding::char('J'), vec![Command::PageDown]);
+        notebook.insert(KeyBinding::char('K'), vec![Command::PageUp]);
+        notebook.insert(KeyBinding::char('N'), vec![Command::NotebookNextCell]);
+        notebook.insert(KeyBinding::char('M'), vec![Command::NotebookPrevCell]);
         // Shift+Enter / Ctrl+Enter execute the focused cell — handled directly in
         // input::handle_key (before mode dispatch) so they fire from Insert too.
 

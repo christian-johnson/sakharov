@@ -13,6 +13,12 @@ use crate::{
 /// return to Normal mode.  Scroll follows the focused cell automatically —
 /// `exec::update_scroll` re-anchors it every frame.
 pub(super) fn after_structural_edit(app: &mut App) {
+    // Output expansion is keyed by cell index, which every structural edit
+    // shifts — a stale entry would silently expand the wrong cell and throw
+    // the height model (and so the scroll anchor) off.
+    if let Some((_, state)) = app.notebook.as_mut() {
+        state.expanded_outputs.clear();
+    }
     load_focused_cell(app);
     notebook_lsp_reopen(app);
     app.mode = crate::mode::Mode::Normal;
@@ -104,6 +110,24 @@ pub(super) fn save_focused_cell(app: &mut App) {
             }
         }
     }
+}
+
+/// Flush the focused cell, then serialise the notebook to disk.
+///
+/// Clearing `app.buffer.modified` is part of the save: the focused cell *is*
+/// `app.buffer`, and every keystroke re-propagates that flag onto the notebook
+/// (`save_focused_cell` / `input::sync_buffer_to_notebook`). Leaving it set
+/// makes `[+]` reappear on the first cursor move after a clean save.
+pub(super) fn save_notebook(app: &mut App) -> anyhow::Result<()> {
+    save_focused_cell(app);
+    let result = match app.notebook.as_mut() {
+        Some((nb, _)) => nb.save(),
+        None => return Ok(()),
+    };
+    if result.is_ok() {
+        app.buffer.modified = false;
+    }
+    result
 }
 
 /// Load the focused notebook cell into app.buffer, updating all dependent state.

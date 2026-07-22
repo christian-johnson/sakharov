@@ -104,7 +104,18 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - `gw` jump mode (2-char labels over visible word starts)
 - Code folding (`zc/zo/za`), git gutter marks, word wrap toggle
 - Multiple buffers (`H`/`L` cycle prev/next), clipboard integration
+- **Bracketed paste** — enabled at startup (`EnableBracketedPaste`, released in
+  `restore_terminal`); a terminal paste arrives as one `Event::Paste` and goes to
+  `input::handle_paste`, which inserts it **verbatim**. It must never be replayed through
+  the per-key handlers: the Enter handler auto-indents, so every embedded newline would add
+  the enclosing block's indent on top of the pasted line's own and the block staircases
+  right. `handle_paste` routes to the open popup's filter / the command line / the search
+  query (newlines flattened) when one of those owns the keyboard, and outside Insert it
+  behaves like `P` (replaces the selection)
 - Auto-indent on Enter, format-on-save (`:fmt` or configurable)
+- `gc` comment-region places the markers at the region's **shallowest indent**, not column 0,
+  so a commented function body keeps its indentation and relative structure (and the
+  uncomment path, which strips the prefix at each line's own indent, round-trips exactly)
 - `indent-region` (`>` / `Ctrl+>`) / `dedent-region` (`<` / `Ctrl+<`) shift the selected lines by one indent unit
 - **Spaces, never tabs, by default** — Tab key and all auto-indent insert `tab_width` spaces.
   `editor.expand_tabs` (default `true`) controls this; set `false` to indent with real tabs.
@@ -148,7 +159,9 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Cell header (`[N] CODE (python)`) lives in the top border line itself
 - **No separate notebook mode** — the focused cell is edited in place with the ordinary
   Normal/Insert/Select modes, exactly like a plain buffer. While a notebook is open a small
-  override map shadows the normal bindings: `J`/`K` move to the next/previous cell, and
+  override map shadows the normal bindings: `J`/`K` page half a screen down/up
+  (`Command::PageDown`/`PageUp`), `N`/`M` move to the next/previous cell (so `N` shadows
+  search-prev inside a notebook), and
   `Ctrl+E` executes the focused cell (`Shift+Enter`/`Ctrl+Enter` also execute, but only on
   terminals with keyboard-enhancement reporting — see `app::run`; the Kitty keyboard protocol
   is force-enabled on Kitty and Ghostty even when the support query goes unanswered
@@ -160,9 +173,20 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   then into the next cell; `k` is the exact inverse (climb the output block back to the source,
   then up into the previous cell — landing on *its* last output row when it has one). The
   output cursor is `NotebookState.output_row` (`Some(visual_row)` while browsing outputs, reset
-  to `None` by any command other than `j`/`k`); a block cursor is drawn on that output row and
-  the source cursor is hidden. Cell management (new/delete/clear-outputs/
+  to `None` by any command other than `j`/`k`/`PageUp`/`PageDown`); a block cursor is drawn on
+  that output row and the source cursor is hidden. Paging is literally a run of `j`/`k` steps
+  (`notebook_vertical` + `notebook_move_down`/`_up`), so it crosses cells and output blocks
+  too. Cell management (new/delete/clear-outputs/
   cell-type/structural-undo) has no default key — use the command palette or `:` command line
+- **Output truncation is per-cell and expandable** — long output is capped at
+  `notebook.max_output_lines` (tracebacks at `max_traceback_lines`) with a
+  `... (N more lines — zo to expand)` row. `zo` (fold sub-mode) / `:expand-output`
+  (`Command::NotebookToggleOutputExpand`) toggles `NotebookState.expanded_outputs` for the
+  focused cell, lifting the caps so every line becomes a real output row that `j`/`k` and the
+  row-granular scroll reach. The caps are resolved once into a `notebook_ui::OutputLimits`
+  (`OutputLimits::new(&config.notebook, expanded)`) which is threaded through *both* the
+  height model and the renderer — they must derive it identically or cell heights drift from
+  what is drawn. `expanded_outputs` is keyed by cell index, so `after_structural_edit` clears it
 - **Persistent kernel session** — one Python subprocess per notebook; namespace shared across all cells
   - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in notebook dir and cwd before falling back to `python3`
   - Runner script embedded in binary; the editor sends a code block terminated by `__KI_CODE_END__`
@@ -220,9 +244,11 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   (`notebook_ui::render_cell`) draws the first cell clipped by `scroll_offset` and clips the
   last cell at the viewport bottom — a clipped edge drops its border line, so the cell visibly
   continues past the screen edge. `nb_cell_height` is the single height model shared by the
-  renderer and the scroll math; `cell_output_rows` sizes the output block (config-driven
-  `max_output_lines` / `max_traceback_lines` / `image_rows` truncation, mirrored by the
-  renderer via `truncated_rows`). (The old per-cell `ensure_focused_visible` + in-cell
+  renderer and the scroll math; `cell_output_rows` sizes the output block (`OutputLimits`
+  truncation, mirrored by the renderer via `truncated_rows` / `draw_truncation_row` — a test,
+  `output_block_height_matches_what_is_drawn`, pins the two together). Both are measured by
+  `exec::scroll::nb_layout`, the one place the whole cell stack is laid out.
+  (The old per-cell `ensure_focused_visible` + in-cell
   `app.scroll_row` model is gone — `app.scroll_row` is now used only by the plain editor.)
 - **Rich display / LaTeX** — the kernel runner evaluates a cell's trailing bare expression
   (like Jupyter's `execute_result`) and prefers a rich repr: `_repr_latex_` is rasterised to
@@ -247,7 +273,11 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   viewport edge is **vertically cropped** (`ImageRequest.crop` → the protocol's `y=`/`h=` source
   rectangle) so the visible band keeps its natural scale instead of squashing the whole figure —
   this is what makes images scroll smoothly with the seamless notebook scroll.
-- **`gw` jump mode works inside notebook cells** — labels overlaid on the focused cell
+- **`gw` jump mode works inside notebook cells** — labels overlaid on the focused cell.
+  The label set is generated over the cell's *on-screen* source lines
+  (`exec::scroll::notebook_visible_source_lines`, derived from the cell-stack scroll anchor),
+  not from line 0: in a cell taller than the viewport the top is scrolled off, and labelling
+  from the top put every label off-screen so none appeared at all
 - All notebook commands accessible via `:` (e.g. `:run`, `:restart-kernel`, `:notebook-next-cell`)
 
 ### Phase 3 (LSP) — complete
