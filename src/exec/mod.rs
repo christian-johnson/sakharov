@@ -97,10 +97,32 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
     };
 
+    // While browsing a cell's output block (`output_row`), horizontal motions
+    // have nowhere to go — the output is read-only and doesn't scroll sideways —
+    // so swallow them rather than letting them fall through and snap the cursor
+    // back to the (hidden) source. j/k/paging keep navigating the block below.
+    let browsing_output = app.notebook.as_ref().map(|(_, s)| s.output_row.is_some()).unwrap_or(false);
+    if browsing_output
+        && matches!(
+            cmd,
+            Command::MoveLeft | Command::MoveRight
+                | Command::MoveWordForward | Command::MoveWordBackward | Command::MoveWordEnd
+                | Command::MoveBigWordForward | Command::MoveBigWordBackward | Command::MoveBigWordEnd
+                | Command::MoveLineStart | Command::MoveLineEnd | Command::MoveLineFirstNonWs
+        )
+    {
+        return;
+    }
+
     // Browsing a cell's output block (`output_row`) is a transient state owned
     // by continued vertical motion — including paging, which is just a run of
     // single steps; any other command snaps the cursor back to the cell source.
-    if !matches!(cmd, Command::MoveUp | Command::MoveDown | Command::PageUp | Command::PageDown) {
+    if !matches!(
+        cmd,
+        Command::MoveUp | Command::MoveDown | Command::PageUp | Command::PageDown
+            // Reads output_row to resolve which traceback frame the cursor is on.
+            | Command::NotebookFollowError
+    ) {
         if let Some((_, state)) = app.notebook.as_mut() {
             state.output_row = None;
         }
@@ -754,6 +776,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
             notebook::convert_cell(app, matches!(cmd, Command::NotebookCellToMarkdown));
             return;
         }
+        Command::NotebookGotoError => {
+            goto_focused_cell_error(app);
+            return;
+        }
+        Command::NotebookFollowError => {
+            follow_output_error_link(app);
+            return;
+        }
 
         // --- Notebook cell folding ---
         Command::NotebookToggleFoldCell => {
@@ -1182,6 +1212,88 @@ fn place_cursor_at_line(app: &mut App, line_idx: usize, col: usize) {
     app.selection = Selection::point(head);
 }
 
+// ---------------------------------------------------------------------------
+// Error-traceback navigation ("jump to the line that raised")
+// ---------------------------------------------------------------------------
+
+/// Resolve an [`ErrorFrame`] to a concrete `(cell index, 0-based line)` in the
+/// currently-open notebook, preferring the stable cell id and falling back to
+/// the 1-based cell number printed in the label.
+fn resolve_error_frame(
+    nb: &crate::notebook::Notebook,
+    frame: &crate::notebook::ErrorFrame,
+) -> Option<(usize, usize)> {
+    let idx = match &frame.cell_id {
+        Some(id) => nb.cells.iter().position(|c| &c.id == id)?,
+        None => frame.cell_number.checked_sub(1)?,
+    };
+    (idx < nb.cells.len()).then_some((idx, frame.line))
+}
+
+/// Move the cursor to `(cell_idx, line)` in the open notebook: focus that cell,
+/// leave the output block, land on the line's first non-whitespace column, and
+/// re-anchor the scroll. Shared by `:goto-error` and Enter-on-a-frame.
+fn jump_to_notebook_cell_line(app: &mut App, cell_idx: usize, line: usize) {
+    if app.notebook.as_ref().map(|(_, s)| s.focused_cell) != Some(cell_idx) {
+        switch_focused_cell(app, cell_idx);
+    }
+    if let Some((_, s)) = app.notebook.as_mut() {
+        s.output_row = None;
+    }
+    let rope = &app.buffer.rope;
+    let li = line.min(rope.len_lines().saturating_sub(1));
+    let start = rope.line_to_char(li);
+    app.selection = motion::move_line_first_non_ws(rope, Selection::point(start), false);
+    update_scroll(app);
+}
+
+/// `:goto-error` — jump to the source line of the focused cell's error. Targets
+/// the *innermost* frame (the last `File` line — where the exception actually
+/// raised), which may be another cell when the culprit is a function defined
+/// elsewhere.
+fn goto_focused_cell_error(app: &mut App) {
+    let target = app.notebook.as_ref().and_then(|(nb, state)| {
+        let cell = nb.cells.get(state.focused_cell)?;
+        cell.outputs.iter().rev().find_map(|o| match o {
+            crate::notebook::Output::Error { frames, .. } => {
+                resolve_error_frame(nb, frames.last()?)
+            }
+            _ => None,
+        })
+    });
+    match target {
+        Some((idx, line)) => {
+            jump_to_notebook_cell_line(app, idx, line);
+            app.messages.show(format!("Jumped to cell [{}] line {}", idx + 1, line + 1));
+        }
+        None => app.messages.show("No navigable error in this cell"),
+    }
+}
+
+/// Enter on a traceback frame line (while browsing the output block with `j`/`k`)
+/// — jump to the exact source line that frame names. A no-op when the output
+/// cursor isn't on a navigable frame.
+fn follow_output_error_link(app: &mut App) {
+    let cell_px = app.graphics.cell_pixel_size;
+    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
+    let target = app.notebook.as_ref().and_then(|(nb, state)| {
+        let orow = state.output_row?;
+        let idx = state.focused_cell;
+        let cell = nb.cells.get(idx)?;
+        let limits = crate::notebook_ui::OutputLimits::new(
+            &app.config.notebook, state.is_output_expanded(idx),
+        );
+        let frame = crate::notebook_ui::error_frame_at_output_row(
+            cell, orow, limits, cell_px, avail_cols,
+        )?;
+        resolve_error_frame(nb, frame)
+    });
+    if let Some((idx, line)) = target {
+        jump_to_notebook_cell_line(app, idx, line);
+        app.messages.show(format!("Jumped to cell [{}] line {}", idx + 1, line + 1));
+    }
+}
+
 /// Execute a slice of commands in order.
 pub fn run_many(app: &mut App, cmds: &[Command]) {
     for cmd in cmds {
@@ -1228,7 +1340,7 @@ pub fn poll_git(app: &mut App) -> bool {
 /// kernel-ready handshake and starts the next queued cell when the kernel
 /// becomes idle. Returns true when state changed (the caller should redraw).
 pub fn process_kernel_events(app: &mut App) -> bool {
-    use crate::notebook::{append_stream, push_error_output, KernelMessage, KernelStatus, MimeData, Output};
+    use crate::notebook::{append_stream, KernelMessage, KernelStatus, MimeData, Output};
 
     let mut refresh_images = false;
     let mut applied = false;
@@ -1274,7 +1386,10 @@ pub fn process_kernel_events(app: &mut App) -> bool {
                 }
                 KernelMessage::Error { traceback } => {
                     if let Some(idx) = idx {
-                        push_error_output(&mut nb.cells[idx].outputs, &traceback);
+                        // Build against the whole cell list so `File "<id>"`
+                        // frames resolve to jump targets; then push.
+                        let out = crate::notebook::build_error_output(&traceback, &nb.cells);
+                        nb.cells[idx].outputs.push(out);
                     }
                 }
                 KernelMessage::Done => {
@@ -1290,9 +1405,11 @@ pub fn process_kernel_events(app: &mut App) -> bool {
                         let failed = nb.cells[idx].outputs.iter()
                             .any(|o| matches!(o, Output::Error { .. }));
                         let verb = if failed { "failed" } else { "finished" };
+                        // On failure, point at the jump-to-line affordances.
+                        let hint = if failed { " — :goto-error (or ↵ on a File line) to jump" } else { "" };
                         announce.push(match elapsed {
-                            Some(t) => format!("Cell [{}] {verb} in {t}", idx + 1),
-                            None => format!("Cell [{}] {verb}", idx + 1),
+                            Some(t) => format!("Cell [{}] {verb} in {t}{hint}", idx + 1),
+                            None => format!("Cell [{}] {verb}{hint}", idx + 1),
                         });
                     }
                     state.executing_cell = None;
@@ -1733,6 +1850,84 @@ mod tests {
         let _ = std::fs::remove_file(&target);
     }
 
+    /// End-to-end: a cell that raises produces an error whose traceback frame
+    /// resolves to the exact cell + line, `:goto-error` jumps there, and the
+    /// runner's linecache registration surfaces the offending source line.
+    #[test]
+    fn kernel_error_frame_resolves_and_goto_error_jumps() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 not available — skipping kernel error-nav test");
+            return;
+        }
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 20;
+        app.viewport_width = 80;
+
+        let dir = unique_tmp_dir("errnav");
+        let target = dir.join("err.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "err");
+
+        // The IndexError is raised on line 3 (0-based line 2) of the cell.
+        if let Some((ref mut nb, _)) = app.notebook {
+            nb.cells[0].source =
+                Rope::from_str("data = [1, 2, 3]\nmid = len(data) // 2\nprint(data[99])");
+        }
+        notebook::load_focused_cell(&mut app);
+
+        execute(&mut app, &Command::NotebookExecuteCell);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            process_kernel_events(&mut app);
+            let (nb, state) = app.notebook.as_ref().unwrap();
+            assert!(
+                nb.kernel.as_ref().map(|k| k.status != crate::notebook::KernelStatus::Dead).unwrap_or(true),
+                "kernel died during the test",
+            );
+            if state.exec_queue.is_empty()
+                && state.executing_cell.is_none()
+                && nb.cells[0].execution_count.is_some()
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "kernel error test timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // The error output carries a navigable frame → cell 0, line 2.
+        {
+            let (nb, _) = app.notebook.as_ref().unwrap();
+            let frames = nb.cells[0].outputs.iter().find_map(|o| match o {
+                crate::notebook::Output::Error { frames, traceback, .. } => {
+                    // linecache made the offending source line show inline.
+                    assert!(
+                        traceback.iter().any(|l| l.contains("data[99]")),
+                        "traceback should include the offending source line",
+                    );
+                    // The ugly compile id was relabelled to a friendly cell number.
+                    assert!(traceback.iter().any(|l| l.contains("Cell [1]")));
+                    Some(frames.clone())
+                }
+                _ => None,
+            }).expect("cell must have an error output");
+            let inner = frames.last().expect("a navigable frame");
+            assert_eq!(resolve_error_frame(nb, inner), Some((0, 2)));
+        }
+
+        // Move the cursor off the culprit line, then `:goto-error` returns to it.
+        app.selection = Selection::point(0);
+        execute(&mut app, &Command::NotebookGotoError);
+        let line = {
+            let rope = &app.buffer.rope;
+            rope.char_to_line(app.selection.head)
+        };
+        assert_eq!(line, 2, ":goto-error must land on the raising line");
+
+        let _ = std::fs::remove_file(&target);
+    }
+
     /// `j`/`k` traverse a cell's output block (so long errors scroll into
     /// view) and cross cleanly into neighbouring cells, and the row-granular
     /// scroll keeps the browsed row on screen.
@@ -1754,6 +1949,7 @@ mod tests {
             nb.cells[0].source = Rope::from_str("a\nb");
             // Error output: 1 headline row + 3 traceback rows = 4 output rows.
             nb.cells[0].outputs = vec![Output::Error {
+                frames: vec![],
                 ename: "ValueError".into(),
                 evalue: "boom".into(),
                 traceback: vec!["tb1".into(), "tb2".into(), "tb3".into()],
@@ -1796,13 +1992,23 @@ mod tests {
         assert_eq!(app.notebook.as_ref().unwrap().1.output_row, None,
             "k off the top of the output block returns to the source");
 
-        // Any non-vertical command snaps output browsing off.
+        // A horizontal motion is swallowed while browsing output — the output
+        // is read-only and doesn't scroll sideways, so h/l/w/0/$ keep the
+        // cursor in the block instead of snapping back to the (hidden) source.
         app.selection = Selection::point(2);
         execute(&mut app, &Command::MoveDown); // into output_row 0
         assert_eq!(app.notebook.as_ref().unwrap().1.output_row, Some(0));
+        let sel_before = app.selection;
         execute(&mut app, &Command::MoveLineStart);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, Some(0),
+            "a horizontal motion stays in the output block");
+        execute(&mut app, &Command::MoveRight);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, Some(0));
+        assert_eq!(app.selection, sel_before, "the source cursor must not move");
+        // A genuinely different command still snaps back to the source.
+        execute(&mut app, &Command::SelectLine);
         assert_eq!(app.notebook.as_ref().unwrap().1.output_row, None,
-            "a horizontal motion resets output browsing");
+            "a non-motion command resets output browsing");
 
         let _ = std::fs::remove_file(&target);
     }

@@ -924,6 +924,41 @@ fn single_output_height_count(
     }
 }
 
+/// The navigable error frame the output cursor sits on, if any.
+///
+/// `output_row` is an index into the cell's whole output block (the index space
+/// of [`NotebookState::output_row`]). We walk the outputs — sizing each exactly
+/// as the renderer does, so the mapping matches what is drawn — to find the one
+/// under the cursor; within an `Error` output, row 0 is the `ename: evalue`
+/// headline and row `1 + i` is `traceback[i]`, so a frame with `tb_index == i`
+/// is the link on that row.
+pub(crate) fn error_frame_at_output_row(
+    cell: &Cell,
+    output_row: usize,
+    limits: OutputLimits,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+) -> Option<&crate::notebook::ErrorFrame> {
+    if cell.cell_type != CellType::Code {
+        return None;
+    }
+    let mut base = 0usize;
+    for output in &cell.outputs {
+        let h = single_output_height_count(output, limits, cell_pixel_size, available_cols) as usize;
+        if output_row < base + h {
+            if let Output::Error { frames, .. } = output {
+                let within = output_row - base;
+                if within >= 1 {
+                    return frames.iter().find(|f| f.tb_index == within - 1);
+                }
+            }
+            return None;
+        }
+        base += h;
+    }
+    None
+}
+
 /// Returns the border colour reflecting the cell's execution state
 /// (theme `[notebook]` colors): not yet run, running, success, errored.
 fn cell_border_color(cell: &Cell, executing_cell: Option<usize>, cell_idx: usize) -> Color {
@@ -1104,6 +1139,54 @@ fn draw_output_row(
     }
 }
 
+/// Draw one traceback row, honouring the scroll clip and output cursor like
+/// [`draw_output_row`]. A `link` row (a navigable `File …` frame) is drawn dim
+/// like the rest, then its **visible text span only** is recoloured and
+/// underlined — so it reads like a hyperlink instead of a full-width bar (the
+/// underline must not bleed across the row's trailing padding).
+fn draw_traceback_row(
+    frame: &mut Frame,
+    area: Rect,
+    current_row: &mut u16,
+    octx: &mut OutputCtx,
+    text: String,
+    link: bool,
+) -> bool {
+    let th = crate::theme::active();
+    match octx.advance() {
+        None => true,
+        Some(is_cursor) => {
+            if *current_row >= area.bottom() {
+                return false;
+            }
+            let row = single_row(area, *current_row);
+            let base = Style::default().fg(th.dim);
+            if link {
+                let chars: Vec<char> = text.chars().collect();
+                let start = chars.iter().take_while(|c| c.is_whitespace()).count();
+                let end = chars.iter().rposition(|c| !c.is_whitespace()).map_or(0, |i| i + 1);
+                let link_style = Style::default().fg(th.info).add_modifier(Modifier::UNDERLINED);
+                frame.render_widget(SingleLineWidget { text, style: base }, row);
+                let buf = frame.buffer_mut();
+                for col in start..end {
+                    let x = row.x + col as u16;
+                    if x >= row.right() {
+                        break;
+                    }
+                    buf[(x, row.y)].set_style(link_style);
+                }
+            } else {
+                frame.render_widget(SingleLineWidget { text, style: base }, row);
+            }
+            if is_cursor {
+                octx.place_cursor(frame, area.x, *current_row);
+            }
+            *current_row += 1;
+            true
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_output(
     frame: &mut Frame,
@@ -1137,7 +1220,7 @@ fn render_output(
             render_mime_data(frame, data, area, current_row, image_requests, cell_pixel_size, octx);
         }
 
-        Output::Error { ename, evalue, traceback } => {
+        Output::Error { ename, evalue, traceback, frames } => {
             if !draw_output_row(
                 frame, area, current_row, octx,
                 format!("  {ename}: {evalue}"),
@@ -1146,11 +1229,12 @@ fn render_output(
                 return;
             }
             let max_tb = octx.limits.max_traceback;
-            for tb_line in traceback.iter().take(max_tb) {
-                if !draw_output_row(
-                    frame, area, current_row, octx,
-                    format!("  {tb_line}"),
-                    Style::default().fg(th.dim),
+            for (i, tb_line) in traceback.iter().take(max_tb).enumerate() {
+                // Navigable frames (`File "Cell [N]", line L`) render like a
+                // link — Enter on this row jumps the cursor to that source line.
+                let is_link = frames.iter().any(|f| f.tb_index == i);
+                if !draw_traceback_row(
+                    frame, area, current_row, octx, format!("  {tb_line}"), is_link,
                 ) {
                     return;
                 }
@@ -1451,6 +1535,7 @@ mod tests {
             text: (0..cfg.max_output_lines * 2).map(|i| format!("o{i}\n")).collect(),
         };
         let error = Output::Error {
+            frames: vec![],
             ename: "ValueError".into(),
             evalue: "boom".into(),
             traceback: (0..cfg.max_traceback_lines * 2).map(|i| format!("tb{i}")).collect(),
@@ -1553,6 +1638,7 @@ mod tests {
             outputs: vec![
                 Output::DisplayData { data: MimeData { text_plain: None, image_png: Some(png) } },
                 Output::Error {
+                    frames: vec![],
                     ename: "E".into(),
                     evalue: "v".into(),
                     traceback: vec!["t1".into(), "t2".into()],
@@ -1602,6 +1688,129 @@ mod tests {
         // The image is partially scrolled off, so its request carries a crop.
         assert!(imgs.iter().any(|r| r.crop.is_some()),
             "a clipped image must be emitted with a vertical crop");
+    }
+
+    /// A navigable frame line underlines only its visible text, not the row's
+    /// full-width padding (regression: the underline spanned the whole screen).
+    #[test]
+    fn link_frame_underline_is_scoped_to_text() {
+        use crate::notebook::{ErrorFrame, Output};
+        let cell = Cell {
+            id: "c".into(),
+            cell_type: CellType::Code,
+            source: Rope::from_str("boom()"),
+            outputs: vec![Output::Error {
+                ename: "IndexError".into(),
+                evalue: "oops".into(),
+                traceback: vec![
+                    "Traceback (most recent call last):".into(),
+                    "  File \"Cell [1]\", line 1, in <module>".into(),
+                    "IndexError: oops".into(),
+                ],
+                frames: vec![ErrorFrame {
+                    tb_index: 1,
+                    cell_id: Some("c".into()),
+                    cell_number: 1,
+                    line: 0,
+                }],
+            }],
+            execution_count: Some(1),
+            rendered: false,
+        };
+        let nb = Notebook {
+            path: std::path::PathBuf::from("/tmp/link-test.ipynb"),
+            metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
+            cells: vec![cell],
+            modified: false,
+            kernel: None,
+        };
+        let state = NotebookState::new();
+        let rope = nb.cells[0].source.clone();
+        let mode = Mode::Normal;
+        let active = ActiveCellView {
+            rope: &rope,
+            cursor: 0,
+            sel_anchor: 0,
+            output_row: None,
+            mode: &mode,
+            jump_labels: &[],
+            jump_typed: "",
+            word_wrap: false,
+        };
+        let width = 80u16;
+        let backend = ratatui::backend::TestBackend::new(width, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render(
+                    f, &state, &nb, &active,
+                    &std::collections::HashMap::new(),
+                    &crate::config::NotebookConfig::default(),
+                    None, &mut CellHighlightCache::default(),
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let underlined = |x: u16, y: u16| {
+            buf[(x, y)].style().add_modifier.contains(Modifier::UNDERLINED)
+        };
+        // Find the row carrying the frame text.
+        let row_text = |y: u16| (0..width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+        let frame_row = (0..12)
+            .find(|&y| row_text(y).contains("Cell [1]"))
+            .expect("frame row must be drawn");
+        // A cell inside the text ("File") is underlined; the far-right padding is not.
+        let file_x = (0..width).find(|&x| buf[(x, frame_row)].symbol() == "F").unwrap();
+        assert!(underlined(file_x, frame_row), "the link text must be underlined");
+        assert!(!underlined(width - 2, frame_row), "trailing padding must not be underlined");
+        // Column 0 (border) and the left pad before the text are not underlined.
+        assert!(!underlined(0, frame_row));
+    }
+
+    #[test]
+    fn error_frame_maps_to_output_cursor_row() {
+        use crate::notebook::{ErrorFrame, Output};
+        // A 2-line stream precedes the error, so the error headline starts at
+        // output row 2; traceback lines follow at rows 3, 4, 5.
+        let cell = Cell {
+            id: "c".into(),
+            cell_type: CellType::Code,
+            source: Rope::from_str("boom()"),
+            outputs: vec![
+                Output::Stream { name: "stdout".into(), text: "one\ntwo\n".into() },
+                Output::Error {
+                    ename: "IndexError".into(),
+                    evalue: "oops".into(),
+                    // tb rows: 0="Traceback…", 1=File(frame), 2=source, 3=exc
+                    traceback: vec![
+                        "Traceback (most recent call last):".into(),
+                        "  File \"Cell [1]\", line 2, in <module>".into(),
+                        "    boom()".into(),
+                        "IndexError: oops".into(),
+                    ],
+                    frames: vec![ErrorFrame {
+                        tb_index: 1,
+                        cell_id: Some("c".into()),
+                        cell_number: 1,
+                        line: 1,
+                    }],
+                },
+            ],
+            execution_count: Some(1),
+            rendered: false,
+        };
+        let cfg = crate::config::NotebookConfig::default();
+        let limits = OutputLimits::new(&cfg, false);
+        // The frame's File line is the 2nd traceback row → base 2 (stream) +
+        // 1 (headline) + 1 (tb_index) = output row 4.
+        let hit = error_frame_at_output_row(&cell, 4, limits, None, 80);
+        assert!(hit.is_some(), "output row 4 must resolve to the frame");
+        assert_eq!(hit.unwrap().line, 1);
+        // The headline row (2) and non-frame traceback rows are not links.
+        assert!(error_frame_at_output_row(&cell, 2, limits, None, 80).is_none());
+        assert!(error_frame_at_output_row(&cell, 3, limits, None, 80).is_none());
+        // A row inside the leading stream isn't a link either.
+        assert!(error_frame_at_output_row(&cell, 0, limits, None, 80).is_none());
     }
 
     #[test]

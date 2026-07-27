@@ -173,8 +173,10 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   then into the next cell; `k` is the exact inverse (climb the output block back to the source,
   then up into the previous cell — landing on *its* last output row when it has one). The
   output cursor is `NotebookState.output_row` (`Some(visual_row)` while browsing outputs, reset
-  to `None` by any command other than `j`/`k`/`PageUp`/`PageDown`); a block cursor is drawn on
-  that output row and the source cursor is hidden. Paging is literally a run of `j`/`k` steps
+  to `None` by any command other than `j`/`k`/`PageUp`/`PageDown`; horizontal motions
+  (`h`/`l`/`w`/`b`/`0`/`$`/…) are **swallowed** while browsing — the output is read-only and has
+  no horizontal scroll, so they'd otherwise snap the cursor back to the hidden source); a block
+  cursor is drawn on that output row and the source cursor is hidden. Paging is literally a run of `j`/`k` steps
   (`notebook_vertical` + `notebook_move_down`/`_up`), so it crosses cells and output blocks
   too. Cell management (new/delete/clear-outputs/
   cell-type/structural-undo) has no default key — use the command palette or `:` command line
@@ -187,9 +189,30 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   (`OutputLimits::new(&config.notebook, expanded)`) which is threaded through *both* the
   height model and the renderer — they must derive it identically or cell heights drift from
   what is drawn. `expanded_outputs` is keyed by cell index, so `after_structural_edit` clears it
+- **Clickable error tracebacks (jump-to-line)** — the kernel compiles each cell under its
+  stable **cell id** as the filename (sent as a `__KI_META__<id>` control line before the code,
+  stripped by the runner so line numbers stay 1-based to the cell) and registers the source with
+  `linecache`, so a traceback both shows the offending source line inline *and* reports
+  `File "<id>", line N`. `notebook::build_error_output` (runtime) resolves those `<id>` frames
+  against the cell list into `Output::Error.frames: Vec<ErrorFrame>` (`tb_index`, `cell_id`,
+  `cell_number`, 0-based `line`) and rewrites the filename to a friendly `Cell [N]` label;
+  `frames` is runtime-only (not nbformat) and is rebuilt on reload from those labels by
+  `frames_from_display`. On a frame row only the *visible text span* is recoloured + underlined
+  (`notebook_ui::draw_traceback_row` — the underline must not bleed across the row's padding),
+  so it reads like a hyperlink; and there are
+  two ways to follow them: **`Enter`** while the output cursor (`output_row`) sits on a frame row
+  (`Command::NotebookFollowError`, bound in the notebook keymap; `error_frame_at_output_row`
+  maps the row → frame — and the command is exempted from the per-command `output_row` reset in
+  `execute()`), and **`:goto-error`** (`Command::NotebookGotoError`) which jumps straight to the
+  focused cell's *innermost* frame. Both go through `exec::jump_to_notebook_cell_line` /
+  `resolve_error_frame` (id-preferred, cell-number fallback), and a failing cell's completion
+  message hints at both. Frames may target another cell when the culprit is a function defined
+  elsewhere
 - **Persistent kernel session** — one Python subprocess per notebook; namespace shared across all cells
   - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in notebook dir and cwd before falling back to `python3`
-  - Runner script embedded in binary; the editor sends a code block terminated by `__KI_CODE_END__`
+  - Runner script embedded in binary; the editor sends an optional `__KI_META__<cell-id>` line,
+    then a code block terminated by `__KI_CODE_END__` (the id becomes the compile filename — see
+    clickable tracebacks above)
   - `exec(compile(code, '<cell>', 'exec'), shared_ns)` — full statement support, persistent imports/variables
 - **Asynchronous, streaming execution** — nothing about the kernel ever blocks the UI:
   - **Kernel startup is async**: `KernelSession::new` spawns python and returns immediately

@@ -294,6 +294,10 @@ impl Keymap {
         notebook.insert(KeyBinding::char('K'), vec![Command::PageUp]);
         notebook.insert(KeyBinding::char('N'), vec![Command::NotebookNextCell]);
         notebook.insert(KeyBinding::char('M'), vec![Command::NotebookPrevCell]);
+        // Enter on a traceback frame line (while browsing output with j/k) jumps
+        // to that source line. A bare Enter is otherwise unbound in a notebook
+        // (Shift/Ctrl+Enter execute the cell, handled before dispatch).
+        notebook.insert(KeyBinding::key(KeyCode::Enter), vec![Command::NotebookFollowError]);
         // Shift+Enter / Ctrl+Enter execute the focused cell — handled directly in
         // input::handle_key (before mode dispatch) so they fire from Insert too.
 

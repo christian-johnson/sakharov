@@ -318,10 +318,13 @@ pub(super) fn pump_execution_queue(app: &mut App) -> bool {
                 continue;
             }
             let code = nb.cells[idx].source.to_string();
+            // The cell's stable id is the compile filename — it lets a traceback
+            // frame be mapped back to this cell for jump-to-line navigation.
+            let cell_tag = nb.cells[idx].id.clone();
             nb.cells[idx].outputs.clear();
             let Some(session) = nb.kernel.as_mut() else { break };
             // Fire-and-forget: output streams back via process_kernel_events.
-            match session.start_execution(&code) {
+            match session.start_execution(&code, &cell_tag) {
                 Ok(()) => {
                     state.executing_cell = Some(idx);
                     state.executing_since = Some(std::time::Instant::now());

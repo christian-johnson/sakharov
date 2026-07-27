@@ -198,6 +198,8 @@ commands! {
         NotebookOpenCellEdit => "notebook-open-cell-edit", aliases: ["open-cell", "edit-cell"], palette: "Open cell in full-screen editor  [:open-cell]";
         NotebookCloseCellEdit => "notebook-close-cell-edit", aliases: ["close-cell", "notebook-discard-cell-edit", "discard-cell"], palette: "Save cell and return  [ctrl+enter, :close-cell]";
         EnterNotebook => "enter-notebook", aliases: ["nb", "notebook"], palette: "Open the current .ipynb as a notebook  [:nb]";
+        NotebookGotoError => "notebook-goto-error", aliases: ["goto-error", "error"], palette: "Jump to the source line of the focused cell's error  [:goto-error]";
+        NotebookFollowError => "notebook-follow-error";
 
         // --- Code folding ---
         FoldToggle => "fold-toggle", aliases: ["za"], palette: "Toggle fold at cursor  [za]";

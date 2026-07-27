@@ -286,6 +286,8 @@ undo) has no default key — use the command palette (`Space`) or the `:` comman
 | `notebook-cell-to-code` | — | `:cell-code`, `:to-code` | Convert the focused cell to a code cell |
 | `notebook-undo-structural` | — | — | Undo the last add/delete-cell change |
 | `notebook-redo-structural` | — | — | Redo the last undone structural change |
+| `notebook-goto-error` | — | `:goto-error`, `:error` | Jump the cursor to the source line of the focused cell's error (the innermost traceback frame) |
+| `notebook-follow-error` | `Enter` (on a traceback `File …` line) | — | Jump to the exact cell + line named by the traceback frame the output cursor is on |
 
 ### Execution & kernel
 

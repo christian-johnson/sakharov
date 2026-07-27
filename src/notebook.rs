@@ -20,7 +20,7 @@ use serde_json::Value;
 //   {"t":"error","text":<traceback>}
 //   {"t":"done"}
 const RUNNER_SCRIPT: &str = r#"
-import sys, json, io, traceback, base64, ast
+import sys, json, io, traceback, base64, ast, linecache
 
 _ns = {'__name__': '__main__'}
 _real_stdout = sys.stdout
@@ -128,6 +128,16 @@ while True:
     else:
         break  # stdin closed — kernel shutting down
 
+    # The editor prefixes a control line naming this cell (its stable id). We
+    # compile under that name so tracebacks report `File "<id>", line N` — the
+    # editor maps the id back to the cell to make the frame a jump target. The
+    # line is stripped before the code so line numbers stay 1-based to the cell.
+    cell_name = '<cell>'
+    if lines and lines[0].startswith('__KI_META__'):
+        tag = lines.pop(0)[len('__KI_META__'):].strip()
+        if tag:
+            cell_name = tag
+
     # Handle IPython-style line magics. Only %matplotlib is processed;
     # everything else starting with % or ! is silently dropped for now.
     code_lines = []
@@ -159,20 +169,26 @@ while True:
 
     code = '\n'.join(code_lines)
 
+    # Register the cell source with linecache so tracebacks show the offending
+    # source line inline (linecache can't read our synthetic `<id>` filename off
+    # disk). mtime None keeps the entry pinned across checkcache() calls.
+    if code:
+        linecache.cache[cell_name] = (len(code), None, code.splitlines(keepends=True), cell_name)
+
     sys.stdout, sys.stderr = _Fwd('stdout'), _Fwd('stderr')
     try:
         if code.strip():
             # Split off a trailing bare expression so its value can be displayed
             # (rich repr if available), mirroring Jupyter's execute_result.
-            _parsed = ast.parse(code, '<cell>', 'exec')
+            _parsed = ast.parse(code, cell_name, 'exec')
             _last_expr = None
             if _parsed.body and isinstance(_parsed.body[-1], ast.Expr):
                 _last_expr = _parsed.body.pop()
             if _parsed.body:
-                exec(compile(_parsed, '<cell>', 'exec'), _ns)
+                exec(compile(_parsed, cell_name, 'exec'), _ns)
             if _last_expr is not None:
                 _expr_ast = ast.fix_missing_locations(ast.Expression(_last_expr.value))
-                _value = eval(compile(_expr_ast, '<cell>', 'eval'), _ns)
+                _value = eval(compile(_expr_ast, cell_name, 'eval'), _ns)
                 if _value is not None:
                     _display_result(_value)
         if _capture_matplotlib:
@@ -291,7 +307,16 @@ impl KernelSession {
     /// Send `code` to the kernel and return immediately. Output arrives later
     /// as [`KernelMessage`]s via [`poll`](Self::poll); the kernel marks itself
     /// busy until a `Done` message is observed.
-    pub fn start_execution(&mut self, code: &str) -> Result<()> {
+    ///
+    /// `cell_tag` names the cell for the kernel (its stable id): the runner
+    /// compiles under that filename, so a traceback reports `File "<tag>", line
+    /// N` and the editor can map the frame back to a jump target.
+    pub fn start_execution(&mut self, code: &str, cell_tag: &str) -> Result<()> {
+        // Control line naming the cell — the runner strips it before the code,
+        // so line numbers stay 1-based to the cell source.
+        self.stdin.write_all(b"__KI_META__")?;
+        self.stdin.write_all(cell_tag.as_bytes())?;
+        self.stdin.write_all(b"\n")?;
         for line in code.lines() {
             self.stdin.write_all(line.as_bytes())?;
             self.stdin.write_all(b"\n")?;
@@ -458,7 +483,29 @@ pub enum Output {
         ename: String,
         evalue: String,
         traceback: Vec<String>,
+        /// Navigable traceback frames — the `File "Cell [N]", line L` lines that
+        /// map to a source line the cursor can jump to. Runtime-only (derived
+        /// from the traceback, not part of nbformat): rebuilt on load from the
+        /// displayed labels, and at kernel time from the cells' compile ids.
+        frames: Vec<ErrorFrame>,
     },
+}
+
+/// One navigable frame inside an error traceback: a `File "…", line L` line that
+/// resolves to a concrete `(cell, line)` the cursor can jump to.
+#[derive(Clone)]
+pub struct ErrorFrame {
+    /// Index into the owning `Output::Error`'s `traceback` Vec of the `File`
+    /// line this frame styles / navigates from.
+    pub tb_index: usize,
+    /// The target cell's stable id when known (frames built at kernel time);
+    /// `None` for frames rebuilt from a reloaded notebook, which only carry the
+    /// 1-based `cell_number` printed in the label.
+    pub cell_id: Option<String>,
+    /// 1-based cell number, as shown in the `Cell [N]` label.
+    pub cell_number: usize,
+    /// 0-based line within the target cell.
+    pub line: usize,
 }
 
 #[derive(Clone)]
@@ -541,7 +588,7 @@ fn parse_output(obj: &Value) -> Option<Output> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let traceback = obj
+            let traceback: Vec<String> = obj
                 .get("traceback")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -550,10 +597,86 @@ fn parse_output(obj: &Value) -> Option<Output> {
                         .collect()
                 })
                 .unwrap_or_default();
-            Some(Output::Error { ename, evalue, traceback })
+            let frames = frames_from_display(&traceback);
+            Some(Output::Error { ename, evalue, traceback, frames })
         }
         _ => None,
     }
+}
+
+/// Parse a CPython traceback frame line — `  File "NAME", line N, in …` —
+/// returning `(name, line_number)`. Returns `None` for non-frame lines.
+fn parse_frame_line(line: &str) -> Option<(String, usize)> {
+    let rest = line.trim_start().strip_prefix("File \"")?;
+    let close = rest.find('"')?;
+    let name = rest[..close].to_string();
+    let after = rest[close + 1..].strip_prefix(", line ")?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    Some((name, digits.parse().ok()?))
+}
+
+/// `"Cell [3]"` → `3`. The friendly label `build_error_output` writes for a
+/// notebook cell frame (and that `frames_from_display` reads back on reload).
+fn cell_number_from_label(name: &str) -> Option<usize> {
+    name.strip_prefix("Cell [")?.strip_suffix(']')?.parse().ok()
+}
+
+/// Rebuild navigable frames from an already-displayed traceback (`Cell [N]`
+/// labels) — the reload path, where the original compile ids are gone.
+fn frames_from_display(traceback: &[String]) -> Vec<ErrorFrame> {
+    traceback
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let (name, lineno) = parse_frame_line(line)?;
+            let number = cell_number_from_label(&name)?;
+            Some(ErrorFrame {
+                tb_index: i,
+                cell_id: None,
+                cell_number: number,
+                line: lineno.saturating_sub(1),
+            })
+        })
+        .collect()
+}
+
+/// Build an `Output::Error` from a raw kernel traceback.
+///
+/// The kernel compiles each cell under its stable id as the filename, so a
+/// traceback frame `File "<id>", line L` names the exact cell + line that
+/// raised. We resolve those frames against `cells`, record them as navigable
+/// [`ErrorFrame`]s, and rewrite the filename to a friendly `Cell [N]` label for
+/// display (frames from library files are left untouched and non-navigable).
+pub fn build_error_output(traceback: &str, cells: &[Cell]) -> Output {
+    let mut lines: Vec<String> = traceback.lines().map(str::to_owned).collect();
+    let mut frames = Vec::new();
+    for (i, line) in lines.iter_mut().enumerate() {
+        let Some((name, lineno)) = parse_frame_line(line) else { continue };
+        let Some(cidx) = cells.iter().position(|c| c.id == name) else { continue };
+        let number = cidx + 1;
+        frames.push(ErrorFrame {
+            tb_index: i,
+            cell_id: Some(cells[cidx].id.clone()),
+            cell_number: number,
+            line: lineno.saturating_sub(1),
+        });
+        *line = line.replacen(&format!("\"{name}\""), &format!("\"Cell [{number}]\""), 1);
+    }
+    let (ename, evalue) = split_error_headline(&lines);
+    Output::Error { ename, evalue, traceback: lines, frames }
+}
+
+/// Split a traceback's last non-empty line — typically `ExceptionType: message`
+/// — into `(ename, evalue)`.
+fn split_error_headline(lines: &[String]) -> (String, String) {
+    let last = lines
+        .iter()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .cloned()
+        .unwrap_or_default();
+    let (ename, evalue) = last.split_once(": ").unwrap_or((&last, ""));
+    (ename.to_owned(), evalue.to_owned())
 }
 
 /// Generate a unique cell ID without an external crate: nanosecond timestamp
@@ -960,7 +1083,7 @@ impl Notebook {
                         "metadata": {},
                     })
                 }
-                Output::Error { ename, evalue, traceback } => serde_json::json!({
+                Output::Error { ename, evalue, traceback, .. } => serde_json::json!({
                     "output_type": "error",
                     "ename": ename,
                     "evalue": evalue,
@@ -1037,24 +1160,6 @@ pub fn append_stream(outputs: &mut Vec<Output>, name: &str, chunk: &str) {
     }
 }
 
-/// Push an `Error` output parsed from a Python traceback string.
-pub fn push_error_output(outputs: &mut Vec<Output>, traceback: &str) {
-    let lines: Vec<String> = traceback.lines().map(str::to_owned).collect();
-    // Last non-empty line is typically "ExceptionType: message".
-    let last = lines
-        .iter()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .cloned()
-        .unwrap_or_default();
-    let (ename, evalue) = last.split_once(": ").unwrap_or((&last, ""));
-    outputs.push(Output::Error {
-        ename: ename.to_owned(),
-        evalue: evalue.to_owned(),
-        traceback: lines,
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,6 +1182,67 @@ mod tests {
             modified: false,
             kernel: None,
         }
+    }
+
+    fn cell_with_id(id: &str, src: &str) -> Cell {
+        Cell {
+            id: id.into(),
+            cell_type: CellType::Code,
+            source: Rope::from_str(src),
+            outputs: vec![],
+            execution_count: None,
+            rendered: false,
+        }
+    }
+
+    #[test]
+    fn build_error_output_resolves_and_relabels_cell_frame() {
+        // Two cells; the error's in-cell frame names cell "bbb" (the 2nd cell).
+        let cells = vec![cell_with_id("aaa", "x = 1"), cell_with_id("bbb", "data = []\nprint(data[10])")];
+        let tb = "Traceback (most recent call last):\n  \
+                  File \"bbb\", line 2, in <module>\n    \
+                  print(data[10])\nIndexError: list index out of range";
+        let out = build_error_output(tb, &cells);
+        let Output::Error { ename, traceback, frames, .. } = out else { panic!("not an error") };
+        assert_eq!(ename, "IndexError");
+        // Exactly one navigable frame → cell index 1 (number 2), line 1 (0-based).
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].cell_id.as_deref(), Some("bbb"));
+        assert_eq!(frames[0].cell_number, 2);
+        assert_eq!(frames[0].line, 1);
+        // The frame's traceback row was relabelled for display.
+        assert!(traceback[frames[0].tb_index].contains("\"Cell [2]\""));
+        assert!(!traceback[frames[0].tb_index].contains("\"bbb\""));
+    }
+
+    #[test]
+    fn build_error_output_ignores_library_frames() {
+        let cells = vec![cell_with_id("aaa", "raise ValueError('x')")];
+        // A frame from a real file must not be treated as navigable.
+        let tb = "Traceback (most recent call last):\n  \
+                  File \"/usr/lib/python3.11/foo.py\", line 42, in bar\n\
+                  ValueError: x";
+        let Output::Error { frames, traceback, .. } = build_error_output(tb, &cells) else {
+            panic!("not an error")
+        };
+        assert!(frames.is_empty());
+        assert!(traceback.iter().any(|l| l.contains("/usr/lib/python3.11/foo.py")));
+    }
+
+    #[test]
+    fn frames_rebuild_from_displayed_labels_on_reload() {
+        // The reload path only has the friendly `Cell [N]` labels to work from.
+        let traceback = vec![
+            "Traceback (most recent call last):".to_string(),
+            "  File \"Cell [3]\", line 5, in <module>".to_string(),
+            "ZeroDivisionError: division by zero".to_string(),
+        ];
+        let frames = frames_from_display(&traceback);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].tb_index, 1);
+        assert_eq!(frames[0].cell_id, None);
+        assert_eq!(frames[0].cell_number, 3);
+        assert_eq!(frames[0].line, 4);
     }
 
     #[test]
