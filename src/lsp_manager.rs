@@ -488,7 +488,7 @@ impl LspManager {
     /// `completionProvider.resolveProvider`, i.e. it can enrich items with docs.
     pub fn completion_resolve_supported(&self, language: &str) -> bool {
         self.server_idx_for_feature(language, "completion")
-            .and_then(|idx| self.servers.get(language).map(|ss| (idx, ss)))
+            .zip(self.servers.get(language))
             .map(|(idx, ss)| {
                 ss[idx]
                     .client
