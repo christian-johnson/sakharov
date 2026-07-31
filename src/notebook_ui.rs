@@ -28,6 +28,10 @@ pub struct ActiveCellView<'a> {
     /// output block (see `NotebookState::output_row`); the source cursor is
     /// hidden and a block cursor is drawn on that output row instead.
     pub output_row: Option<usize>,
+    /// Char column within `output_row`'s content (`NotebookState::output_col`).
+    pub output_col: usize,
+    /// Anchor of an in-progress output-text selection (`NotebookState::output_anchor`).
+    pub output_anchor: Option<(usize, usize)>,
     /// Current editor mode — determines cursor highlight style.
     pub mode: &'a Mode,
     /// Jump-mode labels to overlay on the cell source (`app.jump.labels`).
@@ -657,11 +661,48 @@ fn render_cell_content(
             );
             current_row += 1;
         }
+
+        // Absolute char positions of the output cursor/selection, addressed
+        // into the block's virtual rope (`output_virtual_rope`) exactly like
+        // a source cursor addresses the buffer rope — see
+        // `OutputCtx::advance`, which intersects these against each row as
+        // it's drawn.
+        let (out_cursor_char, out_sel) = if is_focused {
+            active.output_row.map(|row| {
+                let vrope = output_virtual_rope(cell, limits, cell_pixel_size, area.width);
+                let to_char = |r: usize, c: usize| {
+                    let r = r.min(vrope.len_lines().saturating_sub(1));
+                    let line_start = vrope.line_to_char(r);
+                    let line = vrope.line(r);
+                    let n = line.len_chars();
+                    let content_len = if n > 0 && line.char(n - 1) == '\n' { n - 1 } else { n };
+                    line_start + c.min(content_len)
+                };
+                let cursor_char = to_char(row, active.output_col);
+                let sel = active
+                    .output_anchor
+                    .map(|(ar, ac)| {
+                        let a = to_char(ar, ac);
+                        (a.min(cursor_char), a.max(cursor_char))
+                    })
+                    .filter(|(lo, hi)| lo != hi);
+                (cursor_char, sel)
+            })
+            .map_or((None, None), |(c, s)| (Some(c), s))
+        } else {
+            (None, None)
+        };
+
+        let th = crate::theme::active();
         let mut out_ctx = OutputCtx {
             skip: skip_rows,
-            row_idx: 0,
-            cursor_row: if is_focused { active.output_row } else { None },
+            char_pos: 0,
+            cursor_char: out_cursor_char,
+            sel: out_sel,
             cursor_style: crate::theme::cursor_style(active.mode),
+            selection_style: Style::default()
+                .bg(th.cell_selection_bg)
+                .fg(th.selection_fg.unwrap_or_else(|| th.fg())),
             cursor_pos: None,
             limits,
         };
@@ -684,16 +725,24 @@ fn render_cell_content(
 
 /// Shared bookkeeping while rendering a cell's output block: the scroll clip
 /// still to consume, the running output-row index (0 = first row after the
-/// divider — the index space of `NotebookState::output_row`), and the output
-/// cursor when the focused cell's cursor traverses its outputs.
+/// divider — the index space of `NotebookState::output_row`) and matching
+/// char offset into the block's virtual rope (see `output_virtual_rope`),
+/// and the output cursor/selection when the focused cell's cursor traverses
+/// its outputs.
 struct OutputCtx {
     /// Visual output rows still hidden above the viewport.
     skip: usize,
-    /// Index of the next output visual row.
-    row_idx: usize,
-    /// Output row the cursor sits on (focused cell only).
-    cursor_row: Option<usize>,
+    /// Absolute char offset (into the block's virtual rope) of the next row's
+    /// first character.
+    char_pos: usize,
+    /// Absolute char index of the output cursor (focused cell only), in the
+    /// same virtual-rope address space as `char_pos`.
+    cursor_char: Option<usize>,
+    /// Absolute char range `(lo, hi)` of an active output-text selection
+    /// (half-open), or `None` when the cursor is a point.
+    sel: Option<(usize, usize)>,
     cursor_style: Style,
+    selection_style: Style,
     /// Screen position of the output cursor once its row has been drawn.
     cursor_pos: Option<(u16, u16)>,
     /// Truncation caps for this cell — must be the same ones the height model
@@ -701,22 +750,55 @@ struct OutputCtx {
     limits: OutputLimits,
 }
 
+/// Where one output row lands relative to the viewport clip and the active
+/// cursor/selection, computed by [`OutputCtx::advance`].
+struct RowSlot {
+    /// False when the row is scrolled off above the viewport (still
+    /// accounted for in `char_pos`/`row_idx`, just not drawn).
+    visible: bool,
+    /// Selected char sub-range within this row's text (row-local offsets),
+    /// if the active selection overlaps it.
+    sel: Option<(usize, usize)>,
+    /// Row-local column the cursor sits on, if this is the cursor's row.
+    /// May equal the row's char length (the "end of row" position, like the
+    /// EOL cursor cell on a source line).
+    cursor_col: Option<usize>,
+}
+
 impl OutputCtx {
-    /// Account for one output text row.  Returns `None` when the row is
-    /// hidden by the scroll clip, otherwise whether the cursor sits on it.
-    fn advance(&mut self) -> Option<bool> {
-        let idx = self.row_idx;
-        self.row_idx += 1;
-        if self.skip > 0 {
+    /// Account for one output row of content length `len` (chars, no UI
+    /// padding): advance the row/char bookkeeping unconditionally (so later
+    /// rows stay correctly addressed even while this one is clipped), and
+    /// report its visibility plus any cursor/selection overlap.
+    fn advance(&mut self, len: usize) -> RowSlot {
+        let row_start = self.char_pos;
+        let row_end = row_start + len;
+        self.char_pos = row_end + 1; // +1 for the virtual rope's line-joining '\n'
+
+        let visible = if self.skip > 0 {
             self.skip -= 1;
-            return None;
-        }
-        Some(self.cursor_row == Some(idx))
+            false
+        } else {
+            true
+        };
+        let sel = self.sel.and_then(|(lo, hi)| {
+            let s = lo.max(row_start);
+            let e = hi.min(row_end);
+            (s < e).then(|| (s - row_start, e - row_start))
+        });
+        let cursor_col = self
+            .cursor_char
+            .filter(|&c| c >= row_start && c <= row_end)
+            .map(|c| c - row_start);
+        RowSlot { visible, sel, cursor_col }
     }
 
-    /// Paint the block cursor on the first content column of a drawn output
-    /// row and remember its position for the hardware cursor.
-    fn place_cursor(&mut self, frame: &mut Frame, x: u16, y: u16) {
+    /// Paint the cursor at row-local column `col` (clamped to the row's
+    /// drawn width) and remember its screen position for the hardware
+    /// cursor. `content_x` is the screen column of the row's first content
+    /// char (after any left padding/gutter).
+    fn place_cursor(&mut self, frame: &mut Frame, content_x: u16, row_right: u16, col: u16, y: u16) {
+        let x = (content_x + col).min(row_right.saturating_sub(1));
         let buf = frame.buffer_mut();
         buf[(x, y)].set_style(self.cursor_style);
         self.cursor_pos = Some((x, y));
@@ -893,6 +975,17 @@ fn truncated_rows(total: usize, max: usize) -> usize {
     total.min(max) + usize::from(total > max)
 }
 
+/// Columns reserved to the left of an image so the output cursor always has
+/// a spot that isn't covered by the image's own pixel data (see
+/// [`OutputRowKind::Image`] and [`render_mime_data`]). Matches the 2-char
+/// pad every text output row already draws before its content, so the
+/// cursor gutter lines up whether the row underneath it is text or image.
+const IMAGE_GUTTER: u16 = 2;
+
+fn image_available_cols(available_cols: u16) -> u16 {
+    available_cols.saturating_sub(IMAGE_GUTTER)
+}
+
 fn single_output_height_count(
     output: &Output,
     limits: OutputLimits,
@@ -905,8 +998,9 @@ fn single_output_height_count(
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
             if let Some(png) = &data.image_png {
+                let avail = image_available_cols(available_cols);
                 if let Some((pw, ph)) = png_pixel_size(png) {
-                    compute_image_rows(pw, ph, available_cols, cell_pixel_size, limits.image_rows)
+                    compute_image_rows(pw, ph, avail, cell_pixel_size, limits.image_rows)
                 } else {
                     limits.image_rows
                 }
@@ -922,6 +1016,94 @@ fn single_output_height_count(
             (1 + truncated_rows(traceback.len(), limits.max_traceback)) as u16
         }
     }
+}
+
+/// The navigable content of a cell's output block, one entry per row, in the
+/// exact row-index space of `NotebookState::output_row` — row `i` here is
+/// what a cursor at `output_row == i` sits on. Each string is the row's
+/// content with no leading UI padding (that's applied at draw time, like
+/// `render_source_line`'s pad).
+///
+/// This is the read-only counterpart of a cell's source rope: joining every
+/// row with `'\n'` (see [`output_virtual_rope`]) gives a rope that
+/// `motion::*` can navigate exactly like the plain buffer, so output-text
+/// motions/selection are implemented by reusing that module instead of
+/// hand-rolling char/word boundaries a second time. Exactly as many rows as
+/// [`cell_output_rows`] counts — both derive image row counts via the same
+/// [`image_available_cols`] + `compute_image_rows`, and text truncation via
+/// the same [`truncated_rows`] logic, so they cannot drift apart.
+pub(crate) fn output_rows_content(
+    cell: &Cell,
+    limits: OutputLimits,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+) -> Vec<String> {
+    if cell.cell_type != CellType::Code {
+        return Vec::new();
+    }
+
+    /// Push a (possibly truncated) line list — shared by stream output and
+    /// execute-result/display-data text, and inlined for tracebacks below.
+    fn push_truncated_lines(rows: &mut Vec<String>, lines: &[&str], max: usize) {
+        let to_show = lines.len().min(max);
+        rows.extend(lines[..to_show].iter().map(|l| (*l).to_string()));
+        if lines.len() > max {
+            let extra = lines.len() - max;
+            rows.push(format!("... ({extra} more lines — zo to expand)"));
+        }
+    }
+
+    let mut rows = Vec::new();
+    for output in &cell.outputs {
+        match output {
+            Output::Stream { text, .. } => {
+                let lines: Vec<&str> = text.lines().collect();
+                push_truncated_lines(&mut rows, &lines, limits.max_lines);
+            }
+            Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
+                if let Some(png) = &data.image_png {
+                    let avail = image_available_cols(available_cols);
+                    let n = if let Some((pw, ph)) = png_pixel_size(png) {
+                        compute_image_rows(pw, ph, avail, cell_pixel_size, limits.image_rows)
+                    } else {
+                        limits.image_rows
+                    };
+                    for i in 0..n {
+                        rows.push(if i == 0 { "[image]".to_string() } else { String::new() });
+                    }
+                } else if let Some(t) = &data.text_plain {
+                    let lines: Vec<&str> = t.lines().collect();
+                    push_truncated_lines(&mut rows, &lines, limits.max_lines);
+                }
+            }
+            Output::Error { ename, evalue, traceback, .. } => {
+                rows.push(format!("{ename}: {evalue}"));
+                let max_tb = limits.max_traceback;
+                let to_show = traceback.len().min(max_tb);
+                rows.extend(traceback[..to_show].iter().cloned());
+                if traceback.len() > max_tb {
+                    let extra = traceback.len() - max_tb;
+                    rows.push(format!("... ({extra} more lines — zo to expand)"));
+                }
+            }
+        }
+    }
+    rows
+}
+
+/// A read-only rope over a cell's whole output block: every row from
+/// [`output_rows_content`] joined by `'\n'`, one rope line per output row.
+/// `rope.char_to_line(pos)` recovers `output_row`, `line_to_char` its start —
+/// letting `motion::*` drive output-text navigation/selection exactly like
+/// the plain buffer (see `exec::output_motion`).
+pub(crate) fn output_virtual_rope(
+    cell: &Cell,
+    limits: OutputLimits,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+) -> ropey::Rope {
+    let rows = output_rows_content(cell, limits, cell_pixel_size, available_cols);
+    ropey::Rope::from_str(&rows.join("\n"))
 }
 
 /// The navigable error frame the output cursor sits on, if any.
@@ -1111,80 +1293,132 @@ fn render_source_line(
     );
 }
 
-/// Draw one output text row, honouring the scroll clip and output cursor in
-/// `octx`.  A skipped (scrolled-off) row is accounted for but not drawn and
-/// does not advance `current_row`.  Returns false when the viewport bottom is
-/// reached (caller should stop).
+/// Draw one output-block content row: a 2-col left pad (matching the source
+/// line's own pad), then `text` char-by-char with `base_style`, `link_range`
+/// (if any) recoloured + underlined underneath the selection, and `sel` (a
+/// row-local half-open char range) blended in via `selection_style`. A
+/// selected position past the last real char (the row's virtual "end of
+/// line") also gets one highlighted blank cell, mirroring a source line's
+/// EOL cursor cell.
+#[allow(clippy::too_many_arguments)]
+fn draw_output_content_row(
+    frame: &mut Frame,
+    row: Rect,
+    text: &str,
+    base_style: Style,
+    link_range: Option<(usize, usize)>,
+    sel: Option<(usize, usize)>,
+    selection_style: Style,
+) {
+    if row.width == 0 {
+        return;
+    }
+    let pad_len = 2u16.min(row.width);
+    frame.render_widget(
+        SingleLineWidget { text: "  ".to_string(), style: Style::default() },
+        Rect { x: row.x, y: row.y, width: pad_len, height: 1 },
+    );
+    let content_x = row.x + pad_len;
+    if content_x >= row.right() {
+        return;
+    }
+
+    let th = crate::theme::active();
+    let link_style = Style::default().fg(th.info).add_modifier(Modifier::UNDERLINED);
+
+    let buf = frame.buffer_mut();
+    let mut x = content_x;
+    let mut len = 0usize;
+    for (i, c) in text.chars().enumerate() {
+        len = i + 1;
+        if x >= row.right() {
+            break;
+        }
+        let mut style = base_style;
+        if let Some((ls, le)) = link_range {
+            if i >= ls && i < le {
+                style = link_style;
+            }
+        }
+        if let Some((sl, sh)) = sel {
+            if i >= sl && i < sh {
+                style = style.patch(selection_style);
+            }
+        }
+        buf[(x, row.y)].set_char(c).set_style(style);
+        x += 1;
+    }
+    if let Some((sl, sh)) = sel {
+        if x < row.right() && len >= sl && len < sh {
+            buf[(x, row.y)].set_char(' ').set_style(base_style.patch(selection_style));
+        }
+    }
+}
+
+/// Draw one output text row, honouring the scroll clip and output
+/// cursor/selection in `octx`.  A skipped (scrolled-off) row is accounted for
+/// but not drawn and does not advance `current_row`.  Returns false when the
+/// viewport bottom is reached (caller should stop).
 fn draw_output_row(
     frame: &mut Frame,
     area: Rect,
     current_row: &mut u16,
     octx: &mut OutputCtx,
-    text: String,
+    text: &str,
     style: Style,
 ) -> bool {
-    match octx.advance() {
-        None => true, // scrolled off above — consumed, keep going
-        Some(is_cursor) => {
-            if *current_row >= area.bottom() {
-                return false;
-            }
-            frame.render_widget(SingleLineWidget { text, style }, single_row(area, *current_row));
-            if is_cursor {
-                octx.place_cursor(frame, area.x, *current_row);
-            }
-            *current_row += 1;
-            true
-        }
+    let slot = octx.advance(text.chars().count());
+    if !slot.visible {
+        return true; // scrolled off above — consumed, keep going
     }
+    if *current_row >= area.bottom() {
+        return false;
+    }
+    let row = single_row(area, *current_row);
+    draw_output_content_row(frame, row, text, style, None, slot.sel, octx.selection_style);
+    if let Some(col) = slot.cursor_col {
+        let content_x = row.x + 2u16.min(row.width);
+        octx.place_cursor(frame, content_x, row.right(), col as u16, row.y);
+    }
+    *current_row += 1;
+    true
 }
 
-/// Draw one traceback row, honouring the scroll clip and output cursor like
-/// [`draw_output_row`]. A `link` row (a navigable `File …` frame) is drawn dim
-/// like the rest, then its **visible text span only** is recoloured and
-/// underlined — so it reads like a hyperlink instead of a full-width bar (the
-/// underline must not bleed across the row's trailing padding).
+/// Draw one traceback row, honouring the scroll clip and output
+/// cursor/selection like [`draw_output_row`]. A `link` row (a navigable
+/// `File …` frame) has its **visible text span only** recoloured and
+/// underlined — so it reads like a hyperlink instead of a full-width bar
+/// (the underline must not bleed across the row's trailing padding).
 fn draw_traceback_row(
     frame: &mut Frame,
     area: Rect,
     current_row: &mut u16,
     octx: &mut OutputCtx,
-    text: String,
+    text: &str,
     link: bool,
 ) -> bool {
-    let th = crate::theme::active();
-    match octx.advance() {
-        None => true,
-        Some(is_cursor) => {
-            if *current_row >= area.bottom() {
-                return false;
-            }
-            let row = single_row(area, *current_row);
-            let base = Style::default().fg(th.dim);
-            if link {
-                let chars: Vec<char> = text.chars().collect();
-                let start = chars.iter().take_while(|c| c.is_whitespace()).count();
-                let end = chars.iter().rposition(|c| !c.is_whitespace()).map_or(0, |i| i + 1);
-                let link_style = Style::default().fg(th.info).add_modifier(Modifier::UNDERLINED);
-                frame.render_widget(SingleLineWidget { text, style: base }, row);
-                let buf = frame.buffer_mut();
-                for col in start..end {
-                    let x = row.x + col as u16;
-                    if x >= row.right() {
-                        break;
-                    }
-                    buf[(x, row.y)].set_style(link_style);
-                }
-            } else {
-                frame.render_widget(SingleLineWidget { text, style: base }, row);
-            }
-            if is_cursor {
-                octx.place_cursor(frame, area.x, *current_row);
-            }
-            *current_row += 1;
-            true
-        }
+    let slot = octx.advance(text.chars().count());
+    if !slot.visible {
+        return true;
     }
+    if *current_row >= area.bottom() {
+        return false;
+    }
+    let row = single_row(area, *current_row);
+    let base = Style::default().fg(crate::theme::active().dim);
+    let link_range = link.then(|| {
+        let chars: Vec<char> = text.chars().collect();
+        let start = chars.iter().take_while(|c| c.is_whitespace()).count();
+        let end = chars.iter().rposition(|c| !c.is_whitespace()).map_or(0, |i| i + 1);
+        (start, end)
+    });
+    draw_output_content_row(frame, row, text, base, link_range, slot.sel, octx.selection_style);
+    if let Some(col) = slot.cursor_col {
+        let content_x = row.x + 2u16.min(row.width);
+        octx.place_cursor(frame, content_x, row.right(), col as u16, row.y);
+    }
+    *current_row += 1;
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1209,7 +1443,7 @@ fn render_output(
             let max_lines = octx.limits.max_lines;
             let to_show = lines.len().min(max_lines);
             for line in &lines[..to_show] {
-                if !draw_output_row(frame, area, current_row, octx, format!("  {line}"), style) {
+                if !draw_output_row(frame, area, current_row, octx, line, style) {
                     return;
                 }
             }
@@ -1221,11 +1455,8 @@ fn render_output(
         }
 
         Output::Error { ename, evalue, traceback, frames } => {
-            if !draw_output_row(
-                frame, area, current_row, octx,
-                format!("  {ename}: {evalue}"),
-                Style::default().fg(th.error),
-            ) {
+            let headline = format!("{ename}: {evalue}");
+            if !draw_output_row(frame, area, current_row, octx, &headline, Style::default().fg(th.error)) {
                 return;
             }
             let max_tb = octx.limits.max_traceback;
@@ -1233,9 +1464,7 @@ fn render_output(
                 // Navigable frames (`File "Cell [N]", line L`) render like a
                 // link — Enter on this row jumps the cursor to that source line.
                 let is_link = frames.iter().any(|f| f.tb_index == i);
-                if !draw_traceback_row(
-                    frame, area, current_row, octx, format!("  {tb_line}"), is_link,
-                ) {
+                if !draw_traceback_row(frame, area, current_row, octx, tb_line, is_link) {
                     return;
                 }
             }
@@ -1260,11 +1489,8 @@ fn draw_truncation_row(
         return;
     }
     let extra = total - max;
-    draw_output_row(
-        frame, area, current_row, octx,
-        format!("  ... ({extra} more lines — zo to expand)"),
-        Style::default().fg(crate::theme::active().dim),
-    );
+    let text = format!("... ({extra} more lines — zo to expand)");
+    draw_output_row(frame, area, current_row, octx, &text, Style::default().fg(crate::theme::active().dim));
 }
 
 /// Read pixel dimensions from a PNG header (bytes 16-23 of the file).
@@ -1307,45 +1533,64 @@ fn render_mime_data(
 ) {
     if let Some(png) = &data.image_png {
         // Compute rows from image aspect ratio so the display height scales with
-        // figsize.  image_rows acts as a cap, not a fixed height.
+        // figsize.  image_rows acts as a cap, not a fixed height. Sized against
+        // the width left *after* the cursor gutter, exactly like the height
+        // model (`image_available_cols`), so the two never disagree on row count.
+        let avail = image_available_cols(area.width);
         let natural_rows = if let Some((pw, ph)) = png_pixel_size(png) {
-            compute_image_rows(pw, ph, area.width, cell_pixel_size, octx.limits.image_rows)
+            compute_image_rows(pw, ph, avail, cell_pixel_size, octx.limits.image_rows)
         } else {
             octx.limits.image_rows
         };
-        // The image spans `natural_rows` output rows.  When it straddles the
-        // viewport edge, crop the source vertically so the visible band keeps
-        // its natural scale rather than squashing the whole figure.
-        let skip_top = octx.skip.min(natural_rows as usize) as u16; // rows off the top
-        octx.skip = octx.skip.saturating_sub(natural_rows as usize);
-        // Reserve the image's row-index span so a following output's cursor
-        // index stays aligned (the cursor never lands *inside* an image row).
-        let img_first_idx = octx.row_idx;
-        octx.row_idx += natural_rows as usize;
+
+        // Walk every image row through the same skip/cursor/selection
+        // bookkeeping as text rows (row 0 carries the "[image]" placeholder
+        // text from `output_rows_content`, the rest are empty), so the output
+        // cursor/selection index stays aligned with a following output.
+        let slots: Vec<RowSlot> = (0..natural_rows)
+            .map(|i| octx.advance(if i == 0 { "[image]".chars().count() } else { 0 }))
+            .collect();
+        let Some(first_visible) = slots.iter().position(|s| s.visible) else { return };
+        let skip_top = first_visible as u16;
+        let visible_slots = &slots[first_visible..];
 
         let remaining_after_skip = natural_rows - skip_top;
         let available = area.bottom().saturating_sub(*current_row);
         let shown = remaining_after_skip.min(available);
         if shown > 0 {
             let image_top = *current_row;
+            // The image itself starts past a reserved left gutter — never
+            // covered by Kitty's raster — so the output cursor always has a
+            // well-defined spot to render on, instead of disappearing under
+            // arbitrary image pixels.
+            let image_col = area.x + IMAGE_GUTTER;
+            let image_width = area.width.saturating_sub(IMAGE_GUTTER);
 
             // Placeholder width = the same column count Kitty will use so the
             // dark background matches the rendered image footprint exactly.
             let placeholder_cols = if let Some((pw, ph)) = png_pixel_size(png) {
-                estimated_image_cols(pw, ph, natural_rows, cell_pixel_size).min(area.width)
+                estimated_image_cols(pw, ph, natural_rows, cell_pixel_size).min(image_width)
             } else {
-                area.width
+                image_width
             };
 
             // Draw a dark placeholder block; Kitty will paint over it.
             let th = crate::theme::active();
             for r in 0..shown {
-                let row_area = Rect { x: area.x, y: image_top + r, width: placeholder_cols, height: 1 };
-                let label = if skip_top == 0 && r == 0 { "  ▸ image ".to_string() } else { String::new() };
+                let row_area = Rect { x: image_col, y: image_top + r, width: placeholder_cols, height: 1 };
+                let label = if skip_top == 0 && r == 0 { " ▸ image ".to_string() } else { String::new() };
                 frame.render_widget(
                     SingleLineWidget { text: label, style: Style::default().bg(th.output_bg).fg(th.dim) },
                     row_area,
                 );
+                // A selection spanning this image row tints its gutter too —
+                // there's no real text under the image to recolor instead.
+                if visible_slots.get(r as usize).is_some_and(|s| s.sel.is_some()) {
+                    let buf = frame.buffer_mut();
+                    for gx in area.x..image_col.min(area.right()) {
+                        buf[(gx, image_top + r)].set_style(octx.selection_style);
+                    }
+                }
             }
 
             // Vertical source crop (in image pixels) when clipped at either edge.
@@ -1360,7 +1605,7 @@ fn render_mime_data(
             });
 
             image_requests.push(ImageRequest {
-                col: area.x,
+                col: image_col,
                 row: image_top,
                 rows: shown,
                 cols: placeholder_cols,
@@ -1368,11 +1613,13 @@ fn render_mime_data(
                 png_data: png.clone(),
             });
 
-            // Output cursor sitting on a visible image row → park it there.
-            if let Some(cr) = octx.cursor_row {
-                if cr >= img_first_idx + skip_top as usize && cr < img_first_idx + (skip_top + shown) as usize {
-                    let y = image_top + (cr - img_first_idx) as u16 - skip_top;
-                    octx.cursor_pos = Some((area.x, y));
+            // The output cursor never sits on top of image pixels — it's
+            // drawn in the reserved gutter instead, at whichever visible row
+            // it's on.
+            for (i, slot) in visible_slots.iter().take(shown as usize).enumerate() {
+                if slot.cursor_col.is_some() {
+                    let y = image_top + i as u16;
+                    octx.place_cursor(frame, area.x, image_col, 0, y);
                 }
             }
             *current_row += shown;
@@ -1383,7 +1630,7 @@ fn render_mime_data(
         let to_show = lines.len().min(max_lines);
         let info = Style::default().fg(crate::theme::active().info);
         for line in &lines[..to_show] {
-            if !draw_output_row(frame, area, current_row, octx, format!("  {line}"), info) {
+            if !draw_output_row(frame, area, current_row, octx, line, info) {
                 return;
             }
         }
@@ -1488,6 +1735,8 @@ mod tests {
             cursor: 2, // on the 'H' of "# Heading"
             sel_anchor: 2,
             output_row: None,
+            output_col: 0,
+            output_anchor: None,
             mode: &mode,
             jump_labels: &[],
             jump_typed: "",
@@ -1574,6 +1823,8 @@ mod tests {
                 cursor: 0,
                 sel_anchor: 0,
                 output_row: None,
+                output_col: 0,
+                output_anchor: None,
                 mode: &mode,
                 jump_labels: &[],
                 jump_typed: "",
@@ -1665,6 +1916,8 @@ mod tests {
             cursor: rope.len_chars(),
             sel_anchor: rope.len_chars(),
             output_row: Some(5),
+            output_col: 0,
+            output_anchor: None,
             mode: &mode,
             jump_labels: &[],
             jump_typed: "",
@@ -1688,6 +1941,79 @@ mod tests {
         // The image is partially scrolled off, so its request carries a crop.
         assert!(imgs.iter().any(|r| r.crop.is_some()),
             "a clipped image must be emitted with a vertical crop");
+    }
+
+    /// The output cursor must never land inside an image's own pixel region
+    /// — a terminal can visually swallow the hardware cursor under image
+    /// content. A reserved left gutter keeps it in a spot the image never
+    /// covers (regression: the cursor used to sit at the image's own first
+    /// column, exactly where Kitty painted over it).
+    #[test]
+    fn image_output_cursor_stays_left_of_the_image() {
+        use crate::notebook::{MimeData, Output};
+        let png = {
+            let mut v = vec![0u8; 24];
+            v[16..20].copy_from_slice(&40u32.to_be_bytes());
+            v[20..24].copy_from_slice(&40u32.to_be_bytes());
+            std::sync::Arc::new(v)
+        };
+        let cell = Cell {
+            id: "c".into(),
+            cell_type: CellType::Code,
+            source: Rope::from_str("x"),
+            outputs: vec![Output::DisplayData {
+                data: MimeData { text_plain: None, image_png: Some(png) },
+            }],
+            execution_count: Some(1),
+            rendered: false,
+        };
+        let nb = Notebook {
+            path: std::path::PathBuf::from("/tmp/image-cursor-test.ipynb"),
+            metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
+            cells: vec![cell],
+            modified: false,
+            kernel: None,
+        };
+        let state = NotebookState::new();
+        let rope = nb.cells[0].source.clone();
+        let mode = Mode::Normal;
+        let active = ActiveCellView {
+            rope: &rope,
+            cursor: rope.len_chars(),
+            sel_anchor: rope.len_chars(),
+            output_row: Some(0), // the image's first row
+            output_col: 0,
+            output_anchor: None,
+            mode: &mode,
+            jump_labels: &[],
+            jump_typed: "",
+            word_wrap: false,
+        };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut cursor_pos = None;
+        let mut imgs = Vec::new();
+        terminal
+            .draw(|f| {
+                let (images, cursor) = render(
+                    f, &state, &nb, &active,
+                    &std::collections::HashMap::new(),
+                    &crate::config::NotebookConfig::default(),
+                    Some((18, 9)),
+                    &mut CellHighlightCache::default(),
+                );
+                cursor_pos = cursor;
+                imgs = images;
+            })
+            .unwrap();
+
+        let (cx, _cy) = cursor_pos.expect("the output cursor must be visible on the image row");
+        let img = imgs.first().expect("an image request must be emitted");
+        assert!(
+            cx < img.col,
+            "cursor at col {cx} must sit left of the image, which starts at col {}",
+            img.col,
+        );
     }
 
     /// A navigable frame line underlines only its visible text, not the row's
@@ -1732,6 +2058,8 @@ mod tests {
             cursor: 0,
             sel_anchor: 0,
             output_row: None,
+            output_col: 0,
+            output_anchor: None,
             mode: &mode,
             jump_labels: &[],
             jump_typed: "",

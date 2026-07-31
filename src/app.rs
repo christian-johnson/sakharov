@@ -841,6 +841,8 @@ fn draw_frame(
                             cursor: app.selection.head,
                             sel_anchor: app.selection.anchor,
                             output_row: app.notebook.as_ref().and_then(|(_, s)| s.output_row),
+                            output_col: app.notebook.as_ref().map(|(_, s)| s.output_col).unwrap_or(0),
+                            output_anchor: app.notebook.as_ref().and_then(|(_, s)| s.output_anchor),
                             mode: &app.mode,
                             jump_labels: &app.jump.labels,
                             jump_typed: &app.jump.typed,

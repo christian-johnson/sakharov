@@ -97,34 +97,50 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
     };
 
-    // While browsing a cell's output block (`output_row`), horizontal motions
-    // have nowhere to go — the output is read-only and doesn't scroll sideways —
-    // so swallow them rather than letting them fall through and snap the cursor
-    // back to the (hidden) source. j/k/paging keep navigating the block below.
+    // While browsing a cell's output block (`output_row`), horizontal/word/
+    // line motions move a read-only text cursor over the output itself (see
+    // `output_motion`) instead of the hidden source — the output has no
+    // horizontal *scroll*, but the cursor and an optional selection (Select
+    // mode) still move within it, exactly like the plain buffer. j/k/paging
+    // keep navigating the block below (handled further down).
     let browsing_output = app.notebook.as_ref().map(|(_, s)| s.output_row.is_some()).unwrap_or(false);
-    if browsing_output
-        && matches!(
-            cmd,
-            Command::MoveLeft | Command::MoveRight
-                | Command::MoveWordForward | Command::MoveWordBackward | Command::MoveWordEnd
-                | Command::MoveBigWordForward | Command::MoveBigWordBackward | Command::MoveBigWordEnd
-                | Command::MoveLineStart | Command::MoveLineEnd | Command::MoveLineFirstNonWs
-        )
-    {
-        return;
+    if browsing_output {
+        let handled = match cmd {
+            Command::MoveLeft => Some(output_motion(app, extend, motion::move_left)),
+            Command::MoveRight => Some(output_motion(app, extend, motion::move_right)),
+            Command::MoveWordForward => Some(output_motion(app, extend, motion::move_word_forward)),
+            Command::MoveWordBackward => Some(output_motion(app, extend, motion::move_word_backward)),
+            Command::MoveWordEnd => Some(output_motion(app, extend, motion::move_word_end)),
+            Command::MoveBigWordForward => Some(output_motion(app, extend, motion::move_big_word_forward)),
+            Command::MoveBigWordBackward => Some(output_motion(app, extend, motion::move_big_word_backward)),
+            Command::MoveBigWordEnd => Some(output_motion(app, extend, motion::move_big_word_end)),
+            Command::MoveLineStart => Some(output_motion(app, extend, motion::move_line_start)),
+            Command::MoveLineFirstNonWs => Some(output_motion(app, extend, motion::move_line_first_non_ws)),
+            Command::MoveLineEnd => Some(output_motion(app, extend, motion::move_line_end)),
+            _ => None,
+        };
+        if let Some(moved) = handled {
+            if moved {
+                update_scroll(app);
+            }
+            return;
+        }
     }
 
     // Browsing a cell's output block (`output_row`) is a transient state owned
     // by continued vertical motion — including paging, which is just a run of
-    // single steps; any other command snaps the cursor back to the cell source.
+    // single steps — plus the commands above (handled and returned already)
+    // and mode/yank transitions that operate on the output selection itself;
+    // any other command snaps the cursor back to the cell source.
     if !matches!(
         cmd,
         Command::MoveUp | Command::MoveDown | Command::PageUp | Command::PageDown
             // Reads output_row to resolve which traceback frame the cursor is on.
             | Command::NotebookFollowError
+            | Command::EnterSelect | Command::EnterNormal | Command::YankSelection
     ) {
         if let Some((_, state)) = app.notebook.as_mut() {
-            state.output_row = None;
+            state.clear_output_browsing();
         }
     }
 
@@ -135,8 +151,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::MoveUp => {
             // In a notebook, vertical motion flows continuously: through the
             // focused cell's source, up through the previous cell's output
-            // block, and into its source — see `notebook_move_up`.
-            if !extend && notebook_vertical(app) && notebook_move_up(app) {
+            // block, and into its source — see `notebook_move_up`. In Select
+            // mode this only continues an *already active* output-text
+            // selection (extending it row by row); it never starts one, so
+            // Select-mode motion over the source is unaffected.
+            let extending_output = extend && browsing_output;
+            if (!extend || extending_output) && notebook_vertical(app) && notebook_move_up(app, extend) {
                 return;
             }
             app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
@@ -144,8 +164,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::MoveDown => {
             // In a notebook, `j` past the last source line descends into the
             // cell's output block (so long errors/streams scroll into view),
-            // then crosses into the next cell — see `notebook_move_down`.
-            if !extend && notebook_vertical(app) && notebook_move_down(app) {
+            // then crosses into the next cell — see `notebook_move_down`. See
+            // `MoveUp` above for the Select-mode caveat.
+            let extending_output = extend && browsing_output;
+            if (!extend || extending_output) && notebook_vertical(app) && notebook_move_down(app, extend) {
                 return;
             }
             app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
@@ -271,6 +293,21 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.mode = Mode::Insert;
         }
         Command::YankSelection => {
+            if browsing_output {
+                if let Some(text) = yank_output_selection(app) {
+                    let n = text.chars().count();
+                    app.clipboard = text.clone();
+                    crate::clipboard::write(&text);
+                    app.messages.show(format!("Yanked {n} chars from output"));
+                    if let Some((_, s)) = app.notebook.as_mut() {
+                        s.output_anchor = None;
+                    }
+                    if app.mode == Mode::Select {
+                        app.mode = Mode::Normal;
+                    }
+                    return;
+                }
+            }
             text::yank_selection(app);
             if app.mode == Mode::Select {
                 app.mode = Mode::Normal;
@@ -348,10 +385,24 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.mode = Mode::Normal;
             // The call-signature hint only makes sense while typing arguments.
             app.signature_help = None;
+            // Collapse (don't end) an active output-text selection: stay on
+            // the same output row/col, just drop the anchor — mirrors how
+            // Esc collapses `app.selection` above instead of leaving the cell.
+            if let Some((_, s)) = app.notebook.as_mut() {
+                s.output_anchor = None;
+            }
             return;
         }
         Command::EnterSelect => {
             app.mode = Mode::Select;
+            // Seed the output-selection anchor at the current position so a
+            // `y` right after entering Select mode (before any motion) still
+            // yanks — see `Command::YankSelection`.
+            if let Some((_, s)) = app.notebook.as_mut() {
+                if let Some(row) = s.output_row {
+                    s.output_anchor = Some((row, s.output_col));
+                }
+            }
             return;
         }
         Command::EnterCommandMode => {
@@ -904,7 +955,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::PageDown => {
             let half = (app.viewport_height / 2).max(1);
             for _ in 0..half {
-                if !extend && notebook_vertical(app) && notebook_move_down(app) {
+                let extending_output = extend && browsing_output;
+                if (!extend || extending_output) && notebook_vertical(app) && notebook_move_down(app, extend) {
                     continue;
                 }
                 app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
@@ -913,7 +965,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::PageUp => {
             let half = (app.viewport_height / 2).max(1);
             for _ in 0..half {
-                if !extend && notebook_vertical(app) && notebook_move_up(app) {
+                let extending_output = extend && browsing_output;
+                if (!extend || extending_output) && notebook_vertical(app) && notebook_move_up(app, extend) {
                     continue;
                 }
                 app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
@@ -1074,7 +1127,12 @@ fn nb_output_rows(app: &App, cell_idx: usize) -> usize {
 /// `j` inside a notebook: continue past the last source line into the cell's
 /// output block, then into the next cell.  Returns true when it handled the
 /// motion (the caller must not run the ordinary source `move_down`).
-fn notebook_move_down(app: &mut App) -> bool {
+///
+/// `extend` (Select mode) is only ever passed `true` when already browsing
+/// output (see the `MoveDown` handler) — it extends the row-selection one
+/// output row further but never crosses into the next cell, so a selection
+/// stays within a single cell's output block.
+fn notebook_move_down(app: &mut App, extend: bool) -> bool {
     let (focused, count) = match app.notebook.as_ref() {
         Some((nb, s)) => (s.focused_cell, nb.cells.len()),
         None => return false,
@@ -1086,14 +1144,21 @@ fn notebook_move_down(app: &mut App) -> bool {
         if r + 1 < out_rows {
             if let Some((_, s)) = app.notebook.as_mut() {
                 s.output_row = Some(r + 1);
+                s.output_col = 0;
+                if !extend {
+                    s.output_anchor = None;
+                }
             }
             update_scroll(app);
             return true;
         }
+        if extend {
+            return true; // pinned at the last output row while selecting
+        }
         // Past the last output row → next cell's first source line.
         if focused + 1 < count {
             if let Some((_, s)) = app.notebook.as_mut() {
-                s.output_row = None;
+                s.clear_output_browsing();
             }
             switch_focused_cell(app, focused + 1);
             place_cursor_at_line(app, 0, 0);
@@ -1112,6 +1177,8 @@ fn notebook_move_down(app: &mut App) -> bool {
     if nb_output_rows(app, focused) > 0 {
         if let Some((_, s)) = app.notebook.as_mut() {
             s.output_row = Some(0);
+            s.output_col = 0;
+            s.output_anchor = None;
         }
         update_scroll(app);
         return true;
@@ -1129,8 +1196,9 @@ fn notebook_move_down(app: &mut App) -> bool {
 
 /// `k` inside a notebook: the inverse of [`notebook_move_down`] — climb the
 /// output block back to the source, then up into the previous cell (landing on
-/// its last output row when it has outputs, else its last source line).
-fn notebook_move_up(app: &mut App) -> bool {
+/// its last output row when it has outputs, else its last source line). See
+/// [`notebook_move_down`] for the `extend` (Select mode) semantics.
+fn notebook_move_up(app: &mut App, extend: bool) -> bool {
     let focused = match app.notebook.as_ref() {
         Some((_, s)) => s.focused_cell,
         None => return false,
@@ -1138,10 +1206,24 @@ fn notebook_move_up(app: &mut App) -> bool {
     let output_row = app.notebook.as_ref().and_then(|(_, s)| s.output_row);
 
     if let Some(r) = output_row {
+        if r > 0 {
+            if let Some((_, s)) = app.notebook.as_mut() {
+                s.output_row = Some(r - 1);
+                s.output_col = 0;
+                if !extend {
+                    s.output_anchor = None;
+                }
+            }
+            update_scroll(app);
+            return true;
+        }
+        if extend {
+            return true; // pinned at the first output row while selecting
+        }
+        // r == 0 climbs back onto the source (cursor already sits on the
+        // last source line it descended from).
         if let Some((_, s)) = app.notebook.as_mut() {
-            // r == 0 climbs back onto the source (cursor already sits on the
-            // last source line it descended from).
-            s.output_row = if r > 0 { Some(r - 1) } else { None };
+            s.clear_output_browsing();
         }
         update_scroll(app);
         return true;
@@ -1163,6 +1245,8 @@ fn notebook_move_up(app: &mut App) -> bool {
     if prev_out > 0 {
         if let Some((_, s)) = app.notebook.as_mut() {
             s.output_row = Some(prev_out - 1);
+            s.output_col = 0;
+            s.output_anchor = None;
         }
     }
     update_scroll(app);
@@ -1210,6 +1294,105 @@ fn place_cursor_at_line(app: &mut App, line_idx: usize, col: usize) {
         line_start + col.min(content_len - 1)
     };
     app.selection = Selection::point(head);
+}
+
+// ---------------------------------------------------------------------------
+// Output-text navigation, selection, and yank — a read-only cursor over a
+// cell's rendered output block (streams, results, tracebacks), addressed
+// exactly like the plain buffer but backed by a virtual rope over the
+// output text instead of `app.buffer.rope` (see `notebook_ui::output_rows_content`
+// / `output_virtual_rope`). Reusing `motion::*` against that rope means
+// h/l/w/b/e/0/^/$ and Select-mode extension all behave identically to the
+// source buffer without re-implementing char/word boundaries a second time.
+// ---------------------------------------------------------------------------
+
+/// A line's content length excluding a trailing `\n`/`\r` — the same
+/// trimming `motion.rs`'s internal `line_end_char` applies, so a column
+/// derived here never spills past this row into the next one when added to
+/// `line_to_char`.
+fn rope_line_content_len(rope: &ropey::Rope, line_idx: usize) -> usize {
+    let line = rope.line(line_idx);
+    let n = line.len_chars();
+    if n > 0 && matches!(line.char(n - 1), '\n' | '\r') { n - 1 } else { n }
+}
+
+/// Build the focused cell's output virtual rope (see
+/// `notebook_ui::output_virtual_rope`) using exactly the geometry the
+/// renderer used to lay it out, so char addresses agree with what's on
+/// screen. `None` when no notebook is open or there's no focused cell.
+fn focused_output_rope(app: &App) -> Option<ropey::Rope> {
+    let (nb, state) = app.notebook.as_ref()?;
+    let cell = nb.cells.get(state.focused_cell)?;
+    let limits = crate::notebook_ui::OutputLimits::new(
+        &app.config.notebook, state.is_output_expanded(state.focused_cell),
+    );
+    let cell_px = app.graphics.cell_pixel_size;
+    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
+    Some(crate::notebook_ui::output_virtual_rope(cell, limits, cell_px, avail_cols))
+}
+
+/// Apply a `motion::*` function to the read-only output-text cursor exactly
+/// as it would apply to `app.selection`: map `(output_row, output_col)` to a
+/// char index into the focused cell's output virtual rope, run the motion,
+/// map the result back. `extend` (Select mode) moves only the head,
+/// establishing `output_anchor` as the fixed point (or keeping it already
+/// set) — the same anchor/head contract `Selection` has, just addressed in
+/// `(row, col)` instead of a flat char index. Returns whether it moved
+/// anything (false only if output browsing ended between the caller's check
+/// and here, which shouldn't happen in practice).
+fn output_motion(
+    app: &mut App,
+    extend: bool,
+    f: fn(&ropey::Rope, Selection, bool) -> Selection,
+) -> bool {
+    let Some(rope) = focused_output_rope(app) else { return false };
+    let Some(row) = app.notebook.as_ref().and_then(|(_, s)| s.output_row) else { return false };
+    let output_col = app.notebook.as_ref().map(|(_, s)| s.output_col).unwrap_or(0);
+    let output_anchor = app.notebook.as_ref().and_then(|(_, s)| s.output_anchor);
+
+    let last_line = rope.len_lines().saturating_sub(1);
+    let to_char = |r: usize, c: usize| {
+        let r = r.min(last_line);
+        rope.line_to_char(r) + c.min(rope_line_content_len(&rope, r))
+    };
+    let head = to_char(row, output_col);
+    let anchor = output_anchor.map(|(r, c)| to_char(r, c)).unwrap_or(head);
+
+    let new_sel = f(&rope, Selection::new(anchor, head), extend);
+    let to_rowcol = |pos: usize| {
+        let pos = pos.min(rope.len_chars());
+        let li = rope.char_to_line(pos);
+        (li, pos - rope.line_to_char(li))
+    };
+    let (nr, nc) = to_rowcol(new_sel.head);
+    if let Some((_, state)) = app.notebook.as_mut() {
+        state.output_row = Some(nr);
+        state.output_col = nc;
+        state.output_anchor = if extend { Some(to_rowcol(new_sel.anchor)) } else { None };
+    }
+    true
+}
+
+/// `y` while browsing an active output-text selection: the text spanning
+/// `output_anchor` to the current `(output_row, output_col)`, inclusive of
+/// the char under the head/anchor extreme (matching `text::yank_selection`'s
+/// `end()+1`, so even a zero-width "selection" yanks the one char under the
+/// cursor). Returns `None` when not browsing output at all, so the caller
+/// can fall back to the ordinary buffer yank.
+fn yank_output_selection(app: &App) -> Option<String> {
+    let rope = focused_output_rope(app)?;
+    let (_, state) = app.notebook.as_ref()?;
+    let row = state.output_row?;
+    let last_line = rope.len_lines().saturating_sub(1);
+    let to_char = |r: usize, c: usize| {
+        let r = r.min(last_line);
+        rope.line_to_char(r) + c.min(rope_line_content_len(&rope, r))
+    };
+    let head = to_char(row, state.output_col);
+    let anchor = state.output_anchor.map(|(r, c)| to_char(r, c)).unwrap_or(head);
+    let lo = anchor.min(head);
+    let hi = (anchor.max(head) + 1).min(rope.len_chars());
+    Some(rope.slice(lo..hi).to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -2009,6 +2192,108 @@ mod tests {
         execute(&mut app, &Command::SelectLine);
         assert_eq!(app.notebook.as_ref().unwrap().1.output_row, None,
             "a non-motion command resets output browsing");
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// Character/word/line motions over output text move a real column
+    /// within the row — `w`/`$`/`0`/`h`/`l` address the output row's own
+    /// content exactly like the plain buffer addresses a source line,
+    /// rather than being pure no-ops.
+    #[test]
+    fn output_text_supports_char_and_word_motion() {
+        use crate::notebook::Output;
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 12;
+        app.viewport_width = 80;
+
+        let dir = unique_tmp_dir("outmotion");
+        let target = dir.join("outmotion.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "outmotion");
+
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("a");
+            nb.cells[0].outputs = vec![Output::Stream {
+                name: "stdout".into(),
+                text: "hello world\n".into(),
+            }];
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+
+        app.selection = Selection::point(0);
+        execute(&mut app, &Command::MoveDown); // into output row 0
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, Some(0));
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_col, 0);
+
+        execute(&mut app, &Command::MoveWordForward);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_col, 6, "w lands on 'world'");
+
+        execute(&mut app, &Command::MoveLineEnd);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_col, 10, "$ lands on the last char");
+
+        execute(&mut app, &Command::MoveLineStart);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_col, 0);
+
+        execute(&mut app, &Command::MoveRight);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_col, 1);
+        execute(&mut app, &Command::MoveLeft);
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_col, 0);
+
+        // Still anchored in the output block throughout — none of this
+        // touched the (hidden) source cursor's cell.
+        assert_eq!(app.notebook.as_ref().unwrap().1.output_row, Some(0));
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// Selecting inside output text (Select mode entered while browsing
+    /// output) and yanking copies exactly the selected span to the
+    /// clipboard, distinct from the buffer's own yank path, and leaves the
+    /// cursor exactly where it was in the output block.
+    #[test]
+    fn output_text_selection_yanks_to_clipboard() {
+        use crate::notebook::Output;
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        app.viewport_height = 12;
+        app.viewport_width = 80;
+
+        let dir = unique_tmp_dir("outyank");
+        let target = dir.join("outyank.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "outyank");
+
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("a");
+            nb.cells[0].outputs = vec![Output::Stream {
+                name: "stdout".into(),
+                text: "hello world\n".into(),
+            }];
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+
+        app.selection = Selection::point(0);
+        execute(&mut app, &Command::MoveDown); // into output row 0, col 0
+        execute(&mut app, &Command::EnterSelect);
+        assert_eq!(app.mode, Mode::Select);
+        execute(&mut app, &Command::MoveWordEnd); // extend to the end of "hello"
+        execute(&mut app, &Command::YankSelection);
+
+        assert_eq!(app.clipboard, "hello");
+        assert_eq!(app.mode, Mode::Normal, "yank returns to Normal mode");
+        assert_eq!(
+            app.notebook.as_ref().unwrap().1.output_row, Some(0),
+            "yanking output text stays in the output block"
+        );
+        assert!(app.notebook.as_ref().unwrap().1.output_anchor.is_none(),
+            "yank collapses the selection");
 
         let _ = std::fs::remove_file(&target);
     }

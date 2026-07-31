@@ -2,8 +2,8 @@
 name = "Tokyo Night"
 
 [palette]
-bg        = "#141218"
-bg_dark   = "#2b292f"
+bg        = "#1a1b26"
+bg_dark   = "#171822"
 bg_hl     = "#292e42"
 fg        = "#c0caf5"
 fg_dark   = "#a9b1d6"

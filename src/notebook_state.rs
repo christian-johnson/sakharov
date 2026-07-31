@@ -23,6 +23,17 @@ pub struct NotebookState {
     /// cell source.  The buffer selection is untouched while set (it stays on
     /// the source line the cursor descended from).
     pub output_row: Option<usize>,
+    /// Char column within `output_row`'s content (see
+    /// `notebook_ui::output_rows_content`) — the read-only equivalent of a
+    /// buffer cursor's column.  Meaningless while `output_row` is `None`.
+    pub output_col: usize,
+    /// Anchor `(row, col)` of an in-progress output-text selection, set when
+    /// Select mode is entered while browsing output. `None` means the output
+    /// cursor is a point (no selection); motions reuse `motion::*` against a
+    /// virtual rope over the output text exactly like the plain buffer's
+    /// `Selection`, just addressed in `(row, col)` instead of a flat char
+    /// index (see `exec::output_motion`).
+    pub output_anchor: Option<(usize, usize)>,
     /// Set while a cell is executing (for yellow border). None when idle.
     pub executing_cell: Option<usize>,
     /// Cell IDs waiting to execute, run in order as the kernel becomes idle.
@@ -55,6 +66,8 @@ impl NotebookState {
             scroll_cell: 0,
             scroll_offset: 0,
             output_row: None,
+            output_col: 0,
+            output_anchor: None,
             executing_cell: None,
             exec_queue: std::collections::VecDeque::new(),
             executing_since: None,
@@ -63,6 +76,15 @@ impl NotebookState {
             folded_cells: BTreeSet::new(),
             expanded_outputs: BTreeSet::new(),
         }
+    }
+
+    /// Leave output-text browsing entirely: back to the cell source, no
+    /// pending selection. The single place that resets all three fields
+    /// together, so a reset can never leave a stale column/anchor behind.
+    pub fn clear_output_browsing(&mut self) {
+        self.output_row = None;
+        self.output_col = 0;
+        self.output_anchor = None;
     }
 
     /// True if cell `idx` is currently folded.

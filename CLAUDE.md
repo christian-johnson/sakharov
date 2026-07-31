@@ -208,6 +208,31 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   `resolve_error_frame` (id-preferred, cell-number fallback), and a failing cell's completion
   message hints at both. Frames may target another cell when the culprit is a function defined
   elsewhere
+- **Output text is navigable, selectable, and copyable like real text** — the output cursor
+  (`NotebookState.output_row` + `output_col`) is a char position, not just a row index:
+  `h`/`l`/`w`/`b`/`e`/`W`/`B`/`E`/`0`/`^`/`$` move it by reusing `motion::*` against a **virtual
+  rope** built from the block's rendered rows (`notebook_ui::output_rows_content` /
+  `output_virtual_rope` — one rope line per output row, in `output_row`'s index space), so
+  output-text motion behaves exactly like the plain buffer (including this app's own
+  in-line-only `h`/`l`, unlike word motions which do cross rows through the rope's line
+  breaks) without a second hand-rolled implementation of word/char boundaries. `v` while
+  browsing output starts a selection (`NotebookState.output_anchor`, seeded immediately so a
+  `y` right after `v` still works); motions extend it, rendered as a background tint per
+  affected row (`OutputCtx::sel`, intersected per-row in `OutputCtx::advance`); `y` yanks the
+  spanned text to the system clipboard (`exec::yank_output_selection`) instead of the buffer's
+  own yank. Esc collapses the selection but stays in the output block. Because `Mode::Select`
+  never consults the notebook keymap (see `input.rs`), `Enter`/`NotebookFollowError` is
+  naturally unreachable while a selection is active — link-follow only ever fires on a bare
+  cursor. Image rows are addressable too (as a one-line `[image]` placeholder), so a
+  selection/motion can pass through an image without special-casing it
+- **The output cursor never renders under an image's own pixels** — a terminal's native cursor
+  can be visually swallowed by whatever the Kitty graphics protocol painted on top of it. A
+  reserved `IMAGE_GUTTER` (2 cols, matching the text rows' own left pad) keeps every image
+  starting two columns right of the cell border; both the height model
+  (`image_available_cols`, used by `cell_output_rows`/`output_rows_content`) and the renderer
+  (`render_mime_data`) size the image against that narrowed width so they never disagree on
+  row count, and the cursor for any row inside an image is drawn in that gutter instead
+  (skinny, always on a color the app controls, never Kitty's raster)
 - **Persistent kernel session** — one Python subprocess per notebook; namespace shared across all cells
   - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in notebook dir and cwd before falling back to `python3`
   - Runner script embedded in binary; the editor sends an optional `__KI_META__<cell-id>` line,
