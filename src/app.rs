@@ -508,9 +508,14 @@ impl App {
     }
 }
 
-/// Map a file path to an LSP language id via its extension (see [`crate::lang`]).
+/// Map a file path to an LSP language id via its extension (see [`crate::lang`]),
+/// falling back to a filename match for extensionless shell dotfiles like `.zshrc`.
 pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str> {
-    crate::lang::ext_to_lang(path?.extension()?.to_str()?)
+    let path = path?;
+    if let Some(lang) = path.extension().and_then(|e| e.to_str()).and_then(crate::lang::ext_to_lang) {
+        return Some(lang);
+    }
+    crate::lang::filename_to_lang(path.file_name()?.to_str()?)
 }
 
 /// Set up terminal, run the event loop, then restore terminal.

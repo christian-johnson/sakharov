@@ -100,6 +100,23 @@ impl Language {
         }
     }
 
+    /// Detect language from a full path: extension first, falling back to
+    /// well-known shell dotfiles (`.zshrc`, `.bashrc`, ...) that have no
+    /// extension `Path::extension()` can see at all.
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        if let Some(lang) = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Self::from_extension)
+        {
+            return Some(lang);
+        }
+        let name = path.file_name()?.to_str()?;
+        crate::lang::SHELL_DOTFILES
+            .contains(&name)
+            .then_some(Self::Bash)
+    }
+
     /// The raw tree-sitter grammar for this language (shared by the
     /// highlighter and the fold-range walker).
     pub fn ts_language(self) -> tree_sitter::Language {
@@ -133,10 +150,7 @@ pub struct Highlighter {
 impl Highlighter {
     /// Create a highlighter, detecting language from the optional file path.
     pub fn new(path: Option<&std::path::Path>) -> Self {
-        let language = path
-            .and_then(|p| p.extension())
-            .and_then(|e| e.to_str())
-            .and_then(Language::from_extension);
+        let language = path.and_then(Language::from_path);
 
         let config = language.and_then(|lang| build_config(lang).ok());
 
@@ -300,5 +314,27 @@ mod tests {
             let spans = hl.highlight(&Rope::from_str(src)).expect("highlight runs");
             assert!(!spans.is_empty(), "{lang:?}: no highlight spans for {src:?}");
         }
+    }
+
+    /// Shell dotfiles like `.zshrc` have no extension `Path::extension()` can
+    /// see, so they must resolve to Bash via the filename fallback instead.
+    #[test]
+    fn shell_dotfiles_resolve_to_bash_by_filename() {
+        for name in crate::lang::SHELL_DOTFILES {
+            let path = std::path::Path::new(name);
+            assert_eq!(
+                Language::from_path(path),
+                Some(Language::Bash),
+                "{name:?} should resolve to Bash"
+            );
+        }
+    }
+
+    /// A path with a recognised extension must still take priority over any
+    /// filename fallback.
+    #[test]
+    fn from_path_prefers_extension_over_filename() {
+        let path = std::path::Path::new("main.py");
+        assert_eq!(Language::from_path(path), Some(Language::Python));
     }
 }

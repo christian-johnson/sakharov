@@ -38,3 +38,27 @@ pub fn ext_to_lang(ext: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// Shell rc/profile filenames that carry no extension at all (`.zshrc`,
+/// `.bashrc`, ...). `Path::extension()` returns `None` for a name that starts
+/// with `.` and has no other `.` in it, so these dotfiles need to be matched
+/// on their full filename rather than an extension.
+pub const SHELL_DOTFILES: &[&str] = &[
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".bash_aliases",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".profile",
+];
+
+/// Map a bare filename (no extension) to an LSP language id, for files like
+/// [`SHELL_DOTFILES`] that `ext_to_lang` can never see.
+pub fn filename_to_lang(filename: &str) -> Option<&'static str> {
+    SHELL_DOTFILES.contains(&filename).then_some("bash")
+}

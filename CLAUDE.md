@@ -16,7 +16,12 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Tree-sitter syntax highlighting: Rust, Python, JavaScript, TOML, JSON, YAML, Bash, Go, C,
   HTML, CSS (see `highlight::Language` + `lang.rs`; a unit test compiles every grammar's
   highlight query and asserts it produces spans, so a broken query can't silently disable
-  highlighting). Folding (`fold.rs`) and `gc` comment syntax cover the new languages too
+  highlighting). Folding (`fold.rs`) and `gc` comment syntax cover the new languages too.
+  **Language detection falls back to filename for extensionless shell dotfiles**
+  (`.zshrc`, `.bashrc`, `.bash_profile`, `.profile`, ... — see `lang::SHELL_DOTFILES`) since
+  `Path::extension()` returns `None` for a dotfile with no second `.`; both
+  `Language::from_path` (highlighting) and `app::language_for_path` (LSP language id) check
+  this list after the normal extension match fails
 - Markdown (`.md`/`.markdown`/`.qmd`): custom (non-tree-sitter) highlighting in `markdown.rs` —
   per-level header colours, **bold**/*italic*, inline `code`/fenced blocks, links, blockquotes,
   list markers — plus header-section + code-fence folding (same `zc/zo/za` interface)
