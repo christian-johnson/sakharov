@@ -133,8 +133,23 @@ fn build_vis_rows(
     rows
 }
 
-fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
-    let th = theme::active();
+/// Gutter/text-column geometry for the plain-editor line area, computed from
+/// `area_width` — shared by `render_lines` and `cursor_screen_pos` so a
+/// gutter change can never desync cursor placement from what's drawn.
+struct LineLayout {
+    /// 1 when the git-diff mark column is shown, else 0.
+    git_col: u16,
+    /// 5 when line numbers are shown, else 0.
+    line_num_width: u16,
+    /// `git_col + line_num_width`.
+    gutter_width: u16,
+    /// 1 when the right diagnostic gutter is shown (there are diagnostics), else 0.
+    right_gutter: u16,
+    /// Display columns left for text after the gutter and the right diagnostic gutter.
+    text_width: usize,
+}
+
+fn line_layout(app: &App, area_width: u16) -> LineLayout {
     // Git gutter is 1 char wide (only for regular files, not notebooks).
     let git_col: u16 = if app.config.editor.git_gutter && app.notebook.is_none() { 1 } else { 0 };
     let line_num_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
@@ -142,7 +157,14 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     // 1-column right diagnostic gutter (only when there are diagnostics).
     let has_diags = !app.diag_by_line.is_empty();
     let right_gutter: u16 = if has_diags { 1 } else { 0 };
-    let text_width = area.width.saturating_sub(gutter_width + right_gutter) as usize;
+    let text_width = area_width.saturating_sub(gutter_width + right_gutter) as usize;
+    LineLayout { git_col, line_num_width, gutter_width, right_gutter, text_width }
+}
+
+fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
+    let th = theme::active();
+    let LineLayout { git_col, line_num_width, gutter_width, right_gutter, text_width } =
+        line_layout(app, area.width);
     let visible_rows = area.height as usize;
     let word_wrap = app.config.editor.word_wrap;
 
@@ -415,9 +437,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 /// Compute the terminal (col, row) of the cursor for `frame.set_cursor_position`.
 /// Returns None if the cursor is scrolled off screen or inside a hidden fold.
 pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
-    let git_col: u16 = if app.config.editor.git_gutter && app.notebook.is_none() { 1 } else { 0 };
-    let line_num_width: u16 = if app.config.editor.line_numbers { 5 } else { 0 };
-    let gutter_width = git_col + line_num_width;
+    let LineLayout { gutter_width, text_width, .. } = line_layout(app, lines_area.width);
 
     let rope = &app.buffer.rope;
     if rope.len_chars() == 0 {
@@ -435,9 +455,6 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
     let total_lines = rope.len_lines();
     let word_wrap = app.config.editor.word_wrap;
     let tab_width = app.config.editor.tab_width;
-    let has_diags = !app.diag_by_line.is_empty();
-    let right_gutter: u16 = if has_diags { 1 } else { 0 };
-    let text_width = lines_area.width.saturating_sub(gutter_width + right_gutter) as usize;
 
     let line_start = rope.line_to_char(line_idx);
     let line_str = rope.line(line_idx);

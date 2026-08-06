@@ -378,13 +378,10 @@ impl LspManager {
         let uri = path_to_uri(path);
         let (sl, sc) = char_to_lsp_pos(rope, start_char);
         let (el, ec) = char_to_lsp_pos(rope, end_char);
-        if let Some(idx) = self.server_idx_for_feature(language, "code-actions") {
-            if let Some(servers) = self.servers.get_mut(language) {
-                servers[idx].client.request_code_actions(&uri, sl, sc, el, ec);
-                return true;
-            }
-        }
-        false
+        self.with_feature_server_mut(language, "code-actions", |s| {
+            s.client.request_code_actions(&uri, sl, sc, el, ec);
+        })
+        .is_some()
     }
 
     /// Send `textDocument/formatting` via the appropriate server.
@@ -397,24 +394,19 @@ impl LspManager {
         insert_spaces: bool,
     ) -> bool {
         let uri = path_to_uri(path);
-        if let Some(idx) = self.server_idx_for_feature(language, "format") {
-            if let Some(servers) = self.servers.get_mut(language) {
-                servers[idx].client.request_formatting(&uri, tab_size as u32, insert_spaces);
-                return true;
-            }
-        }
-        false
+        self.with_feature_server_mut(language, "format", |s| {
+            s.client.request_formatting(&uri, tab_size as u32, insert_spaces);
+        })
+        .is_some()
     }
 
     /// Send `workspace/executeCommand` via the server responsible for code-actions.
     pub fn execute_command(&mut self, language: &str, command: &str, args: serde_json::Value) {
-        if let Some(idx) = self.server_idx_for_feature(language, "code-actions") {
-            if let Some(servers) = self.servers.get_mut(language) {
-                if servers[idx].client.initialized {
-                    servers[idx].client.execute_command(command, args);
-                }
+        self.with_feature_server_mut(language, "code-actions", |s| {
+            if s.client.initialized {
+                s.client.execute_command(command, args);
             }
-        }
+        });
     }
 
     /// Dispatch a position-based LSP request to the appropriate server.
@@ -430,21 +422,18 @@ impl LspManager {
         let uri = path_to_uri(path);
         let (line, character) = char_to_lsp_pos(rope, char_idx);
 
-        if let Some(idx) = self.server_idx_for_feature(language, feature) {
-            if let Some(servers) = self.servers.get_mut(language) {
-                let _ = match kind {
-                    LspRequestKind::Completion    => servers[idx].client.request_completion(&uri, line, character),
-                    LspRequestKind::Hover         => servers[idx].client.request_hover(&uri, line, character),
-                    LspRequestKind::SignatureHelp => servers[idx].client.request_signature_help(&uri, line, character),
-                    LspRequestKind::Definition    => servers[idx].client.request_definition(&uri, line, character),
-                    LspRequestKind::References    => servers[idx].client.request_references(&uri, line, character),
-                    LspRequestKind::TypeDefinition  => servers[idx].client.request_type_definition(&uri, line, character),
-                    LspRequestKind::Implementation  => servers[idx].client.request_implementation(&uri, line, character),
-                };
-                return true;
-            }
-        }
-        false
+        self.with_feature_server_mut(language, feature, |s| {
+            let _ = match kind {
+                LspRequestKind::Completion    => s.client.request_completion(&uri, line, character),
+                LspRequestKind::Hover         => s.client.request_hover(&uri, line, character),
+                LspRequestKind::SignatureHelp => s.client.request_signature_help(&uri, line, character),
+                LspRequestKind::Definition    => s.client.request_definition(&uri, line, character),
+                LspRequestKind::References    => s.client.request_references(&uri, line, character),
+                LspRequestKind::TypeDefinition  => s.client.request_type_definition(&uri, line, character),
+                LspRequestKind::Implementation  => s.client.request_implementation(&uri, line, character),
+            };
+        })
+        .is_some()
     }
 
     /// Fire a one-shot throwaway completion on the completion server to warm its
@@ -507,13 +496,10 @@ impl LspManager {
         if !self.completion_resolve_supported(language) {
             return false;
         }
-        if let Some(idx) = self.server_idx_for_feature(language, "completion") {
-            if let Some(servers) = self.servers.get_mut(language) {
-                servers[idx].client.request_completion_resolve(item);
-                return true;
-            }
-        }
-        false
+        self.with_feature_server_mut(language, "completion", |s| {
+            s.client.request_completion_resolve(item);
+        })
+        .is_some()
     }
 
     /// Send the notebook to every initialized server: `notebookDocument/didOpen`
@@ -776,6 +762,20 @@ impl LspManager {
             }
         }
         None
+    }
+
+    /// Look up the server that owns `feature` for `language` and run `f`
+    /// against it. `None` when no initialized server currently owns that
+    /// feature — callers treat that the same as "not dispatched".
+    fn with_feature_server_mut<R>(
+        &mut self,
+        language: &str,
+        feature: &str,
+        f: impl FnOnce(&mut ManagedServer) -> R,
+    ) -> Option<R> {
+        let idx = self.server_idx_for_feature(language, feature)?;
+        let servers = self.servers.get_mut(language)?;
+        Some(f(&mut servers[idx]))
     }
 
 }

@@ -327,6 +327,13 @@ impl App {
         self.notebook.is_some() && self.cell_focused_edit
     }
 
+    /// True while a notebook is open and the cursor is navigating between
+    /// cells rather than editing focused-cell text in place (the notebook
+    /// keymap override + cell-sync-after-edit only apply in this state).
+    pub fn in_notebook_nav(&self) -> bool {
+        self.notebook.is_some() && !self.notebook_focused_edit()
+    }
+
     /// The kernel language of the open notebook (e.g. `"python"`), if any.
     /// This is the LSP `languageId` for every code cell.
     pub fn notebook_language(&self) -> Option<&str> {
@@ -828,7 +835,7 @@ fn draw_frame(
                     crate::popup_ui::render(f, popup, None, &app.config.ui);
                 }
             })?;
-        } else if app.notebook.is_some() && !app.notebook_focused_edit() {
+        } else if app.in_notebook_nav() {
             // Notebook multi-cell view — the focused cell is in app.buffer.
             // Lifted out of the draw closure so we can restore the hardware
             // cursor to it *after* the Kitty image flush (which moves the

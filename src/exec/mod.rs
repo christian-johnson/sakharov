@@ -21,8 +21,8 @@ pub use search::{search_compute_matches, search_jump};
 
 // Names used by `execute()` and by sibling submodules via `super::…`.
 use buffers::{
-    navigate_buffer, register_buffer, save_current_special_buffer,
-    stash_current_file_buffer, take_stashed_file_buffer, unsaved_buffer_names,
+    canon, navigate_buffer, register_buffer, save_current_special_buffer,
+    take_stashed_file_buffer, teardown_current_buffer, unsaved_buffer_names,
 };
 use format::run_shell_formatter;
 use scroll::normalize_cursor_folds_directional;
@@ -235,7 +235,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             // from the cell-stack scroll anchor — `app.scroll_row` belongs to
             // the plain editor and would label from the top of the cell,
             // leaving a scrolled long cell with no visible labels at all.
-            let (first_line, rows) = if app.notebook.is_some() && !app.notebook_focused_edit() {
+            let (first_line, rows) = if app.in_notebook_nav() {
                 scroll::notebook_visible_source_lines(app).unwrap_or((0, 0))
             } else {
                 (app.scroll_row, app.viewport_height)
@@ -491,25 +491,21 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             if app.notebook.is_some() {
                 // Flushes any in-progress cell edits into nb.cells before serialising.
-                match notebook::save_notebook(app) {
-                    Ok(()) => {
-                        let name = app.notebook.as_ref()
-                            .and_then(|(nb, _)| nb.path.file_name())
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("notebook.ipynb")
-                            .to_string();
-                        app.messages.show(format!("Saved {name}"));
-                    }
-                    Err(e) => app.messages.show(format!("Error: {e}")),
-                }
+                let result = notebook::save_notebook(app);
+                report_save(app, result, |app| {
+                    let name = app.notebook.as_ref()
+                        .and_then(|(nb, _)| nb.path.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("notebook.ipynb")
+                        .to_string();
+                    app.messages.show(format!("Saved {name}"));
+                });
             } else {
-                match app.buffer.save(None, force) {
-                    Ok(()) => {
-                        app.messages.show(format!("Saved {}", app.buffer.display_name()));
-                        refresh_git(app);
-                    }
-                    Err(e) => app.messages.show(format!("Error: {e}")),
-                }
+                let result = app.buffer.save(None, force);
+                report_save(app, result, |app| {
+                    app.messages.show(format!("Saved {}", app.buffer.display_name()));
+                    refresh_git(app);
+                });
             }
             return;
         }
@@ -519,13 +515,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::WriteAs(path) => {
             let path = path.clone();
-            match app.buffer.save(Some(&path), false) {
-                Ok(()) => {
-                    app.messages.show(format!("Saved {path}"));
-                    refresh_git(app);
-                }
-                Err(e) => app.messages.show(format!("Error: {e}")),
-            }
+            let result = app.buffer.save(Some(&path), false);
+            report_save(app, result, |app| {
+                app.messages.show(format!("Saved {path}"));
+                refresh_git(app);
+            });
             return;
         }
         Command::NewFile => {
@@ -564,21 +558,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
             let saved = if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
                 true
             } else if app.notebook.is_some() {
-                match notebook::save_notebook(app) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        app.messages.show(format!("Error: {e}"));
-                        false
-                    }
-                }
+                let result = notebook::save_notebook(app);
+                report_save(app, result, |_| {})
             } else {
-                match app.buffer.save(None, false) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        app.messages.show(format!("Error: {e}"));
-                        false
-                    }
-                }
+                let result = app.buffer.save(None, false);
+                report_save(app, result, |_| {})
             };
             if saved {
                 let unsaved = unsaved_buffer_names(app);
@@ -644,14 +628,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
             // Remove the closed buffer from the buffer list and any stash.
             if let Some(ref p) = path_to_remove {
-                let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
-                app.open_buffers.retain(|stored| {
-                    let sc = stored.canonicalize().unwrap_or_else(|_| stored.clone());
-                    sc != canon && stored != p
-                });
-                app.notebook_buffers.remove(&canon);
+                let key = canon(p);
+                app.open_buffers.retain(|stored| canon(stored) != key && stored != p);
+                app.notebook_buffers.remove(&key);
                 app.notebook_buffers.remove(p);
-                app.file_buffers.remove(&canon);
+                app.file_buffers.remove(&key);
                 app.file_buffers.remove(p);
             }
 
@@ -986,19 +967,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 return; // handled (success or failure message already set)
             }
             // No shell formatter configured — fall back to LSP.
-            let lang = match app.current_language() {
-                Some(l) => l.to_owned(),
-                None => {
-                    app.messages.show("No formatter configured for this file type");
-                    return;
-                }
-            };
-            let path = match app.buffer.path.clone() {
-                Some(p) => p,
-                None => {
-                    app.messages.show("Save the file before formatting");
-                    return;
-                }
+            let Some((lang, path)) = lsp::require_lang_path(
+                app,
+                "No formatter configured for this file type",
+                "Save the file before formatting",
+            ) else {
+                return;
             };
             if !app.lsp.is_ready(&lang) {
                 app.messages.show("No formatter configured (add [formatters.python] to config, or wait for LSP)");
@@ -1104,7 +1078,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
 /// rather than staying inside the buffer (i.e. a notebook is open and we're
 /// not in the full-screen single-cell overlay).
 fn notebook_vertical(app: &App) -> bool {
-    app.notebook.is_some() && !app.notebook_focused_edit()
+    app.in_notebook_nav()
 }
 
 /// Visual rows in cell `cell_idx`'s output block (0 for none), sized exactly
@@ -1500,6 +1474,26 @@ pub fn refresh_git(app: &mut App) {
         app.buffer.path.clone().filter(|p| !is_special_path(p))
     };
     app.git_pending = Some(crate::git::refresh(path));
+}
+
+/// Report the outcome of a save: on success runs `on_ok` (typically a
+/// "Saved …" message, possibly plus a git refresh) and returns `true`; on
+/// failure shows "Error: {e}" and returns `false`.
+pub(crate) fn report_save<E: std::fmt::Display>(
+    app: &mut App,
+    result: Result<(), E>,
+    on_ok: impl FnOnce(&mut App),
+) -> bool {
+    match result {
+        Ok(()) => {
+            on_ok(app);
+            true
+        }
+        Err(e) => {
+            app.messages.show(format!("Error: {e}"));
+            false
+        }
+    }
 }
 
 /// Apply a finished background git refresh, if one is ready.  Returns true

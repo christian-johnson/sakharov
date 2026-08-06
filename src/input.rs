@@ -153,7 +153,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             // notebook override map shadows the normal bindings — e.g. J/K move
             // between cells, Shift+Enter executes — falling back to the normal
             // bindings for everything else.
-            let in_notebook = app.notebook.is_some() && !app.notebook_focused_edit();
+            let in_notebook = app.in_notebook_nav();
             let cmds = if in_notebook {
                 app.keymap
                     .lookup_notebook(&kb)
@@ -205,14 +205,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     // Keep the focused notebook cell's stored source in sync with app.buffer.
-    if app.notebook.is_some() && !app.notebook_focused_edit() {
-        sync_buffer_to_notebook(app);
-        // Insert mode already calls lsp_did_change on every typed character;
-        // avoid the duplicate rope.to_string() + LSP write.
-        if !matches!(app.mode, Mode::Insert) {
-            exec::lsp_did_change(app);
-        }
-    }
+    // Insert mode already calls lsp_did_change on every typed character, so
+    // skip the redundant rope.to_string() + LSP write here.
+    sync_notebook_cell(app, !matches!(app.mode, Mode::Insert));
 }
 
 // ---------------------------------------------------------------------------
@@ -290,10 +285,9 @@ pub fn handle_paste(app: &mut App, text: &str) {
     exec::update_scroll(app);
 
     // Keep the focused notebook cell's stored source in sync (the key path
-    // does this after every keystroke; a paste bypasses it).
-    if app.notebook.is_some() && !app.notebook_focused_edit() {
-        sync_buffer_to_notebook(app);
-    }
+    // does this after every keystroke; a paste bypasses it). lsp_did_change
+    // was already called unconditionally above, so don't repeat it here.
+    sync_notebook_cell(app, false);
 }
 
 /// Collapse a multi-line paste onto one line for single-line inputs.
@@ -712,6 +706,20 @@ fn sync_buffer_to_notebook(app: &mut App) {
                 nb.modified = true;
             }
         }
+    }
+}
+
+/// Sync the focused notebook cell's stored source with `app.buffer` (a no-op
+/// outside notebook-navigation state), optionally also notifying the LSP.
+/// `notify_lsp` should be `false` when the caller already synced the LSP
+/// itself (e.g. a paste, or an Insert-mode keystroke's incremental sync).
+fn sync_notebook_cell(app: &mut App, notify_lsp: bool) {
+    if !app.in_notebook_nav() {
+        return;
+    }
+    sync_buffer_to_notebook(app);
+    if notify_lsp {
+        exec::lsp_did_change(app);
     }
 }
 

@@ -66,7 +66,7 @@ pub fn update_scroll(app: &mut App) {
     // scroll-off margin.  Because the anchor is measured in rows, scrolling
     // moves one line at a time instead of jumping a whole cell.  (The
     // full-screen focused-cell overlay falls through to the plain path.)
-    if app.notebook.is_some() && !app.notebook_focused_edit() {
+    if app.in_notebook_nav() {
         notebook_update_scroll(app, visible_rows, scroll_off);
         return;
     }
@@ -169,16 +169,9 @@ fn nb_layout(app: &App) -> Option<NbLayout> {
     let word_wrap = app.config.editor.word_wrap;
     let focused = state.focused_cell.min(nb.cells.len() - 1);
 
-    let heights = nb.cells.iter().enumerate().map(|(idx, cell)| {
-        let folded = state.is_cell_folded(idx) && idx != focused;
-        let source = if idx == focused { &app.buffer.rope } else { &cell.source };
-        let limits = crate::notebook_ui::OutputLimits::new(
-            &app.config.notebook, state.is_output_expanded(idx),
-        );
-        crate::notebook_ui::nb_cell_height(
-            cell, folded, source, limits, cell_px, avail_cols, word_wrap,
-        )
-    }).collect();
+    let heights = crate::notebook_ui::nb_cell_heights(
+        nb, state, &app.buffer.rope, &app.config.notebook, cell_px, avail_cols, word_wrap,
+    );
 
     let wrap_width = crate::notebook_ui::cell_wraps(&nb.cells[focused], word_wrap)
         .then(|| crate::notebook_ui::cell_text_width(avail_cols));

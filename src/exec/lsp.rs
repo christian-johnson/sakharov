@@ -10,21 +10,38 @@ use crate::{
     selection::Selection,
 };
 
-/// Send a `textDocument/codeAction` request for the current selection range.
-pub(super) fn lsp_code_actions_request(app: &mut App) {
+/// Resolve the current buffer's language + path, showing `no_lang_msg` /
+/// `no_path_msg` and returning `None` if either is missing.
+pub(super) fn require_lang_path(
+    app: &mut App,
+    no_lang_msg: &str,
+    no_path_msg: &str,
+) -> Option<(String, std::path::PathBuf)> {
     let lang = match app.current_language() {
         Some(l) => l.to_owned(),
         None => {
-            app.messages.show("No language server configured for this file");
-            return;
+            app.messages.show(no_lang_msg);
+            return None;
         }
     };
     let path = match app.buffer.path.clone() {
         Some(p) => p,
         None => {
-            app.messages.show("Save the file before using LSP features");
-            return;
+            app.messages.show(no_path_msg);
+            return None;
         }
+    };
+    Some((lang, path))
+}
+
+/// Send a `textDocument/codeAction` request for the current selection range.
+pub(super) fn lsp_code_actions_request(app: &mut App) {
+    let Some((lang, path)) = require_lang_path(
+        app,
+        "No language server configured for this file",
+        "Save the file before using LSP features",
+    ) else {
+        return;
     };
     let sel = app.selection;
     let start_char = sel.start();
@@ -101,19 +118,12 @@ pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
         return;
     }
 
-    let lang = match app.current_language() {
-        Some(l) => l.to_owned(),
-        None => {
-            app.messages.show("No language server configured for this file");
-            return;
-        }
-    };
-    let path = match app.buffer.path.clone() {
-        Some(p) => p,
-        None => {
-            app.messages.show("Save the file before using LSP features");
-            return;
-        }
+    let Some((lang, path)) = require_lang_path(
+        app,
+        "No language server configured for this file",
+        "Save the file before using LSP features",
+    ) else {
+        return;
     };
     let char_idx = app.selection.head;
     let rope = app.buffer.rope.clone();
@@ -639,31 +649,19 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     // Save scratch content when leaving it.
     super::save_current_special_buffer(app);
 
-    // If a notebook is open, tear it down cleanly before loading a plain file.
+    // If a notebook is open, preserve its .ipynb path in the buffer list
+    // before stashing it below.
+    if let Some((ref nb, _)) = app.notebook {
+        let nb_path = nb.path.clone();
+        super::register_buffer(&mut app.open_buffers, &nb_path);
+    }
     let had_notebook = app.notebook.is_some();
+
+    // Stash or close whatever is currently open (notebook or plain file).
+    super::teardown_current_buffer(app);
+
     if had_notebook {
-        // Preserve the .ipynb path in the buffer list before stashing.
-        if let Some((ref nb, _)) = app.notebook {
-            let nb_path = nb.path.clone();
-            super::register_buffer(&mut app.open_buffers, &nb_path);
-        }
-        // Stash notebook state so edits survive if the user comes back.
-        super::notebook::stash_current_notebook(app);
         app.mode = crate::mode::Mode::Normal;
-    }
-
-    if let (Some(ref lang), Some(ref old_path)) = (
-        app.lsp_language.clone(),
-        app.buffer.path.clone(),
-    ) {
-        app.lsp.did_close(lang, old_path);
-    }
-
-    // Keep the outgoing plain buffer's unsaved edits (and undo history) in
-    // memory.  After a notebook teardown `app.buffer` holds stale cell text
-    // under a virtual path — never stash that.
-    if !had_notebook {
-        super::stash_current_file_buffer(app);
     }
 
     // Restore the target from its stash when we've visited it before;
@@ -825,13 +823,11 @@ fn apply_workspace_edit(app: &mut App, edit: Value) {
 
 /// Perform a plain buffer save (no format step) — used by the format-on-save path.
 fn do_save(app: &mut App) {
-    match app.buffer.save(None, false) {
-        Ok(()) => {
-            app.messages.show(format!("Saved {}", app.buffer.display_name()));
-            super::refresh_git(app);
-        }
-        Err(e) => app.messages.show(format!("Error: {e}")),
-    }
+    let result = app.buffer.save(None, false);
+    super::report_save(app, result, |app| {
+        app.messages.show(format!("Saved {}", app.buffer.display_name()));
+        super::refresh_git(app);
+    });
 }
 
 fn word_prefix_at_cursor(app: &crate::app::App) -> String {

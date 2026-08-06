@@ -17,6 +17,14 @@ pub fn is_special_path(path: &std::path::Path) -> bool {
     matches!(path.to_str(), Some("*scratch*") | Some("*Messages*"))
 }
 
+/// Canonicalize `path`, falling back to it unchanged when the filesystem
+/// lookup fails (e.g. the file doesn't exist yet, or a virtual/notebook-cell
+/// path). Used wherever two paths to the same file need to compare equal
+/// regardless of `..`/symlink differences.
+pub(super) fn canon(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Save the scratch buffer rope when leaving it (so edits survive switches).
 pub(super) fn save_current_special_buffer(app: &mut App) {
     if let Some(ref path) = app.buffer.path.clone() {
@@ -27,16 +35,18 @@ pub(super) fn save_current_special_buffer(app: &mut App) {
     }
 }
 
-/// Switch the editor to a named special buffer (`*scratch*` or `*Messages*`).
-pub fn switch_to_special_buffer(app: &mut App, name: &str) {
-    save_current_special_buffer(app);
-
+/// Stash or close whatever is currently open (notebook or plain file) so it
+/// can be safely replaced. A notebook is stashed whole; a plain buffer is
+/// closed with the LSP (skipping virtual/special paths, which were never
+/// opened with it) and its unsaved edits are kept in memory.
+pub(super) fn teardown_current_buffer(app: &mut App) {
     if app.notebook.is_some() {
         // Stash the open notebook so edits are preserved if the user comes back.
-        // (After this, `app.buffer` holds stale cell text — do NOT stash it.)
+        // (After this, `app.buffer` holds stale cell text — do NOT stash it,
+        // and do NOT did_close it: it was never opened with the LSP under
+        // that virtual path.)
         notebook::stash_current_notebook(app);
     } else {
-        // Plain buffer: close it with the LSP and keep its unsaved edits in memory.
         if let (Some(ref lang), Some(ref old_path)) =
             (app.lsp_language.clone(), app.buffer.path.clone())
         {
@@ -46,6 +56,12 @@ pub fn switch_to_special_buffer(app: &mut App, name: &str) {
         }
         stash_current_file_buffer(app);
     }
+}
+
+/// Switch the editor to a named special buffer (`*scratch*` or `*Messages*`).
+pub fn switch_to_special_buffer(app: &mut App, name: &str) {
+    save_current_special_buffer(app);
+    teardown_current_buffer(app);
 
     let rope = if name == "*scratch*" {
         app.special_buffer_ropes
@@ -89,16 +105,14 @@ pub(super) fn navigate_buffer(app: &mut App, delta: i32) {
     }
 
     let current_canon = if let Some((ref nb, _)) = app.notebook {
-        nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone())
+        canon(&nb.path)
     } else if let Some(ref p) = app.buffer.path {
-        p.canonicalize().unwrap_or_else(|_| p.clone())
+        canon(p)
     } else {
         return;
     };
 
-    let current_idx = app.open_buffers.iter().position(|p| {
-        p.canonicalize().unwrap_or_else(|_| p.clone()) == current_canon
-    });
+    let current_idx = app.open_buffers.iter().position(|p| canon(p) == current_canon);
 
     let idx = match current_idx {
         Some(i) => ((i as i32 + delta).rem_euclid(n as i32)) as usize,
@@ -124,18 +138,7 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     save_current_special_buffer(app);
 
     // Stash or close whatever is currently open.
-    if app.notebook.is_some() {
-        notebook::stash_current_notebook(app);
-    } else {
-        if let (Some(ref lang), Some(ref old_path)) =
-            (app.lsp_language.clone(), app.buffer.path.clone())
-        {
-            if !is_special_path(old_path) {
-                app.lsp.did_close(lang, old_path);
-            }
-        }
-        stash_current_file_buffer(app);
-    }
+    teardown_current_buffer(app);
 
     // Restore from stash if we've visited this notebook before (preserves unsaved edits).
     if notebook::restore_stashed_notebook(app, path) {
@@ -280,7 +283,7 @@ pub(crate) fn stash_current_file_buffer(app: &mut App) {
     if is_special_path(&path) {
         return;
     }
-    let key = path.canonicalize().unwrap_or(path);
+    let key = canon(&path);
     let buf = std::mem::replace(&mut app.buffer, crate::buffer::Buffer::new_empty());
     app.file_buffers.insert(key, buf);
 }
@@ -290,8 +293,7 @@ pub(crate) fn take_stashed_file_buffer(
     app: &mut App,
     path: &std::path::Path,
 ) -> Option<crate::buffer::Buffer> {
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    app.file_buffers.remove(&key)
+    app.file_buffers.remove(&canon(path))
 }
 
 /// Names of every buffer holding unsaved changes, anywhere in the session:
@@ -329,10 +331,8 @@ pub(crate) fn unsaved_buffer_names(app: &App) -> Vec<String> {
 
 /// Append `path` to `open_buffers` if it is not already present (by canonical path).
 pub(super) fn register_buffer(open_buffers: &mut Vec<std::path::PathBuf>, path: &std::path::Path) {
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !open_buffers.iter().any(|stored| {
-        stored.canonicalize().unwrap_or_else(|_| stored.clone()) == canon
-    }) {
-        open_buffers.push(canon);
+    let key = canon(path);
+    if !open_buffers.iter().any(|stored| canon(stored) == key) {
+        open_buffers.push(key);
     }
 }

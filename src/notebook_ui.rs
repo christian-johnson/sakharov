@@ -340,6 +340,12 @@ fn render_cells(
     // Consumed by the first rendered cell; every later cell starts at 0.
     let mut skip = state.scroll_offset as u16;
 
+    // Inner column width available for cell content (subtract left+right borders).
+    let inner_cols = area.width.saturating_sub(2).max(4);
+    let heights = nb_cell_heights(
+        nb, state, active.rope, nb_config, cell_pixel_size, inner_cols, active.word_wrap,
+    );
+
     for (cell_idx, cell) in nb.cells.iter().enumerate() {
         if cell_idx < state.scroll_cell {
             continue;
@@ -350,15 +356,8 @@ fn render_cells(
 
         let is_focused = cell_idx == state.focused_cell;
         let is_folded = state.is_cell_folded(cell_idx);
-        // Inner column width available for cell content (subtract left+right borders).
-        let inner_cols = area.width.saturating_sub(2).max(4);
-        // Folded cells always get the compact height regardless of focus.
-        // For the focused non-folded cell, use the live buffer rope height.
-        let source = if is_focused { active.rope } else { &cell.source };
         let limits = OutputLimits::new(nb_config, state.is_output_expanded(cell_idx));
-        let full_height = nb_cell_height(
-            cell, is_folded, source, limits, cell_pixel_size, inner_cols, active.word_wrap,
-        ) as u16;
+        let full_height = heights[cell_idx] as u16;
 
         // Clip: `clip_top` rows are scrolled off above the viewport; the
         // visible slice is further capped by the rows left before the bottom.
@@ -949,6 +948,34 @@ pub(crate) fn nb_cell_height(
     }
 }
 
+/// Per-cell display heights for the whole notebook, exactly as the renderer
+/// draws them — a folded cell always collapses to its 3-row summary
+/// regardless of focus, and the focused cell is measured against the live
+/// buffer rope (its unsaved edits are ahead of `cell.source`). This is the
+/// single source of truth shared by `render_cells` and the scroll math
+/// (`exec::scroll::nb_layout`) so the two can never disagree row-for-row.
+pub(crate) fn nb_cell_heights(
+    nb: &Notebook,
+    state: &NotebookState,
+    active_rope: &ropey::Rope,
+    nb_config: &crate::config::NotebookConfig,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+    word_wrap: bool,
+) -> Vec<usize> {
+    nb.cells
+        .iter()
+        .enumerate()
+        .map(|(idx, cell)| {
+            let is_focused = idx == state.focused_cell;
+            let folded = state.is_cell_folded(idx);
+            let source = if is_focused { active_rope } else { &cell.source };
+            let limits = OutputLimits::new(nb_config, state.is_output_expanded(idx));
+            nb_cell_height(cell, folded, source, limits, cell_pixel_size, available_cols, word_wrap)
+        })
+        .collect()
+}
+
 /// Total visual rows of a cell's output block, *excluding* the `── output ──`
 /// divider row (0 for markdown/raw cells or when there are no outputs).
 /// Output row indices — `NotebookState::output_row`, the renderer's output
@@ -986,6 +1013,25 @@ fn image_available_cols(available_cols: u16) -> u16 {
     available_cols.saturating_sub(IMAGE_GUTTER)
 }
 
+/// Row count for `data`'s embedded image (`None` when it has none), scaled
+/// from the PNG's aspect ratio and capped at `limits.image_rows`. The single
+/// place image sizing is computed — shared by the height model
+/// (`single_output_height_count`/`output_rows_content`) and the renderer
+/// (`render_mime_data`) so they can never disagree on row count.
+fn mime_image_rows(
+    data: &MimeData,
+    limits: OutputLimits,
+    cell_pixel_size: Option<(u16, u16)>,
+    available_cols: u16,
+) -> Option<u16> {
+    let png = data.image_png.as_ref()?;
+    let avail = image_available_cols(available_cols);
+    Some(match png_pixel_size(png) {
+        Some((pw, ph)) => compute_image_rows(pw, ph, avail, cell_pixel_size, limits.image_rows),
+        None => limits.image_rows,
+    })
+}
+
 fn single_output_height_count(
     output: &Output,
     limits: OutputLimits,
@@ -997,19 +1043,12 @@ fn single_output_height_count(
             truncated_rows(text.lines().count(), limits.max_lines) as u16
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-            if let Some(png) = &data.image_png {
-                let avail = image_available_cols(available_cols);
-                if let Some((pw, ph)) = png_pixel_size(png) {
-                    compute_image_rows(pw, ph, avail, cell_pixel_size, limits.image_rows)
-                } else {
-                    limits.image_rows
-                }
-            } else {
+            mime_image_rows(data, limits, cell_pixel_size, available_cols).unwrap_or_else(|| {
                 data.text_plain
                     .as_deref()
                     .map(|t| truncated_rows(t.lines().count(), limits.max_lines))
                     .unwrap_or(0) as u16
-            }
+            })
         }
         Output::Error { traceback, .. } => {
             // 1 = the "ename: evalue" headline row.
@@ -1061,13 +1100,7 @@ pub(crate) fn output_rows_content(
                 push_truncated_lines(&mut rows, &lines, limits.max_lines);
             }
             Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-                if let Some(png) = &data.image_png {
-                    let avail = image_available_cols(available_cols);
-                    let n = if let Some((pw, ph)) = png_pixel_size(png) {
-                        compute_image_rows(pw, ph, avail, cell_pixel_size, limits.image_rows)
-                    } else {
-                        limits.image_rows
-                    };
+                if let Some(n) = mime_image_rows(data, limits, cell_pixel_size, available_cols) {
                     for i in 0..n {
                         rows.push(if i == 0 { "[image]".to_string() } else { String::new() });
                     }
@@ -1533,15 +1566,11 @@ fn render_mime_data(
 ) {
     if let Some(png) = &data.image_png {
         // Compute rows from image aspect ratio so the display height scales with
-        // figsize.  image_rows acts as a cap, not a fixed height. Sized against
-        // the width left *after* the cursor gutter, exactly like the height
-        // model (`image_available_cols`), so the two never disagree on row count.
-        let avail = image_available_cols(area.width);
-        let natural_rows = if let Some((pw, ph)) = png_pixel_size(png) {
-            compute_image_rows(pw, ph, avail, cell_pixel_size, octx.limits.image_rows)
-        } else {
-            octx.limits.image_rows
-        };
+        // figsize.  image_rows acts as a cap, not a fixed height. Uses the same
+        // `mime_image_rows` the height model calls, so the two never disagree on
+        // row count.
+        let natural_rows = mime_image_rows(data, octx.limits, cell_pixel_size, area.width)
+            .expect("data.image_png just matched Some above");
 
         // Walk every image row through the same skip/cursor/selection
         // bookkeeping as text rows (row 0 carries the "[image]" placeholder
@@ -1765,6 +1794,44 @@ mod tests {
         let (cx, cy) = cursor_pos.expect("cursor must be visible in a rendered markdown cell");
         // Border (1) + 2-char pad + cursor col 2 within the first line.
         assert_eq!((cx, cy), (1 + 2 + 2, 1));
+    }
+
+    /// A folded cell always collapses to its 3-row summary, even when it is
+    /// also the focused cell — `render_cell`'s folded branch draws the
+    /// compact summary unconditionally (see its comment "Folded cells always
+    /// get the compact height regardless of focus"). Regression: `nb_layout`
+    /// (the scroll math's copy of this computation) used to special-case the
+    /// focused cell as never folded, so scrolling onto a folded, focused cell
+    /// left the scroll anchor believing it was still full height — drifting
+    /// from what the renderer actually drew. `nb_cell_heights` is now the one
+    /// function both the renderer and the scroll math call, so they can't
+    /// disagree again.
+    #[test]
+    fn nb_cell_heights_ignores_focus_when_folded() {
+        let make = |text: &str| Cell {
+            id: crate::notebook::new_cell_id(),
+            cell_type: CellType::Code,
+            source: Rope::from_str(text),
+            outputs: vec![],
+            execution_count: None,
+            rendered: false,
+        };
+        let nb = Notebook {
+            path: std::path::PathBuf::from("/tmp/fold-test.ipynb"),
+            metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
+            cells: vec![make("line one\nline two\nline three"), make("x = 1")],
+            modified: false,
+            kernel: None,
+        };
+        let mut state = NotebookState::new();
+        state.focused_cell = 0;
+        state.folded_cells.insert(0);
+
+        let active_rope = nb.cells[0].source.clone();
+        let heights = nb_cell_heights(
+            &nb, &state, &active_rope, &crate::config::NotebookConfig::default(), None, 40, false,
+        );
+        assert_eq!(heights[0], 3, "folded focused cell must collapse to the 3-row summary");
     }
 
     /// The height model and the renderer must agree row-for-row: the cell's
