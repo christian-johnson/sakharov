@@ -4,7 +4,7 @@
 
 use crate::app::App;
 
-use super::{is_special_path, lsp, recompute_highlights, refresh_git};
+use super::{is_special_path, lsp, notebook, recompute_highlights, refresh_git};
 
 /// Run the configured shell formatter for the current buffer's language.
 ///
@@ -31,27 +31,55 @@ pub(super) fn run_shell_formatter(app: &mut App) -> bool {
         None => return false,
     };
 
-    // Save current buffer content to disk first so the formatter sees it.
-    if let Err(e) = app.buffer.save(None, false) {
-        app.messages.show(format!("Could not save before formatting: {e}"));
-        return true;
-    }
+    let in_notebook = app.notebook.is_some();
+
+    // A notebook cell's `app.buffer.path` is a *virtual* location inside the
+    // notebook's own directory (`notebook::cell_virtual_path`) — nothing on
+    // disk actually lives there. Writing it for real (as the plain-file path
+    // below does) would litter the project directory with a stray
+    // `{notebook}__cellN.{ext}` file on every format. Format a real scratch
+    // file instead (same extension, so extension-sniffing formatters still
+    // pick the right language) and discard it once formatting is done.
+    let disk_path = if in_notebook {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("sakharov-fmt-{}.{ext}", std::process::id()));
+        if let Err(e) = std::fs::write(&tmp, app.buffer.rope.to_string()) {
+            app.messages.show(format!("Could not write temp file for formatting: {e}"));
+            return true;
+        }
+        tmp
+    } else {
+        // Save current buffer content to disk first so the formatter sees it.
+        if let Err(e) = app.buffer.save(None, false) {
+            app.messages.show(format!("Could not save before formatting: {e}"));
+            return true;
+        }
+        path.clone()
+    };
 
     let result = std::process::Command::new(&fmt.command)
         .args(&fmt.args)
-        .arg(&path)
+        .arg(&disk_path)
         .output();
 
     match result {
         Ok(out) if out.status.success() => {
             // Reload the formatter's output back into the buffer.
-            match std::fs::read_to_string(&path) {
+            match std::fs::read_to_string(&disk_path) {
                 Ok(content) => {
                     app.buffer.rope = ropey::Rope::from_str(&content);
-                    app.buffer.modified = false;
-                    // The formatter rewrote the file; re-stat so the next save's
-                    // external-modification check doesn't false-positive.
-                    app.buffer.refresh_disk_mtime();
+                    if in_notebook {
+                        // No real file to re-stat; the notebook itself is still
+                        // unsaved and its own dirty tracking covers this cell.
+                        app.buffer.modified = true;
+                        notebook::save_focused_cell(app);
+                    } else {
+                        app.buffer.modified = false;
+                        // The formatter rewrote the file; re-stat so the next save's
+                        // external-modification check doesn't false-positive.
+                        app.buffer.refresh_disk_mtime();
+                    }
                     recompute_highlights(app);
                     lsp::lsp_did_change(app);
                     refresh_git(app);
@@ -74,5 +102,10 @@ pub(super) fn run_shell_formatter(app: &mut App) -> bool {
             app.messages.show(format!("Formatter '{}': {e}", fmt.command));
         }
     }
+
+    if in_notebook {
+        let _ = std::fs::remove_file(&disk_path);
+    }
+
     true
 }

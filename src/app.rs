@@ -92,6 +92,31 @@ fn pending_signal() -> Option<i32> {
     }
 }
 
+/// True when stdin's controlling terminal has hung up (`POLLHUP`) — the
+/// slave pty is still open but its master side has closed. A process
+/// orphaned from its terminal session (e.g. reparented to init/launchd
+/// before the terminal closed) never receives `SIGHUP` for this, and
+/// crossterm's own `event::poll` can retry-loop forever *inside a single
+/// call* reading the resulting stream of 0-byte reads — pinning a CPU core
+/// indefinitely without ever returning to the caller. Checked with our own
+/// zero-timeout `poll(2)` so we can detect it before ever making the call
+/// that gets stuck.
+#[cfg(unix)]
+fn stdin_hung_up() -> bool {
+    let mut pfd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+    ready > 0 && pfd.revents & libc::POLLHUP != 0
+}
+
+#[cfg(not(unix))]
+fn stdin_hung_up() -> bool {
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Search state
 // ---------------------------------------------------------------------------
@@ -667,6 +692,16 @@ fn run_loop(
         if needs_redraw {
             needs_redraw = false;
             draw_frame(terminal, app)?;
+        }
+
+        // A hung-up terminal (see `stdin_hung_up`) never delivers SIGHUP to an
+        // orphaned process, and the crossterm poll below can spin forever
+        // inside itself reading it — so check first and shut down the same
+        // way a real SIGHUP would, rather than ever making that call.
+        if stdin_hung_up() {
+            #[cfg(unix)]
+            PENDING_SIGNAL.store(libc::SIGHUP, std::sync::atomic::Ordering::SeqCst);
+            break;
         }
 
         // Block up to 16 ms for the first event (keeps input latency low while

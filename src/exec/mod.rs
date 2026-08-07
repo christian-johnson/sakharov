@@ -1785,6 +1785,57 @@ mod tests {
         let _ = std::fs::remove_file(&target);
     }
 
+    /// A notebook cell's `app.buffer.path` is a virtual location
+    /// (`{notebook}__cellN.py`) inside the notebook's own directory — it does
+    /// not exist on disk. The shell-formatter path used to `Buffer::save` to
+    /// that path unconditionally, littering the notebook's directory with a
+    /// real leftover file on every `:fmt`. It must format through a scratch
+    /// file instead and leave the notebook's directory untouched.
+    #[test]
+    fn shell_formatter_does_not_leave_stray_file_in_notebook_dir() {
+        let mut config = Config::load();
+        config.formatters.insert(
+            "python".to_string(),
+            crate::config::FormatterConfig {
+                command: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "tr 'a-z' 'A-Z' < \"$0\" > \"$0.up\" && mv \"$0.up\" \"$0\"".to_string(),
+                ],
+            },
+        );
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("fmt-notebook");
+        let nb_path = dir.join("analysis.ipynb");
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "analysis");
+        assert!(app.notebook.is_some(), "setup: notebook should be open");
+
+        app.buffer.rope = Rope::from_str("hello world");
+
+        let handled = run_shell_formatter(&mut app);
+        assert!(handled, "a configured formatter must be attempted");
+        assert_eq!(
+            app.buffer.rope.to_string(),
+            "HELLO WORLD",
+            "formatted content should be reloaded into the buffer"
+        );
+
+        let stray_entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .filter(|n| n != nb_path.file_name().unwrap() && n != "anchor.txt")
+            .collect();
+        assert!(
+            stray_entries.is_empty(),
+            "formatting a notebook cell must not leave files behind in its directory, found: {stray_entries:?}"
+        );
+
+        let _ = std::fs::remove_file(&nb_path);
+    }
+
     #[test]
     fn test_delete_selection_clamping() {
         let config = Config::load();

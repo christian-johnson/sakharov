@@ -9,7 +9,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::lsp_manager::DiagnosticSeverity;
+use crate::lsp_manager::{Diagnostic, DiagnosticSeverity};
 
 /// Display width of `c` at display column `col` (tabs advance to the next stop).
 pub fn char_display_width(c: char, col: usize, tab_width: usize) -> usize {
@@ -44,6 +44,20 @@ pub fn apply_diag_underline<'a>(
             .underline_color(crate::theme::active().warning),
         None => style,
     }
+}
+
+/// The diagnostic covering char-column `col` of `line`, if any — preferring the
+/// most severe when several overlap (matches `apply_diag_underline`'s pick).
+pub fn diagnostic_at(diagnostics: &[Diagnostic], line: usize, col: usize) -> Option<&Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|d| d.line == line && col >= d.col_start && col < d.col_end)
+        .max_by_key(|d| match d.severity {
+            DiagnosticSeverity::Error => 3,
+            DiagnosticSeverity::Warning => 2,
+            DiagnosticSeverity::Information => 1,
+            DiagnosticSeverity::Hint => 0,
+        })
 }
 
 /// The two styles for `gw` jump-label overlays: (pending, confirmed).

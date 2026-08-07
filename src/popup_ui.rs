@@ -28,6 +28,12 @@ pub fn render(
 
     let popup_rect = compute_rect(popup, term, popup_width, popup_height, cursor_screen);
 
+    // `Cell::set_style` merges (it only clears modifier bits present in the new
+    // style's `sub_modifier`), so painting a background over a diagnostic's
+    // underlined cells would otherwise leave the underline (and its color)
+    // showing through the popup. `Clear` does a full cell reset first.
+    frame.render_widget(Clear, popup_rect);
+
     match &popup.content {
         PopupContent::List(state) => {
             render_list_popup(frame, popup, state, popup_rect);

@@ -14,7 +14,10 @@ use crate::{
     lang::lang_to_ext,
     lsp_manager::DiagnosticSeverity,
     mode::{Mode, PromptKind},
-    render_util::{apply_diag_underline, char_display_width, for_each_jump_label_char, SingleLineWidget},
+    render_util::{
+        apply_diag_underline, char_display_width, diagnostic_at, for_each_jump_label_char,
+        SingleLineWidget,
+    },
     theme,
 };
 
@@ -502,6 +505,40 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
 // Status bar
 // ---------------------------------------------------------------------------
 
+/// 0-based (line, char-column) of the cursor in `app.buffer.rope` — in the
+/// notebook view this is the focused cell's text, same as everywhere else in
+/// this module that reads cursor position off `app.buffer`.
+fn cursor_line_col(app: &App) -> (usize, usize) {
+    let rope = &app.buffer.rope;
+    let cursor_pos = app.selection.head.min(rope.len_chars());
+    let line_idx = if rope.len_chars() == 0 { 0 } else { rope.char_to_line(cursor_pos) };
+    let line_start = if rope.len_chars() == 0 { 0 } else { rope.line_to_char(line_idx) };
+    (line_idx, cursor_pos.saturating_sub(line_start))
+}
+
+/// The diagnostic (if any) covering the cursor position in the document
+/// currently being edited — the plain buffer, or the focused notebook cell's
+/// source. `None` while browsing notebook output (the cursor there isn't over
+/// source text) or when nothing at the cursor has a diagnostic.
+fn diagnostic_at_cursor(app: &App) -> Option<&crate::lsp_manager::Diagnostic> {
+    let key = if let Some((nb, state)) = app.notebook.as_ref() {
+        if state.output_row.is_some() {
+            return None;
+        }
+        let vpath = crate::notebook::cell_virtual_path(
+            &nb.path,
+            &nb.metadata.kernel_language,
+            state.focused_cell,
+        );
+        crate::lsp::diagnostic_key(&vpath)
+    } else {
+        crate::lsp::diagnostic_key(app.buffer.path.as_ref()?)
+    };
+    let diags = app.lsp.diagnostics.get(&key)?;
+    let (line, col) = cursor_line_col(app);
+    diagnostic_at(diags, line, col)
+}
+
 /// Build the status-line [`Ctx`](crate::statusline::Ctx) from the current app
 /// state. Shared by the plain editor / focused-cell overlay (this module) and
 /// the multi-cell notebook view (`app::run_loop`); only the chosen module
@@ -512,10 +549,8 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
 /// filename gains cell context and diagnostics are summed across every cell.
 pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
     let rope = &app.buffer.rope;
-    let cursor_pos = app.selection.head.min(rope.len_chars());
-    let line_idx = if rope.len_chars() == 0 { 0 } else { rope.char_to_line(cursor_pos) };
-    let line_start = if rope.len_chars() == 0 { 0 } else { rope.line_to_char(line_idx) };
-    let col = cursor_pos.saturating_sub(line_start) + 1;
+    let (line_idx, col0) = cursor_line_col(app);
+    let col = col0 + 1;
     let total_lines = rope.len_lines().max(1);
     let scroll_pct = (line_idx * 100) / total_lines;
 
@@ -588,26 +623,27 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
 /// Render the command/message/prompt line (bottom row).  Shared by the plain
 /// editor, the notebook view, and the splash screen.
 pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
-    let text = match &app.mode {
-        Mode::Jump { .. } => {
+    let (text, style) = match &app.mode {
+        Mode::Jump { .. } => (
             if app.jump.typed.is_empty() {
                 "Jump: type label chars...".to_string()
             } else {
                 format!("Jump: {}_", app.jump.typed)
-            }
-        }
-        Mode::Command => format!(":{}", app.command_buf),
+            },
+            Style::default(),
+        ),
+        Mode::Command => (format!(":{}", app.command_buf), Style::default()),
         Mode::Prompt { kind } => {
             let label = match kind {
                 PromptKind::NewFile => "New file",
                 PromptKind::NewNotebook => "New notebook",
             };
-            format!("{label}: {}_", app.command_buf)
+            (format!("{label}: {}_", app.command_buf), Style::default())
         }
         Mode::Search { forward } => {
             let prefix = if *forward { '/' } else { '?' };
             let count = app.search.matches.len();
-            if app.search.query.is_empty() {
+            let text = if app.search.query.is_empty() {
                 format!("{prefix}")
             } else if count == 0 {
                 format!("{prefix}{} [no matches]", app.search.query)
@@ -618,21 +654,40 @@ pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
                     app.search.current + 1,
                     count,
                 )
+            };
+            (text, Style::default())
+        }
+        // A transient message wins; then the diagnostic under the cursor (colored
+        // by severity), skipped in Insert mode since signature help owns that
+        // slot there; otherwise the active call signature.
+        _ => {
+            if let Some(msg) = app.messages.current() {
+                (msg.to_owned(), Style::default())
+            } else if !matches!(app.mode, Mode::Insert) {
+                match diagnostic_at_cursor(app) {
+                    Some(diag) => {
+                        let th = theme::active();
+                        let color = match diag.severity {
+                            DiagnosticSeverity::Error => th.error,
+                            DiagnosticSeverity::Warning => th.warning,
+                            _ => th.info,
+                        };
+                        (diag.message.clone(), Style::default().fg(color))
+                    }
+                    None => (
+                        app.signature_help.clone().unwrap_or_default(),
+                        Style::default(),
+                    ),
+                }
+            } else {
+                (
+                    app.signature_help.clone().unwrap_or_default(),
+                    Style::default(),
+                )
             }
         }
-        // A transient message wins; otherwise show the active call signature
-        // (Insert mode only — it's cleared elsewhere) so argument hints are visible.
-        _ => app
-            .messages
-            .current()
-            .map(str::to_owned)
-            .or_else(|| app.signature_help.clone())
-            .unwrap_or_default(),
     };
-    let cmd_widget = SingleLineWidget {
-        text,
-        style: Style::default(),
-    };
+    let cmd_widget = SingleLineWidget { text, style };
     frame.render_widget(cmd_widget, area);
 }
 
