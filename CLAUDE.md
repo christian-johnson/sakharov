@@ -26,6 +26,18 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   per-level header colours, **bold**/*italic*, inline `code`/fenced blocks, links, blockquotes,
   list markers — plus header-section + code-fence folding (same `zc/zo/za` interface)
 - Scroll with configurable `scroll_off`; horizontal scroll tracks cursor correctly
+- **Vertical motion is visual when text is soft-wrapped** — `j`/`k` (and the arrows, and
+  `Ctrl+d`/`Ctrl+u`, which are runs of them) step one *screen row*, preserving the display
+  column, instead of skipping a whole wrapped paragraph. `motion::move_visual_up/_down` are
+  geometry-agnostic: the caller passes a `motion::Wrap` whose `row_starts(line)` comes from
+  whichever rule the view is drawn with — `render_util::scan_wrap_rows` (plain editor, a
+  **hard** break at the text width) or `notebook_ui::wrap_segments` (cells, **word**
+  boundaries). `exec::wrap_kind` picks between them and returns `None` when nothing wraps,
+  so the logical `motion::move_up/_down` still run. `0`/`^`/`$` stay logical on purpose —
+  they are the only way to reach the real start/end of a long line.
+  `notebook_move_down`/`_up` cross cells only at the last/first *visual* row
+  (`at_last_visual_row`/`at_first_visual_row`), so a wrapped cell is walked row by row
+  before `j` descends into its output block
 - **Status line** (`statusline.rs`) — a single starship-style renderer shared by the plain
   editor and the notebook view. Layout is config-driven: `[statusline] left/right` (and
   `[statusline.notebook] left/right`) are ordered lists of module names, packed left /
@@ -687,7 +699,9 @@ src/
   keymap.rs           — KeyBinding type + Keymap (HashMap-based, overrideable)
                         Separate notebook_navigate / notebook_edit maps
   input.rs            — Thin key dispatch; notebook mode + popups take priority
-  motion.rs           — Pure motion functions: (Rope, Selection, extend) → Selection
+  motion.rs           — Pure motion functions: (Rope, Selection, extend) → Selection,
+                        plus move_visual_up/_down (one screen row through a caller-
+                        supplied `Wrap` geometry)
   indent.rs           — Auto-indent computation on Enter / open-line; indent::unit()
                         gives the configured indent string (spaces unless expand_tabs=false)
   fold.rs             — tree-sitter-driven fold ranges for the plain-text editor
@@ -715,7 +729,9 @@ src/
     csv.rs            — CsvSource: delimiter sniffing + `csv`-crate parse, row cap
   table_ui.rs         — ratatui renderer for the grid (header, gutter, cells)
   render_util.rs      — helpers shared by ui.rs and notebook_ui.rs: SingleLineWidget,
-                        jump-label overlay, diagnostic underline, char_display_width
+                        jump-label overlay, diagnostic underline, char_display_width,
+                        scan_wrap_rows/wrap_row_starts (THE plain-editor soft-wrap rule:
+                        renderer, scroll math and visual j/k all derive rows from it)
   spinner.rs          — "boiling" Braille status-bar spinner (random-dot-flip animation)
   statusline.rs       — starship-style status line: config-driven module lists (left/right),
                         shared by the plain editor + notebook view (Ctx + render)

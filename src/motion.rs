@@ -186,6 +186,173 @@ pub fn move_up(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     apply_extend(sel, new_head, extend)
 }
 
+// ---------------------------------------------------------------------------
+// Visual (soft-wrapped) vertical motion
+// ---------------------------------------------------------------------------
+
+/// The wrap geometry `move_visual_up`/`_down` step through: where each logical
+/// line breaks into visual rows, and how wide a character is.
+///
+/// Supplied by the caller because the two views wrap differently — the plain
+/// editor breaks hard at the text width (`render_util::scan_wrap_rows`) while
+/// notebook cells break at word boundaries (`notebook_ui::wrap_segments`) — and
+/// visual motion must follow whichever rows are actually on screen.
+pub struct Wrap<'a> {
+    /// Char offsets within logical line `n` at which each visual row starts.
+    /// Must be non-empty and start with 0.
+    pub row_starts: &'a dyn Fn(usize) -> Vec<usize>,
+    pub tab_width: usize,
+}
+
+impl Wrap<'_> {
+    /// Display column of char offset `off` within the visual row starting at
+    /// `row_start`, and the inverse: the offset in `[row_start, row_end)` whose
+    /// column is closest to (but not past) `goal`.
+    fn column_of(&self, rope: &Rope, line_start: usize, row_start: usize, off: usize) -> usize {
+        let mut col = 0;
+        for i in row_start..off {
+            col += crate::render_util::char_display_width(
+                rope.char(line_start + i),
+                col,
+                self.tab_width,
+            );
+        }
+        col
+    }
+
+    fn offset_at_column(
+        &self,
+        rope: &Rope,
+        line_start: usize,
+        row: std::ops::Range<usize>,
+        goal: usize,
+    ) -> usize {
+        let mut col = 0;
+        for i in row.clone() {
+            let w = crate::render_util::char_display_width(
+                rope.char(line_start + i),
+                col,
+                self.tab_width,
+            );
+            if col + w > goal {
+                return i;
+            }
+            col += w;
+        }
+        // Past the last character of the row: sit on it, not beyond it.
+        row.end.saturating_sub(1).max(row.start)
+    }
+}
+
+/// The visual rows of `line_idx` as char ranges within the line, excluding any
+/// trailing newline.  A trailing empty row (a line whose width is an exact
+/// multiple of the wrap width) is dropped: the renderer draws it, but there is
+/// no character there for a cursor to land on.
+fn visual_rows(rope: &Rope, line_idx: usize, w: &Wrap) -> Vec<std::ops::Range<usize>> {
+    let content = line_content_len(rope, line_idx);
+    let starts = (w.row_starts)(line_idx);
+    let mut rows: Vec<std::ops::Range<usize>> = Vec::with_capacity(starts.len());
+    for (i, &s) in starts.iter().enumerate() {
+        let e = starts.get(i + 1).copied().unwrap_or(content).min(content);
+        let s = s.min(content);
+        if s >= e && i > 0 {
+            continue; // phantom trailing row
+        }
+        rows.push(s..e);
+    }
+    if rows.is_empty() {
+        rows.push(0..0);
+    }
+    rows
+}
+
+/// Chars on line `line_idx`, not counting the line terminator.
+fn line_content_len(rope: &Rope, line_idx: usize) -> usize {
+    if line_idx >= rope.len_lines() {
+        return 0;
+    }
+    let line = rope.line(line_idx);
+    let n = line.len_chars();
+    if n > 0 && (line.char(n - 1) == '\n' || line.char(n - 1) == '\r') {
+        n - 1
+    } else {
+        n
+    }
+}
+
+/// Locate the cursor in wrap geometry: `(line, visual row index, rows)`.
+fn locate(rope: &Rope, pos: usize, w: &Wrap) -> (usize, usize, Vec<std::ops::Range<usize>>) {
+    let line = line_of(rope, pos);
+    let off = pos - rope.line_to_char(line);
+    let rows = visual_rows(rope, line, w);
+    let idx = rows
+        .iter()
+        .rposition(|r| off >= r.start)
+        .unwrap_or(0);
+    (line, idx, rows)
+}
+
+/// `(visual row index of `pos` within its logical line, rows in that line)`.
+pub fn visual_row_of(rope: &Rope, pos: usize, w: &Wrap) -> (usize, usize) {
+    if rope.len_chars() == 0 {
+        return (0, 1);
+    }
+    let (_, idx, rows) = locate(rope, pos.min(rope.len_chars()), w);
+    (idx, rows.len())
+}
+
+/// Move down one *visual* row: to the next wrapped row of the same logical
+/// line when there is one, else to the first row of the next logical line.
+/// The display column within the row is preserved.
+pub fn move_visual_down(rope: &Rope, sel: Selection, extend: bool, w: &Wrap) -> Selection {
+    if rope.len_chars() == 0 {
+        return apply_extend(sel, 0, extend);
+    }
+    let pos = sel.head.min(rope.len_chars());
+    let (line, row_idx, rows) = locate(rope, pos, w);
+    let line_start = rope.line_to_char(line);
+    let goal = w.column_of(rope, line_start, rows[row_idx].start, pos - line_start);
+
+    if row_idx + 1 < rows.len() {
+        let row = rows[row_idx + 1].clone();
+        let off = w.offset_at_column(rope, line_start, row, goal);
+        return apply_extend(sel, line_start + off, extend);
+    }
+    if line + 1 >= rope.len_lines() {
+        return apply_extend(sel, pos, extend);
+    }
+    let next_start = rope.line_to_char(line + 1);
+    let next_rows = visual_rows(rope, line + 1, w);
+    let off = w.offset_at_column(rope, next_start, next_rows[0].clone(), goal);
+    apply_extend(sel, next_start + off, extend)
+}
+
+/// Move up one *visual* row — the inverse of [`move_visual_down`], landing on
+/// the **last** wrapped row of the previous logical line.
+pub fn move_visual_up(rope: &Rope, sel: Selection, extend: bool, w: &Wrap) -> Selection {
+    if rope.len_chars() == 0 {
+        return apply_extend(sel, 0, extend);
+    }
+    let pos = sel.head.min(rope.len_chars());
+    let (line, row_idx, rows) = locate(rope, pos, w);
+    let line_start = rope.line_to_char(line);
+    let goal = w.column_of(rope, line_start, rows[row_idx].start, pos - line_start);
+
+    if row_idx > 0 {
+        let row = rows[row_idx - 1].clone();
+        let off = w.offset_at_column(rope, line_start, row, goal);
+        return apply_extend(sel, line_start + off, extend);
+    }
+    if line == 0 {
+        return apply_extend(sel, pos, extend);
+    }
+    let prev_start = rope.line_to_char(line - 1);
+    let prev_rows = visual_rows(rope, line - 1, w);
+    let row = prev_rows.last().cloned().unwrap_or(0..0);
+    let off = w.offset_at_column(rope, prev_start, row, goal);
+    apply_extend(sel, prev_start + off, extend)
+}
+
 /// Move to the start of the current line.
 pub fn move_line_start(rope: &Rope, sel: Selection, extend: bool) -> Selection {
     let new_head = line_start_char(rope, sel.head);
@@ -501,6 +668,118 @@ pub fn goto_line(rope: &Rope, sel: Selection, line_number: usize, extend: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Visual (soft-wrapped) vertical motion
+    // -----------------------------------------------------------------------
+
+    /// Hard wrap at `width`, the plain editor's rule.
+    fn hard_wrap(rope: &Rope, width: usize) -> impl Fn(usize) -> Vec<usize> + '_ {
+        move |line| crate::render_util::wrap_row_starts(rope.line(line), width, 4)
+    }
+
+    #[test]
+    fn visual_down_walks_the_rows_of_one_wrapped_line() {
+        // Two logical lines; the first wraps to three rows at width 10.
+        let rope = Rope::from_str("0123456789abcdefghijABCDE\nsecond line\n");
+        let f = hard_wrap(&rope, 10);
+        let w = Wrap { row_starts: &f, tab_width: 4 };
+
+        let mut sel = Selection::point(2);
+        sel = move_visual_down(&rope, sel, false, &w);
+        assert_eq!(sel.head, 12, "second row of the same logical line");
+        sel = move_visual_down(&rope, sel, false, &w);
+        assert_eq!(sel.head, 22, "third row");
+        sel = move_visual_down(&rope, sel, false, &w);
+        assert_eq!(sel.head, 26 + 2, "column 2 of the next logical line");
+
+        // …and back up again, landing on the *last* row of the wrapped line.
+        sel = move_visual_up(&rope, sel, false, &w);
+        assert_eq!(sel.head, 22);
+        sel = move_visual_up(&rope, sel, false, &w);
+        assert_eq!(sel.head, 12);
+        sel = move_visual_up(&rope, sel, false, &w);
+        assert_eq!(sel.head, 2);
+    }
+
+    /// The logical-line motion for comparison: one `j` skips the whole
+    /// paragraph, which is what this change is here to fix.
+    #[test]
+    fn logical_down_still_skips_the_whole_wrapped_line() {
+        let rope = Rope::from_str("0123456789abcdefghijABCDE\nsecond line\n");
+        let sel = move_down(&rope, Selection::point(2), false);
+        assert_eq!(sel.head, 26 + 2);
+    }
+
+    #[test]
+    fn a_short_target_row_clamps_to_its_last_character() {
+        // Row 1 of line 0 is "abcde" (5 chars); moving down from column 8 of
+        // row 0 has nowhere near column 8 to land.
+        let rope = Rope::from_str("0123456789abcde\nxy\n");
+        let f = hard_wrap(&rope, 10);
+        let w = Wrap { row_starts: &f, tab_width: 4 };
+        let sel = move_visual_down(&rope, Selection::point(8), false, &w);
+        assert_eq!(sel.head, 14, "last char of the short row, not past it");
+
+        // Same for a short logical line below.
+        let sel = move_visual_down(&rope, sel, false, &w);
+        assert_eq!(sel.head, 16 + 1, "'y', the last char of \"xy\"");
+    }
+
+    #[test]
+    fn visual_motion_stops_at_the_ends_of_the_buffer() {
+        let rope = Rope::from_str("abc\ndef\n");
+        let f = hard_wrap(&rope, 10);
+        let w = Wrap { row_starts: &f, tab_width: 4 };
+        let top = move_visual_up(&rope, Selection::point(1), false, &w);
+        assert_eq!(top.head, 1, "already on the first row");
+        let bottom = Selection::point(rope.len_chars());
+        assert_eq!(
+            move_visual_down(&rope, bottom, false, &w).head,
+            bottom.head,
+            "already on the last row"
+        );
+    }
+
+    /// A line whose width is an exact multiple of the wrap width gets a
+    /// trailing empty row from the renderer; there is no character there, so
+    /// `j` must not park the cursor on it.
+    #[test]
+    fn an_exactly_full_line_does_not_trap_the_cursor_on_a_phantom_row() {
+        let rope = Rope::from_str("0123456789\nnext\n");
+        let f = hard_wrap(&rope, 10);
+        let w = Wrap { row_starts: &f, tab_width: 4 };
+        assert_eq!(crate::render_util::wrap_row_starts(rope.line(0), 10, 4), vec![0, 10]);
+        let sel = move_visual_down(&rope, Selection::point(3), false, &w);
+        assert_eq!(sel.head, 11 + 3, "straight to the next logical line");
+    }
+
+    #[test]
+    fn visual_motion_extends_a_selection() {
+        let rope = Rope::from_str("0123456789abcdefghij\n");
+        let f = hard_wrap(&rope, 10);
+        let w = Wrap { row_starts: &f, tab_width: 4 };
+        let sel = move_visual_down(&rope, Selection::new(0, 2), true, &w);
+        assert_eq!(sel.anchor, 0, "anchor stays put");
+        assert_eq!(sel.head, 12);
+    }
+
+    /// Word-wrapped geometry (notebook cells) drives the same motion code.
+    #[test]
+    fn visual_motion_follows_word_wrapped_rows_too() {
+        let rope = Rope::from_str("hello brave new world\n");
+        let f = |line: usize| -> Vec<usize> {
+            let text = rope.line(line).to_string();
+            crate::notebook_ui::wrap_segments(text.trim_end_matches('\n'), 12)
+                .into_iter()
+                .map(|(off, _)| off)
+                .collect()
+        };
+        let w = Wrap { row_starts: &f, tab_width: 4 };
+        // "hello brave" / "new world"
+        let sel = move_visual_down(&rope, Selection::point(0), false, &w);
+        assert_eq!(rope.slice(sel.head..sel.head + 3), "new");
+    }
 
     /// A rope ending in a newline has a real final line whose only position is
     /// `len_chars()`.  Clamping char→line lookups to `len_chars() - 1` folded

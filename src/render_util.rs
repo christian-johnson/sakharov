@@ -20,6 +20,47 @@ pub fn char_display_width(c: char, col: usize, tab_width: usize) -> usize {
     }
 }
 
+/// Walk `line`'s soft-wrap breaks, calling `on_row_start` with the char offset
+/// (within the line) at which each visual row begins — starting with 0, so it
+/// fires at least once even for an empty line.
+///
+/// This is the plain editor's wrap rule in one place: a **hard** break at
+/// `text_width` display columns, with tab stops measured from the start of the
+/// visual row (which is what the renderer draws). Cursor motion, the scroll
+/// math and the renderer all derive their row geometry from it, so they cannot
+/// disagree about where a line breaks. (Notebook cells wrap at word boundaries
+/// instead — see `notebook_ui::wrap_segments`.)
+pub fn scan_wrap_rows(
+    line: ropey::RopeSlice<'_>,
+    text_width: usize,
+    tab_width: usize,
+    mut on_row_start: impl FnMut(usize),
+) {
+    on_row_start(0);
+    if text_width == 0 {
+        return;
+    }
+    let mut col = 0usize;
+    for (i, c) in line.chars().enumerate() {
+        if c == '\n' || c == '\r' {
+            break;
+        }
+        col += char_display_width(c, col, tab_width);
+        if col >= text_width {
+            on_row_start(i + 1);
+            col = 0;
+        }
+    }
+}
+
+/// Char offsets within `line` at which each soft-wrapped visual row starts.
+/// Always non-empty (`[0]` for a line that doesn't wrap).
+pub fn wrap_row_starts(line: ropey::RopeSlice<'_>, text_width: usize, tab_width: usize) -> Vec<usize> {
+    let mut starts = Vec::new();
+    scan_wrap_rows(line, text_width, tab_width, |o| starts.push(o));
+    starts
+}
+
 /// Add a severity-coloured underline to `style` when any diagnostic covers the
 /// character: red for errors, yellow for anything else. `severities` yields the
 /// severities of all diagnostics covering the character.

@@ -179,6 +179,18 @@ opened by a relative or absolute path.
 | `toggle-relative-line-numbers` | — | Toggle relative line numbers (shows distance from current line) |
 | `toggle-word-wrap` | — | Toggle soft word-wrap (`:wrap` / `:word-wrap`) |
 
+### Moving through wrapped text
+
+When soft-wrap is on, `j` / `k` (and the arrow keys, and `Ctrl+d` / `Ctrl+u`,
+which are runs of them) move by **visual row** — the row you can see — not by
+logical line. A paragraph wrapped over four rows takes four `j`s to cross, and
+the display column is preserved as you go. With wrap off they move by logical
+line as before. The same applies inside notebook cells, which wrap at word
+boundaries; `j` walks a wrapped cell's rows before stepping into the next cell.
+
+`0` / `^` / `$` are deliberately **not** visual: they stay logical-line motions,
+so the start and end of the actual line are always reachable.
+
 ### Command history (palette recency)
 
 The command palette remembers commands you invoke (via the palette or the `:`

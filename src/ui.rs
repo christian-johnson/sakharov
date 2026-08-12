@@ -66,24 +66,11 @@ pub(crate) fn visual_line_height(
     if text_width == 0 || line_idx >= rope.len_lines() {
         return 1;
     }
-    let line = rope.line(line_idx);
-    let mut col = 0usize;
-    let mut rows = 1usize;
-    for c in line.chars() {
-        if c == '\n' || c == '\r' {
-            break;
-        }
-        let w = if c == '\t' {
-            tab_width.saturating_sub(col % tab_width).max(1)
-        } else {
-            c.width().unwrap_or(1)
-        };
-        col += w;
-        if col >= text_width {
-            rows += 1;
-            col = 0;
-        }
-    }
+    // Counted through the shared wrap rule, so the height the scroll math uses,
+    // the rows this renderer draws and the rows `j`/`k` step through are all the
+    // same segmentation (see `render_util::scan_wrap_rows`).
+    let mut rows = 0usize;
+    crate::render_util::scan_wrap_rows(rope.line(line_idx), text_width, tab_width, |_| rows += 1);
     rows
 }
 
@@ -162,6 +149,16 @@ fn line_layout(app: &App, area_width: u16) -> LineLayout {
     let right_gutter: u16 = if has_diags { 1 } else { 0 };
     let text_width = area_width.saturating_sub(gutter_width + right_gutter) as usize;
     LineLayout { git_col, line_num_width, gutter_width, right_gutter, text_width }
+}
+
+/// Display columns available to text in the plain editor at the current
+/// terminal width — the width lines are soft-wrapped to.
+///
+/// The scroll math and visual (`j`/`k`) motion both ask for it here rather than
+/// recomputing the gutters, so a gutter change can't leave them wrapping at a
+/// different width than the renderer draws.
+pub(crate) fn text_width(app: &App) -> usize {
+    line_layout(app, app.viewport_width as u16).text_width
 }
 
 fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
@@ -475,8 +472,18 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
             &app.fold, rope, app.scroll_row, lines_area.height as usize,
             true, text_width, tab_width,
         );
-        let cursor_sub_row = total_col / text_width;
-        let col_in_sub_row = total_col % text_width;
+        // Which wrapped row the cursor is on comes from the shared wrap rule,
+        // not from dividing the display column: `j`/`k` step through the rows
+        // that rule produces, so anything else could draw the cursor on a row
+        // it cannot be moved to.
+        let starts =
+            crate::render_util::wrap_row_starts(line_str, text_width, tab_width);
+        let cursor_sub_row = starts.iter().rposition(|&s| cursor_off >= s).unwrap_or(0);
+        let mut col_in_sub_row = 0usize;
+        for i in starts[cursor_sub_row]..cursor_off {
+            col_in_sub_row +=
+                char_display_width(line_str.char(i), col_in_sub_row, tab_width);
+        }
 
         let screen_row = vis_rows.iter().position(|v| {
             v.line_idx == line_idx && v.fold_end.is_none() && v.sub_row == cursor_sub_row

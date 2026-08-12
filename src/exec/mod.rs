@@ -169,7 +169,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
             if (!extend || extending_output) && notebook_vertical(app) && notebook_move_up(app, extend) {
                 return;
             }
-            app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
+            // Soft-wrapped text moves by the rows on screen, not by logical
+            // lines — `k` out of the middle of a wrapped paragraph goes up one
+            // row of it, the way it looks like it should.
+            if !visual_move(app, extend, false) {
+                app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
+            }
         }
         Command::MoveDown => {
             // In a notebook, `j` past the last source line descends into the
@@ -180,9 +185,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
             if (!extend || extending_output) && notebook_vertical(app) && notebook_move_down(app, extend) {
                 return;
             }
-            app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
+            if !visual_move(app, extend, true) {
+                app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
+            }
         }
-        Command::MoveWordForward  => app.selection = motion::move_word_forward(&app.buffer.rope, app.selection, extend),
+        Command::MoveWordForward => app.selection = motion::move_word_forward(&app.buffer.rope, app.selection, extend),
         Command::MoveWordBackward => app.selection = motion::move_word_backward(&app.buffer.rope, app.selection, extend),
         Command::MoveWordEnd      => app.selection = motion::move_word_end(&app.buffer.rope, app.selection, extend),
         Command::MoveBigWordForward  => app.selection = motion::move_big_word_forward(&app.buffer.rope, app.selection, extend),
@@ -929,7 +936,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 if (!extend || extending_output) && notebook_vertical(app) && notebook_move_down(app, extend) {
                     continue;
                 }
-                app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
+                if !visual_move(app, extend, true) {
+                    app.selection = motion::move_down(&app.buffer.rope, app.selection, extend);
+                }
             }
         }
         Command::PageUp => {
@@ -939,7 +948,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 if (!extend || extending_output) && notebook_vertical(app) && notebook_move_up(app, extend) {
                     continue;
                 }
-                app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
+                if !visual_move(app, extend, false) {
+                    app.selection = motion::move_up(&app.buffer.rope, app.selection, extend);
+                }
             }
         }
 
@@ -1087,6 +1098,112 @@ pub fn execute(app: &mut App, cmd: &Command) {
     update_scroll(app);
 }
 
+/// How the text on screen is soft-wrapped, if it is.
+///
+/// The two views wrap by different rules and each must be followed exactly:
+/// the plain editor breaks **hard** at the text width, notebook cells break at
+/// **word boundaries**. Both widths and both rules come from what the renderer
+/// itself uses, so a visual `j` always lands on the row drawn below the cursor.
+enum WrapKind {
+    /// Plain editor (`editor.word_wrap`), hard break at `width` display columns.
+    Hard { width: usize },
+    /// Notebook cell source, word-wrapped to `width` columns.
+    Words { width: usize },
+}
+
+fn wrap_kind(app: &App) -> Option<WrapKind> {
+    if app.in_notebook_nav() {
+        return scroll::focused_cell_wrap_width(app)
+            .filter(|w| *w > 0)
+            .map(|width| WrapKind::Words { width });
+    }
+    if !app.config.editor.word_wrap {
+        return None;
+    }
+    match crate::ui::text_width(app) {
+        0 => None,
+        width => Some(WrapKind::Hard { width }),
+    }
+}
+
+/// Move the cursor one *visual* row when the text is soft-wrapped.  Returns
+/// false when nothing is wrapped, leaving the caller to move by logical lines.
+///
+/// Without this a wrapped paragraph is a single `j`: the cursor leaves the
+/// three rows it visibly occupies and lands on the next paragraph.
+fn visual_move(app: &mut App, extend: bool, down: bool) -> bool {
+    let Some(kind) = wrap_kind(app) else {
+        return false;
+    };
+    let tab_width = app.config.editor.tab_width;
+    let new_sel = {
+        let rope = &app.buffer.rope;
+        let starts = |line: usize| -> Vec<usize> {
+            match kind {
+                WrapKind::Hard { width } => {
+                    crate::render_util::wrap_row_starts(rope.line(line), width, tab_width)
+                }
+                WrapKind::Words { width } => {
+                    let text = rope.line(line).to_string();
+                    crate::notebook_ui::wrap_segments(
+                        text.trim_end_matches(['\n', '\r']),
+                        width,
+                    )
+                    .into_iter()
+                    .map(|(off, _)| off)
+                    .collect()
+                }
+            }
+        };
+        let wrap = motion::Wrap { row_starts: &starts, tab_width };
+        if down {
+            motion::move_visual_down(rope, app.selection, extend, &wrap)
+        } else {
+            motion::move_visual_up(rope, app.selection, extend, &wrap)
+        }
+    };
+    app.selection = new_sel;
+    true
+}
+
+/// `(visual row index, row count)` for the cursor's logical line, or `(0, 1)`
+/// when nothing wraps.
+fn cursor_visual_row(app: &App) -> (usize, usize) {
+    let Some(kind) = wrap_kind(app) else {
+        return (0, 1);
+    };
+    let tab_width = app.config.editor.tab_width;
+    let rope = &app.buffer.rope;
+    let starts = |line: usize| -> Vec<usize> {
+        match kind {
+            WrapKind::Hard { width } => {
+                crate::render_util::wrap_row_starts(rope.line(line), width, tab_width)
+            }
+            WrapKind::Words { width } => {
+                let text = rope.line(line).to_string();
+                crate::notebook_ui::wrap_segments(text.trim_end_matches(['\n', '\r']), width)
+                    .into_iter()
+                    .map(|(off, _)| off)
+                    .collect()
+            }
+        }
+    };
+    let wrap = motion::Wrap { row_starts: &starts, tab_width };
+    motion::visual_row_of(rope, app.selection.head, &wrap)
+}
+
+/// True when the cursor is on the last visual row of its line — the point at
+/// which `j` should leave the cell rather than move down inside it.
+fn at_last_visual_row(app: &App) -> bool {
+    let (idx, rows) = cursor_visual_row(app);
+    idx + 1 >= rows
+}
+
+/// True when the cursor is on the first visual row of its line.
+fn at_first_visual_row(app: &App) -> bool {
+    cursor_visual_row(app).0 == 0
+}
+
 /// The which-key entries for the `g` sub-mode.
 ///
 /// Every key listed here must be one `input::goto_command` dispatches (pinned
@@ -1203,11 +1320,13 @@ fn notebook_move_down(app: &mut App, extend: bool) -> bool {
         return true; // consumed even when pinned at the very bottom
     }
 
-    // On the source: only the last line descends into the output block.
+    // On the source: only the last row descends into the output block.  In a
+    // wrapped cell the last *line* can still have rows below the cursor, and
+    // `j` must walk those before leaving the cell.
     let rope = &app.buffer.rope;
     let pos = app.selection.head.min(rope.len_chars());
     let on_last_line = rope.len_chars() == 0 || rope.char_to_line(pos) + 1 >= rope.len_lines();
-    if !on_last_line {
+    if !on_last_line || !at_last_visual_row(app) {
         return false;
     }
     if nb_output_rows(app, focused) > 0 {
@@ -1265,11 +1384,12 @@ fn notebook_move_up(app: &mut App, extend: bool) -> bool {
         return true;
     }
 
-    // On the source: only the first line crosses into the previous cell.
+    // On the source: only the first row crosses into the previous cell (see
+    // `notebook_move_down` — a wrapped first line has rows above the cursor).
     let rope = &app.buffer.rope;
     let pos = app.selection.head.min(rope.len_chars());
     let on_first_line = rope.len_chars() == 0 || rope.char_to_line(pos) == 0;
-    if !on_first_line || focused == 0 {
+    if !on_first_line || !at_first_visual_row(app) || focused == 0 {
         return false;
     }
     let col = motion::col_of(rope, pos);
@@ -1727,6 +1847,63 @@ mod tests {
     /// The which-key popup is a promise about what the next keypress does, so
     /// every key it advertises must be one the `g` sub-mode actually
     /// dispatches — in every view, since the table view has its own list.
+    /// `j`/`k` follow the rows on screen once `:wrap` is on, and go back to
+    /// logical lines when it is off.  Driven through `execute` so the wiring —
+    /// wrap width from the renderer, geometry choice, scroll — is exercised.
+    #[test]
+    fn j_and_k_move_by_visual_row_when_wrapping_is_on() {
+        let mut app = App::new(None, Config::load()).unwrap();
+        app.viewport_width = 20; // gutter 5 + 1 git → 14 columns of text
+        app.viewport_height = 20;
+        app.config.editor.line_numbers = true;
+        app.config.editor.git_gutter = true;
+        app.config.editor.word_wrap = true;
+        // One long paragraph over three visual rows, then a short line.
+        app.buffer.rope = Rope::from_str(&format!("{}\nshort\n", "x".repeat(40)));
+        app.selection = Selection::point(0);
+
+        let width = crate::ui::text_width(&app);
+        assert!(width > 0 && width < 40, "the paragraph must wrap");
+
+        execute(&mut app, &Command::MoveDown);
+        assert_eq!(app.selection.head, width, "one row down, same logical line");
+        execute(&mut app, &Command::MoveDown);
+        assert_eq!(app.selection.head, width * 2);
+        execute(&mut app, &Command::MoveUp);
+        assert_eq!(app.selection.head, width);
+
+        // With wrapping off the same `j` skips the whole paragraph.
+        app.config.editor.word_wrap = false;
+        app.selection = Selection::point(0);
+        execute(&mut app, &Command::MoveDown);
+        assert_eq!(app.selection.head, 41, "start of \"short\"");
+    }
+
+    /// The point of visual motion is that the cursor goes where it looks like
+    /// it will: one `j` must move it exactly one *screen* row, as the renderer
+    /// places it.
+    #[test]
+    fn one_j_moves_the_cursor_exactly_one_screen_row() {
+        let mut app = App::new(None, Config::load()).unwrap();
+        app.viewport_width = 30;
+        app.viewport_height = 20;
+        app.config.editor.word_wrap = true;
+        app.buffer.rope = Rope::from_str(&format!("{}\ntail\n", "abcde ".repeat(20)));
+        app.selection = Selection::point(0);
+
+        let area = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: app.viewport_width as u16,
+            height: app.viewport_height as u16,
+        };
+        let before = crate::ui::cursor_screen_pos(&app, area).expect("cursor on screen");
+        execute(&mut app, &Command::MoveDown);
+        let after = crate::ui::cursor_screen_pos(&app, area).expect("cursor on screen");
+        assert_eq!(after.1, before.1 + 1, "one row down");
+        assert_eq!(after.0, before.0, "same column");
+    }
+
     #[test]
     fn goto_hints_only_advertise_real_bindings() {
         let mut app = App::new(None, Config::load()).unwrap();
@@ -2745,6 +2922,57 @@ mod tests {
         app.selection = Selection::point(0);
         execute(&mut app, &Command::MoveUp);
         assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// A wrapped cell line occupies several rows, and `j` must walk them before
+    /// leaving the cell — otherwise one keypress skips a whole paragraph and
+    /// lands in the next cell, which is what "the last line" used to mean.
+    #[test]
+    fn j_walks_the_wrapped_rows_of_a_cell_before_crossing_into_the_next() {
+        let mut app = App::new(None, Config::load()).unwrap();
+        app.viewport_width = 40;
+        app.viewport_height = 30;
+
+        let dir = unique_tmp_dir("wrapcell");
+        let target = dir.join("wrapcell.ipynb");
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "wrapcell");
+
+        // A markdown cell (always wrapped) holding one long line, then a
+        // second cell to cross into.
+        let long = "word ".repeat(30);
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].cell_type = crate::notebook::CellType::Markdown;
+            nb.cells[0].source = Rope::from_str(long.trim_end());
+            let mut second = nb.cells[0].clone();
+            second.id = crate::notebook::new_cell_id();
+            second.source = Rope::from_str("after");
+            nb.cells.push(second);
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+        app.selection = Selection::point(0);
+
+        let width = scroll::focused_cell_wrap_width(&app).expect("markdown cells wrap");
+        assert!(width < long.len(), "the line must wrap");
+
+        // The first `j` stays in this cell, on the next row of the same line.
+        execute(&mut app, &Command::MoveDown);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+        assert!(app.selection.head > 0 && app.selection.head <= width);
+
+        // Walking down eventually crosses into cell 1 — but only after the
+        // rows are used up, and it takes more than one keypress to do it.
+        let mut presses = 1;
+        while app.notebook.as_ref().unwrap().1.focused_cell == 0 && presses < 100 {
+            execute(&mut app, &Command::MoveDown);
+            presses += 1;
+        }
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 1);
+        assert!(presses > 2, "a wrapped paragraph is more than one row tall");
 
         let _ = std::fs::remove_file(&target);
     }

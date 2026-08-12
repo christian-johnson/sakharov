@@ -76,9 +76,10 @@ pub fn update_scroll(app: &mut App) {
         return;
     }
 
-    let git_col = if app.config.editor.git_gutter && app.notebook.is_none() { 1usize } else { 0 };
-    let gutter_width = if app.config.editor.line_numbers { 5 + git_col } else { git_col };
-    let visible_cols = app.viewport_width.saturating_sub(gutter_width);
+    // The renderer owns this number (gutters, diagnostic column): asking it
+    // keeps the width lines are wrapped to for scrolling identical to the width
+    // they are drawn and moved through at.
+    let visible_cols = crate::ui::text_width(app);
     let word_wrap = app.config.editor.word_wrap;
 
     let rope = &app.buffer.rope;
@@ -182,6 +183,13 @@ fn nb_layout(app: &App) -> Option<NbLayout> {
         .then(|| crate::notebook_ui::cell_text_width(avail_cols));
 
     Some(NbLayout { heights, focused, wrap_width })
+}
+
+/// Wrap width of the focused cell's source, or `None` when that cell doesn't
+/// wrap.  The same value the renderer wraps the cell to, so visual `j`/`k`
+/// inside a cell step through the rows actually drawn.
+pub(super) fn focused_cell_wrap_width(app: &App) -> Option<usize> {
+    nb_layout(app)?.wrap_width
 }
 
 /// Absolute row of cell `idx`'s top border (each cell is `h + 1` rows tall
