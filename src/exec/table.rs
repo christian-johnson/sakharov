@@ -234,20 +234,16 @@ pub(super) fn open_cell_buffer(app: &mut App) {
 /// `:bd` in a `*cell …*` buffer — go back to the table it came from.
 /// Returns false when the current buffer is not a cell buffer.
 pub(super) fn close_cell_buffer(app: &mut App) -> bool {
+    if !app.in_cell_buffer() {
+        return false;
+    }
     let Some(origin) = app.table_cell_origin.as_ref().map(|o| o.path.clone()) else {
         return false;
     };
-    let name = app
-        .buffer
-        .path
-        .as_ref()
-        .and_then(|p| p.to_str())
-        .unwrap_or_default()
-        .to_string();
-    if !name.starts_with("*cell ") {
-        return false;
+    if let Some(name) = app.buffer.path.as_ref().and_then(|p| p.to_str()) {
+        let name = name.to_string();
+        app.special_buffer_ropes.remove(&name);
     }
-    app.special_buffer_ropes.remove(&name);
     open_as_table(app, &origin);
     true
 }
@@ -485,47 +481,124 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
             app.messages.show("No cell buffer open");
             return true;
         }
-
-        // Read-only: refuse anything that would edit or write, rather than
-        // letting it operate on the detached buffer behind the grid.
-        _ if is_text_mutation(cmd) => {
-            app.messages
-                .show("The table view is read-only (:table-close to edit as text)");
+        // `:42` addresses a row, the grid's equivalent of a line.
+        Command::GotoLine(n) => {
+            let target = n.saturating_sub(1);
+            moved(app, &|s| s.cursor_row = target);
+        }
+        // The palette's generic "yank" is the cell here — the grid has no text
+        // selection for it to mean anything else.
+        Command::YankSelection => {
+            yank_cell(app);
             return true;
         }
-        _ => return false,
+
+        // Anything that would act on the detached buffer behind the grid is
+        // refused with a reason, rather than silently operating on an empty
+        // buffer (`ga` used to ask the LSP about nothing at all).
+        _ => match refusal(cmd) {
+            Some(why) => {
+                app.messages.show(why.message(cmd));
+                return true;
+            }
+            None => return false,
+        },
     }
 
     update_scroll(app);
     true
 }
 
-/// Commands that edit or save the text buffer — meaningless in the table view,
-/// and refused there so they can't quietly act on the detached buffer.
-fn is_text_mutation(cmd: &Command) -> bool {
-    matches!(
-        cmd,
+/// Why a command doesn't run in the table view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Refusal {
+    /// Would edit or save — the view is a read-only window on the file.
+    ReadOnly,
+    /// Operates on text structure (words, symbols, folds, the LSP's idea of the
+    /// document). The buffer behind the grid is empty and path-less, so these
+    /// answer nothing at best and lie at worst.
+    NeedsText,
+    /// Meaningful in a grid, just not built yet.
+    NotImplemented,
+}
+
+impl Refusal {
+    fn message(self, cmd: &Command) -> String {
+        match self {
+            Refusal::ReadOnly => {
+                "The table view is read-only (:table-close to edit as text)".to_string()
+            }
+            Refusal::NeedsText => format!(
+                "`{}` needs a text buffer (:table-close to edit as text)",
+                cmd.name()
+            ),
+            Refusal::NotImplemented => format!(
+                "`{}` isn't implemented for the table view yet",
+                cmd.name()
+            ),
+        }
+    }
+}
+
+/// Classify a command the grid does not implement.  `None` means "not ours" —
+/// it falls through to the ordinary path and behaves as it does everywhere else
+/// (`:q`, the palette, `:theme`, buffer switching, the toggles, …).
+pub(super) fn refusal(cmd: &Command) -> Option<Refusal> {
+    Some(match cmd {
         Command::EnterInsert
-            | Command::EnterInsertAfter
-            | Command::EnterInsertAtLineStart
-            | Command::EnterInsertAtLineEnd
-            | Command::DeleteSelection
-            | Command::ChangeSelection
-            | Command::PasteAfter
-            | Command::PasteBefore
-            | Command::OpenLineBelow
-            | Command::OpenLineAbove
-            | Command::Undo
-            | Command::Redo
-            | Command::CommentRegion
-            | Command::IndentRegion
-            | Command::DedentRegion
-            | Command::KillToEndOfLine
-            | Command::Write
-            | Command::WriteForce
-            | Command::WriteQuit
-            | Command::FormatDocument
-    )
+        | Command::EnterInsertAfter
+        | Command::EnterInsertAtLineStart
+        | Command::EnterInsertAtLineEnd
+        | Command::DeleteSelection
+        | Command::ChangeSelection
+        | Command::PasteAfter
+        | Command::PasteBefore
+        | Command::OpenLineBelow
+        | Command::OpenLineAbove
+        | Command::Undo
+        | Command::Redo
+        | Command::CommentRegion
+        | Command::IndentRegion
+        | Command::DedentRegion
+        | Command::KillToEndOfLine
+        | Command::Write
+        | Command::WriteForce
+        | Command::WriteQuit
+        | Command::WriteAs(_)
+        | Command::FormatDocument => Refusal::ReadOnly,
+
+        // LSP: there is no document under the cursor to ask about.
+        Command::LspCodeActions
+        | Command::LspGotoDefinition
+        | Command::LspGotoReferences
+        | Command::LspGotoTypeDefinition
+        | Command::LspGotoImplementation
+        | Command::LspRequestCompletion
+        // Text structure: characters, words, symbols, folds.
+        | Command::FindCharForward
+        | Command::FindCharBackward
+        | Command::TillCharForward
+        | Command::TillCharBackward
+        | Command::EnterJumpMode
+        | Command::EnterSelect
+        | Command::SelectLine
+        | Command::SelectAll
+        | Command::OpenSymbolPicker
+        | Command::OpenDiagnosticPicker
+        | Command::GrepBuffer
+        | Command::EnterFoldMode
+        | Command::FoldToggle
+        | Command::FoldToggleAll
+        | Command::ScrollCursorCenter => Refusal::NeedsText,
+
+        // Searching a grid is a real feature, it just doesn't exist yet.
+        Command::SearchForward
+        | Command::SearchBackward
+        | Command::SearchNext
+        | Command::SearchPrev => Refusal::NotImplemented,
+
+        _ => return None,
+    })
 }
 
 /// Data rows that fit on screen (the header takes one row of the grid area).
@@ -1071,5 +1144,91 @@ mod tests {
         assert!(!handle(&mut app, &Command::Quit));
         assert!(!handle(&mut app, &Command::OpenCommandPalette));
         assert!(!handle(&mut app, &Command::EnterCommandMode));
+        // Things that work the same everywhere must keep working here.
+        for cmd in [
+            Command::BufferNext,
+            Command::OpenFilePicker,
+            Command::OpenThemePicker,
+            Command::ToggleLineNumbers,
+            Command::SwitchToMessages,
+        ] {
+            assert!(refusal(&cmd).is_none(), "{} should fall through", cmd.name());
+        }
+    }
+
+    /// The buffer behind the grid is empty and path-less, so a command that
+    /// reads it answers about nothing — `ga` used to ask the LSP for code
+    /// actions on an empty document.  Each one now says why it can't run.
+    #[test]
+    fn commands_that_need_a_text_buffer_are_refused_with_a_reason() {
+        let mut app = app_with_table(3, 2);
+        for cmd in [
+            Command::LspCodeActions,
+            Command::LspGotoDefinition,
+            Command::LspGotoReferences,
+            Command::EnterJumpMode,
+            Command::OpenSymbolPicker,
+            Command::EnterSelect,
+            Command::FoldToggle,
+            Command::FindCharForward,
+        ] {
+            assert!(handle(&mut app, &cmd), "{} should be consumed", cmd.name());
+            assert_eq!(app.mode, crate::mode::Mode::Normal, "no mode change");
+            assert!(app.popup.is_none(), "no popup opened");
+            let msg = app.messages.current().unwrap_or_default().to_string();
+            assert!(
+                msg.contains("needs a text buffer") && msg.contains(cmd.name()),
+                "{} was refused with {msg:?}",
+                cmd.name()
+            );
+        }
+    }
+
+    #[test]
+    fn search_says_it_is_not_built_yet_rather_than_searching_nothing() {
+        let mut app = app_with_table(3, 2);
+        assert!(handle(&mut app, &Command::SearchForward));
+        assert_eq!(app.mode, crate::mode::Mode::Normal);
+        assert!(app
+            .messages
+            .current()
+            .is_some_and(|m| m.contains("isn't implemented")));
+    }
+
+    /// `:42` addresses a row — the grid's equivalent of a line number.
+    #[test]
+    fn a_line_number_command_goes_to_that_row() {
+        let mut app = app_with_table(50, 3);
+        handle(&mut app, &Command::GotoLine(12));
+        assert_eq!(cursor(&app), (11, 0), "1-based, like the row gutter");
+        handle(&mut app, &Command::GotoLine(9999));
+        assert_eq!(cursor(&app).0, 49, "clamped to the last row");
+    }
+
+    /// visidata muscle memory: `q` backs out of the cell text. Driven through
+    /// `input::handle_key`, since the binding lives in the cell override map.
+    #[test]
+    fn q_closes_a_cell_buffer_and_returns_to_the_grid() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _) = app_with_long_cell();
+        handle(&mut app, &Command::TableOpenCell);
+        assert!(app.in_cell_buffer());
+
+        crate::input::handle_key(&mut app, KeyEvent::from(KeyCode::Char('q')));
+        assert_eq!(app.view(), View::Table);
+        assert_eq!(cursor(&app), (1, 1), "on the cell we were reading");
+        assert!(!app.should_quit, "q closes the cell, it does not quit sv");
+    }
+
+    /// …and `q` keeps meaning nothing in an ordinary buffer.
+    #[test]
+    fn q_is_inert_outside_a_cell_buffer() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        app.buffer.rope = ropey::Rope::from_str("hello\n");
+        assert!(!app.in_cell_buffer());
+        crate::input::handle_key(&mut app, KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert_eq!(app.buffer.rope.to_string(), "hello\n");
     }
 }

@@ -416,6 +416,19 @@ impl App {
         self.notebook.is_some() && !self.notebook_focused_edit()
     }
 
+    /// True while a `*cell …*` buffer — a table cell's text opened for reading
+    /// — is the current buffer.  The view is still [`View::Text`]; this only
+    /// selects the small `q`-closes-it keymap override.
+    pub fn in_cell_buffer(&self) -> bool {
+        self.table_cell_origin.is_some()
+            && self
+                .buffer
+                .path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .is_some_and(|n| n.starts_with("*cell "))
+    }
+
     /// The kernel language of the open notebook (e.g. `"python"`), if any.
     /// This is the LSP `languageId` for every code cell.
     pub fn notebook_language(&self) -> Option<&str> {

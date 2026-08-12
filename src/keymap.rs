@@ -106,6 +106,7 @@ pub struct Keymap {
     select: HashMap<KeyBinding, Vec<Command>>,
     notebook: HashMap<KeyBinding, Vec<Command>>,
     table: HashMap<KeyBinding, Vec<Command>>,
+    cell: HashMap<KeyBinding, Vec<Command>>,
 }
 
 impl Keymap {
@@ -116,6 +117,7 @@ impl Keymap {
         let mut select: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut notebook: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut table: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        let mut cell: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
 
         // Helper macro to insert into both maps
         macro_rules! both {
@@ -321,7 +323,15 @@ impl Keymap {
         table.insert(KeyBinding::char('y'), vec![Command::TableYankCell]);
         table.insert(KeyBinding::char('x'), vec![Command::TableYankRow]);
 
-        Self { normal, select, notebook, table }
+        // --- `*cell …*` buffer overrides ---
+        //
+        // A cell buffer is an ordinary text buffer (so search, motions and wrap
+        // all work), with one addition: `q` closes it and returns to the grid,
+        // the way `q` backs out of a sheet in visidata. `q` is unbound in
+        // Normal mode otherwise, so nothing is shadowed.
+        cell.insert(KeyBinding::char('q'), vec![Command::TableCloseCell]);
+
+        Self { normal, select, notebook, table, cell }
     }
 
     pub fn lookup_normal(&self, kb: &KeyBinding) -> Option<&[Command]> {
@@ -338,6 +348,10 @@ impl Keymap {
 
     pub fn lookup_table(&self, kb: &KeyBinding) -> Option<&[Command]> {
         self.table.get(kb).map(Vec::as_slice)
+    }
+
+    pub fn lookup_cell(&self, kb: &KeyBinding) -> Option<&[Command]> {
+        self.cell.get(kb).map(Vec::as_slice)
     }
 
     pub fn set_normal(&mut self, kb: KeyBinding, cmds: Vec<Command>) {

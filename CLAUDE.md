@@ -538,7 +538,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   column, `gg/G` first/last row, `J` half-screen page down (the `Keymap::table`
   override map, same mechanism as the notebook's; `K` is the cell peek here, so
   PageUp stays on `Ctrl+u`/`PgUp`). Anything the table doesn't
-  implement (`:q`, the palette, `:theme`, buffer switching) falls through unchanged
+  implement is classified by `exec::table::refusal` (see Phase T2); anything
+  not text-specific (`:q`, the palette, `:theme`, buffer switching) falls through unchanged
 - **Column types are inferred by sampling** `table.sample_rows` rows
   (`table::infer_type`, narrowest-first so a `0`/`1` column is Int, not Bool);
   numeric columns are right-aligned — header included — so digits line up
@@ -608,10 +609,21 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   a cell buffer and `:bd` back is a round trip to the *same cursor cell* rather
   than a re-parse. `:table-close` and `:bd` drop the stash (an explicit exit
   should re-read a file that may have been edited as text since)
-- **`:bd` in a cell buffer returns to its table** rather than hitting the "cannot
-  close special buffer" refusal — the only place it makes sense to go back to.
-  `H`/`L` also treat a cell buffer as sitting at its origin table's position in
-  the buffer list
+- **`q` (and `:bd`) in a cell buffer returns to its table** rather than hitting
+  the "cannot close special buffer" refusal — the only place it makes sense to
+  go back to. `q` lives in a fourth keymap override map (`Keymap::cell`,
+  selected by `App::in_cell_buffer()`, since the *view* is still `Text`);
+  visidata muscle memory, and `q` is otherwise unbound in Normal mode. `H`/`L`
+  also treat a cell buffer as sitting at its origin table's position in the
+  buffer list
+- **`exec::table::refusal(cmd) -> Option<Refusal>`** classifies everything the
+  grid doesn't implement — `ReadOnly` (edits/writes), `NeedsText` (LSP requests,
+  `f`/`t`, `v`, jump/symbol/fold — all of which would read the empty buffer
+  behind the grid and answer about nothing), `NotImplemented` (search, until
+  T3) — and each is refused with a message naming the command. `None` means
+  "falls through", which is the default for anything not text-specific (`:q`,
+  the palette, `:theme`, buffer switching, the toggles). `Command::GotoLine`
+  (`:42`) is *implemented* rather than refused: it addresses a row
 
 ### Known rough edges / not yet implemented
 - No split panes

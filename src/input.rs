@@ -163,6 +163,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     .keymap
                     .lookup_table(&kb)
                     .or_else(|| app.keymap.lookup_normal(&kb)),
+                // A `*cell …*` buffer is a text view with one override: `q`
+                // returns to the grid it was read out of.
+                crate::app::View::Text if app.in_cell_buffer() => app
+                    .keymap
+                    .lookup_cell(&kb)
+                    .or_else(|| app.keymap.lookup_normal(&kb)),
                 crate::app::View::Text => app.keymap.lookup_normal(&kb),
             }
             .map(|v| v.to_vec());

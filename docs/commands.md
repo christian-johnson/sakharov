@@ -245,14 +245,22 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `table-peek-cell` | `gk`, `K` | Peek the cursor cell's full text in a float (`:peek-cell`, `:peek`) |
 | `table-yank-cell` | `y` | Copy the cursor cell's full value to the clipboard (`:yank-cell`) |
 | `table-yank-row` | `x` | Copy the cursor row to the clipboard as a tab-separated line (`:yank-row`) |
-| `table-close-cell` | — | Return from a cell buffer to its table — what `:bd` does there (`:cell-back`, `:back-to-table`) |
+| `table-close-cell` | `q` (in a cell buffer) | Return from a cell buffer to its table — also what `:bd` does there (`:cell-back`, `:back-to-table`) |
 
 `.csv` / `.tsv` / `.tab` files open in the table view automatically (turn this off
 with `auto_open = false` under `[table]`); `:table-close` always gives you the raw
 text of the same file, so the grid and the text are two views on one file.
 
 The view is **read-only** — edit commands and `:w` are refused rather than applied
-to the buffer behind the grid.
+to the buffer behind the grid. Commands that read the *text* of the current
+document (`ga` code actions, `gd`/`gr`, `gw` jump, `gs` symbols, `f`/`t`, `v`,
+folds) are refused too, and say which they are: the buffer behind the grid is
+empty, so they would otherwise answer about nothing at all. `/` search says it
+isn't built for the grid yet. Everything not specific to the text — `:q`, the
+command palette, `:theme`, buffer switching, the toggles — works as it does
+everywhere else.
+
+`:42` goes to row 42, the grid's equivalent of a line number.
 
 Navigation uses the ordinary motions, reinterpreted against the grid:
 
@@ -282,8 +290,8 @@ there are two ways to see one whole:
 - **`Enter`** opens the cell's untruncated text in its own buffer, named
   `*cell <row>:<column>*` — an ordinary buffer, so `/` search, motions and
   word-wrap all work on it. Word-wrap is forced on while it is open and put back
-  as it was when you leave. `:bd` returns to the grid, on the same cell you left
-  (the table is stashed, not re-parsed).
+  as it was when you leave. **`q`** (or `:bd`) returns to the grid, on the same
+  cell you left — the table is stashed, not re-parsed.
 - **`gk`** (or `K`, unless you have rebound it) peeks the same text in a float
   beside the grid. The float works exactly like the LSP completion popup: it is
   a passive overlay you read at a glance and any key dismisses, **`Tab`** engages
