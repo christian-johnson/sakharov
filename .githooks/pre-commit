@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#
+# Run the same clippy + test pass CI runs, so a CI failure can't be the first
+# time you hear about a broken commit.
+#
+# Enable it once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# It checks the *working tree*, not the staged snapshot — with unstaged changes
+# in the tree it can pass on code that isn't what you're committing. Commit from
+# a clean tree, or treat a green hook as "this tree is fine".
+#
+# Bypass with `git commit --no-verify` when you mean to (e.g. committing a
+# work-in-progress on a branch).
+
+exec ./scripts/check.sh

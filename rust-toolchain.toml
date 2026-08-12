@@ -1,0 +1,12 @@
+# Pinned so a local `cargo clippy` and CI's run the *same* compiler.
+#
+# Clippy gains lints with every release, so a floating `stable` means a
+# developer whose toolchain is a few months old passes locally and fails in CI
+# (this file exists because that happened: `clippy::byte_char_slices` landed
+# between 1.95 and 1.97).
+#
+# To take newer lints: `rustup update stable`, bump `channel` to the version it
+# reports, and fix whatever the new clippy finds.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy"]

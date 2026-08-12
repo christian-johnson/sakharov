@@ -836,6 +836,28 @@ docs/
 - **Shell integration**: `Command::Shell("sh -c '...'")`
 - **Config-driven keybindings**: parse TOML → `Command::parse(name)` + `KeyBinding` → `keymap.set_*`
 
+## Checks (local == CI)
+
+`./scripts/check.sh` is the **one** definition of "does this pass": clippy with
+`-D warnings` over all targets, then the tests. CI (`.github/workflows/ci.yml`)
+runs `./scripts/check.sh --full` (same, plus the release build) and the
+pre-commit hook runs it bare, so the two cannot drift apart.
+
+The toolchain is pinned in `rust-toolchain.toml` (currently 1.97.1). That is not
+ceremony: clippy gains lints every release, so a floating `stable` means an
+older local toolchain passes and CI fails on a lint it has never seen. To take
+newer lints, `rustup update stable`, bump `channel`, and fix what it finds.
+
+Enable the hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+There is **no `cargo fmt` check** — the source is hand-formatted in places
+(aligned match arms, the `commands!` table) and running rustfmt over it would
+produce a huge unrelated diff. Don't add one without agreeing to reformat.
+
 ## Dependency versions
 ```toml
 ratatui = "0.29"

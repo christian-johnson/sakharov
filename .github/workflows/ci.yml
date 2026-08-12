@@ -19,17 +19,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Installs exactly the toolchain pinned in rust-toolchain.toml — the same
+      # compiler a developer gets locally, so clippy can't find something here
+      # that it didn't find there.
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component clippy
+        run: rustup show active-toolchain || rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
-      # Warnings are errors in CI — the codebase is clippy-clean and stays so.
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Tests
-        run: cargo test
-
-      - name: Build release binary
-        run: cargo build --release
+      # The checks themselves live in scripts/check.sh, which the pre-commit
+      # hook also runs, so the two can never drift apart.
+      - name: Clippy, tests, release build
+        run: ./scripts/check.sh --full

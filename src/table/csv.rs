@@ -19,7 +19,7 @@ use crate::config::TableConfig;
 use super::{infer_type, layout::display_width, Column, TableSource};
 
 /// Delimiters considered when sniffing an unknown file.
-const CANDIDATE_DELIMITERS: [u8; 4] = [b',', b'\t', b';', b'|'];
+const CANDIDATE_DELIMITERS: &[u8; 4] = b",\t;|";
 
 /// A fully-loaded delimited-text table.
 pub struct CsvSource {
