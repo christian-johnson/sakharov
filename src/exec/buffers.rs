@@ -109,6 +109,12 @@ pub fn switch_to_special_buffer(app: &mut App, name: &str) {
 /// picker, the file picker, buffer cycling, `:bd`'s fallback — so a new view
 /// only has to be taught to one dispatcher instead of five.
 pub fn open_path(app: &mut App, path: &std::path::Path) {
+    // Opening a file is a commit: leave the dashboard.  The built-in pickers
+    // clear this on popup-confirm, but the *external* picker (yazi/fzf) never
+    // goes through a popup, so without this the dashboard stays painted over
+    // the file that was just opened until the next keypress.
+    app.show_splash = false;
+
     if is_special_path(path) {
         switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
     } else if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {

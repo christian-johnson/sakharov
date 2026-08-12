@@ -566,6 +566,12 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
         // The table view's buffer is detached and has no path, so the name comes
         // from the session.  Read-only, hence never modified.
         (session.display_name(), false, None, None)
+    } else if let Some(name) = app.table_load_name() {
+        // A table is still parsing on the background thread.  The buffer is
+        // already detached, so without this the status line reads "[No Name]"
+        // over an empty screen — name the file being loaded instead (the
+        // `spinner` module is animating alongside it).
+        (format!("{name}  ·  loading"), false, None, None)
     } else if let Some((nb, state)) = app.notebook.as_ref() {
         let nb_name = nb.path.file_stem().and_then(|s| s.to_str()).unwrap_or("notebook");
         let ext = lang_to_ext(&nb.metadata.kernel_language);

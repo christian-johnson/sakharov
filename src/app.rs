@@ -392,6 +392,11 @@ impl App {
         }
     }
 
+    /// Name of the table file currently loading in the background, if any.
+    pub fn table_load_name(&self) -> Option<&str> {
+        self.table_pending.as_ref().map(|l| l.display_name())
+    }
+
     /// Returns true when the focused-cell full-screen overlay is active.
     pub fn notebook_focused_edit(&self) -> bool {
         self.notebook.is_some() && self.cell_focused_edit

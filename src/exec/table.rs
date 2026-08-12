@@ -42,6 +42,16 @@ pub struct TableLoad {
     rx: Receiver<Result<CsvSource, String>>,
 }
 
+impl TableLoad {
+    /// File name shown in the status line while the parse is in flight.
+    pub fn display_name(&self) -> &str {
+        self.path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("table")
+    }
+}
+
 /// True when `path` is a delimited-text file the table view can open.
 pub fn is_table_path(path: &Path) -> bool {
     matches!(
@@ -408,6 +418,39 @@ mod tests {
         assert_eq!(app.buffer.path.as_deref(), Some(path.as_path()));
         assert!(app.buffer.rope.to_string().starts_with("a,b"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The external file picker (yazi/fzf) opens a file without going through a
+    /// popup confirm, so `open_path` is the only thing that can retire the
+    /// dashboard — otherwise it stays painted over the opened file until the
+    /// next keypress.  Also covers the load being visibly in progress.
+    #[test]
+    fn opening_from_the_dashboard_retires_the_splash_and_names_the_load() {
+        let dir = std::env::temp_dir().join(format!("sv-splash-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.csv");
+        std::fs::write(&path, "a,b\n1,x\n").unwrap();
+
+        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        app.config.table = TableConfig::default();
+        app.show_splash = true;
+
+        crate::exec::open_path(&mut app, &path);
+        assert!(!app.show_splash, "the dashboard must not stay over the file");
+
+        // While the parse is in flight the status line names it and the spinner
+        // has something to be active about.
+        assert_eq!(app.table_load_name(), Some("data.csv"));
+        assert!(app.table_pending.is_some());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.table.is_none() && std::time::Instant::now() < deadline {
+            poll_table_load(&mut app);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.view(), View::Table);
+        assert_eq!(app.table_load_name(), None, "cleared once the load lands");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
