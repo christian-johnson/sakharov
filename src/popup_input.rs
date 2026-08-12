@@ -8,6 +8,8 @@ use crate::{
 /// Handle a key event when a popup is open.
 /// Returns the action to take; the caller is responsible for acting on it.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
+    // Read before borrowing the popup out of `app`.
+    let doc_height = app.config.ui.doc_popup_height as usize;
     let popup = match app.popup.as_mut() {
         Some(p) => p,
         None => return PopupAction::Continue,
@@ -16,6 +18,72 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
     // KeyHints are purely informational — any key dismisses with passthrough.
     if matches!(popup.content, PopupContent::KeyHints(_)) {
         return PopupAction::DismissPassthrough;
+    }
+
+    // Text floats (hover docs, the table's cell peek) use the same passive →
+    // focused model as the completion popup: the float is a hint overlay you
+    // read at a glance, Tab engages with it when it is taller than the float,
+    // and j/k/J/K then scroll it. Esc leaves.
+    if let PopupContent::Text(ref mut text) = popup.content {
+        let visible = doc_height;
+        let page = (visible / 2).max(1);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if !text.focused {
+            return match key.code {
+                KeyCode::Tab => {
+                    text.focused = true;
+                    PopupAction::Continue
+                }
+                KeyCode::Esc | KeyCode::Enter => PopupAction::Dismiss,
+                // Anything else is the user moving on: close and let the key do
+                // what it normally does, rather than swallowing it.
+                _ => PopupAction::DismissPassthrough,
+            };
+        }
+
+        return match key.code {
+            KeyCode::Esc | KeyCode::Enter => PopupAction::Dismiss,
+            // Tab disengages without closing, mirroring the completion popup.
+            KeyCode::Tab => {
+                text.focused = false;
+                PopupAction::Continue
+            }
+            KeyCode::Char('d') if ctrl => {
+                text.scroll_down(page, visible);
+                PopupAction::Continue
+            }
+            KeyCode::Char('u') if ctrl => {
+                text.scroll_up(page);
+                PopupAction::Continue
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                text.scroll_down(1, visible);
+                PopupAction::Continue
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                text.scroll_up(1);
+                PopupAction::Continue
+            }
+            KeyCode::Char('J') | KeyCode::PageDown => {
+                text.scroll_down(page, visible);
+                PopupAction::Continue
+            }
+            KeyCode::Char('K') | KeyCode::PageUp => {
+                text.scroll_up(page);
+                PopupAction::Continue
+            }
+            KeyCode::Char('g') => {
+                text.scroll = 0;
+                PopupAction::Continue
+            }
+            KeyCode::Char('G') => {
+                text.scroll_down(text.lines.len(), visible);
+                PopupAction::Continue
+            }
+            // Focused means focused: don't leak stray keys into the editor.
+            _ => PopupAction::Continue,
+        };
     }
 
     let is_completion = popup.on_confirm == PopupTarget::InsertText;
@@ -181,15 +249,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
                     PopupAction::Dismiss
                 }
             }
-            PopupContent::Text(_) => PopupAction::Dismiss,
-            PopupContent::KeyHints(_) => unreachable!(),
+            // Text and KeyHints popups both returned above.
+            _ => unreachable!(),
         },
 
         KeyCode::Up | KeyCode::BackTab => {
             if let PopupContent::List(ref mut s) = popup.content {
                 s.move_up();
-            } else if let PopupContent::Text(ref mut s) = popup.content {
-                s.scroll_up();
             }
             PopupAction::Continue
         }
@@ -197,8 +263,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         KeyCode::Down | KeyCode::Tab => {
             if let PopupContent::List(ref mut s) = popup.content {
                 s.move_down();
-            } else if let PopupContent::Text(ref mut s) = popup.content {
-                s.scroll_down(10);
             }
             PopupAction::Continue
         }

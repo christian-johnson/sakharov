@@ -212,30 +212,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::EnterGotoMode => {
             let extend = app.mode == Mode::Select;
             app.mode = Mode::Goto { extend };
-            let lsp_active = app.current_language()
-                .map(|l| app.lsp.is_ready(l))
-                .unwrap_or(false);
-            let mut hints = vec![
-                ("g".into(), "go to file start".into()),
-                ("e".into(), "go to file end".into()),
-                ("h".into(), "go to line first non-whitespace".into()),
-                ("l".into(), "go to line end".into()),
-                ("z".into(), "scroll cursor to centre".into()),
-                ("w".into(), "jump to label in view".into()),
-                ("b".into(), "buffer picker".into()),
-                ("s".into(), "symbol picker".into()),
-                ("c".into(), "comment/uncomment selection".into()),
-                ("D".into(), "diagnostic picker".into()),
-            ];
-            if lsp_active {
-                hints.push(("a".into(), "code actions  [LSP]".into()));
-                hints.push(("k".into(), "show documentation  [LSP]".into()));
-                hints.push(("d".into(), "go to definition  [LSP]".into()));
-                hints.push(("r".into(), "go to references  [LSP]".into()));
-                hints.push(("y".into(), "go to type definition  [LSP]".into()));
-                hints.push(("i".into(), "go to implementation  [LSP]".into()));
-            }
-            app.popup = Some(crate::popup::Popup::which_key("g", hints));
+            app.popup = Some(crate::popup::Popup::which_key("g", goto_hints(app)));
             return;
         }
         Command::EnterJumpMode => {
@@ -1110,6 +1087,55 @@ pub fn execute(app: &mut App, cmd: &Command) {
     update_scroll(app);
 }
 
+/// The which-key entries for the `g` sub-mode.
+///
+/// Every key listed here must be one `input::goto_command` dispatches (pinned
+/// by `goto_hints_only_advertise_real_bindings`), and the labels describe what
+/// the command does **in the current view** — the same `g h` that goes to the
+/// first non-whitespace character in text goes to the first column in the grid,
+/// and `g k` asks the LSP in a buffer but peeks the cell in a table.  A key that
+/// would do nothing here is left out rather than advertised.
+fn goto_hints(app: &App) -> Vec<(String, String)> {
+    let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
+
+    if app.view() == crate::app::View::Table {
+        return vec![
+            hint("g", "first row"),
+            hint("e", "last row"),
+            hint("h", "first column"),
+            hint("l", "last column"),
+            hint("k", "peek cell text"),
+            hint("b", "buffer picker"),
+        ];
+    }
+
+    let mut hints = vec![
+        hint("g", "go to file start"),
+        hint("e", "go to file end"),
+        hint("h", "go to line first non-whitespace"),
+        hint("l", "go to line end"),
+        hint("z", "scroll cursor to centre"),
+        hint("w", "jump to label in view"),
+        hint("b", "buffer picker"),
+        hint("s", "symbol picker"),
+        hint("c", "comment/uncomment selection"),
+        hint("D", "diagnostic picker"),
+    ];
+    let lsp_active = app
+        .current_language()
+        .map(|l| app.lsp.is_ready(l))
+        .unwrap_or(false);
+    if lsp_active {
+        hints.push(hint("a", "code actions  [LSP]"));
+        hints.push(hint("k", "show documentation  [LSP]"));
+        hints.push(hint("d", "go to definition  [LSP]"));
+        hints.push(hint("r", "go to references  [LSP]"));
+        hints.push(hint("y", "go to type definition  [LSP]"));
+        hints.push(hint("i", "go to implementation  [LSP]"));
+    }
+    hints
+}
+
 /// True when vertical motion should flow through the notebook cell stack
 /// rather than staying inside the buffer (i.e. a notebook is open and we're
 /// not in the full-screen single-cell overlay).
@@ -1697,6 +1723,61 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use ropey::Rope;
+
+    /// The which-key popup is a promise about what the next keypress does, so
+    /// every key it advertises must be one the `g` sub-mode actually
+    /// dispatches — in every view, since the table view has its own list.
+    #[test]
+    fn goto_hints_only_advertise_real_bindings() {
+        let mut app = App::new(None, Config::load()).unwrap();
+        for hints in [goto_hints(&app), {
+            app.table = Some(crate::exec::table::Session {
+                source: Box::new(
+                    crate::table::csv::CsvSource::from_reader(
+                        "a,b\n1,2\n".as_bytes(),
+                        b',',
+                        &crate::config::TableConfig::default(),
+                    )
+                    .unwrap(),
+                ),
+                state: crate::table::TableState::new(),
+                path: std::path::PathBuf::from("t.csv"),
+            });
+            goto_hints(&app)
+        }] {
+            assert!(!hints.is_empty());
+            for (key, label) in hints {
+                let c = key.chars().next().expect("hint key is a char");
+                assert!(
+                    crate::input::goto_command(c).is_some(),
+                    "g{key} is advertised as {label:?} but dispatches nothing"
+                );
+            }
+        }
+    }
+
+    /// `gk` peeks the cell in a table, so it must be listed there — the hint
+    /// list used to gate `k` on an active LSP, which a table never has.
+    #[test]
+    fn the_table_views_goto_hints_include_the_cell_peek() {
+        let mut app = App::new(None, Config::load()).unwrap();
+        app.table = Some(crate::exec::table::Session {
+            source: Box::new(
+                crate::table::csv::CsvSource::from_reader(
+                    "a,b\n1,2\n".as_bytes(),
+                    b',',
+                    &crate::config::TableConfig::default(),
+                )
+                .unwrap(),
+            ),
+            state: crate::table::TableState::new(),
+            path: std::path::PathBuf::from("t.csv"),
+        });
+        let hints = goto_hints(&app);
+        assert!(hints.iter().any(|(k, d)| k == "k" && d.contains("peek")));
+        // And nothing that would do nothing here.
+        assert!(!hints.iter().any(|(k, _)| k == "s" || k == "w"));
+    }
 
     #[test]
     fn test_exec_clamping_behavior() {

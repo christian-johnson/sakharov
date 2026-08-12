@@ -500,18 +500,20 @@ fn is_subsequence(label: &str, filter: &str) -> bool {
 pub struct TextState {
     pub lines: Vec<String>,
     pub scroll: usize,
+    /// True once the user has pressed Tab to engage with the text, exactly as
+    /// [`ListState::focused`] works for the completion popup: passive floats are
+    /// hint overlays that any key dismisses, focused ones capture navigation.
+    pub focused: bool,
 }
 
 impl TextState {
-    pub fn scroll_up(&mut self) {
-        self.scroll = self.scroll.saturating_sub(1);
+    pub fn scroll_up(&mut self, n: usize) {
+        self.scroll = self.scroll.saturating_sub(n);
     }
 
-    pub fn scroll_down(&mut self, max_visible: usize) {
+    pub fn scroll_down(&mut self, n: usize, max_visible: usize) {
         let max_scroll = self.lines.len().saturating_sub(max_visible);
-        if self.scroll < max_scroll {
-            self.scroll += 1;
-        }
+        self.scroll = (self.scroll + n).min(max_scroll);
     }
 }
 
@@ -590,6 +592,7 @@ impl Popup {
             content: PopupContent::Text(TextState {
                 lines: content.lines().map(str::to_owned).collect(),
                 scroll: 0,
+                focused: false,
             }),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.6),

@@ -565,37 +565,48 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
 // Goto mode (after 'g')
 // ---------------------------------------------------------------------------
 
+/// The `g` sub-mode's dispatch table, and the single source of truth for what
+/// `g` does: [`handle_goto`] runs the command, and `exec::goto_hints` labels the
+/// same keys in the which-key popup.  A key that isn't listed here must not
+/// appear in the hints (a test pins that).
+pub fn goto_command(c: char) -> Option<Command> {
+    Some(match c {
+        'g' => Command::GotoFileStart,
+        'e' => Command::GotoFileEnd,
+        'h' => Command::MoveLineFirstNonWs,
+        'l' => Command::MoveLineEnd,
+        'z' => Command::ScrollCursorCenter,
+        'd' => Command::LspGotoDefinition,
+        'r' => Command::LspGotoReferences,
+        'y' => Command::LspGotoTypeDefinition,
+        'i' => Command::LspGotoImplementation,
+        'w' => Command::EnterJumpMode,
+        'b' => Command::OpenBufferPicker,
+        's' => Command::OpenSymbolPicker,
+        'D' => Command::OpenDiagnosticPicker,
+        'a' => Command::LspCodeActions,
+        'c' => Command::CommentRegion,
+        'k' => Command::LspShowDocumentation,
+        _ => return None,
+    })
+}
+
 fn handle_goto(app: &mut App, key: KeyEvent) {
     // Capture whether we entered goto mode from Select (so motions extend).
     let extend = matches!(app.mode, Mode::Goto { extend: true });
     // Transition back to the appropriate mode before dispatching.
     app.mode = if extend { Mode::Select } else { Mode::Normal };
 
-    // Every motion here goes through `exec::execute` rather than calling
+    // Every command here goes through `exec::execute` rather than calling
     // `motion::*` on the buffer directly: the buffer is not always what the
     // motion should move.  In the table view the command is reinterpreted
     // against the grid, and while browsing a notebook cell's output block the
     // line motions move the output cursor — both of which a direct rope motion
     // silently bypasses (it moved a hidden or empty buffer instead).
-    match key.code {
-        KeyCode::Char('g') => exec::execute(app, &Command::GotoFileStart),
-        KeyCode::Char('e') => exec::execute(app, &Command::GotoFileEnd),
-        KeyCode::Char('h') => exec::execute(app, &Command::MoveLineFirstNonWs),
-        KeyCode::Char('l') => exec::execute(app, &Command::MoveLineEnd),
-        KeyCode::Char('z') => exec::execute(app, &Command::ScrollCursorCenter),
-        KeyCode::Char('d') => exec::execute(app, &Command::LspGotoDefinition),
-        KeyCode::Char('r') => exec::execute(app, &Command::LspGotoReferences),
-        KeyCode::Char('y') => exec::execute(app, &Command::LspGotoTypeDefinition),
-        KeyCode::Char('i') => exec::execute(app, &Command::LspGotoImplementation),
-        KeyCode::Char('w') => exec::execute(app, &Command::EnterJumpMode),
-        KeyCode::Char('b') => exec::execute(app, &Command::OpenBufferPicker),
-        KeyCode::Char('s') => exec::execute(app, &Command::OpenSymbolPicker),
-        KeyCode::Char('D') => exec::execute(app, &Command::OpenDiagnosticPicker),
-        KeyCode::Char('a') => exec::execute(app, &Command::LspCodeActions),
-        KeyCode::Char('c') => exec::execute(app, &Command::CommentRegion),
-        KeyCode::Char('k') => exec::execute(app, &Command::LspShowDocumentation),
-        KeyCode::Esc => {}
-        _ => {}
+    if let KeyCode::Char(c) = key.code {
+        if let Some(cmd) = goto_command(c) {
+            exec::execute(app, &cmd);
+        }
     }
     exec::update_scroll(app);
 }

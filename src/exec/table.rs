@@ -947,6 +947,65 @@ mod tests {
         assert_eq!(state.lines.join(" "), long);
     }
 
+    /// The peek float behaves like the completion popup: it is a passive
+    /// overlay until Tab engages it, then j/k/J/K scroll and Esc leaves.
+    /// Driven through `input::handle_key` so the popup layer is exercised.
+    #[test]
+    fn tab_engages_the_peek_float_then_j_k_scroll_and_esc_leaves() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let press = |app: &mut App, code: KeyCode| {
+            crate::input::handle_key(app, KeyEvent::from(code));
+        };
+        let scroll = |app: &App| match &app.popup.as_ref().unwrap().content {
+            crate::popup::PopupContent::Text(s) => s.scroll,
+            _ => panic!("not a text float"),
+        };
+        let focused = |app: &App| match &app.popup.as_ref().unwrap().content {
+            crate::popup::PopupContent::Text(s) => s.focused,
+            _ => panic!("not a text float"),
+        };
+
+        let (mut app, _) = app_with_long_cell();
+        app.config.ui.doc_popup_height = 3;
+        // Opened by command, not by key: `K` is remappable in config, and this
+        // test is about the float's behaviour once it is up.
+        handle(&mut app, &Command::TablePeekCell);
+        assert!(!focused(&app), "passive to begin with");
+
+        press(&mut app, KeyCode::Tab);
+        assert!(focused(&app));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(scroll(&app), 1, "j scrolls one line");
+        press(&mut app, KeyCode::Char('J'));
+        assert_eq!(scroll(&app), 2, "J scrolls half a float");
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(scroll(&app), 1);
+        press(&mut app, KeyCode::Char('G'));
+        assert!(scroll(&app) > 1, "G goes to the end");
+
+        // Focused means focused: `l` scrolls nothing and must not reach the grid.
+        let before = cursor(&app);
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(cursor(&app), before, "keys don't leak past a focused float");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.popup.is_none(), "Esc leaves the float");
+        assert_eq!(app.view(), View::Table, "and lands back in the grid");
+    }
+
+    /// While passive the float is a glance, not a mode: moving on closes it and
+    /// the key still does its job.
+    #[test]
+    fn a_passive_peek_float_gets_out_of_the_way() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _) = app_with_long_cell();
+        let before = cursor(&app);
+        handle(&mut app, &Command::TablePeekCell);
+        crate::input::handle_key(&mut app, KeyEvent::from(KeyCode::Char('k')));
+        assert!(app.popup.is_none());
+        assert_eq!(cursor(&app).0, before.0 - 1, "k still moved up a row");
+    }
+
     /// `K` and `gk` mean "tell me more about this" everywhere else, so they
     /// must peek here rather than firing an LSP request against the empty
     /// buffer behind the grid.

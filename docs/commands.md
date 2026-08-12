@@ -242,7 +242,7 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `open-as-table` | — | View the current file as a data table (`:csv`, `:table`) |
 | `table-close` | — | Leave the table view and edit the same file as text (`:table-close`, `:close-table`) |
 | `table-open-cell` | `Enter` | Read the cursor cell's full text in its own buffer (`:read-cell`, `:cell-buffer`) |
-| `table-peek-cell` | `K`, `gk` | Peek the cursor cell's full text in a float (`:peek-cell`, `:peek`) |
+| `table-peek-cell` | `gk`, `K` | Peek the cursor cell's full text in a float (`:peek-cell`, `:peek`) |
 | `table-yank-cell` | `y` | Copy the cursor cell's full value to the clipboard (`:yank-cell`) |
 | `table-yank-row` | `x` | Copy the cursor row to the clipboard as a tab-separated line (`:yank-row`) |
 | `table-close-cell` | — | Return from a cell buffer to its table — what `:bd` does there (`:cell-back`, `:back-to-table`) |
@@ -264,8 +264,10 @@ Navigation uses the ordinary motions, reinterpreted against the grid:
 | `gg` / `G` | first / last row (keeping the column) |
 | `J` / `Ctrl+u` | half a screen of rows down / up |
 
-(`K` is the cell peek here, not PageUp — it keeps its editor-wide "tell me more
-about the thing under the cursor" meaning. PageUp is `Ctrl+u` / `PgUp`.)
+(`K` is not bound in the table override map, so it keeps whatever it means in
+Normal mode — by default `show-documentation`, which the table view routes to the
+cell peek. If you have rebound `K` in `[keys.normal]` your binding still wins;
+`gk` always peeks. PageUp is `Ctrl+u` / `PgUp`.)
 
 Long values are **truncated to their column** with a `…` and never wrap, so a
 column of paragraph-length text can't swallow the grid; multi-line values show a
@@ -282,8 +284,12 @@ there are two ways to see one whole:
   word-wrap all work on it. Word-wrap is forced on while it is open and put back
   as it was when you leave. `:bd` returns to the grid, on the same cell you left
   (the table is stashed, not re-parsed).
-- **`K`** (or `gk`) peeks the same text in a scrollable float without leaving the
-  grid. Any key dismisses it.
+- **`gk`** (or `K`, unless you have rebound it) peeks the same text in a float
+  beside the grid. The float works exactly like the LSP completion popup: it is
+  a passive overlay you read at a glance and any key dismisses, **`Tab`** engages
+  with it, and once focused `j`/`k` scroll a line, `J`/`K` (or `Ctrl+d`/`Ctrl+u`)
+  half a float, `g`/`G` jump to the ends, `Tab` disengages and `Esc` closes.
+  Hover docs (`K` in a text buffer) behave the same way.
 
 The cell buffer is read-only in the sense that the table view is: it is a virtual
 buffer with no path, so `:w` has nothing to save to and edits never reach the

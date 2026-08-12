@@ -569,12 +569,30 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   `teardown_current_buffer` calls so *every* exit path is covered, not just
   `:bd`). Only one cell buffer exists at a time — opening another evicts the
   previous `*cell …*` rope, which would otherwise leak for the session
-- **`K` / `gk` (`Command::TablePeekCell`)** peeks the same text in a scrollable
+- **`gk` / `K` (`Command::TablePeekCell`)** peeks the same text in a scrollable
   float. `Command::LspShowDocumentation` is routed to it: `K`/`gk` mean "tell me
   more about the thing under the cursor" editor-wide, and in a grid that is the
-  cell. The text popup **clips rather than wraps**, so the peek pre-wraps with
-  `notebook_ui::wrap_segments` at `popup_text_width` (which mirrors
-  `popup_ui::compute_width`'s 0.6-of-terminal fraction — they must agree)
+  cell. `K` is deliberately **not** in the `Keymap::table` override map, so a
+  user's own `[keys.normal] K` rebinding still wins there (unlike the notebook
+  map, which shadows it); `gk` always peeks. The text popup **clips rather than
+  wraps**, so the peek pre-wraps with `notebook_ui::wrap_segments` at
+  `popup_text_width` (which mirrors `popup_ui::compute_width`'s 0.6-of-terminal
+  fraction — they must agree)
+- **`PopupContent::Text` floats are passive → focused**, the same two-state model
+  as the completion popup (`TextState.focused`, handled at the top of
+  `popup_input::handle_key`): passive is a hint overlay any key dismisses with
+  passthrough, `Tab` engages, then `j`/`k` scroll a line, `J`/`K` + `Ctrl+d`/`u`
+  half a float, `g`/`G` the ends, `Tab` disengages, `Esc` closes. A focused float
+  swallows everything else rather than leaking keys into the view behind it. The
+  renderer brightens the border and shows the `Tab to scroll` / `j/k scroll ·
+  Esc close` footer. This covers LSP hover as well as the cell peek — they are
+  the same popup kind
+- **The `g` which-key popup is generated from `exec::goto_hints(app)`** and is
+  **view-aware**: in the table it lists the grid meanings (`gg` first row, `gh`
+  first column, `gk` peek cell) and omits what would do nothing there. Every
+  advertised key must be one `input::goto_command` dispatches — that function is
+  now the single dispatch table for the `g` sub-mode, and
+  `goto_hints_only_advertise_real_bindings` pins the two together
 - **`y` / `x`** copy the full cell value / the row as a tab-separated line
   (`row_tsv`, values flattened through `layout::sanitize` so an embedded newline
   can't split one row into two). TSV because it pastes correctly into

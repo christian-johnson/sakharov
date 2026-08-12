@@ -488,8 +488,25 @@ fn render_text_popup(
 ) {
     let th = crate::theme::active();
     let total_lines = state.lines.len();
-    let block = build_block(popup);
+    let mut block = build_block(popup);
     let inner = block.inner(rect);
+    // A focused float owns the keyboard, so say so the way the completion doc
+    // panel does — a brighter border — and spell out the way in and out.
+    if state.focused {
+        block = block.border_style(Style::default().fg(th.popup_border_focus));
+    }
+    if total_lines > inner.height as usize {
+        let hint = if state.focused {
+            " j/k scroll · Esc close "
+        } else {
+            " Tab to scroll "
+        };
+        block = block.title_bottom(
+            ratatui::text::Line::from(hint)
+                .style(Style::default().fg(th.popup_dim).bg(th.popup_bg))
+                .left_aligned(),
+        );
+    }
     frame.render_widget(block, rect);
 
     if inner.height == 0 || inner.width == 0 {
