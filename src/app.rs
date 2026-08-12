@@ -225,6 +225,28 @@ impl Messages {
 }
 
 // ---------------------------------------------------------------------------
+// Top-level view
+// ---------------------------------------------------------------------------
+
+/// Which top-level view owns the screen and the keyboard.
+///
+/// The views are mutually exclusive by construction: each non-`Text` variant
+/// requires its own `App` field to be populated, and opening one tears the
+/// other down (see `exec::buffers::teardown_current_buffer`).  Derive it with
+/// [`App::view`] rather than testing the individual `Option`s — the three
+/// dispatch points (`app::draw_frame`, `exec::update_scroll`, and the
+/// `input` keymap layer) must agree on which view is active, and a
+/// hand-rolled condition at each one drifts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// Plain text buffer.  Also the view for a notebook's full-screen
+    /// focused-cell overlay, which is edited exactly like a file.
+    Text,
+    /// Notebook cell-stack view.
+    Notebook,
+}
+
+// ---------------------------------------------------------------------------
 // Central application state
 // ---------------------------------------------------------------------------
 
@@ -347,6 +369,15 @@ pub struct App {
 }
 
 impl App {
+    /// The view that currently owns the screen and the keyboard.
+    pub fn view(&self) -> View {
+        if self.in_notebook_nav() {
+            View::Notebook
+        } else {
+            View::Text
+        }
+    }
+
     /// Returns true when the focused-cell full-screen overlay is active.
     pub fn notebook_focused_edit(&self) -> bool {
         self.notebook.is_some() && self.cell_focused_edit
@@ -885,7 +916,7 @@ fn draw_frame(
                     crate::popup_ui::render(f, popup, None, &app.config.ui);
                 }
             })?;
-        } else if app.in_notebook_nav() {
+        } else if app.view() == View::Notebook {
             // Notebook multi-cell view — the focused cell is in app.buffer.
             // Lifted out of the draw closure so we can restore the hardware
             // cursor to it *after* the Kitty image flush (which moves the

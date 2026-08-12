@@ -66,7 +66,7 @@ pub fn update_scroll(app: &mut App) {
     // scroll-off margin.  Because the anchor is measured in rows, scrolling
     // moves one line at a time instead of jumping a whole cell.  (The
     // full-screen focused-cell overlay falls through to the plain path.)
-    if app.in_notebook_nav() {
+    if app.view() == crate::app::View::Notebook {
         notebook_update_scroll(app, visible_rows, scroll_off);
         return;
     }

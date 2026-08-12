@@ -153,13 +153,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             // notebook override map shadows the normal bindings — e.g. J/K move
             // between cells, Shift+Enter executes — falling back to the normal
             // bindings for everything else.
-            let in_notebook = app.in_notebook_nav();
-            let cmds = if in_notebook {
-                app.keymap
+            let in_notebook = app.view() == crate::app::View::Notebook;
+            let cmds = match app.view() {
+                crate::app::View::Notebook => app
+                    .keymap
                     .lookup_notebook(&kb)
-                    .or_else(|| app.keymap.lookup_normal(&kb))
-            } else {
-                app.keymap.lookup_normal(&kb)
+                    .or_else(|| app.keymap.lookup_normal(&kb)),
+                crate::app::View::Text => app.keymap.lookup_normal(&kb),
             }
             .map(|v| v.to_vec());
             if let Some(cmds) = cmds {
