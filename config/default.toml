@@ -251,6 +251,14 @@ indent_width = 2
 # args = ["server"]
 # features = ["code-actions", "format"]   # ruff wins for ga / code-actions / :fmt
 #
+# Valid `features` names — anything else is ignored (and warned about in *Messages*):
+#   completion, hover, definition, references, type-definition,
+#   implementation, code-actions, diagnostics, format
+# Signature help rides on "hover"; there is no separate name for it.
+# Leave ONE server's `features` empty so it catches every feature the others
+# don't claim. If every server is feature-scoped, the unclaimed requests
+# (go-to-definition and friends) reach no server at all — :messages says which.
+#
 # [language_servers.rust]
 # command = "rust-analyzer"
 # args = []

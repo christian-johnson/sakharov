@@ -615,38 +615,18 @@ pub fn run(path: Option<&str>) -> Result<()> {
     // whole paste arrives as one `Event::Paste` and is inserted verbatim.
     execute!(stdout, crossterm::event::EnableBracketedPaste)?;
 
-    // Opt into the kitty keyboard protocol when the terminal supports it, so
-    // modified keys like Shift+Enter / Ctrl+Enter are reported as distinct events
-    // instead of collapsing into a bare Enter. DISAMBIGUATE_ESCAPE_CODES is the
-    // safe level for this — it disambiguates modified special keys without
-    // altering how ordinary text (incl. shifted symbols) is reported.
-    //
-    // The support query can go unanswered (the reply lost in startup output,
-    // a slow ssh hop timing out the poll), so on terminals *known* to
-    // implement the protocol — Kitty and Ghostty — the flags are pushed even
-    // when the query fails. WezTerm is not forced: it only speaks the protocol
-    // when the user enables it, and then it answers the query anyway.
-    let kbd_support = terminal::supports_keyboard_enhancement();
-    let kbd_known_good = app.graphics.terminal.implements_kitty_keyboard();
-    if matches!(kbd_support, Ok(true)) || kbd_known_good {
-        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
-        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
-        if execute!(stdout, PushKeyboardEnhancementFlags(flags)).is_ok() {
-            KEYBOARD_ENHANCED.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    // Surface what was negotiated when key debugging is on (SV_DEBUG_KEYS=1).
-    if std::env::var_os("SV_DEBUG_KEYS").is_some() {
-        app.messages.show(format!(
-            "keyboard enhancement: support={kbd_support:?} terminal={:?} active={}  (logging keys to {})",
-            app.graphics.terminal,
-            KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst),
-            key_debug_log_path().display(),
-        ));
-    }
-
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Paint the file BEFORE negotiating terminal capabilities. The keyboard
+    // query below blocks for up to two seconds when nothing answers it (a raw
+    // pty, an ssh hop, an editor launched from inside another TUI such as
+    // visidata) — and with the alternate screen already entered, doing it
+    // first leaves an empty screen with a lone cursor for that whole time,
+    // which reads as a hang.
+    draw_frame(&mut terminal, &mut app)?;
+
+    negotiate_keyboard_enhancement(&mut app);
 
     // Catch terminating signals so we can restore the terminal and flush unsaved
     // work before dying (pkill/kill/SIGHUP on window close). SIGKILL is exempt.
@@ -676,6 +656,41 @@ pub fn run(path: Option<&str>) -> Result<()> {
     }
 
     result
+}
+
+/// Opt into the kitty keyboard protocol when the terminal supports it, so
+/// modified keys like Shift+Enter / Ctrl+Enter are reported as distinct events
+/// instead of collapsing into a bare Enter. DISAMBIGUATE_ESCAPE_CODES is the
+/// safe level for this — it disambiguates modified special keys without
+/// altering how ordinary text (incl. shifted symbols) is reported.
+///
+/// The support query can go unanswered (the reply lost in startup output, a
+/// slow ssh hop timing out the poll), so on terminals *known* to implement the
+/// protocol — Kitty and Ghostty — the flags are pushed even when the query
+/// fails. Since the answer can't change the outcome there, the query is
+/// skipped outright on those: it costs a two-second stall whenever the reply
+/// doesn't come. WezTerm is not forced — it only speaks the protocol when the
+/// user enables it, and then it answers the query anyway.
+fn negotiate_keyboard_enhancement(app: &mut App) {
+    let known_good = app.graphics.terminal.implements_kitty_keyboard();
+    let support = (!known_good).then(terminal::supports_keyboard_enhancement);
+    if matches!(support, Some(Ok(true))) || known_good {
+        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+        if execute!(io::stdout(), PushKeyboardEnhancementFlags(flags)).is_ok() {
+            KEYBOARD_ENHANCED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    // Surface what was negotiated when key debugging is on (SV_DEBUG_KEYS=1).
+    // `support = None` means the query was skipped as redundant.
+    if std::env::var_os("SV_DEBUG_KEYS").is_some() {
+        app.messages.show(format!(
+            "keyboard enhancement: support={support:?} terminal={:?} active={}  (logging keys to {})",
+            app.graphics.terminal,
+            KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst),
+            key_debug_log_path().display(),
+        ));
+    }
 }
 
 fn run_loop(

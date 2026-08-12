@@ -49,7 +49,15 @@ pub(super) fn lsp_code_actions_request(app: &mut App) {
     let rope = app.buffer.rope.clone();
 
     if !app.lsp.request_code_actions(&lang, &path, &rope, start_char, end_char) {
-        app.messages.show("LSP server initializing — try again in a moment");
+        let msg = if app.lsp.feature_is_claimed(&lang, "code-actions") {
+            "LSP server initializing — try again in a moment".to_string()
+        } else {
+            format!(
+                "No {lang} language server handles 'code-actions' — \
+                 check `features` under [language_servers.{lang}]"
+            )
+        };
+        app.messages.show(msg);
     }
 }
 
@@ -129,7 +137,20 @@ pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
     let rope = app.buffer.rope.clone();
 
     if !app.lsp.request(kind, &lang, &path, &rope, char_idx) {
-        app.messages.show("LSP server initializing — try again in a moment");
+        app.messages.show(unrouted_request_msg(app, &lang, kind));
+    }
+}
+
+/// Why a request found no server: still booting, or scoped away by config.
+fn unrouted_request_msg(app: &App, lang: &str, kind: LspRequestKind) -> String {
+    let feature = crate::lsp_manager::LspManager::feature_name(kind);
+    if app.lsp.feature_is_claimed(lang, feature) {
+        "LSP server initializing — try again in a moment".to_string()
+    } else {
+        format!(
+            "No {lang} language server handles '{feature}' — \
+             check `features` under [language_servers.{lang}]"
+        )
     }
 }
 

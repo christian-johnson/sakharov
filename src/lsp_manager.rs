@@ -27,6 +27,22 @@ pub enum LspRequestKind {
     Implementation,
 }
 
+/// Every feature name `[language_servers.*] features` accepts.  A name outside
+/// this set silently scopes a server to nothing it is ever asked for, so
+/// `ensure_server` warns about typos rather than leaving the user with a
+/// server that answers no requests.
+pub const FEATURE_NAMES: [&str; 9] = [
+    "completion",
+    "hover",
+    "definition",
+    "references",
+    "type-definition",
+    "implementation",
+    "code-actions",
+    "diagnostics",
+    "format",
+];
+
 /// Map an LspRequestKind to the feature name used in server config.
 fn request_feature(kind: LspRequestKind) -> &'static str {
     match kind {
@@ -151,6 +167,11 @@ pub struct LspManager {
     pub diagnostics: HashMap<String, Vec<Diagnostic>>,
     /// Internal per-server diagnostics: "path\x00server_idx" → items.
     server_diagnostics: HashMap<String, Vec<Diagnostic>>,
+    /// The same diagnostics as raw JSON, keyed identically. `Diagnostic` is a
+    /// lossy view (no `code`, `source`, or server-private `data`), but a
+    /// `textDocument/codeAction` request has to hand the server back its own
+    /// diagnostic objects unchanged for it to offer the matching quickfix.
+    server_raw_diagnostics: HashMap<String, Vec<Value>>,
     /// Open notebooks: notebook_uri → (code_cell_uris, current_notebook_version).
     notebook_state: HashMap<String, (Vec<String>, i32)>,
     /// Server-lifecycle log lines (venv discovery, launched/failed/ready),
@@ -165,6 +186,74 @@ pub struct LspManager {
     prewarmed: HashSet<String>,
     /// In-flight pre-warm request id → start instant, for round-trip timing.
     prewarm_started: HashMap<u64, std::time::Instant>,
+    /// Stderr lines surfaced per server so far ("lang\x00idx" → count), used to
+    /// cap the noise a chatty or crash-looping server can put in *Messages*.
+    stderr_shown: HashMap<String, usize>,
+}
+
+/// Stderr lines surfaced per server before the rest are dropped.
+const MAX_STDERR_LINES: usize = 8;
+
+/// The `context.diagnostics` for a code-action request over `start..end`.
+///
+/// Within a single line the whole line is matched rather than the exact
+/// columns: `ga` is pressed with the cursor somewhere on the offending line,
+/// rarely on the offending token, and requiring the latter makes the fix look
+/// unavailable. A multi-line selection is taken literally.
+fn code_action_context(
+    raw: Option<&Vec<Value>>,
+    start: (u32, u32),
+    end: (u32, u32),
+) -> Vec<Value> {
+    let (from, to) = if start.0 == end.0 {
+        ((start.0, 0), (end.0, u32::MAX))
+    } else {
+        (start, end)
+    };
+    raw.map(|diags| {
+        diags
+            .iter()
+            .filter(|d| diagnostic_overlaps(d, from, to))
+            .cloned()
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Whether a raw LSP diagnostic's range intersects `start..end` (inclusive of
+/// touching endpoints, so a cursor sitting just past a squiggle still offers
+/// its fix — the same latitude editors give a click on the error).
+fn diagnostic_overlaps(diag: &Value, start: (u32, u32), end: (u32, u32)) -> bool {
+    let pos = |v: &Value, key: &str| -> Option<(u32, u32)> {
+        let p = v.get("range")?.get(key)?;
+        Some((
+            p.get("line")?.as_u64()? as u32,
+            p.get("character")?.as_u64()? as u32,
+        ))
+    };
+    let (Some(ds), Some(de)) = (pos(diag, "start"), pos(diag, "end")) else {
+        return false;
+    };
+    ds <= end && start <= de
+}
+
+/// Whether a server's stderr line is worth putting in *Messages*: not routine
+/// log chatter, and not one of the traceback's own connective lines.
+fn is_notable_stderr(line: &str) -> bool {
+    const CHATTER_LEVELS: [&str; 4] = ["INFO", "DEBUG", "TRACE", "NOTSET"];
+    const CONNECTIVE: [&str; 2] = [
+        "Traceback (",
+        "During handling of the above exception",
+    ];
+    if CONNECTIVE.iter().any(|p| line.starts_with(p)) {
+        return false;
+    }
+    // Log lines carry their level as a standalone word ("… - WARNING - …",
+    // "… INFO No workspace options …"), so match on tokens rather than a
+    // substring — an exception message mentioning "info" must still get through.
+    !line
+        .split(|c: char| c.is_whitespace() || c == '-')
+        .any(|tok| CHATTER_LEVELS.contains(&tok))
 }
 
 impl LspManager {
@@ -173,11 +262,45 @@ impl LspManager {
             servers: HashMap::new(),
             diagnostics: HashMap::new(),
             server_diagnostics: HashMap::new(),
+            server_raw_diagnostics: HashMap::new(),
             notebook_state: HashMap::new(),
             lifecycle_log: Vec::new(),
             logged: HashSet::new(),
             prewarmed: HashSet::new(),
             prewarm_started: HashMap::new(),
+            stderr_shown: HashMap::new(),
+        }
+    }
+
+    /// Surface a language server's stderr line in *Messages*.
+    ///
+    /// A server that keeps answering requests with empty results because of an
+    /// internal failure (pylsp against a venv its bundled jedi/parso can't
+    /// parse is the classic one) reports that only here — the protocol replies
+    /// stay perfectly well-formed and empty, so without this the editor just
+    /// looks like it has no completions.
+    ///
+    /// Only the lines that could explain a failure survive: indented ones are
+    /// the interior frames of a Python traceback (whose informative last line
+    /// is flush-left), and routine INFO/DEBUG chatter — ruff logs its
+    /// workspace registration that way on every start — is not a problem
+    /// report. What's left is capped per server so a crash loop can't flood
+    /// the log.
+    fn log_server_stderr(&mut self, command: &str, language: &str, idx: usize, line: &str) {
+        if line.starts_with(char::is_whitespace) || !is_notable_stderr(line) {
+            return;
+        }
+        let slot = format!("{language}\x00{idx}");
+        let shown = self.stderr_shown.entry(slot).or_insert(0);
+        *shown += 1;
+        match (*shown).cmp(&MAX_STDERR_LINES) {
+            std::cmp::Ordering::Greater => {}
+            std::cmp::Ordering::Equal => self.lifecycle_log.push(format!(
+                "LSP: '{command}' ({language}): {line} — further stderr suppressed"
+            )),
+            std::cmp::Ordering::Less => self
+                .lifecycle_log
+                .push(format!("LSP: '{command}' ({language}): {line}")),
         }
     }
 
@@ -220,6 +343,35 @@ impl LspManager {
         let format_elsewhere = specs
             .iter()
             .any(|(_, _, _, features)| features.iter().any(|f| f == "format"));
+
+        // A misspelled feature name is silently ignored by the routing, which
+        // shows up as "that LSP feature doesn't work" with nothing to point at.
+        for (command, _, _, features) in &specs {
+            for f in features.iter().filter(|f| !FEATURE_NAMES.contains(&f.as_str())) {
+                self.log_once(format!(
+                    "LSP: '{command}' ({language}) lists unknown feature '{f}' — \
+                     valid names: {}",
+                    FEATURE_NAMES.join(", "),
+                ));
+            }
+        }
+        // Every feature no configured server claims: with any feature-scoped
+        // server present and no catch-all one, requests for the rest reach
+        // nobody at all.
+        if !specs.is_empty() && specs.iter().all(|(_, _, _, f)| !f.is_empty()) {
+            let unclaimed: Vec<&str> = FEATURE_NAMES
+                .iter()
+                .copied()
+                .filter(|name| !specs.iter().any(|(_, _, _, f)| f.iter().any(|x| x == name)))
+                .collect();
+            if !unclaimed.is_empty() {
+                self.log_once(format!(
+                    "LSP ({language}): no server handles {} — leave one server's \
+                     `features` empty to make it the catch-all",
+                    unclaimed.join(", "),
+                ));
+            }
+        }
 
         let cwd = std::env::current_dir().ok();
         let workspace_root = cwd.as_deref().or(root_path);
@@ -378,10 +530,22 @@ impl LspManager {
         let uri = path_to_uri(path);
         let (sl, sc) = char_to_lsp_pos(rope, start_char);
         let (el, ec) = char_to_lsp_pos(rope, end_char);
-        self.with_feature_server_mut(language, "code-actions", |s| {
-            s.client.request_code_actions(&uri, sl, sc, el, ec);
-        })
-        .is_some()
+        let Some(idx) = self.server_idx_for_feature(language, "code-actions") else {
+            return false;
+        };
+        // Echo back only *this* server's own diagnostics for the range — a
+        // server can't act on another's, and quickfixes are derived from them.
+        let slot_key = format!("{}\x00{idx}", crate::lsp::diagnostic_key(path));
+        let context = code_action_context(
+            self.server_raw_diagnostics.get(&slot_key),
+            (sl, sc),
+            (el, ec),
+        );
+        let Some(servers) = self.servers.get_mut(language) else {
+            return false;
+        };
+        servers[idx].client.request_code_actions(&uri, sl, sc, el, ec, context);
+        true
     }
 
     /// Send `textDocument/formatting` via the appropriate server.
@@ -689,6 +853,10 @@ impl LspManager {
                     };
                     let server = &mut self.servers.get_mut(&lang).unwrap()[idx];
                     let command = server.command.clone();
+                    if let ServerMessage::Stderr(line) = msg {
+                        self.log_server_stderr(&command, &lang, idx, &line);
+                        continue;
+                    }
                     if let Some(evt) = process_message(
                         &mut server.client,
                         &lang,
@@ -696,6 +864,7 @@ impl LspManager {
                         msg,
                         &mut self.diagnostics,
                         &mut self.server_diagnostics,
+                        &mut self.server_raw_diagnostics,
                     ) {
                         match &evt {
                             LspEvent::Initialized { .. } => {
@@ -764,6 +933,22 @@ impl LspManager {
         None
     }
 
+    /// The config feature name a request kind routes on — for explaining a
+    /// request that reached no server (see `exec::lsp::lsp_request`).
+    pub fn feature_name(kind: LspRequestKind) -> &'static str {
+        request_feature(kind)
+    }
+
+    /// Whether any *configured* server claims `feature`, initialized or not.
+    /// Distinguishes "still starting up" from "your `features` lists leave
+    /// this request with nowhere to go".
+    pub fn feature_is_claimed(&self, language: &str, feature: &str) -> bool {
+        self.servers
+            .get(language)
+            .map(|ss| ss.iter().any(|s| s.supports_feature(feature)))
+            .unwrap_or(false)
+    }
+
     /// Look up the server that owns `feature` for `language` and run `f`
     /// against it. `None` when no initialized server currently owns that
     /// feature — callers treat that the same as "not dispatched".
@@ -791,6 +976,7 @@ fn process_message(
     msg: ServerMessage,
     diagnostics: &mut HashMap<String, Vec<Diagnostic>>,
     server_diagnostics: &mut HashMap<String, Vec<Diagnostic>>,
+    server_raw_diagnostics: &mut HashMap<String, Vec<Value>>,
 ) -> Option<LspEvent> {
     match msg {
         ServerMessage::Response { id, result, error: _ } => {
@@ -863,9 +1049,19 @@ fn process_message(
                 let path_str = path.to_string_lossy().to_string();
                 let items = parse_diagnostics(params.get("diagnostics")?);
 
-                // Store per-server diagnostics keyed by "path\x00server_idx".
+                // Store per-server diagnostics keyed by "path\x00server_idx",
+                // both parsed (for rendering) and raw (to echo back on a
+                // codeAction request — see `request_code_actions`).
                 let slot_key = format!("{path_str}\x00{server_idx}");
-                server_diagnostics.insert(slot_key, items.clone());
+                server_diagnostics.insert(slot_key.clone(), items.clone());
+                server_raw_diagnostics.insert(
+                    slot_key,
+                    params
+                        .get("diagnostics")
+                        .and_then(|d| d.as_array())
+                        .cloned()
+                        .unwrap_or_default(),
+                );
 
                 // Rebuild the merged view for this path (across all server slots).
                 let merged: Vec<Diagnostic> = server_diagnostics
@@ -882,6 +1078,8 @@ fn process_message(
                 None
             }
         }
+        // Handled by `LspManager::poll` before it gets here.
+        ServerMessage::Stderr(_) => None,
     }
 }
 
@@ -1233,6 +1431,58 @@ mod tests {
             vec![ManagedServer { client, features: vec![], command: "cat".into() }],
         );
         mgr
+    }
+
+    /// A code-action request must hand the server back its own diagnostics for
+    /// the line under the cursor — with an empty context a server has nothing
+    /// to build a quickfix from and only offers whole-file actions.
+    #[test]
+    fn code_action_request_carries_the_lines_diagnostics() {
+        use super::code_action_context;
+        use serde_json::Value;
+        let diag = |line: u32, c0: u32, c1: u32, code: &str| {
+            json!({
+                "range": {"start": {"line": line, "character": c0},
+                          "end":   {"line": line, "character": c1}},
+                "message": format!("{code} problem"), "code": code,
+                "data": {"fix": code},
+            })
+        };
+        let raw = vec![diag(0, 7, 10, "F401"), diag(2, 0, 5, "E999")];
+        let codes = |ctx: &[Value]| -> Vec<String> {
+            ctx.iter().filter_map(|d| d["code"].as_str().map(str::to_owned)).collect()
+        };
+
+        // Cursor at the start of line 0 — nowhere near F401's columns (7..10),
+        // but on its line, which is where `ga` actually gets pressed.
+        let ctx = code_action_context(Some(&raw), (0, 0), (0, 0));
+        assert_eq!(codes(&ctx), ["F401"], "the cursor's line's diagnostic must be included");
+        assert_eq!(ctx[0]["data"]["fix"], json!("F401"), "server-private data must survive");
+
+        // A multi-line selection is taken literally: lines 0..2 catch both.
+        let ctx = code_action_context(Some(&raw), (0, 0), (2, 1));
+        assert_eq!(codes(&ctx), ["F401", "E999"]);
+
+        // A line with nothing on it contributes no context.
+        assert!(code_action_context(Some(&raw), (1, 0), (1, 0)).is_empty());
+        assert!(code_action_context(None, (0, 0), (0, 0)).is_empty());
+    }
+
+    /// Server stderr worth showing: real failures through, log chatter and
+    /// traceback scaffolding dropped.
+    #[test]
+    fn only_notable_stderr_lines_reach_messages() {
+        use super::is_notable_stderr;
+        assert!(is_notable_stderr(
+            "NotImplementedError: Python version 3.14 is currently not supported."
+        ));
+        assert!(is_notable_stderr("2026-08-10 - WARNING - pylsp - Failed to load hook"));
+        assert!(!is_notable_stderr("2026-08-10  INFO Registering workspace: /tmp/x"));
+        assert!(!is_notable_stderr("2026-08-10 - DEBUG - pylsp - starting"));
+        assert!(!is_notable_stderr("Traceback (most recent call last):"));
+        assert!(!is_notable_stderr("During handling of the above exception, another occurred:"));
+        // "info" inside a real message must not be mistaken for a log level.
+        assert!(is_notable_stderr("ValueError: no info available for symbol"));
     }
 
     /// Pre-warm fires exactly once per document, only after the doc is open, and

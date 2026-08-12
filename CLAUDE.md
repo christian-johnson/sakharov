@@ -287,6 +287,17 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   cell heights and scroll offsets always match what is drawn. Cells have **no
   horizontal scroll** — a non-wrapped long line (code cell, `:wrap` off) clips at the
   border; toggle `:wrap` to see it all
+- **Output text always wraps**, independent of `editor.word_wrap` — unlike cell source,
+  the output block has no horizontal scroll *and* no cursor column past the rendered
+  rows, so an unwrapped long line (a `print()` of a wide dataframe row) would be
+  permanently unreachable rather than merely clipped. Wrap width is
+  `notebook_ui::output_text_width(available_cols)`; the truncation caps
+  (`max_output_lines` / `max_traceback_lines`) still count **logical** lines, not
+  screen rows. `truncated_rows` is the shared row-count primitive used by
+  `single_output_height_count` (height model), `output_rows_content` (the navigable
+  row list backing `output_row`/`output_col` and the virtual rope) and the renderer,
+  so all three agree row-for-row; `error_frame_at_output_row` maps a frame's link to
+  *every* row its traceback line wrapped onto
 - **Seamless, row-granular notebook scroll** — the whole notebook is one vertical stack of
   cells (each `nb_cell_height` rows tall, separated by a 1-row gap) and the viewport is a
   window into it, anchored by `(NotebookState.scroll_cell, scroll_offset)` measured in
@@ -358,7 +369,14 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   `gr` jumps directly when there's a single result; multiple results open a navigate popup
   (one line of source per reference, `cell N:line` / `file:line` detail, Enter to jump —
   notebook references jump to the cell in-place)
-- Code actions (`ga`)
+- Code actions (`ga`). The request carries the owning server's **own published
+  diagnostics** for the range back in `context.diagnostics` (kept as raw JSON in
+  `LspManager::server_raw_diagnostics`, since the parsed `Diagnostic` drops the
+  server-private `data` a quickfix is built from) — with an empty context a server
+  only ever answers with whole-file actions ("fix all", "organize imports"), never
+  the fix for the error under the cursor. A cursor/selection **within one line**
+  matches diagnostics anywhere on that line, since `ga` is pressed on the offending
+  line far more often than on the offending token; a multi-line selection is literal
 - Formatting (`gf` / `:fmt`, format-on-save option). Shell formatters via `[formatters.<lang>]`
   take priority over LSP formatting when configured
 - **Notebook LSP** — `notebookDocument/didOpen` sync; virtual cell paths for per-cell diagnostics and completions.
@@ -432,6 +450,21 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   ready (initialize handshake complete). Lines are deduped once per session
   (`LspManager::log_once` — `ensure_server` re-runs on every cell/buffer switch) and drained once
   per frame by `exec::lsp::process_lsp_events` into `app.messages`.
+- **Server stderr is surfaced in *Messages*** (`ServerMessage::Stderr` →
+  `LspManager::log_server_stderr`). A server whose internals have failed still speaks
+  perfect JSON-RPC and answers every request with an *empty* result — pylsp against a
+  venv its bundled jedi/parso can't parse ("Python version 3.14 is currently not
+  supported") is the classic case — so its stderr is the only evidence that anything
+  is wrong, and discarding it made the editor look like it simply had no completions.
+  Indented traceback frames and routine INFO/DEBUG chatter are filtered
+  (`is_notable_stderr`), and the rest is capped at `MAX_STDERR_LINES` per server.
+  stderr is **piped, never inherited** — inheriting paints tracebacks over the TUI.
+- **Feature-name config is validated at launch** — `LspManager::FEATURE_NAMES` is the
+  accepted set; an unknown name in a `features` list is warned about, and so is any
+  feature no configured server claims (a config where *every* server is
+  feature-scoped silently leaves e.g. `gd`/`gr` routed to nobody). A request that
+  finds no owner says which feature and which config key, instead of the old
+  misleading "LSP server initializing".
 
 ### Data safety (Phase B hardening)
 - **Buffer switching never loses edits**: plain-file buffers are stashed in memory
@@ -473,7 +506,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Gutter overflows at >9999 lines (cosmetic)
 - Notebook cell rendering assumes width-1 characters (tabs/CJK render at the wrong width inside cells)
 - Notebook cells have no horizontal scroll: with `:wrap` off, a long code-cell line clips at
-  the cell border (markdown cells always wrap, so this only affects code/raw cells)
+  the cell border (markdown cells always wrap, so this only affects code/raw cells —
+  cell *outputs* always wrap and are never clipped)
 
 ## Architecture
 
@@ -576,6 +610,14 @@ docs/
 
 ### Key invariants
 - The `exec/` module is the only place that mutates `App` state in response to commands
+- **Nothing that can block goes between entering the alternate screen and the first
+  `draw_frame`.** `app::run` paints one frame before calling
+  `negotiate_keyboard_enhancement`, because that query waits up to two seconds for a
+  reply that never comes on a terminal which doesn't answer it (a bare pty, an ssh
+  hop, `sv` launched as `$EDITOR` from inside another TUI such as visidata) — and an
+  entered-but-unpainted alternate screen is an empty screen with a lone cursor, which
+  reads as a hang. The query is also skipped outright on Kitty/Ghostty, where the
+  flags are pushed regardless of the answer
 - Minibuffer messages go through `app.messages.show(...)` (see `app::Messages`), which appends
   to the *Messages* log at show time — never write a message field directly
 - **Every renderer color comes from the active theme** — grab `let th = theme::active();` and

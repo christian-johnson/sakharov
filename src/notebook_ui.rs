@@ -995,11 +995,30 @@ pub(crate) fn cell_output_rows(
         .sum()
 }
 
-/// Rows shown for a truncated line list: at most `max` lines plus one
-/// "… (N more lines)" indicator row.  Shared by the height model and the
-/// renderer so they cannot drift.
-fn truncated_rows(total: usize, max: usize) -> usize {
-    total.min(max) + usize::from(total > max)
+/// Width one output text row has for its content: the output block draws
+/// after the same 2-char pad as source lines.
+///
+/// Output text **always** wraps to this width, regardless of the
+/// `editor.word_wrap` toggle (which governs cell *source* only — see
+/// [`cell_wraps`]). The output block has no horizontal scroll and no cursor
+/// column beyond the rendered rows, so an unwrapped long line would put its
+/// tail permanently out of reach — not merely clipped, as in a source cell.
+pub(crate) fn output_text_width(available_cols: u16) -> usize {
+    cell_text_width(available_cols)
+}
+
+/// Rows shown for a truncated, word-wrapped line list: the first `max`
+/// *logical* lines (so `max_output_lines` still counts printed lines, not
+/// screen rows), each wrapped to `width`, plus one "… (N more lines)"
+/// indicator row.  Shared by the height model, [`output_rows_content`] and
+/// the renderer so they cannot drift.
+fn truncated_rows<S: AsRef<str>>(lines: &[S], max: usize, width: usize) -> usize {
+    let shown = lines.len().min(max);
+    let body: usize = lines[..shown]
+        .iter()
+        .map(|l| wrap_segments(l.as_ref(), width).len())
+        .sum();
+    body + usize::from(lines.len() > max)
 }
 
 /// Columns reserved to the left of an image so the output cursor always has
@@ -1038,21 +1057,27 @@ fn single_output_height_count(
     cell_pixel_size: Option<(u16, u16)>,
     available_cols: u16,
 ) -> u16 {
+    let width = output_text_width(available_cols);
     match output {
         Output::Stream { text, .. } => {
-            truncated_rows(text.lines().count(), limits.max_lines) as u16
+            let lines: Vec<&str> = text.lines().collect();
+            truncated_rows(&lines, limits.max_lines, width) as u16
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
             mime_image_rows(data, limits, cell_pixel_size, available_cols).unwrap_or_else(|| {
                 data.text_plain
                     .as_deref()
-                    .map(|t| truncated_rows(t.lines().count(), limits.max_lines))
+                    .map(|t| {
+                        let lines: Vec<&str> = t.lines().collect();
+                        truncated_rows(&lines, limits.max_lines, width)
+                    })
                     .unwrap_or(0) as u16
             })
         }
-        Output::Error { traceback, .. } => {
-            // 1 = the "ename: evalue" headline row.
-            (1 + truncated_rows(traceback.len(), limits.max_traceback)) as u16
+        Output::Error { ename, evalue, traceback, .. } => {
+            let headline = format!("{ename}: {evalue}");
+            (wrap_segments(&headline, width).len()
+                + truncated_rows(traceback, limits.max_traceback, width)) as u16
         }
     }
 }
@@ -1081,23 +1106,32 @@ pub(crate) fn output_rows_content(
         return Vec::new();
     }
 
-    /// Push a (possibly truncated) line list — shared by stream output and
-    /// execute-result/display-data text, and inlined for tracebacks below.
-    fn push_truncated_lines(rows: &mut Vec<String>, lines: &[&str], max: usize) {
+    /// Push a (possibly truncated) line list, each line word-wrapped to
+    /// `width` — shared by stream output, execute-result/display-data text
+    /// and tracebacks, and mirroring [`truncated_rows`] row for row.
+    fn push_truncated_lines<S: AsRef<str>>(
+        rows: &mut Vec<String>,
+        lines: &[S],
+        max: usize,
+        width: usize,
+    ) {
         let to_show = lines.len().min(max);
-        rows.extend(lines[..to_show].iter().map(|l| (*l).to_string()));
+        for line in &lines[..to_show] {
+            rows.extend(wrap_segments(line.as_ref(), width).into_iter().map(|(_, s)| s.to_string()));
+        }
         if lines.len() > max {
             let extra = lines.len() - max;
             rows.push(format!("... ({extra} more lines — zo to expand)"));
         }
     }
 
+    let width = output_text_width(available_cols);
     let mut rows = Vec::new();
     for output in &cell.outputs {
         match output {
             Output::Stream { text, .. } => {
                 let lines: Vec<&str> = text.lines().collect();
-                push_truncated_lines(&mut rows, &lines, limits.max_lines);
+                push_truncated_lines(&mut rows, &lines, limits.max_lines, width);
             }
             Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
                 if let Some(n) = mime_image_rows(data, limits, cell_pixel_size, available_cols) {
@@ -1106,18 +1140,13 @@ pub(crate) fn output_rows_content(
                     }
                 } else if let Some(t) = &data.text_plain {
                     let lines: Vec<&str> = t.lines().collect();
-                    push_truncated_lines(&mut rows, &lines, limits.max_lines);
+                    push_truncated_lines(&mut rows, &lines, limits.max_lines, width);
                 }
             }
             Output::Error { ename, evalue, traceback, .. } => {
-                rows.push(format!("{ename}: {evalue}"));
-                let max_tb = limits.max_traceback;
-                let to_show = traceback.len().min(max_tb);
-                rows.extend(traceback[..to_show].iter().cloned());
-                if traceback.len() > max_tb {
-                    let extra = traceback.len() - max_tb;
-                    rows.push(format!("... ({extra} more lines — zo to expand)"));
-                }
+                let headline = format!("{ename}: {evalue}");
+                rows.extend(wrap_segments(&headline, width).into_iter().map(|(_, s)| s.to_string()));
+                push_truncated_lines(&mut rows, traceback, limits.max_traceback, width);
             }
         }
     }
@@ -1161,10 +1190,18 @@ pub(crate) fn error_frame_at_output_row(
     for output in &cell.outputs {
         let h = single_output_height_count(output, limits, cell_pixel_size, available_cols) as usize;
         if output_row < base + h {
-            if let Output::Error { frames, .. } = output {
-                let within = output_row - base;
-                if within >= 1 {
-                    return frames.iter().find(|f| f.tb_index == within - 1);
+            if let Output::Error { ename, evalue, traceback, frames } = output {
+                // Walk the block's wrapped rows: the headline first, then each
+                // traceback line's own (possibly multi-row) span. A frame's link
+                // covers every row its line wrapped onto.
+                let width = output_text_width(available_cols);
+                let headline = format!("{ename}: {evalue}");
+                let mut row = base + wrap_segments(&headline, width).len();
+                for (i, tb_line) in traceback.iter().take(limits.max_traceback).enumerate() {
+                    row += wrap_segments(tb_line, width).len();
+                    if output_row < row {
+                        return frames.iter().find(|f| f.tb_index == i);
+                    }
                 }
             }
             return None;
@@ -1475,9 +1512,12 @@ fn render_output(
             let lines: Vec<&str> = text.lines().collect();
             let max_lines = octx.limits.max_lines;
             let to_show = lines.len().min(max_lines);
+            let width = output_text_width(area.width);
             for line in &lines[..to_show] {
-                if !draw_output_row(frame, area, current_row, octx, line, style) {
-                    return;
+                for (_, seg) in wrap_segments(line, width) {
+                    if !draw_output_row(frame, area, current_row, octx, seg, style) {
+                        return;
+                    }
                 }
             }
             draw_truncation_row(frame, area, current_row, octx, lines.len(), max_lines);
@@ -1488,17 +1528,23 @@ fn render_output(
         }
 
         Output::Error { ename, evalue, traceback, frames } => {
+            let width = output_text_width(area.width);
             let headline = format!("{ename}: {evalue}");
-            if !draw_output_row(frame, area, current_row, octx, &headline, Style::default().fg(th.error)) {
-                return;
+            for (_, seg) in wrap_segments(&headline, width) {
+                if !draw_output_row(frame, area, current_row, octx, seg, Style::default().fg(th.error)) {
+                    return;
+                }
             }
             let max_tb = octx.limits.max_traceback;
             for (i, tb_line) in traceback.iter().take(max_tb).enumerate() {
                 // Navigable frames (`File "Cell [N]", line L`) render like a
-                // link — Enter on this row jumps the cursor to that source line.
+                // link — Enter on any row this frame wrapped onto jumps the
+                // cursor to that source line.
                 let is_link = frames.iter().any(|f| f.tb_index == i);
-                if !draw_traceback_row(frame, area, current_row, octx, tb_line, is_link) {
-                    return;
+                for (_, seg) in wrap_segments(tb_line, width) {
+                    if !draw_traceback_row(frame, area, current_row, octx, seg, is_link) {
+                        return;
+                    }
                 }
             }
             draw_truncation_row(frame, area, current_row, octx, traceback.len(), max_tb);
@@ -1658,9 +1704,12 @@ fn render_mime_data(
         let max_lines = octx.limits.max_lines;
         let to_show = lines.len().min(max_lines);
         let info = Style::default().fg(crate::theme::active().info);
+        let width = output_text_width(area.width);
         for line in &lines[..to_show] {
-            if !draw_output_row(frame, area, current_row, octx, line, info) {
-                return;
+            for (_, seg) in wrap_segments(line, width) {
+                if !draw_output_row(frame, area, current_row, octx, seg, info) {
+                    return;
+                }
             }
         }
         draw_truncation_row(frame, area, current_row, octx, lines.len(), max_lines);
@@ -1934,6 +1983,83 @@ mod tests {
                 expected - 2,
             );
         }
+    }
+
+    /// Output text has no horizontal scroll, so a long printed line must wrap
+    /// onto extra output rows — reachable by `j`/`k` and actually drawn —
+    /// rather than clipping at the cell border.
+    #[test]
+    fn long_output_lines_wrap_onto_extra_rows() {
+        use crate::notebook::Output;
+        let cfg = crate::config::NotebookConfig::default();
+        let tail = "TAIL-MARKER";
+        let long = format!("{}{tail}", "x ".repeat(80));
+        let cell = Cell {
+            id: "w".into(),
+            cell_type: CellType::Code,
+            source: Rope::from_str("print(row)"),
+            outputs: vec![Output::Stream { name: "stdout".into(), text: format!("{long}\n") }],
+            execution_count: Some(1),
+            rendered: false,
+        };
+        let width = 60u16;
+        let avail = width - 2;
+        let limits = OutputLimits::new(&cfg, false);
+
+        let rows = output_rows_content(&cell, limits, None, avail);
+        assert!(rows.len() > 1, "a 171-char line must wrap at width {avail}");
+        assert_eq!(
+            cell_output_rows(&cell, limits, None, avail),
+            rows.len(),
+            "height model and row content disagree on the wrapped row count",
+        );
+        assert!(
+            rows.last().unwrap().contains(tail),
+            "the line's tail must land on a real output row: {rows:?}",
+        );
+
+        // …and the tail must actually be painted, not clipped off the edge.
+        let nb = Notebook {
+            path: std::path::PathBuf::from("/tmp/wrap-test.ipynb"),
+            metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
+            cells: vec![cell],
+            modified: false,
+            kernel: None,
+        };
+        let state = NotebookState::new();
+        let rope = nb.cells[0].source.clone();
+        let mode = Mode::Normal;
+        let active = ActiveCellView {
+            rope: &rope,
+            cursor: 0,
+            sel_anchor: 0,
+            output_row: None,
+            output_col: 0,
+            output_anchor: None,
+            mode: &mode,
+            jump_labels: &[],
+            jump_typed: "",
+            // `editor.word_wrap` is off: output wraps regardless of the toggle.
+            word_wrap: false,
+        };
+        let height = cell_display_height(&rope, &nb.cells[0], limits, None, avail, false) + 4;
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render(
+                    f, &state, &nb, &active,
+                    &std::collections::HashMap::new(),
+                    &cfg, None, &mut CellHighlightCache::default(),
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let screen: String = (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains(tail), "wrapped tail was not drawn:\n{screen}");
     }
 
     /// A scrolled (clipped) tall cell whose output block includes an image

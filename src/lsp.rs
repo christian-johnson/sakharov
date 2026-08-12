@@ -17,6 +17,13 @@ pub enum ServerMessage {
         method: String,
         params: Option<Value>,
     },
+    /// One line the server wrote to stderr. Language servers report their own
+    /// fatal problems there and nowhere else — a jedi/parso version mismatch,
+    /// for instance, makes pylsp answer every request with an empty result
+    /// while logging the traceback to stderr. Dropping it left the editor
+    /// looking like the LSP feature simply didn't work, so the lines are
+    /// surfaced in *Messages* (see `LspManager::poll`).
+    Stderr(String),
 }
 
 /// What a pending request is waiting for — tells the manager how to handle the response.
@@ -80,13 +87,19 @@ impl LspClient {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Piped, never inherited: inheriting would paint the server's
+            // tracebacks straight over the TUI, and discarding them hides the
+            // one place a server explains why it stopped answering.
+            .stderr(Stdio::piped())
             .spawn()?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
 
         let (tx, rx) = mpsc::channel();
+        let err_tx = tx.clone();
+        std::thread::spawn(move || stderr_thread(BufReader::new(stderr), err_tx));
         std::thread::spawn(move || reader_thread(BufReader::new(stdout), tx));
 
         let (wtx, wrx) = mpsc::channel();
@@ -326,6 +339,12 @@ impl LspClient {
         }), PendingKind::Implementation)
     }
 
+    /// `diagnostics` are the server's own published diagnostics overlapping the
+    /// range, echoed back verbatim. They are not decoration: a quickfix action
+    /// is offered *per diagnostic*, and servers read the fix out of the
+    /// diagnostic's own `data` (ruff does exactly this), so sending an empty
+    /// list reduces the response to the whole-file actions — "fix all",
+    /// "organize imports" — and never the fix for the error under the cursor.
     pub fn request_code_actions(
         &mut self,
         uri: &str,
@@ -333,6 +352,7 @@ impl LspClient {
         start_char: u32,
         end_line: u32,
         end_char: u32,
+        diagnostics: Vec<Value>,
     ) -> u64 {
         self.send_request("textDocument/codeAction", json!({
             "textDocument": { "uri": uri },
@@ -340,7 +360,7 @@ impl LspClient {
                 "start": { "line": start_line, "character": start_char },
                 "end":   { "line": end_line,   "character": end_char   }
             },
-            "context": { "diagnostics": [] }
+            "context": { "diagnostics": diagnostics }
         }), PendingKind::CodeAction)
     }
 
@@ -520,6 +540,25 @@ fn writer_thread(mut stdin: BufWriter<ChildStdin>, rx: Receiver<Value>) {
 // ---------------------------------------------------------------------------
 // Background reader thread
 // ---------------------------------------------------------------------------
+
+/// Forward the server's stderr, one line at a time, onto the same channel the
+/// protocol reader uses.  Long lines are truncated so a runaway server can't
+/// push a megabyte into the message log.
+fn stderr_thread(reader: BufReader<std::process::ChildStderr>, tx: Sender<ServerMessage>) {
+    const MAX_LINE: usize = 400;
+    for line in reader.lines() {
+        let Ok(mut line) = line else { return };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.chars().count() > MAX_LINE {
+            line = line.chars().take(MAX_LINE).collect::<String>() + "…";
+        }
+        if tx.send(ServerMessage::Stderr(line)).is_err() {
+            return;
+        }
+    }
+}
 
 fn reader_thread(
     mut reader: BufReader<std::process::ChildStdout>,
