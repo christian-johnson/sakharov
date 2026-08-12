@@ -32,6 +32,8 @@ mod spinner;
 mod splash;
 mod statusline;
 mod symbols;
+mod table;
+mod table_ui;
 mod theme;
 mod ui;
 

@@ -30,6 +30,8 @@ pub struct Config {
     #[serde(default)]
     pub notebook: NotebookConfig,
     #[serde(default)]
+    pub table: TableConfig,
+    #[serde(default)]
     pub keys: KeysConfig,
     /// Language server definitions, keyed by language id (e.g. "python", "rust").
     #[serde(default)]
@@ -288,6 +290,9 @@ pub struct StatuslineConfig {
     /// Layout used while a notebook is open (the multi-cell view).
     #[serde(default)]
     pub notebook: NotebookStatuslineConfig,
+    /// Layout used in the tabular data view (`:csv`).
+    #[serde(default)]
+    pub table: TableStatuslineConfig,
     /// String inserted between adjacent modules.  Default `""` relies on each
     /// module's own padding (a single leading/trailing space) for visual
     /// separation.  Try `">"`, `"|"`, `"/"`, or `"\\"` for a powerline-inspired
@@ -316,6 +321,31 @@ pub struct NotebookStatuslineConfig {
     pub right: Vec<String>,
 }
 
+/// `[statusline.table]` — module layout for the tabular data view.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TableStatuslineConfig {
+    #[serde(default = "default_table_statusline_left")]
+    pub left: Vec<String>,
+    #[serde(default = "default_table_statusline_right")]
+    pub right: Vec<String>,
+}
+
+impl Default for TableStatuslineConfig {
+    fn default() -> Self {
+        Self {
+            left: default_table_statusline_left(),
+            right: default_table_statusline_right(),
+        }
+    }
+}
+
+fn default_table_statusline_left() -> Vec<String> {
+    vec!["mode".into(), "file".into(), "table_shape".into()]
+}
+fn default_table_statusline_right() -> Vec<String> {
+    vec!["spinner".into(), "table_column".into(), "table_position".into()]
+}
+
 fn default_statusline_left() -> Vec<String> {
     vec!["mode".into(), "git".into(), "file".into()]
 }
@@ -335,6 +365,7 @@ impl Default for StatuslineConfig {
             left: default_statusline_left(),
             right: default_statusline_right(),
             notebook: NotebookStatuslineConfig::default(),
+            table: TableStatuslineConfig::default(),
             separator: String::new(),
             styles: HashMap::new(),
         }
@@ -375,6 +406,60 @@ impl Default for NotebookConfig {
             image_rows: default_image_rows(),
             max_output_lines: default_max_output_lines(),
             max_traceback_lines: default_max_traceback_lines(),
+        }
+    }
+}
+
+/// Tabular-data view configuration (`[table]`) — see `src/table/`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TableConfig {
+    /// Open `.csv`/`.tsv` files in the table view instead of as text.
+    /// `:table-close` always drops back to the raw text of the same file.
+    #[serde(default = "default_table_auto_open")]
+    pub auto_open: bool,
+    /// Widest a column may be drawn, in display columns.  A longer value is
+    /// truncated with an ellipsis; the full text is always reachable with
+    /// `K` (peek) or `Enter` (open in its own buffer).  This is what keeps a
+    /// column of paragraph-length text from swallowing the grid.
+    #[serde(default = "default_table_max_col_width")]
+    pub max_col_width: usize,
+    /// Narrowest a column may be drawn, so a column of short values still
+    /// shows enough of its header to be identifiable.
+    #[serde(default = "default_table_min_col_width")]
+    pub min_col_width: usize,
+    /// Show the 1-based row number in a left gutter.
+    #[serde(default = "default_table_row_numbers")]
+    pub row_numbers: bool,
+    /// Rows loaded before the load stops and reports a truncated table.
+    /// Guards against opening a file far larger than memory.
+    #[serde(default = "default_table_max_rows")]
+    pub max_rows: usize,
+    /// Rows sampled to infer column types and natural widths.
+    #[serde(default = "default_table_sample_rows")]
+    pub sample_rows: usize,
+    /// Text drawn in place of an empty cell.
+    #[serde(default = "default_table_null_display")]
+    pub null_display: String,
+}
+
+fn default_table_auto_open() -> bool { true }
+fn default_table_max_col_width() -> usize { 32 }
+fn default_table_min_col_width() -> usize { 3 }
+fn default_table_row_numbers() -> bool { true }
+fn default_table_max_rows() -> usize { 1_000_000 }
+fn default_table_sample_rows() -> usize { 1_000 }
+fn default_table_null_display() -> String { String::new() }
+
+impl Default for TableConfig {
+    fn default() -> Self {
+        Self {
+            auto_open: default_table_auto_open(),
+            max_col_width: default_table_max_col_width(),
+            min_col_width: default_table_min_col_width(),
+            row_numbers: default_table_row_numbers(),
+            max_rows: default_table_max_rows(),
+            sample_rows: default_table_sample_rows(),
+            null_display: default_table_null_display(),
         }
     }
 }

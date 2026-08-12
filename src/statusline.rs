@@ -52,6 +52,19 @@ pub struct Ctx {
     pub cell: Option<(usize, usize)>,
     /// Kernel state — notebook only.
     pub kernel: Option<KernelView>,
+    /// Table view only: the grid's shape and where the cursor is in it.
+    pub table: Option<TableView>,
+}
+
+/// Cursor position and shape of the open table — table view only.
+#[derive(Clone)]
+pub struct TableView {
+    /// 1-based cursor row / total rows.
+    pub row: (usize, usize),
+    /// 1-based cursor column / total columns.
+    pub col: (usize, usize),
+    /// Name of the column the cursor is in.
+    pub col_name: String,
 }
 
 #[derive(Clone)]
@@ -233,6 +246,26 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
             }
             Some(KernelView::Dead) => vec![Segment::new("[dead]", base.fg(th.error))],
             Some(KernelView::None) => vec![Segment::new("[no kernel]", dim_style())],
+            None => vec![],
+        },
+        // --- Table view ---
+        "table_position" | "table_pos" => match &ctx.table {
+            Some(t) => vec![Segment::new(format!("{}/{}", t.row.0, t.row.1), base)],
+            None => vec![],
+        },
+        "table_column" | "table_col" => match &ctx.table {
+            Some(t) if !t.col_name.is_empty() => vec![Segment::new(
+                format!("{} ({}/{})", t.col_name, t.col.0, t.col.1),
+                base,
+            )],
+            Some(t) => vec![Segment::new(format!("col {}/{}", t.col.0, t.col.1), base)],
+            None => vec![],
+        },
+        "table_shape" => match &ctx.table {
+            Some(t) => vec![Segment::new(
+                format!("{}\u{00d7}{}", t.row.1, t.col.1),
+                dim_style(),
+            )],
             None => vec![],
         },
         // Unknown → literal text (acts as a user-defined separator / label).
@@ -491,6 +524,7 @@ mod tests {
             spinner,
             cell: None,
             kernel,
+            table: None,
         }
     }
 

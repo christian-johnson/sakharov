@@ -235,6 +235,45 @@ The cursor is automatically snapped past folds when moving down, and to the fold
 A folded cell shows: first line of source + `▶ N lines · M outputs` indicator.
 Entering Insert (`i`) on a folded cell auto-unfolds it.
 
+## Tabular data (CSV/TSV)
+
+| Command | Default Key | Description |
+|---------|-------------|-------------|
+| `open-as-table` | — | View the current file as a data table (`:csv`, `:table`) |
+| `table-close` | — | Leave the table view and edit the same file as text (`:table-close`, `:close-table`) |
+
+`.csv` / `.tsv` / `.tab` files open in the table view automatically (turn this off
+with `auto_open = false` under `[table]`); `:table-close` always gives you the raw
+text of the same file, so the grid and the text are two views on one file.
+
+The view is **read-only** — edit commands and `:w` are refused rather than applied
+to the buffer behind the grid.
+
+Navigation uses the ordinary motions, reinterpreted against the grid:
+
+| Key | Moves |
+|-----|-------|
+| `h` / `j` / `k` / `l` | one cell left / down / up / right |
+| `w` / `b` | next / previous column |
+| `0` / `$` | first / last column |
+| `gg` / `G` | first / last row (keeping the column) |
+| `J` / `K` | half a screen of rows down / up |
+
+Long values are **truncated to their column** with a `…` and never wrap, so a
+column of paragraph-length text can't swallow the grid; multi-line values show a
+`↵` where the line breaks were. Numeric columns (detected by sampling
+`table.sample_rows` rows) are right-aligned so their digits line up.
+
+Configuration lives under `[table]` in `config.toml`: `auto_open`,
+`max_col_width`, `min_col_width`, `row_numbers`, `max_rows`, `sample_rows`,
+`null_display`. Colours come from `[table]` in the theme
+(`header`, `header_background`, `grid`, `row_highlight`, `cursor`, `truncation`,
+`numeric`, `null`), and the status line uses the `[statusline.table]` layout with
+the `table_position`, `table_column`, and `table_shape` modules.
+
+Large files load on a background thread — the status spinner runs while the parse
+is in flight — and stop at `table.max_rows`, reporting that they did.
+
 ## Notebooks
 
 Opening a `.ipynb` file shows its cells as a vertical stack. **There is no separate

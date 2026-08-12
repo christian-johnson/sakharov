@@ -562,7 +562,11 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
     };
 
     let (mut diag_errors, mut diag_warnings) = (0usize, 0usize);
-    let (filename, modified, cell, kernel) = if let Some((nb, state)) = app.notebook.as_ref() {
+    let (filename, modified, cell, kernel) = if let Some(session) = app.table.as_ref() {
+        // The table view's buffer is detached and has no path, so the name comes
+        // from the session.  Read-only, hence never modified.
+        (session.display_name(), false, None, None)
+    } else if let Some((nb, state)) = app.notebook.as_ref() {
         let nb_name = nb.path.file_stem().and_then(|s| s.to_str()).unwrap_or("notebook");
         let ext = lang_to_ext(&nb.metadata.kernel_language);
         let filename = format!("{nb_name}  ·  cell [{}].{ext}", state.focused_cell + 1);
@@ -600,6 +604,18 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
         spinner: app.spinner.glyph(),
         cell,
         kernel,
+        table: app.table.as_ref().map(|s| {
+            let st = &s.state;
+            let cols = s.source.columns();
+            crate::statusline::TableView {
+                row: (st.cursor_row + 1, s.source.loaded_rows()),
+                col: (st.cursor_col + 1, cols.len()),
+                col_name: cols
+                    .get(st.cursor_col)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default(),
+            }
+        }),
     }
 }
 

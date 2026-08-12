@@ -55,6 +55,8 @@ pub struct ThemeSpec {
     pub markdown: MarkdownSpec,
     #[serde(default)]
     pub notebook: NotebookSpec,
+    #[serde(default)]
+    pub table: TableSpec,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -229,6 +231,35 @@ pub struct NotebookSpec {
     pub border_error: Option<String>,
 }
 
+/// `[table]` — the tabular data (CSV) grid view.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TableSpec {
+    /// Header row text. Falls back to `ui.accent`.
+    #[serde(default)]
+    pub header: Option<String>,
+    /// Header row background.
+    #[serde(default)]
+    pub header_background: Option<String>,
+    /// Column separators and the row-number gutter. Falls back to `ui.line_numbers`.
+    #[serde(default)]
+    pub grid: Option<String>,
+    /// Background tint of the row the cursor is on.
+    #[serde(default)]
+    pub row_highlight: Option<String>,
+    /// Background of the cursor cell itself. Falls back to `ui.selection`.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// The `…` marking a value too wide for its column. Falls back to `ui.dim`.
+    #[serde(default)]
+    pub truncation: Option<String>,
+    /// Values in numeric columns. Falls back to `ui.info`.
+    #[serde(default)]
+    pub numeric: Option<String>,
+    /// The `table.null_display` stand-in for an empty cell. Falls back to `ui.dim`.
+    #[serde(default)]
+    pub null: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Theme — the resolved runtime palette
 // ---------------------------------------------------------------------------
@@ -282,6 +313,15 @@ pub struct Theme {
     pub nb_border_running: Color,
     pub nb_border_ok: Color,
     pub nb_border_error: Color,
+    // --- Tabular data view (see src/table/) ---
+    pub table_header: Color,
+    pub table_header_bg: Color,
+    pub table_grid: Color,
+    pub table_row_bg: Color,
+    pub table_cursor_bg: Color,
+    pub table_truncation: Color,
+    pub table_numeric: Color,
+    pub table_null: Color,
     pub modes: ModeColors,
     /// Style per highlight index (see `highlight::HIGHLIGHT_NAMES` + `MD_*`).
     syntax: Vec<Style>,
@@ -530,6 +570,25 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     let nb_border_ok = pick(&[c(&spec.notebook.border_ok)], success);
     let nb_border_error = pick(&[c(&spec.notebook.border_error)], error);
 
+    // --- Table view ---
+    // The grid needs three distinguishable background levels — header, cursor
+    // row, cursor cell — so they are blends of the theme's own bg/fg rather
+    // than independent colors that could collapse into each other.
+    let table_header = pick(&[c(&spec.table.header)], accent);
+    let table_header_bg = pick(
+        &[c(&spec.table.header_background)],
+        if themed { blend(bg, fg, 0.14) } else { Color::Rgb(30, 30, 45) },
+    );
+    let table_grid = pick(&[c(&spec.table.grid)], line_numbers);
+    let table_row_bg = pick(
+        &[c(&spec.table.row_highlight)],
+        if themed { blend(bg, fg, 0.06) } else { Color::Rgb(20, 20, 30) },
+    );
+    let table_cursor_bg = pick(&[c(&spec.table.cursor)], selection_bg);
+    let table_truncation = pick(&[c(&spec.table.truncation)], dim);
+    let table_numeric = pick(&[c(&spec.table.numeric)], info);
+    let table_null = pick(&[c(&spec.table.null)], dim);
+
     // --- Syntax palette ---
     let keyword = c(&spec.syntax.keyword);
     let function = c(&spec.syntax.function);
@@ -643,6 +702,14 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         nb_border_running,
         nb_border_ok,
         nb_border_error,
+        table_header,
+        table_header_bg,
+        table_grid,
+        table_row_bg,
+        table_cursor_bg,
+        table_truncation,
+        table_numeric,
+        table_null,
         modes,
         syntax,
     }

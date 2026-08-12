@@ -140,3 +140,16 @@ border            = "#3b4261"  # not-yet-run cell border    (← ui.line_numbers
 border_running    = "cyan"     # executing                  (← ui.info)
 border_ok         = "green"    # ran successfully           (← ui.success)
 border_error      = "red"      # failed                     (← ui.error)
+
+# ---------------------------------------------------------------------------
+# [table] — the tabular data (CSV) grid view.  Every key optional.
+# ---------------------------------------------------------------------------
+[table]
+header            = "#7aa2f7"  # column-name row text       (← ui.accent)
+header_background = "#292e42"  # column-name row background (← blend of bg/fg)
+grid              = "#3b4261"  # separators + row numbers   (← ui.line_numbers)
+row_highlight     = "#1e2030"  # tint of the cursor's row   (← blend of bg/fg)
+cursor            = "#33467c"  # the cursor cell itself     (← ui.selection)
+truncation        = "#565f89"  # the `…` on a clipped value (← ui.dim)
+numeric           = "#89ddff"  # values in numeric columns  (← ui.info)
+null              = "#565f89"  # the empty-cell stand-in    (← ui.dim)

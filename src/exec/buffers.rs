@@ -40,6 +40,10 @@ pub(super) fn save_current_special_buffer(app: &mut App) {
 /// closed with the LSP (skipping virtual/special paths, which were never
 /// opened with it) and its unsaved edits are kept in memory.
 pub(super) fn teardown_current_buffer(app: &mut App) {
+    // A table session holds no unsaved state (the view is read-only), so it is
+    // simply dropped; reopening reloads from disk.
+    app.table = None;
+    app.table_pending = None;
     if app.notebook.is_some() {
         // Stash the open notebook so edits are preserved if the user comes back.
         // (After this, `app.buffer` holds stale cell text — do NOT stash it,
@@ -97,6 +101,25 @@ pub fn switch_to_special_buffer(app: &mut App, name: &str) {
     rebuild_diag_cache(app);
 }
 
+/// Open `path` in whichever view its type calls for: a special buffer, the
+/// notebook view (`.ipynb`), the table view (`.csv`/`.tsv`, when
+/// `table.auto_open` is on), or the plain text editor.
+///
+/// Every "the user picked a file, show it" path goes through here — the buffer
+/// picker, the file picker, buffer cycling, `:bd`'s fallback — so a new view
+/// only has to be taught to one dispatcher instead of five.
+pub fn open_path(app: &mut App, path: &std::path::Path) {
+    if is_special_path(path) {
+        switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
+    } else if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+        open_as_notebook(app, path);
+    } else if app.config.table.auto_open && super::table::is_table_path(path) {
+        super::table::open_as_table(app, path);
+    } else {
+        lsp::open_file_at(app, path, 0, 0);
+    }
+}
+
 /// Cycle through `open_buffers` by `delta` (+1 = next, -1 = prev).
 pub(super) fn navigate_buffer(app: &mut App, delta: i32) {
     let n = app.open_buffers.len();
@@ -104,7 +127,10 @@ pub(super) fn navigate_buffer(app: &mut App, delta: i32) {
         return;
     }
 
-    let current_canon = if let Some((ref nb, _)) = app.notebook {
+    let current_canon = if let Some(ref session) = app.table {
+        // The table view's buffer is detached, so the session holds the path.
+        canon(&session.path)
+    } else if let Some((ref nb, _)) = app.notebook {
         canon(&nb.path)
     } else if let Some(ref p) = app.buffer.path {
         canon(p)
@@ -120,13 +146,7 @@ pub(super) fn navigate_buffer(app: &mut App, delta: i32) {
     };
 
     let target = app.open_buffers[idx].clone();
-    if is_special_path(&target) {
-        switch_to_special_buffer(app, target.to_str().unwrap_or("*scratch*"));
-    } else if target.extension().and_then(|e| e.to_str()) == Some("ipynb") {
-        open_as_notebook(app, &target);
-    } else {
-        lsp::open_file_at(app, &target, 0, 0);
-    }
+    open_path(app, &target);
 }
 
 /// Open a `.ipynb` file as a notebook, replacing whatever is currently open.
@@ -185,6 +205,11 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
 /// open notebook or current buffer, falling back to the working directory for
 /// special buffers (scratch / messages / dashboard) or unnamed buffers.
 fn current_buffer_dir(app: &App) -> std::path::PathBuf {
+    if let Some(ref session) = app.table {
+        if let Some(parent) = session.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            return parent.to_path_buf();
+        }
+    }
     if let Some((ref nb, _)) = app.notebook {
         return crate::notebook::notebook_dir(&nb.path);
     }

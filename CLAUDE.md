@@ -498,6 +498,67 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - **`ListState::filtered_indices` is memoised** keyed by the effective filter string; item-content
   mutations (completion resolve) call `invalidate_filter_cache`.
 
+### Phase T1 (tabular data view) — complete
+- **`:csv` / `:table`** opens the current file as a grid; `.csv`/`.tsv`/`.tab` open
+  that way automatically (`[table] auto_open`, default true). `:table-close` returns
+  to the raw text of the same file, so grid and text are two views on one file
+- **`App::view() -> View { Text, Notebook, Table }`** is the single view-dispatch
+  accessor. The three places that decide who owns the screen and the keyboard
+  (`app::draw_frame`, `exec::update_scroll`, the `input` keymap layer) all match on
+  it instead of hand-rolling conditions from `app.notebook`/`app.table`
+- **`exec::buffers::open_path`** is the single "user picked a file, show it"
+  dispatcher (special buffer / notebook / table / text). The buffer picker, file
+  picker, buffer cycling and `:bd`'s fallback all route through it, so a new view is
+  taught to one function rather than five
+- **The view is read-only.** While it is open `app.buffer` is a *detached empty
+  buffer with no path*, so no save path in the editor can write over the data file;
+  `exec::table::is_text_mutation` refuses the edit/write commands on top of that
+  (a `:wq` that fell through to the text path would have truncated the CSV)
+- **Modularity**: a new backend implements `table::TableSource`
+  (`columns`/`row_count`/`loaded_rows`/`cell`/`ensure_rows`/`describe`) and nothing
+  else changes. `ensure_rows(range)` is called once per frame with the window about
+  to be drawn, so a windowed source (SQL, a lazily-indexed CSV) can fetch exactly
+  what is drawn; `CsvSource` holds every row, so its impl is the default no-op
+- **`table::layout` is the single geometry model** — column widths, which columns are
+  on screen, the row window (`visible_rows`), and cell truncation (`fit_cell`).
+  The renderer (`table_ui`) and the scroll math (`exec::table::update_scroll` via
+  `layout::scroll_col_for_cursor`) MUST both derive geometry from it, exactly as the
+  notebook renderer and scroll math share `nb_cell_height`. Pinned by
+  `layout_contains_cursor_after_scroll`, which asserts that for every viewport width
+  and cursor column the drawn layout shows the cursor's column in full
+- **Every cell is exactly one row tall and no wider than its column.** `fit_cell`
+  flattens the value (newlines → `↵`, tabs/control chars → space) and truncates to
+  the column width with a `…` in `theme.table_truncation`; nothing wraps. That is
+  what stops a column of paragraph-length free text from swallowing the grid —
+  the full text stays reachable (T2: `K` peek float, `Enter` → its own buffer).
+  Widths are clamped to `[table.min_col_width, table.max_col_width]` and measured
+  in *display* columns (`unicode_width`), so CJK/emoji don't shear the grid
+- Navigation reuses the ordinary motions, reinterpreted against the grid by
+  `exec::table::handle`: `h/j/k/l` by cell, `w/b` by column, `0/$` first/last
+  column, `gg/G` first/last row, `J/K` half-screen paging (the `Keymap::table`
+  override map, same mechanism as the notebook's). Anything the table doesn't
+  implement (`:q`, the palette, `:theme`, buffer switching) falls through unchanged
+- **Column types are inferred by sampling** `table.sample_rows` rows
+  (`table::infer_type`, narrowest-first so a `0`/`1` column is Int, not Bool);
+  numeric columns are right-aligned — header included — so digits line up
+- **Delimiter sniffing** (`csv::sniff_delimiter`): tab for `.tsv`/`.tab`, otherwise
+  whichever of `, ; \t |` appears most often in the header line, counted outside
+  quoted regions. A semicolon export rendering as one wide text column is the
+  classic way a CSV viewer looks broken
+- **Loading is async and bounded**: a background thread parses (spinner runs,
+  `app.table_pending`), `exec::poll_table_load` installs it from the run loop, and
+  the load stops at `table.max_rows` and says so. A failed load falls back to the
+  text view rather than stranding the user in the blank detached buffer
+- Config `[table]`: `auto_open`, `max_col_width`, `min_col_width`, `row_numbers`,
+  `max_rows`, `sample_rows`, `null_display`. Theme `[table]`: `header`,
+  `header_background`, `grid`, `row_highlight`, `cursor`, `truncation`, `numeric`,
+  `null`. Status line: `[statusline.table]` layout + `table_position`,
+  `table_column`, `table_shape` modules
+- **Not yet** (planned): `Enter` → cell contents in their own buffer and `K` peek
+  float (T2); sort / hide / freeze / resize columns and `/` search (T3); lazy
+  byte-offset row indexing for files bigger than RAM, and a second `TableSource`
+  backend to validate the trait (T4)
+
 ### Known rough edges / not yet implemented
 - No split panes
 - The kernel is a single REPL, so cells still *run* one at a time — but they queue (`:run-all`,
@@ -508,6 +569,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Notebook cells have no horizontal scroll: with `:wrap` off, a long code-cell line clips at
   the cell border (markdown cells always wrap, so this only affects code/raw cells —
   cell *outputs* always wrap and are never clipped)
+- The table view is read-only, loads the whole file into memory (capped at
+  `table.max_rows`), and has no sort/filter/search yet — see Phase T1's closing note
 
 ## Architecture
 
@@ -535,6 +598,9 @@ src/
     buffers.rs        — buffer-list management: special buffers, buffer switch +
                         stashes (plain-file & via notebook), open_as_notebook,
                         new-file/new-notebook, unsaved_buffer_names quit sweep
+    table.rs          — table view: Session (source + state + path), async load
+                        + poll, open/close, command routing (motions → cells,
+                        edits refused), cursor-follow scroll
     scroll.rs         — update_scroll (the single authoritative scroll fn) +
                         notebook_update_scroll (row-granular cell-stack scroll) +
                         wrap helpers + fold-aware cursor normalisation
@@ -571,6 +637,15 @@ src/
                         terminal OSC color queries
   lang.rs             — language id ↔ file extension mapping
   symbols.rs          — tree-sitter symbol extraction (buffer completions, picker)
+  table/              — tabular data view (CSV today, SQL/parquet later)
+    mod.rs            — TableSource trait (the one thing a new backend implements),
+                        Column/ColumnType, sampling-based type inference
+    layout.rs         — THE geometry model: column widths, visible columns,
+                        cell truncation (fit_cell), row window, column scroll.
+                        Renderer + scroll math must both derive geometry here
+    state.rs          — TableState: cursor (row, col) + scroll anchor
+    csv.rs            — CsvSource: delimiter sniffing + `csv`-crate parse, row cap
+  table_ui.rs         — ratatui renderer for the grid (header, gutter, cells)
   render_util.rs      — helpers shared by ui.rs and notebook_ui.rs: SingleLineWidget,
                         jump-label overlay, diagnostic underline, char_display_width
   spinner.rs          — "boiling" Braille status-bar spinner (random-dot-flip animation)
@@ -650,6 +725,18 @@ docs/
   change to how a cell (or its output block) is sized must go through those two functions.
   Because scroll always follows the cursor now, the command-only `notebook-scroll-down`/`-up`
   nudges snap back to the focused cell on the next frame.
+- **The table view's geometry lives in `table::layout`** — `column_width`,
+  `compute`, `visible_rows`, `fit_cell`, `scroll_col_for_cursor`. The renderer and
+  the scroll math must agree cell-for-cell, so any change to how a column is sized
+  or which columns/rows are on screen goes through those functions (the table's
+  equivalent of `nb_cell_height`/`cell_output_rows` for notebooks).
+- **The table view never holds a writable handle on the data file** — `app.buffer`
+  is detached (`Buffer::new_empty()`, `path = None`) while a table is open. Adding a
+  code path that saves `app.buffer` must not assume it has a path, and any new
+  command that writes must be listed in `exec::table::is_text_mutation`.
+- **Opening a file by path goes through `exec::open_path`**, which picks the view
+  from the extension. Don't call `lsp::open_file_at` directly from a "user picked a
+  file" site — that bypasses the notebook and table views.
 - **LSP document identity**: a document's URI is `lsp::path_to_uri(path)` (absolute +
   canonicalized, with a plain-absolute fallback for nonexistent virtual cell paths).
   Diagnostics arrive keyed by the URI the server echoes back, so any code looking up

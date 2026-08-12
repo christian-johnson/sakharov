@@ -208,6 +208,10 @@ commands! {
         NotebookToggleOutputExpand => "notebook-toggle-output-expand", aliases: ["expand-output", "output-expand"], palette: "Show full cell output (no line cap)  [zo, :expand-output]";
         NotebookToggleAllFolds => "notebook-toggle-all-folds", aliases: ["fold-all-cells"], palette: "Toggle all cell folds  [:fold-all-cells]";
 
+        // --- Tabular data view ---
+        OpenAsTable => "open-as-table", aliases: ["csv", "table"], palette: "View the current file as a data table  [:csv]";
+        TableClose => "table-close", aliases: ["close-table"], palette: "Leave the table view and edit as text  [:table-close]";
+
         // --- Toggles / config ---
         ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";
         ToggleLineNumbers => "toggle-line-numbers", aliases: ["line-numbers"], palette: "Toggle line numbers  [:toggle-line-numbers]";

@@ -159,6 +159,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     .keymap
                     .lookup_notebook(&kb)
                     .or_else(|| app.keymap.lookup_normal(&kb)),
+                crate::app::View::Table => app
+                    .keymap
+                    .lookup_table(&kb)
+                    .or_else(|| app.keymap.lookup_normal(&kb)),
                 crate::app::View::Text => app.keymap.lookup_normal(&kb),
             }
             .map(|v| v.to_vec());
@@ -828,10 +832,13 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
         }
         PopupTarget::Navigate => {
             if let ConfirmPayload::Navigate { path, line, col } = payload {
-                if exec::is_special_path(&path) {
-                    exec::switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
-                } else if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
-                    exec::open_as_notebook(app, &path);
+                if exec::is_special_path(&path)
+                    || path.extension().and_then(|e| e.to_str()) == Some("ipynb")
+                    || (app.config.table.auto_open && exec::is_table_path(&path))
+                {
+                    // Whole-file targets (buffer picker, a data file) open in
+                    // their natural view; only a real text location jumps.
+                    exec::open_path(app, &path);
                 } else {
                     exec::jump_to_location(app, &LspLocation { path, line, character: col });
                 }

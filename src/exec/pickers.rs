@@ -393,7 +393,7 @@ fn open_file_external_picker(app: &mut App, cmd: &str) {
 
     if !chosen.is_empty() {
         let path = std::path::PathBuf::from(&chosen);
-        super::lsp::open_file_at(app, &path, 0, 0);
+        super::buffers::open_path(app, &path);
     }
 
     app.needs_clear = true;

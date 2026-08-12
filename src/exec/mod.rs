@@ -6,9 +6,10 @@ pub(crate) mod notebook;
 mod pickers;
 mod scroll;
 mod search;
+pub(crate) mod table;
 mod text;
 
-pub use buffers::{is_special_path, open_as_notebook, switch_to_special_buffer};
+pub use buffers::{is_special_path, open_as_notebook, open_path, switch_to_special_buffer};
 pub use export::{poll_export, ExportJob};
 pub(crate) use buffers::{create_new_file, create_new_notebook, SCRATCH_INTRO};
 pub use lsp::{
@@ -17,6 +18,7 @@ pub use lsp::{
     refresh_completion_doc,
 };
 pub use scroll::{normalize_cursor_folds, update_scroll};
+pub use table::{is_table_path, open_as_table, poll_table_load};
 pub use search::{search_compute_matches, search_jump};
 
 // Names used by `execute()` and by sibling submodules via `super::…`.
@@ -85,6 +87,14 @@ pub fn revert_theme_preview(app: &mut App) {
 /// Execute a single command against the application state.
 pub fn execute(app: &mut App, cmd: &Command) {
     let extend = app.mode == Mode::Select;
+
+    // The table view owns the whole screen and has no text buffer behind it, so
+    // it intercepts the commands it implements (motions become cell movement)
+    // and refuses the ones that would edit.  Everything else — `:q`, the
+    // palette, `:theme`, buffer switching — falls through unchanged.
+    if app.view() == crate::app::View::Table && table::handle(app, cmd) {
+        return;
+    }
 
     // Capture cursor line before the command so we can detect movement direction.
     let pre_exec_line: usize = {
@@ -647,13 +657,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 .cloned()
                 .unwrap_or_else(|| std::path::PathBuf::from("*scratch*"));
 
-            if is_special_path(&next) {
-                switch_to_special_buffer(app, next.to_str().unwrap_or("*scratch*"));
-            } else if next.extension().and_then(|e| e.to_str()) == Some("ipynb") {
-                open_as_notebook(app, &next);
-            } else {
-                lsp::open_file_at(app, &next, 0, 0);
-            }
+            buffers::open_path(app, &next);
 
             app.messages.show("Buffer closed");
             return;
@@ -1065,6 +1069,17 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::ShowDashboard => {
             app.show_splash = true;
+            return;
+        }
+
+        // --- Tabular data view ---
+        // (In the table view these are handled by `table::handle` above.)
+        Command::OpenAsTable => {
+            table::open_current_as_table(app);
+            return;
+        }
+        Command::TableClose => {
+            app.messages.show("No table open");
             return;
         }
     }

@@ -196,6 +196,35 @@ max_output_lines = 20
 # Maximum Python traceback lines shown for error outputs.
 max_traceback_lines = 5
 
+# ---------------------------------------------------------------------------
+# Tabular data view (CSV/TSV) — `:csv` / `:table-close`
+# ---------------------------------------------------------------------------
+[table]
+# Open .csv/.tsv files in the grid view instead of as plain text.
+# `:table-close` always drops back to the raw text of the same file.
+auto_open = true
+
+# Widest a column is drawn, in display columns. Longer values are truncated
+# with an ellipsis so no single cell can swallow the grid; the full text is
+# always reachable (peek float, or open the cell in its own buffer).
+max_col_width = 32
+
+# Narrowest a column is drawn, so short-valued columns still show their header.
+min_col_width = 3
+
+# Show 1-based row numbers in a left gutter.
+row_numbers = true
+
+# Rows loaded before the load stops and the table reports itself truncated.
+max_rows = 1000000
+
+# Rows sampled to infer column types (numeric columns are right-aligned)
+# and natural column widths.
+sample_rows = 1000
+
+# Text drawn in place of an empty cell (e.g. "-" or "NULL").
+null_display = ""
+
 # Per-language editor overrides, keyed by language id.
 # `indent_width` sets the spaces-per-indent for that language (auto-indent,
 # Tab, and indent-/dedent-region); languages without an entry use

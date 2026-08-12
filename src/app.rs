@@ -244,6 +244,8 @@ pub enum View {
     Text,
     /// Notebook cell-stack view.
     Notebook,
+    /// Tabular data grid (CSV/TSV today — see [`crate::table`]).
+    Table,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +273,12 @@ pub struct App {
     pub keymap: Keymap,
     /// Loaded notebook + UI state, present when a `.ipynb` file is opened.
     pub notebook: Option<(Notebook, NotebookState)>,
+    /// Open tabular data source + cursor state, present in the table view
+    /// (`:csv`).  Mutually exclusive with `notebook`; while it is set
+    /// `buffer` is a detached empty buffer, so nothing can write the data file.
+    pub table: Option<crate::exec::table::Session>,
+    /// In-flight background table load, polled once per frame by the run loop.
+    pub table_pending: Option<crate::exec::table::TableLoad>,
     /// Per-cell highlight-span cache + shared highlighter for the notebook
     /// view.  Lives outside `notebook` so the renderer can borrow it mutably
     /// alongside an immutable borrow of the notebook itself.
@@ -371,7 +379,13 @@ pub struct App {
 impl App {
     /// The view that currently owns the screen and the keyboard.
     pub fn view(&self) -> View {
-        if self.in_notebook_nav() {
+        debug_assert!(
+            !(self.table.is_some() && self.notebook.is_some()),
+            "a table and a notebook must never be open at once"
+        );
+        if self.table.is_some() {
+            View::Table
+        } else if self.in_notebook_nav() {
             View::Notebook
         } else {
             View::Text
@@ -521,6 +535,8 @@ impl App {
             config,
             keymap,
             notebook,
+            table: None,
+            table_pending: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
             graphics: GraphicsState::default(),
             cell_focused_edit: false,
@@ -620,6 +636,15 @@ pub fn run(path: Option<&str>) -> Result<()> {
                     app.lsp_language = Some(lang);
                 }
             }
+        }
+    }
+
+    // A data file opens in the table view.  Done here rather than in
+    // `App::new` because the load runs on a background thread and is applied by
+    // the run loop's poll — `App::new` has no loop to poll it.
+    if let Some(p) = path.map(std::path::PathBuf::from) {
+        if app.config.table.auto_open && crate::exec::is_table_path(&p) {
+            crate::exec::open_as_table(&mut app, &p);
         }
     }
 
@@ -793,6 +818,7 @@ fn run_loop(
         needs_redraw |= crate::exec::process_kernel_events(app);
         needs_redraw |= crate::exec::poll_git(app);
         needs_redraw |= crate::exec::poll_export(app);
+        needs_redraw |= crate::exec::poll_table_load(app);
 
         // Advance the status-bar spinner.  It's "active" whenever a notebook
         // cell is executing or queued, the kernel is booting, an LSP request
@@ -809,7 +835,8 @@ fn run_loop(
             })
             .unwrap_or(false)
             || app.lsp.has_pending_requests()
-            || app.export_pending.is_some();
+            || app.export_pending.is_some()
+            || app.table_pending.is_some();
         app.spinner.update(background_active);
         needs_redraw |= background_active;
 
@@ -912,6 +939,48 @@ fn draw_frame(
                 }
                 // If a popup was opened from the dashboard (e.g. file picker),
                 // render it on top of the splash background.
+                if let Some(ref popup) = app.popup {
+                    crate::popup_ui::render(f, popup, None, &app.config.ui);
+                }
+            })?;
+        } else if app.view() == View::Table {
+            // Tabular data grid.  No text cursor: the cursor is the highlighted
+            // cell, drawn by the renderer (a terminal cursor in a grid of cells
+            // reads as a text caret inside the value, which it isn't).
+            terminal.draw(|f| {
+                crate::theme::fill_background(f);
+                let size = f.area();
+                if size.height >= 3 {
+                    if let Some(ref session) = app.table {
+                        let grid = ratatui::layout::Rect {
+                            height: size.height.saturating_sub(2),
+                            ..size
+                        };
+                        crate::table_ui::render(f, grid, session, &app.config.table);
+
+                        let status_area = ratatui::layout::Rect {
+                            x: size.x,
+                            y: size.y + size.height.saturating_sub(2),
+                            width: size.width,
+                            height: 1,
+                        };
+                        let ctx = ui::status_ctx(app);
+                        crate::statusline::render(
+                            f, status_area, &ctx,
+                            &app.config.statusline.table.left,
+                            &app.config.statusline.table.right,
+                            &app.config.statusline.separator,
+                            &app.config.statusline.styles,
+                        );
+                        let cmd_area = ratatui::layout::Rect {
+                            x: size.x,
+                            y: size.y + size.height.saturating_sub(1),
+                            width: size.width,
+                            height: 1,
+                        };
+                        ui::render_command(f, app, cmd_area);
+                    }
+                }
                 if let Some(ref popup) = app.popup {
                     crate::popup_ui::render(f, popup, None, &app.config.ui);
                 }

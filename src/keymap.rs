@@ -105,6 +105,7 @@ pub struct Keymap {
     normal: HashMap<KeyBinding, Vec<Command>>,
     select: HashMap<KeyBinding, Vec<Command>>,
     notebook: HashMap<KeyBinding, Vec<Command>>,
+    table: HashMap<KeyBinding, Vec<Command>>,
 }
 
 impl Keymap {
@@ -114,6 +115,7 @@ impl Keymap {
         let mut normal: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut select: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut notebook: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        let mut table: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
 
         // Helper macro to insert into both maps
         macro_rules! both {
@@ -301,7 +303,16 @@ impl Keymap {
         // Shift+Enter / Ctrl+Enter execute the focused cell — handled directly in
         // input::handle_key (before mode dispatch) so they fire from Insert too.
 
-        Self { normal, select, notebook }
+        // --- Table (tabular data) overrides ---
+        //
+        // Cell movement reuses the ordinary motions (h/j/k/l, w/b, 0/$, gg/G),
+        // which `exec::table` reinterprets against the grid, so only the keys
+        // whose table meaning differs from their text meaning are listed here.
+        // J / K page half a screen, matching the notebook view.
+        table.insert(KeyBinding::char('J'), vec![Command::PageDown]);
+        table.insert(KeyBinding::char('K'), vec![Command::PageUp]);
+
+        Self { normal, select, notebook, table }
     }
 
     pub fn lookup_normal(&self, kb: &KeyBinding) -> Option<&[Command]> {
@@ -314,6 +325,10 @@ impl Keymap {
 
     pub fn lookup_notebook(&self, kb: &KeyBinding) -> Option<&[Command]> {
         self.notebook.get(kb).map(Vec::as_slice)
+    }
+
+    pub fn lookup_table(&self, kb: &KeyBinding) -> Option<&[Command]> {
+        self.table.get(kb).map(Vec::as_slice)
     }
 
     pub fn set_normal(&mut self, kb: KeyBinding, cmds: Vec<Command>) {
