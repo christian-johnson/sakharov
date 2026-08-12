@@ -5,9 +5,10 @@ It steals many of Helix's features (noun->verb modal editing; minimal configurat
 - Native Jupyter notebook interface
 - LSP support in notebooks
 - Kitty graphics protocol integration
+- Tabular data inspection
 
 The goal is to use Jupyter notebooks with the full customizability and power of a TUI text editor. 
-This project is focused on Python notebooks - other kernels (e.g. R) could theoretically be added in the future, but it's not a high priority. 
+This project is focused on Python notebooks - other kernels (e.g. R) could theoretically be added in the future, but it's not a high priority at the moment. 
 
 There are other projects in the same vein out there (e.g. [Euporie](https://github.com/joouha/euporie), [Marimo](https://marimo.io)...) but I have never been fully happy with any of them for my own parochial reasons.
 Then along came LLMs and the ability to build a custom text editor, so here we are.
@@ -90,10 +91,10 @@ That's it!
 Features I plan on adding in the near future include:
 - Better Markdown support (section folding, etc)
 - More syntax highlighting language support
-- A more comprehensive theming approach
 - Select-around-thing functionality via `tree-sitter`
 - Code breadcrumbs
-- More UI eye candy (e.g. customizable modelines)
+- JSON file navigability/folding
+- More powerful data exploration features
 
 I don't plan on adding a version control interface (I use `lazygit` for this) or a more robust file explorer (I use `yazi` for this).
 
