@@ -466,6 +466,35 @@ mod tests {
         assert_eq!(cursor(&app), (0, 0));
     }
 
+    /// Driven through `input::handle_key`, not `handle` directly: the goto
+    /// sub-mode used to call `motion::*` on the buffer itself, so `gg`/`ge`/
+    /// `gh`/`gl` never reached the table router and did nothing at all.
+    #[test]
+    fn goto_submode_keys_move_the_grid_cursor() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut app = app_with_table(50, 4);
+        let press = |app: &mut App, c: char| {
+            crate::input::handle_key(app, KeyEvent::from(KeyCode::Char(c)));
+        };
+
+        press(&mut app, 'g');
+        press(&mut app, 'e');
+        assert_eq!(cursor(&app), (49, 0), "ge → last row");
+
+        press(&mut app, 'g');
+        press(&mut app, 'l');
+        assert_eq!(cursor(&app), (49, 3), "gl → last column");
+
+        press(&mut app, 'g');
+        press(&mut app, 'h');
+        assert_eq!(cursor(&app), (49, 0), "gh → first column");
+
+        press(&mut app, 'g');
+        press(&mut app, 'g');
+        assert_eq!(cursor(&app), (0, 0), "gg → first row");
+    }
+
     #[test]
     fn word_motions_step_by_column() {
         let mut app = app_with_table(3, 5);

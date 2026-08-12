@@ -571,20 +571,17 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
     // Transition back to the appropriate mode before dispatching.
     app.mode = if extend { Mode::Select } else { Mode::Normal };
 
+    // Every motion here goes through `exec::execute` rather than calling
+    // `motion::*` on the buffer directly: the buffer is not always what the
+    // motion should move.  In the table view the command is reinterpreted
+    // against the grid, and while browsing a notebook cell's output block the
+    // line motions move the output cursor — both of which a direct rope motion
+    // silently bypasses (it moved a hidden or empty buffer instead).
     match key.code {
-        KeyCode::Char('g') => {
-            app.selection = motion::goto_file_start(&app.buffer.rope, app.selection, extend);
-        }
-        KeyCode::Char('e') => {
-            app.selection = motion::goto_file_end(&app.buffer.rope, app.selection, extend);
-        }
-        KeyCode::Char('h') => {
-            app.selection =
-                motion::move_line_first_non_ws(&app.buffer.rope, app.selection, extend);
-        }
-        KeyCode::Char('l') => {
-            app.selection = motion::move_line_end(&app.buffer.rope, app.selection, extend);
-        }
+        KeyCode::Char('g') => exec::execute(app, &Command::GotoFileStart),
+        KeyCode::Char('e') => exec::execute(app, &Command::GotoFileEnd),
+        KeyCode::Char('h') => exec::execute(app, &Command::MoveLineFirstNonWs),
+        KeyCode::Char('l') => exec::execute(app, &Command::MoveLineEnd),
         KeyCode::Char('z') => exec::execute(app, &Command::ScrollCursorCenter),
         KeyCode::Char('d') => exec::execute(app, &Command::LspGotoDefinition),
         KeyCode::Char('r') => exec::execute(app, &Command::LspGotoReferences),
