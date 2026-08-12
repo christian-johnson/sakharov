@@ -279,6 +279,13 @@ pub struct App {
     pub table: Option<crate::exec::table::Session>,
     /// In-flight background table load, polled once per frame by the run loop.
     pub table_pending: Option<crate::exec::table::TableLoad>,
+    /// Table sessions stashed by path when navigating away, so coming back
+    /// restores the exact cursor cell instead of re-parsing the file from disk.
+    /// (The counterpart of `file_buffers` / `notebook_buffers`.)
+    pub table_buffers: std::collections::HashMap<std::path::PathBuf, crate::exec::table::Session>,
+    /// While a `*cell …*` buffer is open, the table it was read out of (what
+    /// `:bd` returns to) plus the settings the cell buffer overrode.
+    pub table_cell_origin: Option<crate::exec::table::CellOrigin>,
     /// Per-cell highlight-span cache + shared highlighter for the notebook
     /// view.  Lives outside `notebook` so the renderer can borrow it mutably
     /// alongside an immutable borrow of the notebook itself.
@@ -542,6 +549,8 @@ impl App {
             notebook,
             table: None,
             table_pending: None,
+            table_buffers: std::collections::HashMap::new(),
+            table_cell_origin: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
             graphics: GraphicsState::default(),
             cell_focused_edit: false,

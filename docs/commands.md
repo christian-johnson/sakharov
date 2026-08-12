@@ -241,6 +241,11 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 |---------|-------------|-------------|
 | `open-as-table` | — | View the current file as a data table (`:csv`, `:table`) |
 | `table-close` | — | Leave the table view and edit the same file as text (`:table-close`, `:close-table`) |
+| `table-open-cell` | `Enter` | Read the cursor cell's full text in its own buffer (`:read-cell`, `:cell-buffer`) |
+| `table-peek-cell` | `K`, `gk` | Peek the cursor cell's full text in a float (`:peek-cell`, `:peek`) |
+| `table-yank-cell` | `y` | Copy the cursor cell's full value to the clipboard (`:yank-cell`) |
+| `table-yank-row` | `x` | Copy the cursor row to the clipboard as a tab-separated line (`:yank-row`) |
+| `table-close-cell` | — | Return from a cell buffer to its table — what `:bd` does there (`:cell-back`, `:back-to-table`) |
 
 `.csv` / `.tsv` / `.tab` files open in the table view automatically (turn this off
 with `auto_open = false` under `[table]`); `:table-close` always gives you the raw
@@ -257,12 +262,32 @@ Navigation uses the ordinary motions, reinterpreted against the grid:
 | `w` / `b` | next / previous column |
 | `0` / `$` | first / last column |
 | `gg` / `G` | first / last row (keeping the column) |
-| `J` / `K` | half a screen of rows down / up |
+| `J` / `Ctrl+u` | half a screen of rows down / up |
+
+(`K` is the cell peek here, not PageUp — it keeps its editor-wide "tell me more
+about the thing under the cursor" meaning. PageUp is `Ctrl+u` / `PgUp`.)
 
 Long values are **truncated to their column** with a `…` and never wrap, so a
 column of paragraph-length text can't swallow the grid; multi-line values show a
 `↵` where the line breaks were. Numeric columns (detected by sampling
 `table.sample_rows` rows) are right-aligned so their digits line up.
+
+### Reading a cell in full
+
+The grid deliberately shows a clipped one-line rendering of every value, so
+there are two ways to see one whole:
+
+- **`Enter`** opens the cell's untruncated text in its own buffer, named
+  `*cell <row>:<column>*` — an ordinary buffer, so `/` search, motions and
+  word-wrap all work on it. Word-wrap is forced on while it is open and put back
+  as it was when you leave. `:bd` returns to the grid, on the same cell you left
+  (the table is stashed, not re-parsed).
+- **`K`** (or `gk`) peeks the same text in a scrollable float without leaving the
+  grid. Any key dismisses it.
+
+The cell buffer is read-only in the sense that the table view is: it is a virtual
+buffer with no path, so `:w` has nothing to save to and edits never reach the
+data file.
 
 Configuration lives under `[table]` in `config.toml`: `auto_open`,
 `max_col_width`, `min_col_width`, `row_numbers`, `max_rows`, `sample_rows`,

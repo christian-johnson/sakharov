@@ -530,13 +530,14 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   flattens the value (newlines → `↵`, tabs/control chars → space) and truncates to
   the column width with a `…` in `theme.table_truncation`; nothing wraps. That is
   what stops a column of paragraph-length free text from swallowing the grid —
-  the full text stays reachable (T2: `K` peek float, `Enter` → its own buffer).
+  the full text stays reachable (see Phase T2 below).
   Widths are clamped to `[table.min_col_width, table.max_col_width]` and measured
   in *display* columns (`unicode_width`), so CJK/emoji don't shear the grid
 - Navigation reuses the ordinary motions, reinterpreted against the grid by
   `exec::table::handle`: `h/j/k/l` by cell, `w/b` by column, `0/$` first/last
-  column, `gg/G` first/last row, `J/K` half-screen paging (the `Keymap::table`
-  override map, same mechanism as the notebook's). Anything the table doesn't
+  column, `gg/G` first/last row, `J` half-screen page down (the `Keymap::table`
+  override map, same mechanism as the notebook's; `K` is the cell peek here, so
+  PageUp stays on `Ctrl+u`/`PgUp`). Anything the table doesn't
   implement (`:q`, the palette, `:theme`, buffer switching) falls through unchanged
 - **Column types are inferred by sampling** `table.sample_rows` rows
   (`table::infer_type`, narrowest-first so a `0`/`1` column is Int, not Bool);
@@ -554,10 +555,45 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   `header_background`, `grid`, `row_highlight`, `cursor`, `truncation`, `numeric`,
   `null`. Status line: `[statusline.table]` layout + `table_position`,
   `table_column`, `table_shape` modules
-- **Not yet** (planned): `Enter` → cell contents in their own buffer and `K` peek
-  float (T2); sort / hide / freeze / resize columns and `/` search (T3); lazy
-  byte-offset row indexing for files bigger than RAM, and a second `TableSource`
-  backend to validate the trait (T4)
+- **Not yet** (planned): sort / hide / freeze / resize columns and `/` search (T3);
+  lazy byte-offset row indexing for files bigger than RAM, and a second
+  `TableSource` backend to validate the trait (T4)
+
+### Phase T2 (reading a cell in full) — complete
+The grid shows one clipped line per value on purpose, so the whole value has to
+be reachable some other way. Two ways, both in `exec/table.rs`:
+- **`Enter` (`Command::TableOpenCell`)** opens the untruncated value in its own
+  buffer named `*cell <row>:<column>*` — an ordinary buffer, so search, motions
+  and wrap all work. Word-wrap is forced on and restored on the way out
+  (`CellOrigin.prev_word_wrap`, undone by `leave_cell_buffer`, which
+  `teardown_current_buffer` calls so *every* exit path is covered, not just
+  `:bd`). Only one cell buffer exists at a time — opening another evicts the
+  previous `*cell …*` rope, which would otherwise leak for the session
+- **`K` / `gk` (`Command::TablePeekCell`)** peeks the same text in a scrollable
+  float. `Command::LspShowDocumentation` is routed to it: `K`/`gk` mean "tell me
+  more about the thing under the cursor" editor-wide, and in a grid that is the
+  cell. The text popup **clips rather than wraps**, so the peek pre-wraps with
+  `notebook_ui::wrap_segments` at `popup_text_width` (which mirrors
+  `popup_ui::compute_width`'s 0.6-of-terminal fraction — they must agree)
+- **`y` / `x`** copy the full cell value / the row as a tab-separated line
+  (`row_tsv`, values flattened through `layout::sanitize` so an embedded newline
+  can't split one row into two). TSV because it pastes correctly into
+  spreadsheets and needs no quoting for the commas already inside values
+- **`is_special_path` is now the `*…*` shape**, not a fixed list of two names, so
+  a new virtual buffer is automatically kept out of saving, LSP sync, crash
+  recovery and the unsaved-changes sweep. `switch_to_special_buffer` reads any
+  other `*…*` name's rope from `special_buffer_ropes` (`*Messages*` stays the one
+  special buffer rebuilt from a live source)
+- **Table sessions are stashed, not dropped** (`app.table_buffers`, keyed by
+  canonical path, mirroring `file_buffers`/`notebook_buffers`):
+  `teardown_current_buffer` stashes and `open_as_table` restores, so `Enter` into
+  a cell buffer and `:bd` back is a round trip to the *same cursor cell* rather
+  than a re-parse. `:table-close` and `:bd` drop the stash (an explicit exit
+  should re-read a file that may have been edited as text since)
+- **`:bd` in a cell buffer returns to its table** rather than hitting the "cannot
+  close special buffer" refusal — the only place it makes sense to go back to.
+  `H`/`L` also treat a cell buffer as sitting at its origin table's position in
+  the buffer list
 
 ### Known rough edges / not yet implemented
 - No split panes
@@ -570,7 +606,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   the cell border (markdown cells always wrap, so this only affects code/raw cells —
   cell *outputs* always wrap and are never clipped)
 - The table view is read-only, loads the whole file into memory (capped at
-  `table.max_rows`), and has no sort/filter/search yet — see Phase T1's closing note
+  `table.max_rows`), and has no sort/filter/search yet — see Phase T1's closing note.
+  A stashed session keeps its whole parse in memory until `:bd`/`:table-close`
 
 ## Architecture
 
@@ -600,7 +637,8 @@ src/
                         new-file/new-notebook, unsaved_buffer_names quit sweep
     table.rs          — table view: Session (source + state + path), async load
                         + poll, open/close, command routing (motions → cells,
-                        edits refused), cursor-follow scroll
+                        edits refused), cursor-follow scroll, session stash, and
+                        cell reading (Enter → *cell* buffer, K peek, y/x yank)
     scroll.rs         — update_scroll (the single authoritative scroll fn) +
                         notebook_update_scroll (row-granular cell-stack scroll) +
                         wrap helpers + fold-aware cursor normalisation

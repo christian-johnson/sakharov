@@ -165,7 +165,7 @@ pub(crate) fn cell_wraps(cell: &Cell, word_wrap: bool) -> bool {
 /// Returns `(char_offset_within_line, segment)` pairs — always at least one,
 /// so an empty line still occupies one row. Char-based, like the rest of the
 /// cell renderer (the width-1-chars assumption is a known rough edge).
-fn wrap_segments(line: &str, width: usize) -> Vec<(usize, &str)> {
+pub(crate) fn wrap_segments(line: &str, width: usize) -> Vec<(usize, &str)> {
     let width = width.max(1);
     let chars: Vec<(usize, char)> = line.char_indices().collect();
     let n = chars.len();

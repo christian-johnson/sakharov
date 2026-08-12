@@ -34,6 +34,28 @@ impl Session {
             .unwrap_or("table")
             .to_string()
     }
+
+    /// The cursor cell's **untruncated** value — what the grid can only show a
+    /// clipped, single-line rendering of.
+    pub fn cursor_value(&self) -> Option<&str> {
+        self.source
+            .cell(self.state.cursor_row, self.state.cursor_col)
+    }
+
+    /// Header of the cursor's column.
+    pub fn cursor_column_name(&self) -> Option<&str> {
+        self.source
+            .columns()
+            .get(self.state.cursor_col)
+            .map(|c| c.name.as_str())
+    }
+
+    /// Every value in `row`, in column order (missing cells read as empty).
+    fn row_values(&self, row: usize) -> Vec<&str> {
+        (0..self.source.columns().len())
+            .map(|c| self.source.cell(row, c).unwrap_or(""))
+            .collect()
+    }
 }
 
 /// An in-flight background load, polled once per frame by the run loop.
@@ -73,6 +95,7 @@ pub fn open_as_table(app: &mut App, path: &Path) {
     super::save_current_special_buffer(app);
     super::teardown_current_buffer(app);
     app.table = None;
+    app.table_cell_origin = None;
 
     // Detached buffer: the table view renders from the source, and nothing that
     // could write `app.buffer` may be pointed at the data file.
@@ -89,6 +112,14 @@ pub fn open_as_table(app: &mut App, path: &Path) {
     super::rebuild_diag_cache(app);
 
     super::register_buffer(&mut app.open_buffers, path);
+
+    // A session stashed on the way out comes back whole — same parse, same
+    // cursor cell.  This is what makes `Enter` into a cell buffer and back a
+    // round trip rather than a reload.
+    if let Some(session) = app.table_buffers.remove(&super::canon(path)) {
+        app.table = Some(session);
+        return;
+    }
     start_load(app, path);
 }
 
@@ -119,7 +150,196 @@ pub(super) fn close_table(app: &mut App) {
     };
     let path = session.path.clone();
     drop(session);
+    // Deliberate exit from the grid: drop the stash too, so a later `:csv`
+    // re-reads the file (which the user may have just edited as text) rather
+    // than resurrecting the parse from before.
+    app.table_buffers.remove(&super::canon(&path));
     super::lsp::open_file_at(app, &path, 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Reading a cell
+// ---------------------------------------------------------------------------
+
+/// Where an open `*cell …*` buffer came from, and what to undo when leaving it.
+pub struct CellOrigin {
+    /// The table the cell was read out of — what `:bd` returns to.
+    pub path: PathBuf,
+    /// `editor.word_wrap` as it was before the cell buffer forced it on.
+    prev_word_wrap: bool,
+}
+
+/// Called when leaving a cell buffer (from `teardown_current_buffer`, so every
+/// exit path is covered): put the word-wrap setting back as it was.
+pub(super) fn leave_cell_buffer(app: &mut App) {
+    if let Some(origin) = app.table_cell_origin.take() {
+        app.config.editor.word_wrap = origin.prev_word_wrap;
+    }
+}
+
+/// Name of the virtual buffer a cell's text is read in.  The `*…*` form marks
+/// it special (see [`super::is_special_path`]) so nothing tries to save it.
+fn cell_buffer_name(session: &Session) -> String {
+    let col = session.cursor_column_name().unwrap_or("?");
+    format!("*cell {}:{}*", session.state.cursor_row + 1, col)
+}
+
+/// `Enter` — open the cursor cell's full text in its own buffer.
+///
+/// This is the point of the whole view: the grid deliberately shows one
+/// truncated line per cell, and a paragraph-length value is only readable once
+/// it is text in a buffer, with wrapping, motions and search.  The table is
+/// stashed on the way out, so returning lands on the same cell.
+pub(super) fn open_cell_buffer(app: &mut App) {
+    let Some(session) = app.table.as_ref() else {
+        app.messages.show("No table open");
+        return;
+    };
+    let Some(value) = session.cursor_value() else {
+        app.messages.show("No cell here");
+        return;
+    };
+    if value.is_empty() {
+        app.messages.show("Cell is empty");
+        return;
+    }
+
+    let name = cell_buffer_name(session);
+    let origin = session.path.clone();
+    let short = session.display_name();
+    let mut text = value.to_string();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+
+    // One cell buffer at a time: without this every cell ever read would keep
+    // its rope alive for the rest of the session.
+    app.special_buffer_ropes.retain(|k, _| !k.starts_with("*cell "));
+    app.special_buffer_ropes
+        .insert(name.clone(), ropey::Rope::from_str(&text));
+
+    super::switch_to_special_buffer(app, &name);
+    // The value is prose far more often than it is code, and it is the long
+    // ones the user came here to read — so wrap, and put the setting back when
+    // the buffer is left (`leave_cell_buffer`).
+    app.table_cell_origin = Some(CellOrigin {
+        path: origin,
+        prev_word_wrap: app.config.editor.word_wrap,
+    });
+    app.config.editor.word_wrap = true;
+    app.messages
+        .show(format!("Reading cell — :bd returns to {short}"));
+}
+
+/// `:bd` in a `*cell …*` buffer — go back to the table it came from.
+/// Returns false when the current buffer is not a cell buffer.
+pub(super) fn close_cell_buffer(app: &mut App) -> bool {
+    let Some(origin) = app.table_cell_origin.as_ref().map(|o| o.path.clone()) else {
+        return false;
+    };
+    let name = app
+        .buffer
+        .path
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .unwrap_or_default()
+        .to_string();
+    if !name.starts_with("*cell ") {
+        return false;
+    }
+    app.special_buffer_ropes.remove(&name);
+    open_as_table(app, &origin);
+    true
+}
+
+/// `K` / `gk` — peek the cursor cell's full text without leaving the grid.
+///
+/// Same question as `Enter` answers, asked without giving up your place: the
+/// float is read-only and scrollable, and any key dismisses it.
+pub(super) fn peek_cell(app: &mut App) {
+    let Some(session) = app.table.as_ref() else {
+        app.messages.show("No table open");
+        return;
+    };
+    let Some(value) = session.cursor_value() else {
+        app.messages.show("No cell here");
+        return;
+    };
+    if value.is_empty() {
+        app.messages.show("Cell is empty");
+        return;
+    }
+
+    let title = format!(
+        " {} · row {} ",
+        session.cursor_column_name().unwrap_or("cell"),
+        session.state.cursor_row + 1
+    );
+    // Wrap to the float's inner width: the text popup clips rather than wraps,
+    // and a cell worth peeking at is exactly the one that would be clipped.
+    let inner = popup_text_width(app.viewport_width);
+    let wrapped: Vec<String> = value
+        .lines()
+        .flat_map(|line| {
+            crate::notebook_ui::wrap_segments(line, inner)
+                .into_iter()
+                .map(|(_, seg)| seg.to_string())
+        })
+        .collect();
+    app.popup = Some(crate::popup::Popup::documentation(&title, &wrapped.join("\n")));
+}
+
+/// Inner text width of a `FractionOfScreen(0.6)` centered float, mirroring
+/// `popup_ui::compute_width` (0.6 of the terminal, at least 20) minus borders.
+fn popup_text_width(viewport_width: usize) -> usize {
+    let w = ((viewport_width as f32 * 0.6) as usize).max(20);
+    w.saturating_sub(2).max(1)
+}
+
+/// `y` — copy the cursor cell's full value to the system clipboard.
+pub(super) fn yank_cell(app: &mut App) {
+    let Some(session) = app.table.as_ref() else {
+        return;
+    };
+    let Some(value) = session.cursor_value().map(str::to_string) else {
+        app.messages.show("No cell here");
+        return;
+    };
+    let n = value.chars().count();
+    crate::clipboard::write(&value);
+    app.messages.show(format!("Yanked cell ({n} chars)"));
+}
+
+/// One row rendered as a tab-separated line.  Values are flattened
+/// ([`layout::sanitize`]) so an embedded newline can't split one row into two.
+fn row_tsv(session: &Session, row: usize) -> String {
+    session
+        .row_values(row)
+        .iter()
+        .map(|v| layout::sanitize(v))
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+/// `x` — copy the cursor row to the clipboard as a tab-separated line.
+///
+/// TSV rather than the file's own delimiter: it is what spreadsheets and chat
+/// windows paste correctly, and it needs no quoting rules for the commas that
+/// are already inside the values.
+pub(super) fn yank_row(app: &mut App) {
+    let Some(session) = app.table.as_ref() else {
+        return;
+    };
+    let row = session.state.cursor_row;
+    if row >= session.source.loaded_rows() {
+        app.messages.show("No row here");
+        return;
+    }
+    let line = row_tsv(session, row);
+    let cols = session.source.columns().len();
+    crate::clipboard::write(&line);
+    app.messages
+        .show(format!("Yanked row {} ({cols} columns)", row + 1));
 }
 
 /// Spawn the background parse for `path`.
@@ -239,6 +459,30 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
         }
         Command::OpenAsTable => {
             app.messages.show("Already in the table view");
+            return true;
+        }
+
+        // --- reading a cell ---
+        Command::TableOpenCell => {
+            open_cell_buffer(app);
+            return true;
+        }
+        // `K` / `gk` mean "tell me more about the thing under the cursor"
+        // everywhere in the editor; in a grid that is the cell's full text.
+        Command::TablePeekCell | Command::LspShowDocumentation => {
+            peek_cell(app);
+            return true;
+        }
+        Command::TableYankCell => {
+            yank_cell(app);
+            return true;
+        }
+        Command::TableYankRow => {
+            yank_row(app);
+            return true;
+        }
+        Command::TableCloseCell => {
+            app.messages.show("No cell buffer open");
             return true;
         }
 
@@ -610,6 +854,156 @@ mod tests {
             assert!(!app.buffer.modified);
             assert!(app.messages.current().is_some_and(|m| m.contains("read-only")));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Reading a cell (the point of the view)
+    // -----------------------------------------------------------------------
+
+    /// A table whose one long cell is exactly what the grid cannot show.
+    fn app_with_long_cell() -> (App, String) {
+        let long: String = "lorem ipsum dolor ".repeat(30).trim_end().to_string();
+        let text = format!("id,notes\n1,short\n2,\"{long}\"\n");
+        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        app.viewport_height = 11;
+        app.viewport_width = 80;
+        app.config.editor.scroll_off = 2;
+        app.config.editor.word_wrap = false;
+        app.config.table = TableConfig::default();
+        app.table = Some(Session {
+            source: Box::new(
+                CsvSource::from_reader(text.as_bytes(), b',', &TableConfig::default()).unwrap(),
+            ),
+            state: table::TableState::new(),
+            path: PathBuf::from("notes.csv"),
+        });
+        // Cursor on the long value.
+        handle(&mut app, &Command::MoveDown);
+        handle(&mut app, &Command::MoveRight);
+        (app, long)
+    }
+
+    #[test]
+    fn enter_opens_the_full_cell_text_in_its_own_buffer() {
+        let (mut app, long) = app_with_long_cell();
+        assert!(handle(&mut app, &Command::TableOpenCell));
+
+        // The buffer holds the value in full — untruncated, unlike the grid.
+        assert_eq!(app.buffer.rope.to_string().trim_end(), long);
+        assert_eq!(
+            app.buffer.path.as_ref().unwrap().to_str(),
+            Some("*cell 2:notes*"),
+            "named for the cell it came from"
+        );
+        assert_eq!(app.view(), View::Text, "the grid gives up the screen");
+        // Nothing here can write the data file: a virtual buffer, no path.
+        assert!(crate::exec::is_special_path(app.buffer.path.as_ref().unwrap()));
+        assert!(app.config.editor.word_wrap, "wrapped, so it is readable");
+    }
+
+    #[test]
+    fn returning_from_a_cell_buffer_lands_on_the_same_cell() {
+        let (mut app, _) = app_with_long_cell();
+        handle(&mut app, &Command::TableOpenCell);
+        // The parsed table is stashed, not dropped.
+        assert_eq!(app.table_buffers.len(), 1);
+
+        assert!(close_cell_buffer(&mut app));
+        assert_eq!(app.view(), View::Table, "back in the grid");
+        assert_eq!(cursor(&app), (1, 1), "on the cell we were reading");
+        assert!(
+            app.table_pending.is_none(),
+            "restored from the stash, not re-parsed from disk"
+        );
+        assert!(!app.config.editor.word_wrap, "wrap setting put back");
+        assert!(app.table_cell_origin.is_none());
+    }
+
+    /// `:bd` is the natural "close this" for the cell buffer, and it must not
+    /// hit the "cannot close special buffer" refusal.
+    #[test]
+    fn bd_in_a_cell_buffer_returns_to_the_table() {
+        let (mut app, _) = app_with_long_cell();
+        handle(&mut app, &Command::TableOpenCell);
+        crate::exec::execute(&mut app, &Command::BufferClose);
+        assert_eq!(app.view(), View::Table);
+        assert_eq!(cursor(&app), (1, 1));
+    }
+
+    #[test]
+    fn peek_shows_the_whole_value_wrapped_without_leaving_the_grid() {
+        let (mut app, long) = app_with_long_cell();
+        assert!(handle(&mut app, &Command::TablePeekCell));
+        assert_eq!(app.view(), View::Table, "still in the grid");
+
+        let popup = app.popup.as_ref().expect("peek float");
+        let crate::popup::PopupContent::Text(state) = &popup.content else {
+            panic!("peek should be a text float");
+        };
+        // Wrapped to the float, and complete: the rejoined rows are the value.
+        let width = popup_text_width(app.viewport_width);
+        assert!(state.lines.len() > 1, "a long value wraps to many rows");
+        assert!(state.lines.iter().all(|l| l.chars().count() <= width));
+        assert_eq!(state.lines.join(" "), long);
+    }
+
+    /// `K` and `gk` mean "tell me more about this" everywhere else, so they
+    /// must peek here rather than firing an LSP request against the empty
+    /// buffer behind the grid.
+    #[test]
+    fn k_peeks_instead_of_asking_the_lsp() {
+        let (mut app, _) = app_with_long_cell();
+        assert!(handle(&mut app, &Command::LspShowDocumentation));
+        assert!(app.popup.is_some());
+    }
+
+    #[test]
+    fn empty_and_missing_cells_say_so_instead_of_opening_a_blank_buffer() {
+        let mut app = app_with_table(3, 3);
+        // Blank the cell under the cursor by pointing at a column past the data.
+        let source =
+            CsvSource::from_reader("a,b\n1,\n".as_bytes(), b',', &TableConfig::default()).unwrap();
+        app.table.as_mut().unwrap().source = Box::new(source);
+        handle(&mut app, &Command::MoveRight);
+
+        handle(&mut app, &Command::TableOpenCell);
+        assert_eq!(app.view(), View::Table, "no buffer opened");
+        assert!(app.messages.current().is_some_and(|m| m.contains("empty")));
+
+        handle(&mut app, &Command::TablePeekCell);
+        assert!(app.popup.is_none());
+    }
+
+    /// The yank commands themselves are not driven here: `clipboard::write`
+    /// shells out to the real system clipboard, which a test must neither
+    /// depend on nor clobber.  What they copy is this.
+    #[test]
+    fn yank_text_is_the_full_cell_and_the_row_as_tsv() {
+        let (app, long) = app_with_long_cell();
+        let session = app.table.as_ref().unwrap();
+
+        assert_eq!(session.cursor_value(), Some(long.as_str()), "untruncated");
+        assert_eq!(
+            row_tsv(session, 1),
+            format!("2\t{long}"),
+            "every column of the row, tab-separated"
+        );
+    }
+
+    /// An embedded newline must not turn one copied row into two lines.
+    #[test]
+    fn a_multiline_value_stays_on_one_line_when_the_row_is_yanked() {
+        let mut app = app_with_table(1, 1);
+        let source = CsvSource::from_reader(
+            "a,b\n\"one\ntwo\",x\n".as_bytes(),
+            b',',
+            &TableConfig::default(),
+        )
+        .unwrap();
+        app.table.as_mut().unwrap().source = Box::new(source);
+        let line = row_tsv(app.table.as_ref().unwrap(), 0);
+        assert!(!line.contains('\n'));
+        assert_eq!(line, "one↵two\tx");
     }
 
     #[test]

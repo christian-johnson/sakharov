@@ -12,9 +12,15 @@ pub(crate) const SCRATCH_INTRO: &str = "\
 ;; This buffer is for notes you don't want to save.\n\
 ;; Use it for scratch text.\n";
 
-/// Returns true for virtual buffer names that don't correspond to real files.
+/// Returns true for virtual buffer names that don't correspond to real files:
+/// `*scratch*`, `*Messages*`, and the table view's `*cell …*` buffers.
+///
+/// The `*…*` shape is the rule rather than a fixed list, so a new virtual
+/// buffer is automatically excluded from saving, LSP sync, crash recovery and
+/// the unsaved-changes sweep — the places a name that isn't a path must never
+/// reach.
 pub fn is_special_path(path: &std::path::Path) -> bool {
-    matches!(path.to_str(), Some("*scratch*") | Some("*Messages*"))
+    matches!(path.to_str(), Some(s) if s.len() >= 2 && s.starts_with('*') && s.ends_with('*'))
 }
 
 /// Canonicalize `path`, falling back to it unchanged when the filesystem
@@ -40,10 +46,17 @@ pub(super) fn save_current_special_buffer(app: &mut App) {
 /// closed with the LSP (skipping virtual/special paths, which were never
 /// opened with it) and its unsaved edits are kept in memory.
 pub(super) fn teardown_current_buffer(app: &mut App) {
-    // A table session holds no unsaved state (the view is read-only), so it is
-    // simply dropped; reopening reloads from disk.
-    app.table = None;
+    // A table session holds no unsaved state (the view is read-only), but it
+    // does hold a parsed copy of the file and the cursor cell — stash both, so
+    // reading a cell in its own buffer and coming straight back lands on the
+    // same cell without re-parsing.  An in-flight load has nothing worth
+    // keeping and is simply dropped.
+    if let Some(session) = app.table.take() {
+        app.table_buffers.insert(canon(&session.path), session);
+    }
     app.table_pending = None;
+    // Leaving a `*cell …*` buffer, whichever way: undo the settings it forced.
+    super::table::leave_cell_buffer(app);
     if app.notebook.is_some() {
         // Stash the open notebook so edits are preserved if the user comes back.
         // (After this, `app.buffer` holds stale cell text — do NOT stash it,
@@ -67,21 +80,30 @@ pub fn switch_to_special_buffer(app: &mut App, name: &str) {
     save_current_special_buffer(app);
     teardown_current_buffer(app);
 
-    let rope = if name == "*scratch*" {
-        app.special_buffer_ropes
+    let rope = match name {
+        "*scratch*" => app
+            .special_buffer_ropes
             .get("*scratch*")
             .cloned()
-            .unwrap_or_else(|| Rope::from_str(SCRATCH_INTRO))
-    } else {
-        // *Messages*: rebuild from the accumulated log.
-        let content = if app.messages.log.is_empty() {
-            String::new()
-        } else {
-            let mut s = app.messages.log.join("\n");
-            s.push('\n');
-            s
-        };
-        Rope::from_str(&content)
+            .unwrap_or_else(|| Rope::from_str(SCRATCH_INTRO)),
+        // *Messages* is the one special buffer with a live source: rebuild it
+        // from the accumulated log rather than from the stash.
+        "*Messages*" => {
+            let content = if app.messages.log.is_empty() {
+                String::new()
+            } else {
+                let mut s = app.messages.log.join("\n");
+                s.push('\n');
+                s
+            };
+            Rope::from_str(&content)
+        }
+        // Anything else (a `*cell …*` buffer) is whatever its creator stashed.
+        other => app
+            .special_buffer_ropes
+            .get(other)
+            .cloned()
+            .unwrap_or_default(),
     };
 
     let mut buf = crate::buffer::Buffer::new_empty();
@@ -136,6 +158,10 @@ pub(super) fn navigate_buffer(app: &mut App, delta: i32) {
     let current_canon = if let Some(ref session) = app.table {
         // The table view's buffer is detached, so the session holds the path.
         canon(&session.path)
+    } else if let Some(ref origin) = app.table_cell_origin {
+        // A cell buffer sits "at" the table it was read out of, so H/L step
+        // away from that table rather than restarting from the list head.
+        canon(&origin.path)
     } else if let Some((ref nb, _)) = app.notebook {
         canon(&nb.path)
     } else if let Some(ref p) = app.buffer.path {

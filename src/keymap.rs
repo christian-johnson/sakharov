@@ -308,9 +308,18 @@ impl Keymap {
         // Cell movement reuses the ordinary motions (h/j/k/l, w/b, 0/$, gg/G),
         // which `exec::table` reinterprets against the grid, so only the keys
         // whose table meaning differs from their text meaning are listed here.
-        // J / K page half a screen, matching the notebook view.
+        // J pages half a screen, matching the notebook view.  `K` is *not* its
+        // counterpart here: it keeps its editor-wide "tell me more about the
+        // thing under the cursor" meaning, which in a grid is the cell peek
+        // (`exec::table` routes `LspShowDocumentation` there, so `gk` peeks
+        // too).  PageUp is on Ctrl-u / PgUp as everywhere else.
         table.insert(KeyBinding::char('J'), vec![Command::PageDown]);
-        table.insert(KeyBinding::char('K'), vec![Command::PageUp]);
+        // Reading a cell: Enter opens its full text as its own buffer.
+        // y / x copy the cell / the row — the grid has no text selection for
+        // the usual yank to act on.
+        table.insert(KeyBinding::key(KeyCode::Enter), vec![Command::TableOpenCell]);
+        table.insert(KeyBinding::char('y'), vec![Command::TableYankCell]);
+        table.insert(KeyBinding::char('x'), vec![Command::TableYankRow]);
 
         Self { normal, select, notebook, table }
     }

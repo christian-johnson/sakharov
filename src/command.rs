@@ -211,6 +211,11 @@ commands! {
         // --- Tabular data view ---
         OpenAsTable => "open-as-table", aliases: ["csv", "table"], palette: "View the current file as a data table  [:csv]";
         TableClose => "table-close", aliases: ["close-table"], palette: "Leave the table view and edit as text  [:table-close]";
+        TableOpenCell => "table-open-cell", aliases: ["read-cell", "cell-buffer"], palette: "Read the cursor cell's full text in its own buffer  [Enter]";
+        TablePeekCell => "table-peek-cell", aliases: ["peek-cell", "peek"], palette: "Peek the cursor cell's full text in a float  [K]";
+        TableYankCell => "table-yank-cell", aliases: ["yank-cell"], palette: "Copy the cursor cell to the clipboard  [y]";
+        TableYankRow => "table-yank-row", aliases: ["yank-row"], palette: "Copy the cursor row to the clipboard as TSV  [x]";
+        TableCloseCell => "table-close-cell", aliases: ["cell-back", "back-to-table"], palette: "Return from a cell buffer to its table  [:bd]";
 
         // --- Toggles / config ---
         ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";

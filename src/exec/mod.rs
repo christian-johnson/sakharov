@@ -591,6 +591,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::BufferClose | Command::BufferForceClose => {
             let force = matches!(cmd, Command::BufferForceClose);
 
+            // A `*cell …*` buffer is closed by going back to the table it was
+            // read out of — the only place it makes sense to return to.
+            if table::close_cell_buffer(app) {
+                return;
+            }
+
             // Special buffers cannot be closed.
             let is_special = app.buffer.path.as_deref()
                 .map(is_special_path)
@@ -644,6 +650,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.notebook_buffers.remove(p);
                 app.file_buffers.remove(&key);
                 app.file_buffers.remove(p);
+                app.table_buffers.remove(&key);
+                app.table_buffers.remove(p);
             }
 
             // Drop the closed buffer's contents now: the buffer-switch below
@@ -1079,6 +1087,19 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::TableClose => {
+            app.messages.show("No table open");
+            return;
+        }
+        Command::TableCloseCell => {
+            if !table::close_cell_buffer(app) {
+                app.messages.show("Not a table cell buffer");
+            }
+            return;
+        }
+        Command::TableOpenCell
+        | Command::TablePeekCell
+        | Command::TableYankCell
+        | Command::TableYankRow => {
             app.messages.show("No table open");
             return;
         }
