@@ -277,7 +277,7 @@ pub(super) fn peek_cell(app: &mut App) {
     let wrapped: Vec<String> = value
         .lines()
         .flat_map(|line| {
-            crate::notebook_ui::wrap_segments(line, inner)
+            crate::render_util::wrap_segments(line, inner)
                 .into_iter()
                 .map(|(_, seg)| seg.to_string())
         })

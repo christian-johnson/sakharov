@@ -16,12 +16,11 @@ use crate::{
     highlight::{Highlighter, Span},
     input,
     keymap::Keymap,
-    kitty,
+    kitty::{self, ImageRequest},
     lsp_manager::{DiagnosticSeverity, LspManager},
     mode::Mode,
     notebook::Notebook,
     notebook_state::NotebookState,
-    notebook_ui::ImageRequest,
     selection::Selection,
     ui,
 };
@@ -142,8 +141,15 @@ pub struct GraphicsState {
     /// Which terminal graphics backend is available (Kitty, WezTerm, or none).
     /// Detected once at startup from environment variables.
     pub terminal: kitty::GraphicsTerminal,
-    /// Image draw requests collected by the last notebook render pass.
+    /// Image draw requests collected by the last render pass.  Any view may
+    /// fill this — `flush_images` places whatever is here after the draw, so a
+    /// renderer that wants a raster does not have to know how images reach the
+    /// terminal.
     pub pending: Vec<ImageRequest>,
+    /// Whether the last flush left placements on screen.  Drives the clear
+    /// pass: without it, images from a view we have since left would stay
+    /// painted over the new one.
+    pub placed: bool,
     /// Maps Arc-pointer-as-usize → Kitty image ID so pixel data is uploaded
     /// only once per image.  Must be cleared whenever outputs change or the
     /// terminal is resized (Kitty evicts pixel cache on resize).
@@ -164,6 +170,7 @@ impl Default for GraphicsState {
         Self {
             terminal: kitty::GraphicsTerminal::detect(),
             pending: Vec::new(),
+            placed: false,
             image_ids: std::collections::HashMap::new(),
             next_id: 1,
             last_size: (0, 0),
@@ -937,6 +944,11 @@ fn draw_frame(
             let _ = terminal.clear();
         }
 
+        // Where the view drew its text cursor, when it draws images and needs it
+        // restored after the flush (see `flush_images`).  Views that emit no
+        // images leave it `None`.
+        let mut frame_cursor: Option<(u16, u16)> = None;
+
         if app.show_splash {
             terminal.draw(|f| {
                 crate::theme::fill_background(f);
@@ -1072,60 +1084,7 @@ fn draw_frame(
                     crate::popup_ui::render(f, popup, nb_cursor, &app.config.ui);
                 }
             })?;
-
-            // If the terminal was resized, Kitty evicts its pixel cache, so
-            // any cached image IDs are invalid — flush them before placing.
-            let cur_size = (app.viewport_width as u16, app.viewport_height as u16);
-            if cur_size != app.graphics.last_size {
-                app.graphics.image_ids.clear();
-                app.graphics.last_size = cur_size;
-            }
-
-            // Clear visible placements so images that scrolled off screen
-            // (or were replaced) disappear.  q=2 suppresses OK responses.
-            // Always clear in notebook mode so that cell-output clears take
-            // effect even when kitty_image_ids was just emptied by the command.
-            if app.graphics.terminal.supports_graphics()
-                && (app.notebook.is_some()
-                    || !app.graphics.pending.is_empty()
-                    || !app.graphics.image_ids.is_empty())
-            {
-                let _ = kitty::clear_images();
-            }
-
-            if app.graphics.terminal.supports_graphics()
-                && !app.graphics.pending.is_empty()
-                && app.popup.is_none()
-            {
-                let images = std::mem::take(&mut app.graphics.pending);
-                for req in &images {
-                    let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
-                    if let Some(&kid) = app.graphics.image_ids.get(&ptr_key) {
-                        // Pixel data already cached in the terminal — re-place cheaply.
-                        let _ = kitty::place_image(req.col, req.row, kid, req.rows, req.cols, req.crop);
-                    } else {
-                        // First time seeing this image — upload pixel data once.
-                        let kid = app.graphics.next_id;
-                        app.graphics.next_id = if app.graphics.next_id == u32::MAX { 1 } else { app.graphics.next_id + 1 };
-                        let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, req.crop, &req.png_data);
-                        app.graphics.image_ids.insert(ptr_key, kid);
-                    }
-                }
-
-                // Placing images moved the terminal cursor to the last image's
-                // origin; put it back where ratatui drew the text cursor so the
-                // block cursor doesn't appear stuck on an image.  (When the
-                // focused cell has no visible cursor — e.g. a rendered markdown
-                // cell — nb_cursor is None and ratatui already hid the cursor.)
-                if let Some((cx, cy)) = nb_cursor {
-                    use std::io::Write;
-                    let mut out = io::stdout();
-                    let _ = write!(out, "\x1b[{};{}H", cy + 1, cx + 1);
-                    let _ = out.flush();
-                }
-            } else {
-                app.graphics.pending.clear();
-            }
+            frame_cursor = nb_cursor;
         } else {
             // Plain text editor or full-screen focused-cell overlay.
             terminal.draw(|f| {
@@ -1138,6 +1097,10 @@ fn draw_frame(
             })?;
         }
 
+        // Every view goes through the same flush: ratatui owns the screen during
+        // the draw, so pixel data can only be written once it has finished.
+        flush_images(app, frame_cursor);
+
         // Only write cursor-shape OSC sequences when the mode actually changes.
         if app.last_rendered_mode.as_ref() != Some(&app.mode) {
             app.last_rendered_mode = Some(app.mode.clone());
@@ -1145,6 +1108,70 @@ fn draw_frame(
         }
     }
     Ok(())
+}
+
+/// Place the images the frame just asked for, and clear the previous frame's.
+///
+/// View-agnostic on purpose: a renderer's whole contract is to push
+/// [`ImageRequest`]s onto `app.graphics.pending`, and this decides how (and
+/// whether) they reach the terminal.  `cursor` is where the view drew its text
+/// cursor — placing an image leaves the terminal cursor at that image's origin,
+/// so it has to be put back or the block cursor appears stuck on the image.
+///
+/// Images are suppressed entirely while a popup is open: a float drawn by
+/// ratatui cannot cover a Kitty raster, so the image would sit on top of it.
+fn flush_images(app: &mut App, cursor: Option<(u16, u16)>) {
+    if !app.graphics.terminal.supports_graphics() {
+        app.graphics.pending.clear();
+        return;
+    }
+
+    // If the terminal was resized, Kitty evicts its pixel cache, so any cached
+    // image IDs are invalid — drop them so the next placement re-uploads.
+    let cur_size = (app.viewport_width as u16, app.viewport_height as u16);
+    if cur_size != app.graphics.last_size {
+        app.graphics.image_ids.clear();
+        app.graphics.last_size = cur_size;
+    }
+
+    // Clear last frame's placements so images that scrolled off screen, were
+    // replaced, or belong to a view we have since left disappear.  Keyed on
+    // `placed` rather than on `image_ids` so a command that empties the ID
+    // cache (`:clear-outputs`) still gets its placements taken down.
+    if app.graphics.placed || !app.graphics.pending.is_empty() {
+        let _ = kitty::clear_images();
+    }
+
+    let images = std::mem::take(&mut app.graphics.pending);
+    if images.is_empty() || app.popup.is_some() {
+        app.graphics.placed = false;
+        return;
+    }
+
+    for req in &images {
+        let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
+        if let Some(&kid) = app.graphics.image_ids.get(&ptr_key) {
+            // Pixel data already cached in the terminal — re-place cheaply.
+            let _ = kitty::place_image(req.col, req.row, kid, req.rows, req.cols, req.crop);
+        } else {
+            // First time seeing this image — upload pixel data once.
+            let kid = app.graphics.next_id;
+            app.graphics.next_id = if app.graphics.next_id == u32::MAX { 1 } else { app.graphics.next_id + 1 };
+            let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, req.crop, &req.png_data);
+            app.graphics.image_ids.insert(ptr_key, kid);
+        }
+    }
+    app.graphics.placed = true;
+
+    // Put the cursor back where the view drew it.  (`None` when the view has no
+    // visible cursor — a rendered markdown cell, the grid — in which case
+    // ratatui already hid it.)
+    if let Some((cx, cy)) = cursor {
+        use std::io::Write;
+        let mut out = io::stdout();
+        let _ = write!(out, "\x1b[{};{}H", cy + 1, cx + 1);
+        let _ = out.flush();
+    }
 }
 
 fn restore_terminal() -> Result<()> {

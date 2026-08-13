@@ -1159,7 +1159,7 @@ fn visual_move(app: &mut App, extend: bool, down: bool) -> bool {
                 }
                 WrapKind::Words { width } => {
                     let text = rope.line(line).to_string();
-                    crate::notebook_ui::wrap_segments(
+                    crate::render_util::wrap_segments(
                         text.trim_end_matches(['\n', '\r']),
                         width,
                     )
@@ -1195,7 +1195,7 @@ fn cursor_visual_row(app: &App) -> (usize, usize) {
             }
             WrapKind::Words { width } => {
                 let text = rope.line(line).to_string();
-                crate::notebook_ui::wrap_segments(text.trim_end_matches(['\n', '\r']), width)
+                crate::render_util::wrap_segments(text.trim_end_matches(['\n', '\r']), width)
                     .into_iter()
                     .map(|(off, _)| off)
                     .collect()

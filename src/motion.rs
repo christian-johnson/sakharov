@@ -195,7 +195,7 @@ pub fn move_up(rope: &Rope, sel: Selection, extend: bool) -> Selection {
 ///
 /// Supplied by the caller because the two views wrap differently — the plain
 /// editor breaks hard at the text width (`render_util::scan_wrap_rows`) while
-/// notebook cells break at word boundaries (`notebook_ui::wrap_segments`) — and
+/// notebook cells break at word boundaries (`render_util::wrap_segments`) — and
 /// visual motion must follow whichever rows are actually on screen.
 pub struct Wrap<'a> {
     /// Char offsets within logical line `n` at which each visual row starts.
@@ -770,7 +770,7 @@ mod tests {
         let rope = Rope::from_str("hello brave new world\n");
         let f = |line: usize| -> Vec<usize> {
             let text = rope.line(line).to_string();
-            crate::notebook_ui::wrap_segments(text.trim_end_matches('\n'), 12)
+            crate::render_util::wrap_segments(text.trim_end_matches('\n'), 12)
                 .into_iter()
                 .map(|(off, _)| off)
                 .collect()

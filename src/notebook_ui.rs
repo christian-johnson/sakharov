@@ -7,12 +7,13 @@ use ratatui::{
 
 use crate::{
     highlight::{self, Highlighter},
+    kitty::ImageRequest,
     lang::lang_to_ext,
     lsp_manager::{Diagnostic, DiagnosticSeverity},
     mode::Mode,
     notebook::{Cell, CellType, MimeData, Notebook, Output},
     notebook_state::NotebookState,
-    render_util::{apply_diag_underline, for_each_jump_label_char, SingleLineWidget},
+    render_util::{apply_diag_underline, for_each_jump_label_char, wrap_segments, SingleLineWidget},
 };
 
 
@@ -158,39 +159,6 @@ pub(crate) fn cell_wraps(cell: &Cell, word_wrap: bool) -> bool {
     cell.cell_type == CellType::Markdown || word_wrap
 }
 
-/// Word-wrap a logical line into visual-row segments of at most `width` chars.
-///
-/// Breaks at the last space within the window when possible (the space is
-/// consumed by the break); a single word longer than `width` is hard-broken.
-/// Returns `(char_offset_within_line, segment)` pairs — always at least one,
-/// so an empty line still occupies one row. Char-based, like the rest of the
-/// cell renderer (the width-1-chars assumption is a known rough edge).
-pub(crate) fn wrap_segments(line: &str, width: usize) -> Vec<(usize, &str)> {
-    let width = width.max(1);
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
-    let n = chars.len();
-    if n <= width {
-        return vec![(0, line)];
-    }
-    let byte_at = |ci: usize| if ci < n { chars[ci].0 } else { line.len() };
-    let mut segs = Vec::new();
-    let mut start = 0usize; // char index of the current segment's first char
-    while n - start > width {
-        let limit = start + width; // exclusive end of a full-width segment
-        // A space at `limit` itself is the ideal break: the segment is exactly
-        // full and the space dies at the boundary.
-        let brk = (start + 1..=limit).rev().find(|&i| chars[i].1 == ' ');
-        let (end, next) = match brk {
-            Some(i) => (i, i + 1),
-            None => (limit, limit),
-        };
-        segs.push((start, &line[byte_at(start)..byte_at(end)]));
-        start = next;
-    }
-    segs.push((start, &line[byte_at(start)..]));
-    segs
-}
-
 /// Total visual rows of a source rope when word-wrapped to `width` chars.
 /// Must mirror the renderer exactly: same line split, same segmentation.
 fn wrapped_source_rows(source: &ropey::Rope, width: usize) -> u16 {
@@ -262,22 +230,6 @@ pub(crate) fn cell_visual_rows(rope: &ropey::Rope, width: Option<usize>) -> usiz
         Some(w) => wrapped_source_rows(rope, w) as usize,
         None => rope.len_lines().max(1),
     }
-}
-
-/// A request to render a PNG image via the Kitty graphics protocol.
-pub struct ImageRequest {
-    pub col: u16,
-    pub row: u16,
-    pub rows: u16,
-    /// Explicit column width passed as `c=` in the protocol.  Required for
-    /// WezTerm, which doesn't auto-compute width from aspect ratio like Kitty.
-    pub cols: u16,
-    /// Vertical source-rectangle crop `(y_px, h_px)` when the image is clipped
-    /// at the viewport edge — the visible band is shown at its natural scale
-    /// instead of squashing the whole image into the remaining rows.
-    pub crop: Option<crate::kitty::ImageCrop>,
-    /// Shared reference to the raw PNG bytes — cloning this is O(1).
-    pub png_data: std::sync::Arc<Vec<u8>>,
 }
 
 /// Render the notebook view into the frame.
@@ -1729,29 +1681,6 @@ fn single_row(area: Rect, row: u16) -> Rect {
 mod tests {
     use super::*;
     use ropey::Rope;
-
-    #[test]
-    fn wrap_segments_breaks_at_word_boundaries() {
-        // Width 10: "hello brave world" → "hello" / "brave" / "world"
-        let segs = wrap_segments("hello brave world", 10);
-        let texts: Vec<&str> = segs.iter().map(|&(_, s)| s).collect();
-        assert_eq!(texts, vec!["hello", "brave", "world"]);
-        // Offsets address the original line (for highlight-span lookup).
-        assert_eq!(segs[1].0, 6);
-        assert_eq!(segs[2].0, 12);
-        // Every segment fits the width.
-        assert!(segs.iter().all(|&(_, s)| s.chars().count() <= 10));
-    }
-
-    #[test]
-    fn wrap_segments_hard_breaks_long_words_and_keeps_short_lines() {
-        let segs = wrap_segments("abcdefghij", 4);
-        let texts: Vec<&str> = segs.iter().map(|&(_, s)| s).collect();
-        assert_eq!(texts, vec!["abcd", "efgh", "ij"]);
-        // Short and empty lines occupy exactly one row.
-        assert_eq!(wrap_segments("short", 80).len(), 1);
-        assert_eq!(wrap_segments("", 80).len(), 1);
-    }
 
     #[test]
     fn markdown_height_counts_wrapped_rows() {

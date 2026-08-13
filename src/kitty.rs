@@ -62,6 +62,28 @@ impl GraphicsTerminal {
 /// to clip images at the viewport edge instead of squashing them.
 pub type ImageCrop = (u32, u32);
 
+/// A request to render a PNG image via the Kitty graphics protocol.
+///
+/// Produced by a renderer (which knows *where* on screen an image goes) and
+/// flushed by the run loop after `terminal.draw()` — ratatui owns the screen
+/// during the draw, so pixel data cannot be written until it has finished.
+/// Lives here rather than with any one renderer because every view that can
+/// show a raster emits these.
+pub struct ImageRequest {
+    pub col: u16,
+    pub row: u16,
+    pub rows: u16,
+    /// Explicit column width passed as `c=` in the protocol.  Required for
+    /// WezTerm, which doesn't auto-compute width from aspect ratio like Kitty.
+    pub cols: u16,
+    /// Vertical source-rectangle crop `(y_px, h_px)` when the image is clipped
+    /// at the viewport edge — the visible band is shown at its natural scale
+    /// instead of squashing the whole image into the remaining rows.
+    pub crop: Option<ImageCrop>,
+    /// Shared reference to the raw PNG bytes — cloning this is O(1).
+    pub png_data: std::sync::Arc<Vec<u8>>,
+}
+
 fn crop_params(crop: Option<ImageCrop>) -> String {
     match crop {
         Some((y, h)) if h > 0 => format!(",y={y},h={h}"),

@@ -29,7 +29,7 @@ pub fn char_display_width(c: char, col: usize, tab_width: usize) -> usize {
 /// visual row (which is what the renderer draws). Cursor motion, the scroll
 /// math and the renderer all derive their row geometry from it, so they cannot
 /// disagree about where a line breaks. (Notebook cells wrap at word boundaries
-/// instead — see `notebook_ui::wrap_segments`.)
+/// instead — see [`wrap_segments`].)
 pub fn scan_wrap_rows(
     line: ropey::RopeSlice<'_>,
     text_width: usize,
@@ -59,6 +59,44 @@ pub fn wrap_row_starts(line: ropey::RopeSlice<'_>, text_width: usize, tab_width:
     let mut starts = Vec::new();
     scan_wrap_rows(line, text_width, tab_width, |o| starts.push(o));
     starts
+}
+
+/// Word-wrap a logical line into visual-row segments of at most `width` chars.
+///
+/// The **word-boundary** wrap rule, as opposed to [`scan_wrap_rows`]'s hard
+/// break at the text width: notebook cells, cell outputs and the table view's
+/// cell peek all wrap this way, and the renderers, the height models and
+/// `motion::move_visual_up/_down` must all derive their rows from here.
+///
+/// Breaks at the last space within the window when possible (the space is
+/// consumed by the break); a single word longer than `width` is hard-broken.
+/// Returns `(char_offset_within_line, segment)` pairs — always at least one,
+/// so an empty line still occupies one row. Char-based, like the rest of the
+/// cell renderer (the width-1-chars assumption is a known rough edge).
+pub fn wrap_segments(line: &str, width: usize) -> Vec<(usize, &str)> {
+    let width = width.max(1);
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let n = chars.len();
+    if n <= width {
+        return vec![(0, line)];
+    }
+    let byte_at = |ci: usize| if ci < n { chars[ci].0 } else { line.len() };
+    let mut segs = Vec::new();
+    let mut start = 0usize; // char index of the current segment's first char
+    while n - start > width {
+        let limit = start + width; // exclusive end of a full-width segment
+        // A space at `limit` itself is the ideal break: the segment is exactly
+        // full and the space dies at the boundary.
+        let brk = (start + 1..=limit).rev().find(|&i| chars[i].1 == ' ');
+        let (end, next) = match brk {
+            Some(i) => (i, i + 1),
+            None => (limit, limit),
+        };
+        segs.push((start, &line[byte_at(start)..byte_at(end)]));
+        start = next;
+    }
+    segs.push((start, &line[byte_at(start)..]));
+    segs
 }
 
 /// Add a severity-coloured underline to `style` when any diagnostic covers the
@@ -167,5 +205,33 @@ impl Widget for SingleLineWidget {
         for (x, c) in (area.left()..area.right()).zip(self.text.chars()) {
             buf[(x, y)].set_char(c).set_style(self.style);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_segments_breaks_at_word_boundaries() {
+        // Width 10: "hello brave world" → "hello" / "brave" / "world"
+        let segs = wrap_segments("hello brave world", 10);
+        let texts: Vec<&str> = segs.iter().map(|&(_, s)| s).collect();
+        assert_eq!(texts, vec!["hello", "brave", "world"]);
+        // Offsets address the original line (for highlight-span lookup).
+        assert_eq!(segs[1].0, 6);
+        assert_eq!(segs[2].0, 12);
+        // Every segment fits the width.
+        assert!(segs.iter().all(|&(_, s)| s.chars().count() <= 10));
+    }
+
+    #[test]
+    fn wrap_segments_hard_breaks_long_words_and_keeps_short_lines() {
+        let segs = wrap_segments("abcdefghij", 4);
+        let texts: Vec<&str> = segs.iter().map(|&(_, s)| s).collect();
+        assert_eq!(texts, vec!["abcd", "efgh", "ij"]);
+        // Short and empty lines occupy exactly one row.
+        assert_eq!(wrap_segments("short", 80).len(), 1);
+        assert_eq!(wrap_segments("", 80).len(), 1);
     }
 }

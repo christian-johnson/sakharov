@@ -31,7 +31,7 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   column, instead of skipping a whole wrapped paragraph. `motion::move_visual_up/_down` are
   geometry-agnostic: the caller passes a `motion::Wrap` whose `row_starts(line)` comes from
   whichever rule the view is drawn with — `render_util::scan_wrap_rows` (plain editor, a
-  **hard** break at the text width) or `notebook_ui::wrap_segments` (cells, **word**
+  **hard** break at the text width) or `render_util::wrap_segments` (cells, **word**
   boundaries). `exec::wrap_kind` picks between them and returns `None` when nothing wraps,
   so the logical `motion::move_up/_down` still run. `0`/`^`/`$` stay logical on purpose —
   they are the only way to reach the real start/end of a long line.
@@ -308,7 +308,7 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   back to code (clears outputs + reopens the cell's LSP doc under the new language id).
   `Cell.rendered` is runtime-only (not serialised); cells load from disk rendered
 - **Notebook cells word-wrap** at word boundaries to the cell's text width
-  (`notebook_ui::wrap_segments`; a single over-long word hard-breaks). Markdown cells
+  (`render_util::wrap_segments`; a single over-long word hard-breaks). Markdown cells
   always wrap — rendered view *and* editable source view alike; other cells follow the
   `editor.word_wrap` toggle (`:wrap`). The single predicate `notebook_ui::cell_wraps`
   decides wrapping in the renderer, `cell_display_height`, **and** the scroll math, so
@@ -604,7 +604,7 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   cell. `K` is deliberately **not** in the `Keymap::table` override map, so a
   user's own `[keys.normal] K` rebinding still wins there (unlike the notebook
   map, which shadows it); `gk` always peeks. The text popup **clips rather than
-  wraps**, so the peek pre-wraps with `notebook_ui::wrap_segments` at
+  wraps**, so the peek pre-wraps with `render_util::wrap_segments` at
   `popup_text_width` (which mirrors `popup_ui::compute_width`'s 0.6-of-terminal
   fraction — they must agree)
 - **`PopupContent::Text` floats are passive → focused**, the same two-state model
@@ -777,10 +777,11 @@ src/
   notebook_state.rs   — NotebookState: focused_cell, (scroll_cell, scroll_offset) row-granular
                         scroll anchor, output_row (output-block cursor), exec queue, undo
                         snapshots, folded cells
-  notebook_ui.rs      — ratatui rendering for notebooks; returns Vec<ImageRequest>
+  notebook_ui.rs      — ratatui rendering for notebooks; returns Vec<kitty::ImageRequest>
   kitty.rs            — Kitty graphics protocol (Kitty/Ghostty/WezTerm): upload/place/crop
-                        images, clear/delete; GraphicsTerminal detection + keyboard-protocol
-                        capability
+                        images, clear/delete; ImageRequest (what a renderer emits, flushed
+                        by app::flush_images after the draw — any view may emit them);
+                        GraphicsTerminal detection + keyboard-protocol capability
 
 docs/
   commands.md    — full command reference (keep this up to date with command.rs)
