@@ -2,6 +2,7 @@ mod app;
 mod buffer;
 mod clipboard;
 mod command;
+mod compute;
 mod config;
 mod exec;
 mod fold;

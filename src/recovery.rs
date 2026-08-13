@@ -528,10 +528,8 @@ fn apply_restore(app: &mut App, item: &PendingRecovery) {
             match crate::notebook::Notebook::from_json_str(&nb_path, &item.content) {
                 Ok(mut nb) if matches_active => {
                     nb.modified = true;
-                    // Preserve any running kernel from the freshly-opened notebook.
-                    if let Some((old, _)) = app.notebook.as_mut() {
-                        nb.kernel = old.kernel.take();
-                    }
+                    // The kernel is the editor's (`app.compute`), so swapping the
+                    // notebook out from under it keeps the running session.
                     app.notebook = Some((nb, crate::notebook_state::NotebookState::new()));
                     crate::exec::notebook::load_focused_cell(app);
                     crate::exec::recompute_highlights(app);

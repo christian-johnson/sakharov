@@ -258,9 +258,8 @@ fn queue_cells(app: &mut App, range: std::ops::Range<usize>) {
     }
     // Try to start immediately; otherwise report what's waiting and why.
     if !pump_execution_queue(app) {
-        let starting = app.notebook.as_ref().and_then(|(nb, _)| nb.kernel.as_ref())
-            .map(|k| k.status == crate::notebook::KernelStatus::Starting)
-            .unwrap_or(false);
+        let starting = app.compute.as_ref()
+            .is_some_and(|c| *c.status() == crate::compute::KernelStatus::Starting);
         let plural = if n == 1 { "cell" } else { "cells" };
         app.messages.show(if starting {
             format!("Queued {n} {plural} — waiting for kernel to start")
@@ -270,21 +269,40 @@ fn queue_cells(app: &mut App, range: std::ops::Range<usize>) {
     }
 }
 
-/// Make sure a kernel process exists and is alive (booting counts), spawning
-/// one asynchronously if needed. Returns false when the spawn itself failed.
-fn ensure_kernel(app: &mut App) -> bool {
-    let Some((nb, _)) = app.notebook.as_mut() else { return false };
-    if nb.kernel.as_mut().map(|k| k.is_alive()).unwrap_or(false) {
+/// Make sure a kernel process exists, is alive (booting counts), and resolves
+/// the interpreter this notebook's directory expects — spawning one
+/// asynchronously if not.  Returns false when the spawn itself failed.
+///
+/// The kernel is the *editor's*, not the notebook's, so two notebooks under the
+/// same project share one namespace.  One under a different root resolves a
+/// different venv, and gets a fresh kernel instead of the wrong interpreter.
+pub(super) fn ensure_kernel(app: &mut App) -> bool {
+    let Some((nb, _)) = app.notebook.as_ref() else { return false };
+    let root = crate::notebook::notebook_dir(&nb.path);
+    ensure_kernel_for(app, &root)
+}
+
+/// [`ensure_kernel`] against an explicit root — for a view with no notebook.
+pub(super) fn ensure_kernel_for(app: &mut App, root: &std::path::Path) -> bool {
+    let reusable = app
+        .compute
+        .as_mut()
+        .is_some_and(|c| c.serves(root) && c.kernel.is_alive());
+    if reusable {
         return true;
     }
-    let nb_dir = crate::notebook::notebook_dir(&nb.path);
-    match nb.start_kernel(&nb_dir) {
-        Ok(found_venv) => {
-            let python = nb.kernel.as_ref().map(|k| k.python.clone()).unwrap_or_default();
-            app.messages.show(if found_venv {
-                format!("Kernel starting ({python})…")
-            } else {
-                "Kernel starting (no venv found — using system python3)…".to_string()
+    // A kernel for a different root is replaced, not kept alongside: one
+    // session, one interpreter (see the invariant in `crate::compute`).
+    let replacing = app.compute.as_ref().is_some_and(|c| !c.serves(root));
+    app.compute = None;
+    match crate::compute::ComputeSession::start(root) {
+        Ok((session, found_venv)) => {
+            let python = session.kernel.python.clone();
+            app.compute = Some(session);
+            app.messages.show(match (replacing, found_venv) {
+                (true, _) => format!("Kernel starting for {} ({python})…", root.display()),
+                (false, true) => format!("Kernel starting ({python})…"),
+                (false, false) => "Kernel starting (no venv found — using system python3)…".to_string(),
             });
             true
         }
@@ -299,46 +317,54 @@ fn ensure_kernel(app: &mut App) -> bool {
 /// Returns true when state changed (a cell started, or the queue drained
 /// stale entries). Called after every kernel event and after queueing.
 pub(super) fn pump_execution_queue(app: &mut App) -> bool {
-    use crate::notebook::KernelStatus;
+    use crate::compute::{Consumer, RequestKind};
+
+    match app.notebook.as_ref() {
+        Some((_, state)) if state.executing_cell.is_none() && !state.exec_queue.is_empty() => {}
+        _ => return false,
+    }
+    if !app.compute.as_ref().is_some_and(|c| c.is_idle()) {
+        return false;
+    }
 
     let mut started: Option<(usize, usize)> = None; // (cell idx, cells still queued)
     let mut failed: Option<String> = None;
-    if let Some((nb, state)) = app.notebook.as_mut() {
-        if state.executing_cell.is_some() || state.exec_queue.is_empty() {
-            return false;
+    while let Some((nb, state)) = app.notebook.as_mut() {
+        // Resolve by ID at start time — the cell may have been moved, deleted,
+        // or converted since it was queued.
+        let Some(id) = state.exec_queue.pop_front() else { break };
+        let Some(idx) = nb.cells.iter().position(|c| c.id == id) else { continue };
+        if nb.cells[idx].cell_type != CellType::Code {
+            continue;
         }
-        if nb.kernel.as_ref().map(|k| k.status != KernelStatus::Idle).unwrap_or(true) {
-            return false;
-        }
-        while let Some(id) = state.exec_queue.pop_front() {
-            // Resolve by ID at start time — the cell may have been moved,
-            // deleted, or converted since it was queued.
-            let Some(idx) = nb.cells.iter().position(|c| c.id == id) else { continue };
-            if nb.cells[idx].cell_type != CellType::Code {
-                continue;
-            }
-            let code = nb.cells[idx].source.to_string();
-            // The cell's stable id is the compile filename — it lets a traceback
-            // frame be mapped back to this cell for jump-to-line navigation.
-            let cell_tag = nb.cells[idx].id.clone();
-            nb.cells[idx].outputs.clear();
-            let Some(session) = nb.kernel.as_mut() else { break };
-            // Fire-and-forget: output streams back via process_kernel_events.
-            match session.start_execution(&code, &cell_tag) {
-                Ok(()) => {
+        let code = nb.cells[idx].source.to_string();
+        nb.cells[idx].outputs.clear();
+        let remaining = state.exec_queue.len();
+
+        let Some(compute) = app.compute.as_mut() else { break };
+        // Fire-and-forget: output streams back via process_kernel_events, routed
+        // by the request id to this cell's *stable* id (an index would go stale
+        // if the cell moved while it was running).  That id is also the compile
+        // filename, which is what makes a traceback frame a jump target.
+        let kind = RequestKind::Exec { tag: id.clone() };
+        match compute.request(kind, &code, Consumer::NotebookCell(id)) {
+            Ok(_) => {
+                if let Some((nb, state)) = app.notebook.as_mut() {
                     state.executing_cell = Some(idx);
                     state.executing_since = Some(std::time::Instant::now());
                     nb.modified = true;
-                    started = Some((idx, state.exec_queue.len()));
                 }
-                Err(e) => {
-                    failed = Some(format!("Kernel error: {e}"));
-                    nb.kernel = None;
+                started = Some((idx, remaining));
+            }
+            Err(e) => {
+                failed = Some(format!("Kernel error: {e}"));
+                app.compute = None;
+                if let Some((_, state)) = app.notebook.as_mut() {
                     state.exec_queue.clear();
                 }
             }
-            break;
         }
+        break;
     }
     if let Some(msg) = failed {
         app.messages.show(msg);
@@ -359,41 +385,59 @@ pub(super) fn pump_execution_queue(app: &mut App) -> bool {
 /// Kill and restart the kernel, clearing all in-memory execution state
 /// (including any queued cells).
 pub(super) fn restart_kernel(app: &mut App) {
-    if let Some((nb, state)) = app.notebook.as_mut() {
-        nb.kernel = None;
+    // Every consumer of the old kernel is invalidated, not just the notebook's:
+    // dropping the session abandons whatever was in flight.
+    // Restart against the root the session already serves; failing that (no
+    // kernel yet) the open notebook's own directory.
+    let root = app
+        .compute
+        .as_ref()
+        .map(|c| c.root().to_path_buf())
+        .or_else(|| app.notebook.as_ref().map(|(nb, _)| crate::notebook::notebook_dir(&nb.path)));
+    let Some(root) = root else {
+        app.messages.show("No kernel to restart");
+        return;
+    };
+    app.compute = None;
+    if let Some((_, state)) = app.notebook.as_mut() {
         state.executing_cell = None;
         state.executing_since = None;
         state.exec_queue.clear();
-        let nb_dir = crate::notebook::notebook_dir(&nb.path);
-        match nb.start_kernel(&nb_dir) {
-            Ok(found_venv) => {
-                app.messages.show(if found_venv {
-                    "Kernel restarting…"
-                } else {
-                    "Kernel restarting (no venv found — using system python3)…"
-                });
-            }
-            Err(e) => app.messages.show(format!("Kernel restart failed: {e}")),
+    }
+    match crate::compute::ComputeSession::start(&root) {
+        Ok((session, found_venv)) => {
+            app.compute = Some(session);
+            app.messages.show(if found_venv {
+                "Kernel restarting…"
+            } else {
+                "Kernel restarting (no venv found — using system python3)…"
+            });
         }
+        Err(e) => app.messages.show(format!("Kernel restart failed: {e}")),
     }
 }
 
 /// Send SIGINT to the running kernel and drop any queued cells.
 pub(super) fn interrupt_kernel(app: &mut App) {
-    if let Some((nb, state)) = app.notebook.as_mut() {
-        if let Some(ref session) = nb.kernel {
-            session.interrupt();
-            let dropped = state.exec_queue.len();
+    let Some(compute) = app.compute.as_ref() else {
+        app.messages.show("No kernel running");
+        return;
+    };
+    compute.kernel.interrupt();
+    let dropped = app
+        .notebook
+        .as_mut()
+        .map(|(_, state)| {
+            let n = state.exec_queue.len();
             state.exec_queue.clear();
-            app.messages.show(if dropped > 0 {
-                format!("Kernel interrupted — {dropped} queued cell(s) dropped")
-            } else {
-                "Kernel interrupted".to_string()
-            });
-        } else {
-            app.messages.show("No kernel running");
-        }
-    }
+            n
+        })
+        .unwrap_or(0);
+    app.messages.show(if dropped > 0 {
+        format!("Kernel interrupted — {dropped} queued cell(s) dropped")
+    } else {
+        "Kernel interrupted".to_string()
+    });
 }
 
 /// Clear the focused cell's outputs, deleting any Kitty image placements first.

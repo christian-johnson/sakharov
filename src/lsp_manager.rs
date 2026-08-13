@@ -387,7 +387,7 @@ impl LspManager {
         // against, so we don't start the Python server at all (no autocomplete
         // is better than autocomplete against the wrong environment).
         let py_venv = if language == "python" {
-            match venv_root.and_then(crate::notebook::venv_python_up) {
+            match venv_root.and_then(crate::compute::venv_python_up) {
                 Some(p) => {
                     self.log_once(format!("LSP: python environment {}", p.display()));
                     Some(p)

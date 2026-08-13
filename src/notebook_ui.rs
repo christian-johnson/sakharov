@@ -1732,7 +1732,6 @@ mod tests {
             metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
             cells: vec![cell],
             modified: false,
-            kernel: None,
         };
         let state = NotebookState::new();
         let rope = nb.cells[0].source.clone();
@@ -1799,7 +1798,6 @@ mod tests {
             metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
             cells: vec![make("line one\nline two\nline three"), make("x = 1")],
             modified: false,
-            kernel: None,
         };
         let mut state = NotebookState::new();
         state.focused_cell = 0;
@@ -1854,7 +1852,6 @@ mod tests {
                 metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
                 cells: vec![cell],
                 modified: false,
-                kernel: None,
             };
             let mut state = NotebookState::new();
             if expanded {
@@ -1953,7 +1950,6 @@ mod tests {
             metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
             cells: vec![cell],
             modified: false,
-            kernel: None,
         };
         let state = NotebookState::new();
         let rope = nb.cells[0].source.clone();
@@ -2025,7 +2021,6 @@ mod tests {
             metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
             cells: vec![cell],
             modified: false,
-            kernel: None,
         };
         let mut state = NotebookState::new();
         // Scroll deep into the cell so the top border + many rows are clipped
@@ -2094,7 +2089,6 @@ mod tests {
             metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
             cells: vec![cell],
             modified: false,
-            kernel: None,
         };
         let state = NotebookState::new();
         let rope = nb.cells[0].source.clone();
@@ -2170,7 +2164,6 @@ mod tests {
             metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
             cells: vec![cell],
             modified: false,
-            kernel: None,
         };
         let state = NotebookState::new();
         let rope = nb.cells[0].source.clone();

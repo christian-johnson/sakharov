@@ -223,7 +223,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   height model and the renderer — they must derive it identically or cell heights drift from
   what is drawn. `expanded_outputs` is keyed by cell index, so `after_structural_edit` clears it
 - **Clickable error tracebacks (jump-to-line)** — the kernel compiles each cell under its
-  stable **cell id** as the filename (sent as a `__KI_META__<id>` control line before the code,
+  stable **cell id** as the filename (sent as the `tag` of the `__KI_REQ__` header line before
+  the code,
   stripped by the runner so line numbers stay 1-based to the cell) and registers the source with
   `linecache`, so a traceback both shows the offending source line inline *and* reports
   `File "<id>", line N`. `notebook::build_error_output` (runtime) resolves those `<id>` frames
@@ -266,20 +267,35 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   (`render_mime_data`) size the image against that narrowed width so they never disagree on
   row count, and the cursor for any row inside an image is drawn in that gutter instead
   (skinny, always on a color the app controls, never Kitty's raster)
-- **Persistent kernel session** — one Python subprocess per notebook; namespace shared across all cells
-  - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in notebook dir and cwd before falling back to `python3`
-  - Runner script embedded in binary; the editor sends an optional `__KI_META__<cell-id>` line,
-    then a code block terminated by `__KI_CODE_END__` (the id becomes the compile filename — see
-    clickable tracebacks above)
+- **Persistent kernel session** (`compute/`) — one Python subprocess **per session**, owned by
+  `App.compute` (a `compute::ComputeSession`), not by the notebook; namespace shared across all
+  cells *and* across every view. The kernel is keyed by the **root** its interpreter was resolved
+  against (`ComputeSession::serves`): two notebooks in one project share a namespace, and one
+  under a different root gets a fresh kernel rather than the wrong venv
+  (`exec::notebook::ensure_kernel`). `ComputeSession` assigns a request id per request and
+  remembers which `compute::Consumer` is waiting on it, so a reply is routed to whoever asked
+  instead of to whatever the editor last did — that is what lets a non-notebook view use the
+  kernel at all
+  - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in the root dir and cwd before falling back to `python3`
+  - Runner script is `compute/runner.py`, embedded via `include_str!`; the editor sends a
+    `__KI_REQ__{"id":N,"kind":"exec","tag":"<cell-id>"}` header line, then a code block
+    terminated by `__KI_CODE_END__` (the tag becomes the compile filename — see clickable
+    tracebacks above). Every reply line carries the same `id`. An unknown `kind` is answered
+    with an error rather than ignored, so a newer editor never waits forever on an older kernel
+  - **Requests are served strictly in order, one at a time** — the runner reads stdin only
+    between executions. A request issued while a user cell is running waits in the pipe until
+    that cell finishes. This is deliberate (it is what prevents concurrent access to a namespace
+    mid-execution); a consumer that can go stale must render a "kernel busy" state rather than
+    work around it with a thread inside the runner
   - `exec(compile(code, '<cell>', 'exec'), shared_ns)` — full statement support, persistent imports/variables
 - **Asynchronous, streaming execution** — nothing about the kernel ever blocks the UI:
   - **Kernel startup is async**: `KernelSession::new` spawns python and returns immediately
     with `KernelStatus::Starting`; the reader thread performs the `__KI_READY__` handshake and
-    sends `KernelMessage::Ready`, which flips the status to `Idle` (and logs "Kernel ready").
+    sends `MessageBody::Ready`, which flips the status to `Idle` (and logs "Kernel ready").
     The status line shows `[⠿ starting]` while booting
-  - `KernelSession::start_execution` writes the code and returns immediately; the background
-    reader thread parses one JSON message per line (`{"t":"stream"|"image"|"error"|"done"}`)
-    onto an mpsc channel
+  - `ComputeSession::request` writes the request and returns immediately; the background
+    reader thread parses one JSON message per line
+    (`{"id":N,"t":"stream"|"image"|"error"|"done"}`) onto an mpsc channel
   - `exec::process_kernel_events` (run-loop, once per frame) drains the channel and appends to the
     executing cell's outputs, so stdout/stderr — including in-place progress bars (tqdm, `\r`) — render live
   - The executing cell's border is **bright blue** (`Color::LightBlue`); navigation/editing of other cells
@@ -467,7 +483,7 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
     (`build_init_options`): a `features = ["diagnostics"]` server (e.g. `ruff server`) disables
     pycodestyle/pyflakes/mccabe/pylint/flake8/pydocstyle; `"format"` disables autopep8/yapf.
     jedi plugins always stay on. A pylsp-only setup (no feature-scoped servers) is untouched.
-- **Python venv is required, never the system interpreter** — `notebook::venv_python_up` (the single
+- **Python venv is required, never the system interpreter** — `compute::venv_python_up` (the single
   venv discovery shared by the LSP and the kernel) walks up from the file's/notebook's location for
   `.venv`/`venv`/`.env`/`env`; the path is passed to the server as the jedi environment. If no venv is
   found, the Python language server is **not started** (no autocomplete is preferred over autocomplete
@@ -769,10 +785,13 @@ src/
   popup_input.rs      — key handling for popups (filter, navigate, confirm)
   popup_ui.rs         — ratatui rendering for popups + floats
   ui.rs               — ratatui rendering for plain text editor + status bar
-  notebook.rs         — Notebook/Cell/Output data model; from_path, save, Cell::execute(session)
-                        KernelSession: persistent Python subprocess; start_execution + background
-                        reader thread stream KernelMessages (async, non-blocking)
-                        KernelStatus enum; find_python_executable for venv detection
+  compute/            — the session's Python engine, owned by App (not by any view)
+    mod.rs            — KernelSession: persistent subprocess, request framing + background
+                        reader thread streaming KernelMessages (async, non-blocking);
+                        KernelStatus; ComputeSession (request ids -> Consumer routing,
+                        one kernel per venv root); find_python_executable/venv_python_up
+    runner.py         — the kernel runner, embedded with include_str!
+  notebook.rs         — Notebook/Cell/Output data model; from_path, save
                         cell_virtual_path() = LSP document identity for a cell
   notebook_state.rs   — NotebookState: focused_cell, (scroll_cell, scroll_offset) row-granular
                         scroll anchor, output_row (output-block cursor), exec queue, undo
@@ -789,6 +808,15 @@ docs/
 
 ### Key invariants
 - The `exec/` module is the only place that mutates `App` state in response to commands
+- **The compute session is owned by `App` and only ever *borrowed* by a view.** Every
+  consumer must tolerate it being absent, busy, or restarted between frames — no view may
+  cache a handle to it across frames. A kernel reply is routed by its request id through
+  `ComputeSession::consumer`, never by "what the editor last started": a reply whose id is
+  unknown (retired, or from before a restart) is **dropped**, not applied to what is in view
+  now. `:restart-kernel` therefore invalidates *every* consumer, not just notebook state.
+- **The images a frame draws come from `app.graphics.pending`**, filled by whichever renderer
+  drew and flushed by `app::flush_images` after `terminal.draw()` (ratatui owns the screen
+  until then). A renderer emits `kitty::ImageRequest`s; it does not talk to the terminal.
 - **Nothing that can block goes between entering the alternate screen and the first
   `draw_frame`.** `app::run` paints one frame before calling
   `negotiate_keyboard_enhancement`, because that query waits up to two seconds for a

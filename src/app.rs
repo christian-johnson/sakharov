@@ -280,6 +280,11 @@ pub struct App {
     pub keymap: Keymap,
     /// Loaded notebook + UI state, present when a `.ipynb` file is opened.
     pub notebook: Option<(Notebook, NotebookState)>,
+    /// The session's Python kernel, once something has needed one.  Owned here
+    /// rather than by the notebook so any view can ask the same interpreter the
+    /// same questions — see [`crate::compute`], including the rule that a view
+    /// may only *borrow* it and must tolerate it being absent or restarted.
+    pub compute: Option<crate::compute::ComputeSession>,
     /// Open tabular data source + cursor state, present in the table view
     /// (`:csv`).  Mutually exclusive with `notebook`; while it is set
     /// `buffer` is a detached empty buffer, so nothing can write the data file.
@@ -553,6 +558,7 @@ impl App {
 
         Ok(Self {
             buffer,
+            compute: None,
             selection: Selection::point(0),
             scroll_row: 0,
             scroll_col: 0,
@@ -861,13 +867,12 @@ fn run_loop(
         let background_active = app
             .notebook
             .as_ref()
-            .map(|(nb, state)| {
-                state.executing_cell.is_some()
-                    || !state.exec_queue.is_empty()
-                    || nb.kernel.as_ref()
-                        .is_some_and(|k| k.status == crate::notebook::KernelStatus::Starting)
+            .map(|(_, state)| {
+                state.executing_cell.is_some() || !state.exec_queue.is_empty()
             })
             .unwrap_or(false)
+            || app.compute.as_ref()
+                .is_some_and(|c| *c.status() == crate::compute::KernelStatus::Starting)
             || app.lsp.has_pending_requests()
             || app.export_pending.is_some()
             || app.table_pending.is_some();
