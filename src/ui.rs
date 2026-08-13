@@ -588,7 +588,9 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
             let vpath = crate::notebook::cell_virtual_path(&nb.path, &nb.metadata.kernel_language, idx);
             count_diags(&crate::lsp::diagnostic_key(&vpath), &mut diag_errors, &mut diag_warnings);
         }
-        let kernel = Some(match app.compute.as_ref().map(|c| c.status()) {
+        // The status chip shows *this notebook's* kernel — one per notebook, so
+        // another notebook's busy kernel must not read as this one's.
+        let kernel = Some(match crate::exec::notebook::notebook_session(app).map(|c| c.status()) {
             Some(crate::compute::KernelStatus::Starting) => crate::statusline::KernelView::Starting,
             Some(crate::compute::KernelStatus::Idle) => crate::statusline::KernelView::Idle,
             Some(crate::compute::KernelStatus::Busy) => crate::statusline::KernelView::Busy,

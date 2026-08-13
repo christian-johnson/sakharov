@@ -206,6 +206,7 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
 
     let lang = nb.metadata.kernel_language.clone();
     app.notebook = Some((nb, NotebookState::new()));
+    notebook::focus_notebook_session(app);
     app.cell_focused_edit = false;
     app.mode = Mode::Normal;
     app.lsp_language = Some(lang);

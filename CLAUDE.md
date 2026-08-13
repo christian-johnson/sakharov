@@ -267,15 +267,21 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   (`render_mime_data`) size the image against that narrowed width so they never disagree on
   row count, and the cursor for any row inside an image is drawn in that gutter instead
   (skinny, always on a color the app controls, never Kitty's raster)
-- **Persistent kernel session** (`compute/`) — one Python subprocess **per session**, owned by
-  `App.compute` (a `compute::ComputeSession`), not by the notebook; namespace shared across all
-  cells *and* across every view. The kernel is keyed by the **root** its interpreter was resolved
-  against (`ComputeSession::serves`): two notebooks in one project share a namespace, and one
-  under a different root gets a fresh kernel rather than the wrong venv
-  (`exec::notebook::ensure_kernel`). `ComputeSession` assigns a request id per request and
-  remembers which `compute::Consumer` is waiting on it, so a reply is routed to whoever asked
-  instead of to whatever the editor last did — that is what lets a non-notebook view use the
-  kernel at all
+- **Persistent kernel sessions** (`compute/`) — Python subprocesses owned by `App.compute`
+  (a `compute::ComputePool`), not by the notebook, so any view can reach an interpreter.
+  **One kernel per notebook, as in Jupyter**, keyed by the notebook's `SourceId`
+  (`exec::notebook::ensure_kernel`): a `df` in one notebook must never answer a cell in
+  another — that is wrong in the quiet way, no error, just numbers from the wrong data
+  (pinned by `two_notebooks_do_not_share_a_namespace`). Opening or closing one notebook
+  never disturbs another's kernel; **closing a notebook buffer shuts its kernel down**
+  (`ComputePool::shutdown`), or the process would outlive the buffer. The pool also tracks
+  an **active** session (`focus_notebook_session`, following the notebook on screen) — that
+  is the namespace a view with *no* kernel of its own (a grid, a plot, a query result)
+  attaches to, so "explore the dataframe I just built" reaches the namespace that built it.
+  Namespace is shared across all cells of one notebook. `ComputeSession` assigns a request id
+  per request and remembers which `compute::Consumer` is waiting on it, so a reply is routed
+  to whoever asked instead of to whatever the editor last did — that is what lets a
+  non-notebook view use the kernel at all
   - Auto-detected venv: checks `.venv`, `venv`, `.env`, `env` in the root dir and cwd before falling back to `python3`
   - Runner script is `compute/runner.py`, embedded via `include_str!`; the editor sends a
     `__KI_REQ__{"id":N,"kind":"exec","tag":"<cell-id>"}` header line, then a code block
@@ -296,8 +302,12 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   - `ComputeSession::request` writes the request and returns immediately; the background
     reader thread parses one JSON message per line
     (`{"id":N,"t":"stream"|"image"|"error"|"done"}`) onto an mpsc channel
-  - `exec::process_kernel_events` (run-loop, once per frame) drains the channel and appends to the
-    executing cell's outputs, so stdout/stderr — including in-place progress bars (tqdm, `\r`) — render live
+  - `exec::process_kernel_events` (run-loop, once per frame) drains **every** session's channel
+    (`ComputePool::poll_all`) and appends to the cell that asked, so stdout/stderr — including
+    in-place progress bars (tqdm, `\r`) — render live. Output reaches a **stashed** notebook too
+    (`exec::notebook_for_key`): a cell left running while you navigate away still finishes, and
+    its output lands in the notebook that asked for it. Messages about a kernel that isn't the
+    one on screen name which notebook they came from
   - The executing cell's border is **bright blue** (`Color::LightBlue`); navigation/editing of other cells
     stays responsive while a cell runs
   - `notebook::append_stream` applies carriage-return line discipline so `\r`-overwrite bars show one updating line
@@ -790,11 +800,12 @@ src/
   popup_input.rs      — key handling for popups (filter, navigate, confirm)
   popup_ui.rs         — ratatui rendering for popups + floats
   ui.rs               — ratatui rendering for plain text editor + status bar
-  compute/            — the session's Python engine, owned by App (not by any view)
+  compute/            — the Python engines, owned by App (not by any view)
     mod.rs            — KernelSession: persistent subprocess, request framing + background
                         reader thread streaming KernelMessages (async, non-blocking);
-                        KernelStatus; ComputeSession (request ids -> Consumer routing,
-                        one kernel per venv root); find_python_executable/venv_python_up
+                        KernelStatus; ComputeSession (request ids -> Consumer routing);
+                        ComputePool (one session per notebook, keyed by SourceId, + the
+                        active one); find_python_executable/venv_python_up
     runner.py         — the kernel runner, embedded with include_str!
   notebook.rs         — Notebook/Cell/Output data model; from_path, save
                         cell_virtual_path() = LSP document identity for a cell
@@ -813,12 +824,13 @@ docs/
 
 ### Key invariants
 - The `exec/` module is the only place that mutates `App` state in response to commands
-- **The compute session is owned by `App` and only ever *borrowed* by a view.** Every
-  consumer must tolerate it being absent, busy, or restarted between frames — no view may
-  cache a handle to it across frames. A kernel reply is routed by its request id through
+- **Compute sessions are owned by `App` and only ever *borrowed* by a view.** Every consumer
+  must tolerate one being absent, busy, or restarted between frames — no view may cache a
+  handle across frames. A kernel reply is routed by *(session key, request id)* through
   `ComputeSession::consumer`, never by "what the editor last started": a reply whose id is
   unknown (retired, or from before a restart) is **dropped**, not applied to what is in view
-  now. `:restart-kernel` therefore invalidates *every* consumer, not just notebook state.
+  now. `:restart-kernel` invalidates every consumer of *that* session — and only that one:
+  restarting one notebook's namespace must never destroy another's.
 - **The images a frame draws come from `app.graphics.pending`**, filled by whichever renderer
   drew and flushed by `app::flush_images` after `terminal.draw()` (ratatui owns the screen
   until then). A renderer emits `kitty::ImageRequest`s; it does not talk to the terminal.

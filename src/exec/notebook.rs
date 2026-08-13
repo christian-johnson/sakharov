@@ -5,6 +5,7 @@ use crate::{
     lsp::{path_to_uri, NotebookCell},
     notebook::CellType,
     selection::Selection,
+    source::SourceId,
 };
 
 /// The fix-up ritual every structural cell change (add / delete / convert /
@@ -196,6 +197,7 @@ pub fn restore_stashed_notebook(app: &mut App, path: &std::path::Path) -> bool {
     let lang = nb.metadata.kernel_language.clone();
     app.lsp_language = Some(lang);
     app.notebook = Some((nb, state));
+    focus_notebook_session(app);
     app.mode = crate::mode::Mode::Normal;
     load_focused_cell(app);
     super::recompute_highlights(app);
@@ -258,7 +260,7 @@ fn queue_cells(app: &mut App, range: std::ops::Range<usize>) {
     }
     // Try to start immediately; otherwise report what's waiting and why.
     if !pump_execution_queue(app) {
-        let starting = app.compute.as_ref()
+        let starting = notebook_session(app)
             .is_some_and(|c| *c.status() == crate::compute::KernelStatus::Starting);
         let plural = if n == 1 { "cell" } else { "cells" };
         app.messages.show(if starting {
@@ -269,40 +271,48 @@ fn queue_cells(app: &mut App, range: std::ops::Range<usize>) {
     }
 }
 
-/// Make sure a kernel process exists, is alive (booting counts), and resolves
-/// the interpreter this notebook's directory expects — spawning one
-/// asynchronously if not.  Returns false when the spawn itself failed.
-///
-/// The kernel is the *editor's*, not the notebook's, so two notebooks under the
-/// same project share one namespace.  One under a different root resolves a
-/// different venv, and gets a fresh kernel instead of the wrong interpreter.
-pub(super) fn ensure_kernel(app: &mut App) -> bool {
-    let Some((nb, _)) = app.notebook.as_ref() else { return false };
-    let root = crate::notebook::notebook_dir(&nb.path);
-    ensure_kernel_for(app, &root)
+/// The key of the open notebook's own kernel.  One kernel per notebook, so this
+/// is the notebook's own identity (see [`crate::compute`] for why sharing one
+/// across notebooks is the wrong default).
+pub(crate) fn notebook_key(app: &App) -> Option<SourceId> {
+    app.notebook.as_ref().map(|(nb, _)| SourceId::of(&nb.path))
 }
 
-/// [`ensure_kernel`] against an explicit root — for a view with no notebook.
-pub(super) fn ensure_kernel_for(app: &mut App, root: &std::path::Path) -> bool {
-    let reusable = app
-        .compute
-        .as_mut()
-        .is_some_and(|c| c.serves(root) && c.kernel.is_alive());
-    if reusable {
-        return true;
+/// The open notebook's kernel, if it has one yet.
+pub fn notebook_session(app: &App) -> Option<&crate::compute::ComputeSession> {
+    app.compute.get(&notebook_key(app)?)
+}
+
+/// Point the *active* session at the notebook now on screen.
+///
+/// "Active" is which namespace a view with no kernel of its own talks to, so it
+/// has to follow what the user is looking at — not the last notebook a cell
+/// happened to run in.  Called on every path that makes a notebook current.
+pub(super) fn focus_notebook_session(app: &mut App) {
+    if let Some(key) = notebook_key(app) {
+        app.compute.focus(&key);
     }
-    // A kernel for a different root is replaced, not kept alongside: one
-    // session, one interpreter (see the invariant in `crate::compute`).
-    let replacing = app.compute.as_ref().is_some_and(|c| !c.serves(root));
-    app.compute = None;
-    match crate::compute::ComputeSession::start(root) {
-        Ok((session, found_venv)) => {
-            let python = session.kernel.python.clone();
-            app.compute = Some(session);
-            app.messages.show(match (replacing, found_venv) {
-                (true, _) => format!("Kernel starting for {} ({python})…", root.display()),
-                (false, true) => format!("Kernel starting ({python})…"),
-                (false, false) => "Kernel starting (no venv found — using system python3)…".to_string(),
+}
+
+/// Make sure the open notebook has a live kernel of its own (booting counts),
+/// spawning one asynchronously if not, and focus it so a view with no kernel of
+/// its own talks to this notebook's namespace.  False when the spawn failed.
+pub(super) fn ensure_kernel(app: &mut App) -> bool {
+    let Some((nb, _)) = app.notebook.as_ref() else { return false };
+    let key = SourceId::of(&nb.path);
+    let root = crate::notebook::notebook_dir(&nb.path);
+    match app.compute.ensure(&key, &root) {
+        Ok(None) => true, // reused
+        Ok(Some(found_venv)) => {
+            let python = app
+                .compute
+                .get(&key)
+                .map(|c| c.kernel.python.clone())
+                .unwrap_or_default();
+            app.messages.show(if found_venv {
+                format!("Kernel starting ({python})…")
+            } else {
+                "Kernel starting (no venv found — using system python3)…".to_string()
             });
             true
         }
@@ -323,7 +333,8 @@ pub(super) fn pump_execution_queue(app: &mut App) -> bool {
         Some((_, state)) if state.executing_cell.is_none() && !state.exec_queue.is_empty() => {}
         _ => return false,
     }
-    if !app.compute.as_ref().is_some_and(|c| c.is_idle()) {
+    let Some(key) = notebook_key(app) else { return false };
+    if !app.compute.get(&key).is_some_and(|c| c.is_idle()) {
         return false;
     }
 
@@ -341,7 +352,7 @@ pub(super) fn pump_execution_queue(app: &mut App) -> bool {
         nb.cells[idx].outputs.clear();
         let remaining = state.exec_queue.len();
 
-        let Some(compute) = app.compute.as_mut() else { break };
+        let Some(compute) = app.compute.get_mut(&key) else { break };
         // Fire-and-forget: output streams back via process_kernel_events, routed
         // by the request id to this cell's *stable* id (an index would go stale
         // if the cell moved while it was running).  That id is also the compile
@@ -357,8 +368,9 @@ pub(super) fn pump_execution_queue(app: &mut App) -> bool {
                 started = Some((idx, remaining));
             }
             Err(e) => {
+                // The pipe is broken; this notebook's kernel is gone.
                 failed = Some(format!("Kernel error: {e}"));
-                app.compute = None;
+                app.compute.shutdown(&key);
                 if let Some((_, state)) = app.notebook.as_mut() {
                     state.exec_queue.clear();
                 }
@@ -384,46 +396,56 @@ pub(super) fn pump_execution_queue(app: &mut App) -> bool {
 
 /// Kill and restart the kernel, clearing all in-memory execution state
 /// (including any queued cells).
+/// Restarts the kernel of the notebook in focus (or, with no notebook open, the
+/// active session).  Other notebooks' kernels are untouched — restarting one
+/// namespace must not destroy another's.
 pub(super) fn restart_kernel(app: &mut App) {
-    // Every consumer of the old kernel is invalidated, not just the notebook's:
-    // dropping the session abandons whatever was in flight.
-    // Restart against the root the session already serves; failing that (no
-    // kernel yet) the open notebook's own directory.
+    // Dropping the session invalidates *every* consumer waiting on it, not just
+    // the notebook's, so the notebook's own execution state is reset too.
+    let key = notebook_key(app).or_else(|| app.compute.active_key().cloned());
+    let Some(key) = key else {
+        app.messages.show("No kernel to restart");
+        return;
+    };
+    // Restart against the root the old session served; failing that (no kernel
+    // yet) the notebook's own directory.
     let root = app
         .compute
-        .as_ref()
+        .get(&key)
         .map(|c| c.root().to_path_buf())
         .or_else(|| app.notebook.as_ref().map(|(nb, _)| crate::notebook::notebook_dir(&nb.path)));
     let Some(root) = root else {
         app.messages.show("No kernel to restart");
         return;
     };
-    app.compute = None;
+    app.compute.shutdown(&key);
     if let Some((_, state)) = app.notebook.as_mut() {
         state.executing_cell = None;
         state.executing_since = None;
         state.exec_queue.clear();
     }
-    match crate::compute::ComputeSession::start(&root) {
-        Ok((session, found_venv)) => {
-            app.compute = Some(session);
-            app.messages.show(if found_venv {
-                "Kernel restarting…"
-            } else {
+    match app.compute.ensure(&key, &root) {
+        Ok(started) => {
+            app.messages.show(if started == Some(false) {
                 "Kernel restarting (no venv found — using system python3)…"
+            } else {
+                "Kernel restarting…"
             });
         }
         Err(e) => app.messages.show(format!("Kernel restart failed: {e}")),
     }
 }
 
-/// Send SIGINT to the running kernel and drop any queued cells.
+/// Send SIGINT to the focused notebook's kernel and drop any queued cells.
 pub(super) fn interrupt_kernel(app: &mut App) {
-    let Some(compute) = app.compute.as_ref() else {
+    let session = notebook_key(app)
+        .and_then(|k| app.compute.get(&k))
+        .or_else(|| app.compute.active());
+    let Some(session) = session else {
         app.messages.show("No kernel running");
         return;
     };
-    compute.kernel.interrupt();
+    session.kernel.interrupt();
     let dropped = app
         .notebook
         .as_mut()

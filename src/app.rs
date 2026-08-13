@@ -280,11 +280,13 @@ pub struct App {
     pub keymap: Keymap,
     /// Loaded notebook + UI state, present when a `.ipynb` file is opened.
     pub notebook: Option<(Notebook, NotebookState)>,
-    /// The session's Python kernel, once something has needed one.  Owned here
-    /// rather than by the notebook so any view can ask the same interpreter the
-    /// same questions — see [`crate::compute`], including the rule that a view
-    /// may only *borrow* it and must tolerate it being absent or restarted.
-    pub compute: Option<crate::compute::ComputeSession>,
+    /// Every live Python kernel: one per notebook (Jupyter semantics — a `df` in
+    /// one notebook must not answer a cell in another), plus the *active* one a
+    /// view with no kernel of its own talks to.  Owned here rather than by the
+    /// notebook so any view can reach an interpreter — see [`crate::compute`],
+    /// including the rule that a view may only *borrow* a session and must
+    /// tolerate it being absent, busy or restarted between frames.
+    pub compute: crate::compute::ComputePool,
     /// Open tabular data source + cursor state, present in the table view
     /// (`:csv`).  Mutually exclusive with `notebook`; while it is set
     /// `buffer` is a detached empty buffer, so nothing can write the data file.
@@ -557,7 +559,7 @@ impl App {
 
         Ok(Self {
             buffer,
-            compute: None,
+            compute: crate::compute::ComputePool::default(),
             selection: Selection::point(0),
             scroll_row: 0,
             scroll_col: 0,
@@ -866,12 +868,11 @@ fn run_loop(
         let background_active = app
             .notebook
             .as_ref()
-            .map(|(_, state)| {
-                state.executing_cell.is_some() || !state.exec_queue.is_empty()
-            })
+            .map(|(_, state)| !state.exec_queue.is_empty())
             .unwrap_or(false)
-            || app.compute.as_ref()
-                .is_some_and(|c| *c.status() == crate::compute::KernelStatus::Starting)
+            // Any kernel booting or running something — including one belonging
+            // to a notebook that isn't on screen.
+            || app.compute.any_busy()
             || app.lsp.has_pending_requests()
             || app.export_pending.is_some()
             || app.table_pending.is_some();

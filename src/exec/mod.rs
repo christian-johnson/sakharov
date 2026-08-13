@@ -647,6 +647,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.notebook_buffers.remove(&key);
                 app.file_buffers.remove(&key);
                 app.table_buffers.remove(&key);
+                // Closing a notebook shuts its kernel down — otherwise the
+                // Python process outlives the buffer for the rest of the
+                // session, holding whatever it had loaded.
+                if app.compute.shutdown(&key) {
+                    app.messages.show(format!("Kernel shut down ({})", key.label()));
+                }
             }
 
             // Drop the closed buffer's contents now: the buffer-switch below
@@ -1794,121 +1800,131 @@ pub fn process_kernel_events(app: &mut App) -> bool {
     // minibuffer and the log keeps them all.
     let mut announce: Vec<String> = Vec::new();
 
+    // The active notebook's kernel went away (a failed send, a restart) while
+    // one of its cells was marked as running.  Nothing will ever finish it.
+    let active_orphaned = notebook::notebook_key(app)
+        .is_some_and(|k| app.compute.get(&k).is_none());
     if let Some((_, ref mut state)) = app.notebook {
-        // The kernel went away (a failed send, a restart) while a cell was
-        // marked as running.  Nothing will ever finish it.
-        if state.executing_cell.is_some() && app.compute.is_none() {
+        if state.executing_cell.is_some() && active_orphaned {
             state.executing_cell = None;
             state.executing_since = None;
             applied = true;
         }
     }
 
-    let msgs = match app.compute.as_mut() {
-        Some(c) => c.kernel.poll(),
-        None => Vec::new(),
-    };
-    applied |= !msgs.is_empty();
+    // Every session, not just the one on screen: a cell in a notebook the user
+    // has navigated away from must still be able to finish.
+    let batches = app.compute.poll_all();
+    applied |= !batches.is_empty();
 
-    for msg in msgs {
-        // Resolve the message to whoever asked for it.  `Ready` and `Dead`
-        // belong to the process rather than to a request, so they carry no
-        // consumer; anything else with an unknown id is from a request that has
-        // already been retired and must not be applied to what is in view now.
-        let consumer = app.compute.as_ref().and_then(|c| c.consumer(msg.id)).cloned();
-        // A notebook cell is waiting on this reply — `cell` is where it is now,
-        // which is `None` if it was deleted mid-run.  The distinction matters on
-        // `Done`: the notebook's execution state must still be cleared, whereas
-        // a reply nobody is waiting on must not touch it at all.
-        let for_notebook = matches!(consumer, Some(Consumer::NotebookCell(_)));
-        let cell = match consumer {
-            Some(Consumer::NotebookCell(ref id)) => app
-                .notebook
-                .as_ref()
-                .and_then(|(nb, _)| nb.cells.iter().position(|c| &c.id == id)),
-            None => None,
+    for (key, msgs) in batches {
+        // Whose kernel this is, named in a message only when it isn't the
+        // notebook in front of the user — otherwise every line would be noise.
+        let whose = match notebook::notebook_key(app) {
+            Some(active) if active == key => String::new(),
+            _ => format!(" for {}", key.label()),
         };
-        match msg.body {
-            MessageBody::Ready => {
-                if let Some(c) = app.compute.as_mut() {
-                    if *c.status() == KernelStatus::Starting {
-                        c.kernel.status = KernelStatus::Idle;
+        for msg in msgs {
+            // Resolve the message to whoever asked for it.  `Ready` and `Dead`
+            // belong to the process rather than to a request, so they carry no
+            // consumer; anything else with an unknown id is from a request that
+            // has already been retired and must not be applied to what is in
+            // view now.
+            let consumer = app.compute.get(&key).and_then(|c| c.consumer(msg.id)).cloned();
+            // A notebook cell is waiting on this reply — `cell` is where it is
+            // now, which is `None` if it was deleted mid-run.  The distinction
+            // matters on `Done`: the notebook's execution state must still be
+            // cleared, whereas a reply nobody is waiting on must not touch it.
+            let for_notebook = matches!(consumer, Some(Consumer::NotebookCell(_)));
+            let cell = match consumer {
+                Some(Consumer::NotebookCell(ref id)) => notebook_for_key(app, &key)
+                    .and_then(|(nb, _)| nb.cells.iter().position(|c| &c.id == id)),
+                None => None,
+            };
+            match msg.body {
+                MessageBody::Ready => {
+                    if let Some(c) = app.compute.get_mut(&key) {
+                        if *c.status() == KernelStatus::Starting {
+                            c.kernel.status = KernelStatus::Idle;
+                        }
+                        announce.push(format!("Kernel ready{whose} ({})", c.kernel.python));
                     }
-                    announce.push(format!("Kernel ready ({})", c.kernel.python));
                 }
-            }
-            MessageBody::Stream { name, text } => {
-                if let (Some(idx), Some((nb, _))) = (cell, app.notebook.as_mut()) {
-                    append_stream(&mut nb.cells[idx].outputs, &name, &text);
+                MessageBody::Stream { name, text } => {
+                    if let (Some(idx), Some((nb, _))) = (cell, notebook_for_key(app, &key)) {
+                        append_stream(&mut nb.cells[idx].outputs, &name, &text);
+                    }
                 }
-            }
-            MessageBody::Image { png } => {
-                if let (Some(idx), Some((nb, _))) = (cell, app.notebook.as_mut()) {
-                    nb.cells[idx].outputs.push(Output::DisplayData {
-                        data: MimeData { text_plain: None, image_png: Some(std::sync::Arc::new(png)) },
+                MessageBody::Image { png } => {
+                    if let (Some(idx), Some((nb, _))) = (cell, notebook_for_key(app, &key)) {
+                        nb.cells[idx].outputs.push(Output::DisplayData {
+                            data: MimeData { text_plain: None, image_png: Some(std::sync::Arc::new(png)) },
+                        });
+                        refresh_images = true;
+                    }
+                }
+                MessageBody::Error { traceback } => {
+                    if let (Some(idx), Some((nb, _))) = (cell, notebook_for_key(app, &key)) {
+                        // Build against the whole cell list so `File "<id>"`
+                        // frames resolve to jump targets; then push.
+                        let out = crate::notebook::build_error_output(&traceback, &nb.cells);
+                        nb.cells[idx].outputs.push(out);
+                    }
+                }
+                MessageBody::Done => {
+                    let count = match app.compute.get_mut(&key) {
+                        Some(c) => {
+                            c.finish(msg.id);
+                            c.kernel.status = KernelStatus::Idle;
+                            c.kernel.execution_count += 1;
+                            Some(c.kernel.execution_count)
+                        }
+                        None => None,
+                    };
+                    if for_notebook {
+                        if let Some((nb, state)) = notebook_for_key(app, &key) {
+                            let elapsed = state.executing_since.take().map(|t| format_duration(t.elapsed()));
+                            if let Some(idx) = cell {
+                                nb.cells[idx].execution_count = count;
+                                let failed = nb.cells[idx].outputs.iter()
+                                    .any(|o| matches!(o, Output::Error { .. }));
+                                let verb = if failed { "failed" } else { "finished" };
+                                // On failure, point at the jump-to-line affordances.
+                                let hint = if failed { " — :goto-error (or ↵ on a File line) to jump" } else { "" };
+                                announce.push(match elapsed {
+                                    Some(t) => format!("Cell [{}]{whose} {verb} in {t}{hint}", idx + 1),
+                                    None => format!("Cell [{}]{whose} {verb}{hint}", idx + 1),
+                                });
+                            }
+                            state.executing_cell = None;
+                            nb.modified = true;
+                        }
+                    }
+                    refresh_images = true;
+                }
+                MessageBody::Dead => {
+                    if let Some(c) = app.compute.get_mut(&key) {
+                        c.kernel.status = KernelStatus::Dead;
+                        // Nothing in flight will ever be answered.
+                        c.abandon_all();
+                    }
+                    let dropped = match notebook_for_key(app, &key) {
+                        Some((_, state)) => {
+                            state.executing_cell = None;
+                            state.executing_since = None;
+                            let n = state.exec_queue.len();
+                            state.exec_queue.clear();
+                            n
+                        }
+                        None => 0,
+                    };
+                    announce.push(if dropped > 0 {
+                        format!("Kernel died{whose} — {dropped} queued cell(s) dropped (:restart-kernel)")
+                    } else {
+                        format!("Kernel died{whose} (:restart-kernel to restart)")
                     });
                     refresh_images = true;
                 }
-            }
-            MessageBody::Error { traceback } => {
-                if let (Some(idx), Some((nb, _))) = (cell, app.notebook.as_mut()) {
-                    // Build against the whole cell list so `File "<id>"`
-                    // frames resolve to jump targets; then push.
-                    let out = crate::notebook::build_error_output(&traceback, &nb.cells);
-                    nb.cells[idx].outputs.push(out);
-                }
-            }
-            MessageBody::Done => {
-                let count = match app.compute.as_mut() {
-                    Some(c) => {
-                        c.finish(msg.id);
-                        c.kernel.status = KernelStatus::Idle;
-                        c.kernel.execution_count += 1;
-                        Some(c.kernel.execution_count)
-                    }
-                    None => None,
-                };
-                if let Some((nb, state)) = app.notebook.as_mut().filter(|_| for_notebook) {
-                    let elapsed = state.executing_since.take().map(|t| format_duration(t.elapsed()));
-                    if let Some(idx) = cell {
-                        nb.cells[idx].execution_count = count;
-                        let failed = nb.cells[idx].outputs.iter()
-                            .any(|o| matches!(o, Output::Error { .. }));
-                        let verb = if failed { "failed" } else { "finished" };
-                        // On failure, point at the jump-to-line affordances.
-                        let hint = if failed { " — :goto-error (or ↵ on a File line) to jump" } else { "" };
-                        announce.push(match elapsed {
-                            Some(t) => format!("Cell [{}] {verb} in {t}{hint}", idx + 1),
-                            None => format!("Cell [{}] {verb}{hint}", idx + 1),
-                        });
-                    }
-                    state.executing_cell = None;
-                    nb.modified = true;
-                }
-                refresh_images = true;
-            }
-            MessageBody::Dead => {
-                if let Some(c) = app.compute.as_mut() {
-                    c.kernel.status = KernelStatus::Dead;
-                    // Nothing in flight will ever be answered.
-                    c.abandon_all();
-                }
-                let dropped = match app.notebook.as_mut() {
-                    Some((_, state)) => {
-                        state.executing_cell = None;
-                        state.executing_since = None;
-                        let n = state.exec_queue.len();
-                        state.exec_queue.clear();
-                        n
-                    }
-                    None => 0,
-                };
-                announce.push(if dropped > 0 {
-                    format!("Kernel died — {dropped} queued cell(s) dropped (:restart-kernel)")
-                } else {
-                    "Kernel died (:restart-kernel to restart)".to_string()
-                });
-                refresh_images = true;
             }
         }
     }
@@ -1922,6 +1938,26 @@ pub fn process_kernel_events(app: &mut App) -> bool {
     // queued cell. Its "Running cell [N]…" takes over the minibuffer.
     applied |= notebook::pump_execution_queue(app);
     applied
+}
+
+/// The notebook a kernel belongs to: the one on screen, or one that has been
+/// navigated away from and stashed.
+///
+/// Output has to reach a stashed notebook, not just the visible one — a cell
+/// left running while the user goes elsewhere still finishes, and its output
+/// belongs in the notebook that asked for it.
+fn notebook_for_key<'a>(
+    app: &'a mut App,
+    key: &crate::source::SourceId,
+) -> Option<&'a mut (crate::notebook::Notebook, crate::notebook_state::NotebookState)> {
+    let is_active = app
+        .notebook
+        .as_ref()
+        .is_some_and(|(nb, _)| crate::source::SourceId::of(&nb.path) == *key);
+    if is_active {
+        return app.notebook.as_mut();
+    }
+    app.notebook_buffers.get_mut(key)
 }
 
 /// Human-readable duration for the cell-completion log message.
@@ -2572,7 +2608,7 @@ mod tests {
         loop {
             process_kernel_events(&mut app);
             let (nb, state) = app.notebook.as_ref().unwrap();
-            let kernel_dead = app.compute.as_ref()
+            let kernel_dead = notebook::notebook_session(&app)
                 .is_some_and(|c| *c.status() == crate::compute::KernelStatus::Dead);
             assert!(!kernel_dead, "kernel died during the test");
             let done = state.exec_queue.is_empty()
@@ -2608,6 +2644,71 @@ mod tests {
         let _ = std::fs::remove_file(&target);
     }
 
+    /// Two notebooks in one project get **two kernels**: a variable defined in
+    /// one must not be visible to the other.  Sharing a namespace would be wrong
+    /// in the quiet way — no error, just numbers from the wrong data.
+    #[test]
+    fn two_notebooks_do_not_share_a_namespace() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 not available — skipping kernel isolation test");
+            return;
+        }
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+        let dir = unique_tmp_dir("kernelsep");
+        app.buffer.path = Some(dir.join("anchor.txt"));
+
+        // Run a cell in one notebook, then the same variable in another — both
+        // in the same directory, so they resolve the same interpreter.
+        let run = |app: &mut App, name: &str, code: &str| -> String {
+            let target = dir.join(format!("{name}.ipynb"));
+            let _ = std::fs::remove_file(&target);
+            create_new_notebook(app, name);
+            if let Some((ref mut nb, _)) = app.notebook {
+                nb.cells[0].source = Rope::from_str(code);
+            }
+            notebook::load_focused_cell(app);
+            execute(app, &Command::NotebookExecuteCell);
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while app.notebook.as_ref().is_some_and(|(nb, s)| {
+                !s.exec_queue.is_empty() || s.executing_cell.is_some() || nb.cells[0].execution_count.is_none()
+            }) {
+                process_kernel_events(app);
+                assert!(std::time::Instant::now() < deadline, "kernel timed out on {name}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let (nb, _) = app.notebook.as_ref().unwrap();
+            nb.cells[0].outputs.iter().map(|o| match o {
+                crate::notebook::Output::Stream { text, .. } => text.clone(),
+                crate::notebook::Output::Error { traceback, .. } => traceback.join("\n"),
+                _ => String::new(),
+            }).collect::<String>()
+        };
+
+        let first = run(&mut app, "sep_one", "shared_value = 41\nprint('set', shared_value)");
+        assert!(first.contains("set 41"), "first notebook should run: {first}");
+
+        let second = run(&mut app, "sep_two", "print(shared_value + 1)");
+        assert!(
+            second.contains("NameError"),
+            "the second notebook must not see the first's variables, got: {second}",
+        );
+
+        // Both kernels are alive: opening the second must not have killed the
+        // first, which would silently discard everything it had loaded.
+        let key_one = crate::source::SourceId::of(&dir.join("sep_one.ipynb"));
+        let key_two = crate::source::SourceId::of(&dir.join("sep_two.ipynb"));
+        assert!(app.compute.get(&key_one).is_some(), "the first kernel must survive");
+        assert!(app.compute.get(&key_two).is_some());
+        // And the active session follows the notebook in focus, which is what a
+        // view with no kernel of its own attaches to.
+        assert_eq!(app.compute.active_key(), Some(&key_two));
+
+        let _ = std::fs::remove_file(dir.join("sep_one.ipynb"));
+        let _ = std::fs::remove_file(dir.join("sep_two.ipynb"));
+    }
+
     /// End-to-end: a cell that raises produces an error whose traceback frame
     /// resolves to the exact cell + line, `:goto-error` jumps there, and the
     /// runner's linecache registration surfaces the offending source line.
@@ -2641,7 +2742,7 @@ mod tests {
             process_kernel_events(&mut app);
             let (nb, state) = app.notebook.as_ref().unwrap();
             assert!(
-                app.compute.as_ref().map(|c| *c.status() != crate::compute::KernelStatus::Dead).unwrap_or(true),
+                notebook::notebook_session(&app).map(|c| *c.status() != crate::compute::KernelStatus::Dead).unwrap_or(true),
                 "kernel died during the test",
             );
             if state.exec_queue.is_empty()

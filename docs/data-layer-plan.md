@@ -123,7 +123,11 @@ pub compute: Option<ComputeSession>,
 ```
 
 - `Notebook::start_kernel` and `find_python_executable` move to `compute`;
-  `notebook::venv_python_up` is already the shared discovery and stays put.
+  `venv_python_up` is the shared discovery and moves with them.
+- **One kernel per notebook, keyed by its `SourceId`** — Jupyter's semantics. A single
+  session shared across notebooks would let a `df` defined in one answer a cell in
+  another; the pool also tracks an *active* session, which is what a view with no kernel
+  of its own (a grid, a plot, a query result) attaches to.
 - `exec/notebook.rs` switches from `nb.kernel` to `app.compute`.
   `process_kernel_events` becomes `process_compute_events` and routes by
   `Consumer` instead of reading `state.executing_cell`.

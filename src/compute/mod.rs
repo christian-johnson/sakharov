@@ -1,19 +1,29 @@
-//! The compute session: one persistent Python process, owned by the editor
-//! rather than by any one view.
+//! Compute sessions: persistent Python processes, owned by the editor rather
+//! than by any one view.
 //!
-//! It used to hang off `Notebook`, which made Python reachable only while a
-//! notebook was open.  It lives on [`App`](crate::app::App) instead so that a
-//! grid, a plot, or a variable explorer can ask the same interpreter the same
-//! questions the notebook does — one namespace, one venv, one process.
+//! A kernel used to hang off `Notebook`, which made Python reachable only while
+//! a notebook was open.  It lives on [`App`](crate::app::App) instead so that a
+//! grid, a plot, or a variable explorer can ask the interpreter the same
+//! questions the notebook does.
 //!
 //! * [`KernelSession`] — the process and its stdio: spawn, write a request,
 //!   drain replies.  Knows nothing about cells.
-//! * [`ComputeSession`] — the editor's handle on it: assigns request ids and
+//! * [`ComputeSession`] — the editor's handle on one: assigns request ids and
 //!   remembers which [`Consumer`] is waiting on each, so a reply is routed to
 //!   whoever asked instead of to whatever the editor last did.
+//! * [`ComputePool`] — all of them, keyed by whose they are, plus which one is
+//!   *active* (the one a view with no kernel of its own talks to).
 //!
-//! **Invariant:** the session is owned by `App` and only ever *borrowed* by a
-//! view.  Every consumer must tolerate it being absent, busy, or restarted
+//! **One kernel per notebook**, as in Jupyter, keyed by the notebook's
+//! [`SourceId`].  Sharing one process across notebooks would let a `df` defined
+//! in one silently answer a cell in another — wrong in the quiet way, with no
+//! error and only the numbers to give it away.  A view with no notebook behind
+//! it (a query result, a CSV grid) uses the session in focus, so "explore the
+//! dataframe I just built" reaches the namespace that built it, and falls back
+//! to a project-level session keyed by a virtual id.
+//!
+//! **Invariant:** sessions are owned by `App` and only ever *borrowed* by a
+//! view.  Every consumer must tolerate one being absent, busy, or restarted
 //! between frames — a view may not cache a handle to it across frames.
 
 use std::collections::HashMap;
@@ -24,6 +34,8 @@ use std::sync::mpsc::{self, Receiver};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use serde_json::Value;
+
+use crate::source::SourceId;
 
 /// The kernel runner, embedded in the binary and run with `python -c`.
 ///
@@ -382,6 +394,108 @@ impl ComputeSession {
     /// so nothing that was asked will ever be answered.
     pub fn abandon_all(&mut self) -> Vec<Consumer> {
         self.pending.drain().map(|(_, c)| c).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The pool
+// ---------------------------------------------------------------------------
+
+/// Every live compute session, keyed by whose it is.
+///
+/// A notebook's key is its own [`SourceId`] (the `.ipynb` file), so opening a
+/// second notebook gets a second interpreter rather than inheriting the first
+/// one's variables.  A view with no notebook behind it keys by a virtual id —
+/// `SourceId` already distinguishes "a file" from "a thing with no file", which
+/// is exactly the distinction needed here.
+#[derive(Default)]
+pub struct ComputePool {
+    sessions: HashMap<SourceId, ComputeSession>,
+    /// Whose kernel a view without one of its own talks to — the last notebook
+    /// worked in.  `None` until something has started a kernel.
+    active: Option<SourceId>,
+}
+
+impl ComputePool {
+    /// The session a view with no kernel of its own should use.
+    pub fn active(&self) -> Option<&ComputeSession> {
+        self.sessions.get(self.active.as_ref()?)
+    }
+
+    pub fn active_key(&self) -> Option<&SourceId> {
+        self.active.as_ref()
+    }
+
+    pub fn get(&self, key: &SourceId) -> Option<&ComputeSession> {
+        self.sessions.get(key)
+    }
+
+    pub fn get_mut(&mut self, key: &SourceId) -> Option<&mut ComputeSession> {
+        self.sessions.get_mut(key)
+    }
+
+    /// Mark `key`'s session as the one in focus, if it exists.
+    pub fn focus(&mut self, key: &SourceId) {
+        if self.sessions.contains_key(key) {
+            self.active = Some(key.clone());
+        }
+    }
+
+    /// Make sure `key` has a live kernel resolved against `root`, spawning one
+    /// if it is missing or dead, and focus it.
+    ///
+    /// `Ok(Some(started))` means a process was spawned — `started` is whether a
+    /// venv was found, which the caller should surface, since the system
+    /// interpreter probably isn't what the user's code expects.  `Ok(None)`
+    /// means an existing session was reused.
+    pub fn ensure(&mut self, key: &SourceId, root: &Path) -> Result<Option<bool>> {
+        let alive = self
+            .sessions
+            .get_mut(key)
+            .is_some_and(|s| s.serves(root) && s.kernel.is_alive());
+        if alive {
+            self.active = Some(key.clone());
+            return Ok(None);
+        }
+        // A dead session, or one resolved against a root that has since moved,
+        // is replaced rather than kept alongside.
+        self.sessions.remove(key);
+        let (session, found_venv) = ComputeSession::start(root)?;
+        self.sessions.insert(key.clone(), session);
+        self.active = Some(key.clone());
+        Ok(Some(found_venv))
+    }
+
+    /// Shut down `key`'s kernel (killing the process) and forget it.  Called
+    /// when its notebook is closed — otherwise a closed buffer leaves a Python
+    /// process running for the rest of the session.
+    pub fn shutdown(&mut self, key: &SourceId) -> bool {
+        let existed = self.sessions.remove(key).is_some();
+        if self.active.as_ref() == Some(key) {
+            self.active = self.sessions.keys().next().cloned();
+        }
+        existed
+    }
+
+    /// Drain every session's queued messages, tagged with whose session they
+    /// came from.  Polling *all* of them (not just the active one) is what lets
+    /// a cell in a notebook you have navigated away from still finish.
+    pub fn poll_all(&mut self) -> Vec<(SourceId, Vec<KernelMessage>)> {
+        self.sessions
+            .iter_mut()
+            .filter_map(|(key, session)| {
+                let msgs = session.kernel.poll();
+                (!msgs.is_empty()).then(|| (key.clone(), msgs))
+            })
+            .collect()
+    }
+
+    /// True when any kernel is booting or running something — what the status
+    /// spinner means by "there is background work".
+    pub fn any_busy(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|s| matches!(s.kernel.status, KernelStatus::Starting | KernelStatus::Busy))
     }
 }
 
