@@ -179,7 +179,7 @@ pub fn stash_current_notebook(app: &mut App) {
     let _ = crate::kitty::clear_images();
     app.graphics.image_ids.clear();
     if let Some((nb, state)) = app.notebook.take() {
-        let key = super::canon(&nb.path);
+        let key = crate::source::SourceId::of(&nb.path);
         app.notebook_buffers.insert(key, (nb, state));
     }
     app.cell_focused_edit = false;
@@ -189,7 +189,7 @@ pub fn stash_current_notebook(app: &mut App) {
 /// state when a stash is found; returns `false` when no stash exists for `path`
 /// (caller should load from disk instead).
 pub fn restore_stashed_notebook(app: &mut App, path: &std::path::Path) -> bool {
-    let key = super::canon(path);
+    let key = crate::source::SourceId::of(path);
     let Some((nb, state)) = app.notebook_buffers.remove(&key) else {
         return false;
     };

@@ -294,7 +294,7 @@ pub struct App {
     /// Table sessions stashed by path when navigating away, so coming back
     /// restores the exact cursor cell instead of re-parsing the file from disk.
     /// (The counterpart of `file_buffers` / `notebook_buffers`.)
-    pub table_buffers: std::collections::HashMap<std::path::PathBuf, crate::exec::table::Session>,
+    pub table_buffers: std::collections::HashMap<crate::source::SourceId, crate::exec::table::Session>,
     /// While a `*cell …*` buffer is open, the table it was read out of (what
     /// `:bd` returns to) plus the settings the cell buffer overrode.
     pub table_cell_origin: Option<crate::exec::table::CellOrigin>,
@@ -322,7 +322,7 @@ pub struct App {
     /// Visible text columns — updated each render frame, used by scroll logic.
     pub viewport_width: usize,
     /// All file paths opened in this session (for the buffer picker).
-    pub open_buffers: Vec<std::path::PathBuf>,
+    pub open_buffers: Vec<crate::source::SourceId>,
     /// Git diff marks for the current buffer, keyed by 0-indexed line number.
     pub git_diff: std::collections::HashMap<usize, GutterMark>,
     /// Current git branch name (refreshed in the background at startup and on write).
@@ -370,12 +370,12 @@ pub struct App {
     /// Keyed by the canonicalized `.ipynb` path.  When the user navigates back
     /// to a notebook, its state is restored from here rather than reloading from
     /// disk, so unsaved edits are preserved across buffer switches.
-    pub notebook_buffers: std::collections::HashMap<std::path::PathBuf, (Notebook, NotebookState)>,
+    pub notebook_buffers: std::collections::HashMap<crate::source::SourceId, (Notebook, NotebookState)>,
     /// In-memory stash of plain-file buffers navigated away from, keyed by
     /// canonicalized path.  Preserves unsaved edits and undo history across
     /// buffer switches (the file is otherwise reloaded from disk).  Entries
     /// are removed when restored or when the buffer is closed with `:bd`.
-    pub file_buffers: std::collections::HashMap<std::path::PathBuf, Buffer>,
+    pub file_buffers: std::collections::HashMap<crate::source::SourceId, Buffer>,
     /// Crash-recovery bookkeeping (recovery dir, debounce, written-file index).
     pub recovery: crate::recovery::Recovery,
     /// Recovery prompts queued at startup / on open, shown one at a time.
@@ -531,16 +531,15 @@ impl App {
         let initial_mode = Mode::Normal;
 
         // *scratch* and *Messages* are always present at the front of the buffer list.
-        let mut open_buffers: Vec<std::path::PathBuf> = vec![
-            std::path::PathBuf::from("*scratch*"),
-            std::path::PathBuf::from("*Messages*"),
+        let mut open_buffers: Vec<crate::source::SourceId> = vec![
+            crate::source::SourceId::virtual_named("scratch"),
+            crate::source::SourceId::virtual_named("Messages"),
         ];
         if let Some((ref nb, _)) = notebook {
             // For notebooks, always track the .ipynb file — never the virtual cell paths.
-            open_buffers.push(nb.path.canonicalize().unwrap_or_else(|_| nb.path.clone()));
+            open_buffers.push(crate::source::SourceId::of(&nb.path));
         } else if let Some(p) = buffer.path.as_ref() {
-            // Always store canonical absolute paths so dedup comparisons work reliably.
-            open_buffers.push(p.canonicalize().unwrap_or_else(|_| p.clone()));
+            open_buffers.push(crate::source::SourceId::of(p));
         }
 
         // Branch + diff marks arrive asynchronously; the run loop polls this.

@@ -12,6 +12,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use crate::{
     app::{App, View},
     command::Command,
+    source::SourceId,
     table::{self, csv::CsvSource, layout, TableSource},
 };
 
@@ -20,19 +21,23 @@ pub struct Session {
     /// The data.  Boxed so a future source (SQL, parquet) needs no changes here.
     pub source: Box<dyn TableSource>,
     pub state: table::TableState,
-    /// File the table was opened from — what `:table-close` returns to, and
-    /// the name shown in the status line (`app.buffer` has no path here).
-    pub path: PathBuf,
+    /// What this table *is*: the file it was opened from, or (later, for a query
+    /// result or a derived table) a virtual identity with no file behind it.
+    /// It is the stash key, the buffer-list entry, and the status-line name —
+    /// `app.buffer` has no path while the grid is open.
+    pub id: SourceId,
 }
 
 impl Session {
     /// Name shown in the status line.
     pub fn display_name(&self) -> String {
-        self.path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("table")
-            .to_string()
+        self.id.label().to_string()
+    }
+
+    /// The file this table came from, or `None` for a virtual source.  Anything
+    /// that reads or re-opens the underlying file must go through this.
+    pub fn path(&self) -> Option<&Path> {
+        self.id.as_path()
     }
 
     /// The cursor cell's **untruncated** value — what the grid can only show a
@@ -116,7 +121,7 @@ pub fn open_as_table(app: &mut App, path: &Path) {
     // A session stashed on the way out comes back whole — same parse, same
     // cursor cell.  This is what makes `Enter` into a cell buffer and back a
     // round trip rather than a reload.
-    if let Some(session) = app.table_buffers.remove(&super::canon(path)) {
+    if let Some(session) = app.table_buffers.remove(&SourceId::of(path)) {
         app.table = Some(session);
         return;
     }
@@ -148,13 +153,18 @@ pub(super) fn close_table(app: &mut App) {
         app.messages.show("No table open");
         return;
     };
-    let path = session.path.clone();
+    let id = session.id.clone();
+    let path = session.path().map(Path::to_path_buf);
     drop(session);
     // Deliberate exit from the grid: drop the stash too, so a later `:csv`
     // re-reads the file (which the user may have just edited as text) rather
     // than resurrecting the parse from before.
-    app.table_buffers.remove(&super::canon(&path));
-    super::lsp::open_file_at(app, &path, 0, 0);
+    app.table_buffers.remove(&id);
+    match path {
+        Some(path) => super::lsp::open_file_at(app, &path, 0, 0),
+        // A virtual source has no text to fall back to.
+        None => app.messages.show(format!("Closed {}", id.label())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +174,7 @@ pub(super) fn close_table(app: &mut App) {
 /// Where an open `*cell …*` buffer came from, and what to undo when leaving it.
 pub struct CellOrigin {
     /// The table the cell was read out of — what `:bd` returns to.
-    pub path: PathBuf,
+    pub id: SourceId,
     /// `editor.word_wrap` as it was before the cell buffer forced it on.
     prev_word_wrap: bool,
 }
@@ -205,7 +215,7 @@ pub(super) fn open_cell_buffer(app: &mut App) {
     }
 
     let name = cell_buffer_name(session);
-    let origin = session.path.clone();
+    let origin = session.id.clone();
     let short = session.display_name();
     let mut text = value.to_string();
     if !text.ends_with('\n') {
@@ -223,7 +233,7 @@ pub(super) fn open_cell_buffer(app: &mut App) {
     // ones the user came here to read — so wrap, and put the setting back when
     // the buffer is left (`leave_cell_buffer`).
     app.table_cell_origin = Some(CellOrigin {
-        path: origin,
+        id: origin,
         prev_word_wrap: app.config.editor.word_wrap,
     });
     app.config.editor.word_wrap = true;
@@ -237,7 +247,7 @@ pub(super) fn close_cell_buffer(app: &mut App) -> bool {
     if !app.in_cell_buffer() {
         return false;
     }
-    let Some(origin) = app.table_cell_origin.as_ref().map(|o| o.path.clone()) else {
+    let Some(origin) = app.table_cell_origin.as_ref().map(|o| o.id.to_path()) else {
         return false;
     };
     if let Some(name) = app.buffer.path.as_ref().and_then(|p| p.to_str()) {
@@ -384,7 +394,7 @@ pub fn poll_table_load(app: &mut App) -> bool {
             app.table = Some(Session {
                 source: Box::new(source),
                 state: table::TableState::new(),
-                path,
+                id: SourceId::of(&path),
             });
             if cols == 0 {
                 app.messages
@@ -684,7 +694,7 @@ mod tests {
         app.table = Some(Session {
             source: Box::new(source(rows, cols)),
             state: table::TableState::new(),
-            path: PathBuf::from("t.csv"),
+            id: SourceId::of(Path::new("t.csv")),
         });
         app
     }
@@ -732,7 +742,12 @@ mod tests {
         close_table(&mut app);
         assert!(app.table.is_none());
         assert_eq!(app.view(), View::Text);
-        assert_eq!(app.buffer.path.as_deref(), Some(path.as_path()));
+        // The same file — compared through `SourceId`, since a session's
+        // identity is the canonical path and `/var` is a symlink on macOS.
+        assert_eq!(
+            app.buffer.path.as_deref().map(SourceId::of),
+            Some(SourceId::of(&path)),
+        );
         assert!(app.buffer.rope.to_string().starts_with("a,b"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -948,7 +963,7 @@ mod tests {
                 CsvSource::from_reader(text.as_bytes(), b',', &TableConfig::default()).unwrap(),
             ),
             state: table::TableState::new(),
-            path: PathBuf::from("notes.csv"),
+            id: SourceId::of(Path::new("notes.csv")),
         });
         // Cursor on the long value.
         handle(&mut app, &Command::MoveDown);

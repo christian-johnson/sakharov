@@ -23,7 +23,7 @@ pub use search::{search_compute_matches, search_jump};
 
 // Names used by `execute()` and by sibling submodules via `super::…`.
 use buffers::{
-    canon, navigate_buffer, register_buffer, save_current_special_buffer,
+    navigate_buffer, register_buffer, save_current_special_buffer,
     take_stashed_file_buffer, teardown_current_buffer, unsaved_buffer_names,
 };
 use format::run_shell_formatter;
@@ -642,14 +642,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
             // Remove the closed buffer from the buffer list and any stash.
             if let Some(ref p) = path_to_remove {
-                let key = canon(p);
-                app.open_buffers.retain(|stored| canon(stored) != key && stored != p);
+                let key = crate::source::SourceId::of(p);
+                app.open_buffers.retain(|stored| *stored != key);
                 app.notebook_buffers.remove(&key);
-                app.notebook_buffers.remove(p);
                 app.file_buffers.remove(&key);
-                app.file_buffers.remove(p);
                 app.table_buffers.remove(&key);
-                app.table_buffers.remove(p);
             }
 
             // Drop the closed buffer's contents now: the buffer-switch below
@@ -659,8 +656,8 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
             // Pick the next buffer: prefer real files over *Messages*, fall back to *scratch*.
             let next = app.open_buffers.iter()
-                .find(|p| p.to_str() != Some("*Messages*"))
-                .cloned()
+                .find(|id| id.label() != "*Messages*")
+                .map(|id| id.to_path())
                 .unwrap_or_else(|| std::path::PathBuf::from("*scratch*"));
 
             buffers::open_path(app, &next);
@@ -2158,7 +2155,7 @@ mod tests {
                     .unwrap(),
                 ),
                 state: crate::table::TableState::new(),
-                path: std::path::PathBuf::from("t.csv"),
+                id: crate::source::SourceId::of(std::path::Path::new("t.csv")),
             });
             goto_hints(&app)
         }] {
@@ -2188,7 +2185,7 @@ mod tests {
                 .unwrap(),
             ),
             state: crate::table::TableState::new(),
-            path: std::path::PathBuf::from("t.csv"),
+            id: crate::source::SourceId::of(std::path::Path::new("t.csv")),
         });
         let hints = goto_hints(&app);
         assert!(hints.iter().any(|(k, d)| k == "k" && d.contains("peek")));

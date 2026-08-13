@@ -29,6 +29,7 @@ mod popup_ui;
 mod recovery;
 mod render_util;
 mod selection;
+mod source;
 mod spinner;
 mod splash;
 mod statusline;

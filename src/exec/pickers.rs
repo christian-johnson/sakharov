@@ -108,10 +108,10 @@ pub(super) fn buffer_picker(app: &mut App) {
     let items: Vec<crate::popup::ListItem> = app
         .open_buffers
         .iter()
-        .filter_map(|p| {
-            let name = p.file_name()?.to_string_lossy().into_owned();
-            let detail = p.to_string_lossy().into_owned();
-            Some(crate::popup::ListItem::navigate(name, detail, p, 0, 0))
+        .map(|id| {
+            let path = id.to_path();
+            let detail = path.to_string_lossy().into_owned();
+            crate::popup::ListItem::navigate(id.label().to_string(), detail, &path, 0, 0)
         })
         .collect();
     if items.is_empty() {

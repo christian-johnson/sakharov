@@ -642,7 +642,8 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   (`row_tsv`, values flattened through `layout::sanitize` so an embedded newline
   can't split one row into two). TSV because it pastes correctly into
   spreadsheets and needs no quoting for the commas already inside values
-- **`is_special_path` is now the `*…*` shape**, not a fixed list of two names, so
+- **`is_special_path` is now the `*…*` shape** (delegated to `source::SourceId::is_virtual`),
+  not a fixed list of two names, so
   a new virtual buffer is automatically kept out of saving, LSP sync, crash
   recovery and the unsaved-changes sweep. `switch_to_special_buffer` reads any
   other `*…*` name's rope from `special_buffer_ropes` (`*Messages*` stays the one
@@ -694,6 +695,10 @@ src/
   buffer.rs           — Rope buffer (ropey), undo/redo, file I/O
                         insert_raw/remove_raw for session-coalesced undo
   selection.rs        — Selection { anchor, head } (char indices into rope)
+  source.rs           — SourceId { File(canonical path) | Virtual("*name*") }: what the
+                        editor means by "which thing is open". THE identity used by
+                        open_buffers and all three stash maps; is_special_path delegates
+                        to it, and canonicalisation lives here and nowhere else
   mode.rs             — Mode enum: Normal, Insert, Select, Command, Goto,
                         FindChar, Search, Jump, Fold, Prompt
   command.rs          — Command enum + parse()/name()/palette_entries(), all
@@ -869,6 +874,13 @@ docs/
 - **Opening a file by path goes through `exec::open_path`**, which picks the view
   from the extension. Don't call `lsp::open_file_at` directly from a "user picked a
   file" site — that bypasses the notebook and table views.
+- **Buffer/source identity is `source::SourceId`, never a bare `PathBuf`** — `File` holds
+  the *canonicalised* path (so two spellings of one file are one buffer) and `Virtual` holds
+  a `*…*` name for a source with no file (scratch, a `*cell …*` buffer, later a query
+  result). `open_buffers`, `file_buffers`, `notebook_buffers`, `table_buffers` and
+  `exec::table::Session` are all keyed by it. Canonicalisation happens **only** inside
+  `source.rs`: a comparison that re-derives it risks disagreeing. Anything that wants to
+  *write* must go through `as_path()` and handle the `None`.
 - **LSP document identity**: a document's URI is `lsp::path_to_uri(path)` (absolute +
   canonicalized, with a plain-absolute fallback for nonexistent virtual cell paths).
   Diagnostics arrive keyed by the URI the server echoes back, so any code looking up

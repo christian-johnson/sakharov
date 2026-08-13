@@ -231,7 +231,7 @@ mod tests {
         Session {
             source: Box::new(src),
             state: TableState::new(),
-            path: std::path::PathBuf::from("t.csv"),
+            id: crate::source::SourceId::of(std::path::Path::new("t.csv")),
         }
     }
 

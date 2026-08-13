@@ -90,6 +90,9 @@ D0–D5 implements it.
 
 ## D0 — Foundations
 
+**Status: done** (D0.4, D0.1+D0.2, D0.3). D0.5 remains deliberately deferred to its
+trigger condition.
+
 Four changes with no user-visible effect. All four are cheap now and
 structurally expensive later, because each is a thing currently owned by the
 wrong module.

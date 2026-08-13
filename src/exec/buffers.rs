@@ -4,7 +4,9 @@
 
 use ropey::Rope;
 
-use crate::{app::App, mode::Mode, selection::Selection};
+use std::path::Path;
+
+use crate::{app::App, mode::Mode, selection::Selection, source::SourceId};
 
 use super::{lsp, notebook, rebuild_diag_cache, recompute_highlights};
 
@@ -20,15 +22,7 @@ pub(crate) const SCRATCH_INTRO: &str = "\
 /// the unsaved-changes sweep — the places a name that isn't a path must never
 /// reach.
 pub fn is_special_path(path: &std::path::Path) -> bool {
-    matches!(path.to_str(), Some(s) if s.len() >= 2 && s.starts_with('*') && s.ends_with('*'))
-}
-
-/// Canonicalize `path`, falling back to it unchanged when the filesystem
-/// lookup fails (e.g. the file doesn't exist yet, or a virtual/notebook-cell
-/// path). Used wherever two paths to the same file need to compare equal
-/// regardless of `..`/symlink differences.
-pub(super) fn canon(path: &std::path::Path) -> std::path::PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    SourceId::of(path).is_virtual()
 }
 
 /// Save the scratch buffer rope when leaving it (so edits survive switches).
@@ -52,7 +46,7 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
     // same cell without re-parsing.  An in-flight load has nothing worth
     // keeping and is simply dropped.
     if let Some(session) = app.table.take() {
-        app.table_buffers.insert(canon(&session.path), session);
+        app.table_buffers.insert(session.id.clone(), session);
     }
     app.table_pending = None;
     // Leaving a `*cell …*` buffer, whichever way: undo the settings it forced.
@@ -155,29 +149,29 @@ pub(super) fn navigate_buffer(app: &mut App, delta: i32) {
         return;
     }
 
-    let current_canon = if let Some(ref session) = app.table {
-        // The table view's buffer is detached, so the session holds the path.
-        canon(&session.path)
+    let current = if let Some(ref session) = app.table {
+        // The table view's buffer is detached, so the session holds the identity.
+        session.id.clone()
     } else if let Some(ref origin) = app.table_cell_origin {
         // A cell buffer sits "at" the table it was read out of, so H/L step
         // away from that table rather than restarting from the list head.
-        canon(&origin.path)
+        origin.id.clone()
     } else if let Some((ref nb, _)) = app.notebook {
-        canon(&nb.path)
+        SourceId::of(&nb.path)
     } else if let Some(ref p) = app.buffer.path {
-        canon(p)
+        SourceId::of(p)
     } else {
         return;
     };
 
-    let current_idx = app.open_buffers.iter().position(|p| canon(p) == current_canon);
+    let current_idx = app.open_buffers.iter().position(|id| *id == current);
 
     let idx = match current_idx {
         Some(i) => ((i as i32 + delta).rem_euclid(n as i32)) as usize,
         None => 0,
     };
 
-    let target = app.open_buffers[idx].clone();
+    let target = app.open_buffers[idx].to_path();
     open_path(app, &target);
 }
 
@@ -237,10 +231,14 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
 /// open notebook or current buffer, falling back to the working directory for
 /// special buffers (scratch / messages / dashboard) or unnamed buffers.
 fn current_buffer_dir(app: &App) -> std::path::PathBuf {
-    if let Some(ref session) = app.table {
-        if let Some(parent) = session.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            return parent.to_path_buf();
-        }
+    if let Some(parent) = app
+        .table
+        .as_ref()
+        .and_then(|s| s.path())
+        .and_then(Path::parent)
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        return parent.to_path_buf();
     }
     if let Some((ref nb, _)) = app.notebook {
         return crate::notebook::notebook_dir(&nb.path);
@@ -340,9 +338,8 @@ pub(crate) fn stash_current_file_buffer(app: &mut App) {
     if is_special_path(&path) {
         return;
     }
-    let key = canon(&path);
     let buf = std::mem::replace(&mut app.buffer, crate::buffer::Buffer::new_empty());
-    app.file_buffers.insert(key, buf);
+    app.file_buffers.insert(SourceId::of(&path), buf);
 }
 
 /// Remove and return the stashed buffer for `path`, if one exists.
@@ -350,7 +347,7 @@ pub(crate) fn take_stashed_file_buffer(
     app: &mut App,
     path: &std::path::Path,
 ) -> Option<crate::buffer::Buffer> {
-    app.file_buffers.remove(&canon(path))
+    app.file_buffers.remove(&SourceId::of(path))
 }
 
 /// Names of every buffer holding unsaved changes, anywhere in the session:
@@ -373,23 +370,23 @@ pub(crate) fn unsaved_buffer_names(app: &App) -> Vec<String> {
             names.push(short(p));
         }
     }
-    for (path, (nb, _)) in &app.notebook_buffers {
+    for (id, (nb, _)) in &app.notebook_buffers {
         if nb.modified {
-            names.push(short(path));
+            names.push(id.label().to_string());
         }
     }
-    for (path, buf) in &app.file_buffers {
+    for (id, buf) in &app.file_buffers {
         if buf.modified {
-            names.push(short(path));
+            names.push(id.label().to_string());
         }
     }
     names
 }
 
-/// Append `path` to `open_buffers` if it is not already present (by canonical path).
-pub(super) fn register_buffer(open_buffers: &mut Vec<std::path::PathBuf>, path: &std::path::Path) {
-    let key = canon(path);
-    if !open_buffers.iter().any(|stored| canon(stored) == key) {
-        open_buffers.push(key);
+/// Register `path` in `open_buffers` if its identity is not already there.
+pub(super) fn register_buffer(open_buffers: &mut Vec<SourceId>, path: &std::path::Path) {
+    let id = SourceId::of(path);
+    if !open_buffers.contains(&id) {
+        open_buffers.push(id);
     }
 }

@@ -244,7 +244,8 @@ fn collect_entries(app: &App) -> Vec<Entry> {
     }
 
     // Stashed plain-file buffers (navigated away from but still in memory).
-    for (path, buf) in &app.file_buffers {
+    // A virtual source has no file to recover to, so it is skipped.
+    for (path, buf) in app.file_buffers.iter().filter_map(|(id, b)| id.as_path().map(|p| (p, b))) {
         if !buf.modified {
             continue;
         }
@@ -260,7 +261,11 @@ fn collect_entries(app: &App) -> Vec<Entry> {
     }
 
     // Stashed notebooks (navigated away from but still in memory).
-    for (path, (nb, _)) in &app.notebook_buffers {
+    for (path, (nb, _)) in app
+        .notebook_buffers
+        .iter()
+        .filter_map(|(id, v)| id.as_path().map(|p| (p, v)))
+    {
         let is_active = app
             .notebook
             .as_ref()
