@@ -302,19 +302,24 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `table-close-cell` | `q` (in a cell buffer) | Return from a cell buffer to its table — also what `:bd` does there (`:cell-back`, `:back-to-table`) |
 | `column-summary` | `S` | Statistics for the cursor's column in a float: values/missing/distinct, min–max, quartiles, mean, distribution (`:summary`, `:describe`) |
 | `column-frequency` | `F` | Count the cursor column's values into a new grid of its own (`:frequency`, `:value-counts`) |
+| `toggle-column-sparkline` | `s` | Show/hide the distribution row under the column names (`:sparkline`, `:column-sparkline`) |
+| `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table) and go back to the one it came from — also what `:bd` does there (`:table-back`) |
 
 `.csv` / `.tsv` / `.tab` files open in the table view automatically (turn this off
 with `auto_open = false` under `[table]`); `:table-close` always gives you the raw
 text of the same file, so the grid and the text are two views on one file.
 
-Under each numeric column's name is a **distribution sparkline** — one row of block
-glyphs showing the column's histogram, so a skew or an outlier is visible without
-asking (`column_sparkline = false` under `[table]` turns it off and gives the row
-back to the data). A text column's slot is blank: the order of category counts is
-arbitrary, so a "distribution" of them would be a shape the data doesn't have.
+`s` toggles a **distribution sparkline** row under the column names — block glyphs
+showing each numeric column's histogram, so a skew or an outlier is visible without
+asking. It costs one row of grid height, so it is off unless you turn it on
+(`column_sparkline = true` under `[table]` makes it the default). A text column's
+slot is blank: the order of category counts is arbitrary, so a "distribution" of
+them would be a shape the data doesn't have.
+
 `S` opens the full statistics for the cursor's column, and `F` turns that column's
-value counts into a grid of their own — a *derived* table, with no file behind it,
-which `:bd` / `H` steps back out of.
+value counts into a grid of their own — a *computed* table, with no file behind it.
+`q` backs out of it to the table it came from, the same way `q` backs out of a cell
+buffer; `:bd` does the same, and `H`/`L` step past it without losing it.
 
 Summaries scan at most `summary_max_rows` rows (a summary is a full column scan,
 and the sparkline needs one per visible column); the panel names the number of

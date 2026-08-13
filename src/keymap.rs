@@ -328,6 +328,12 @@ impl Keymap {
         // characters to search along a row of cells.
         table.insert(KeyBinding::char('S'), vec![Command::TableColumnSummary]);
         table.insert(KeyBinding::char('F'), vec![Command::TableColumnFrequency]);
+        // Lowercase `s` toggles the distribution row `S` describes in full.
+        table.insert(KeyBinding::char('s'), vec![Command::TableToggleSparkline]);
+        // `q` backs out of a *computed* table (a frequency table) to the one it
+        // came from — the same "back out of the temporary thing" `q` does in a
+        // cell buffer.  On a file-backed table there is nowhere to go back to.
+        table.insert(KeyBinding::char('q'), vec![Command::TableCloseDerived]);
 
         // --- `*cell …*` buffer overrides ---
         //

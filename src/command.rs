@@ -224,6 +224,8 @@ commands! {
         TableCloseCell => "table-close-cell", aliases: ["cell-back", "back-to-table"], palette: "Return from a cell buffer to its table  [:bd]";
         TableColumnSummary => "column-summary", aliases: ["summary", "describe"], palette: "Statistics for the cursor's column  [S]";
         TableColumnFrequency => "column-frequency", aliases: ["frequency", "value-counts"], palette: "Count the cursor column's values as a new table  [F]";
+        TableToggleSparkline => "toggle-column-sparkline", aliases: ["sparkline", "column-sparkline"], palette: "Show/hide the distribution row under the column names  [s]";
+        TableCloseDerived => "close-derived-table", aliases: ["table-back"], palette: "Leave a computed table and go back to the one it came from  [q]";
 
         // --- Toggles / config ---
         ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";

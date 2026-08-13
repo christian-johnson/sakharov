@@ -447,14 +447,15 @@ pub struct TableConfig {
     #[serde(default = "default_table_summary_max_rows")]
     pub summary_max_rows: usize,
     /// Draw a second header row: a block-glyph sparkline of each numeric
-    /// column's distribution.  Costs one data row of screen height, and is what
-    /// makes a skew or an outlier visible without opening a summary.
+    /// column's distribution.  Off by default because it costs a data row of
+    /// screen height for every table, including one with no numeric column to
+    /// draw; `:sparkline` toggles it for the session.
     #[serde(default = "default_table_column_sparkline")]
     pub column_sparkline: bool,
 }
 
 fn default_table_auto_open() -> bool { true }
-fn default_table_column_sparkline() -> bool { true }
+fn default_table_column_sparkline() -> bool { false }
 fn default_table_summary_max_rows() -> usize { 200_000 }
 fn default_table_max_col_width() -> usize { 32 }
 fn default_table_min_col_width() -> usize { 3 }

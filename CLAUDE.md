@@ -698,8 +698,15 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   `session.path()` is `None` and `:table-close` says so rather than stranding an empty
   buffer; `exec::open_path` routes a virtual id that has a stashed session back to the grid
   instead of into the special-buffer branch, so `H`/`L` cycling onto it works.
-- **Distribution sparkline in the header** (`[table] column_sparkline`, default on) — a
-  second header row of block glyphs per numeric column. **`layout::header_rows(cfg)` is the
+  **`q` backs out of a computed table to the one it came from** (`Session.origin`,
+  `close_derived_table`) — the same "back out of the temporary thing" paradigm as `q` in a
+  `*cell …*` buffer, and `:bd` does it too. The derived table is *dropped* rather than
+  stashed on that path (`F` rebuilds it in a keystroke, and a buffer list accumulating
+  `*freq …*` entries is worse than one that doesn't).
+- **Distribution sparkline in the header** (`[table] column_sparkline`, default **off**,
+  `s` / `:sparkline` toggles it for the session) — a second header row of block glyphs per
+  numeric column. Off by default because the row costs grid height on every table,
+  including one with no numeric column to draw. **`layout::header_rows(cfg)` is the
   single definition of the header's height** (`NAME_ROWS` + the sparkline row); the renderer
   offsets its data rows by it and `layout::visible_rows` sizes the row window from it, so the
   two cannot drift (pinned by `header_height_is_config_driven_and_data_rows_follow_it`, and

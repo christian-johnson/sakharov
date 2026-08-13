@@ -589,9 +589,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::BufferClose | Command::BufferForceClose => {
             let force = matches!(cmd, Command::BufferForceClose);
 
-            // A `*cell …*` buffer is closed by going back to the table it was
-            // read out of — the only place it makes sense to return to.
-            if table::close_cell_buffer(app) {
+            // A `*cell …*` buffer, and equally a computed table, is closed by
+            // going back to the table it came from — the only place it makes
+            // sense to return to.
+            if table::close_cell_buffer(app) || table::close_derived_table(app) {
                 return;
             }
 
@@ -1099,6 +1100,16 @@ pub fn execute(app: &mut App, cmd: &Command) {
             if !table::close_cell_buffer(app) {
                 app.messages.show("Not a table cell buffer");
             }
+            return;
+        }
+        Command::TableCloseDerived => {
+            app.messages.show("No table open");
+            return;
+        }
+        // A display preference, so it works from anywhere — the grid does not
+        // have to be open to set how the next one is drawn.
+        Command::TableToggleSparkline => {
+            table::toggle_sparkline(app);
             return;
         }
         Command::TableOpenCell

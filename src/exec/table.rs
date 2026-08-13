@@ -26,6 +26,10 @@ pub struct Session {
     /// It is the stash key, the buffer-list entry, and the status-line name —
     /// `app.buffer` has no path while the grid is open.
     pub id: SourceId,
+    /// For a *computed* table (a frequency table), the table it was derived
+    /// from — where `q` goes back to, mirroring how `q` backs out of a
+    /// `*cell …*` buffer.  `None` for a table read from a file.
+    pub origin: Option<SourceId>,
     /// Per-column statistics, computed once on demand and kept.
     ///
     /// Cached because a summary is a full scan of the column: the header
@@ -44,6 +48,7 @@ impl Session {
             source,
             state: table::TableState::new(),
             id,
+            origin: None,
             summaries: std::collections::HashMap::new(),
             summaries_rows: 0,
         }
@@ -220,6 +225,21 @@ fn summary_text(
     out
 }
 
+/// `s` / `:sparkline` — show or hide the distribution row for the session.
+///
+/// A display preference rather than a table property, so it applies to every
+/// grid and is not persisted; `[table] column_sparkline` is what makes it the
+/// default.  Turning it on computes the summaries it needs on the next frame.
+pub(super) fn toggle_sparkline(app: &mut App) {
+    let on = !app.config.table.column_sparkline;
+    app.config.table.column_sparkline = on;
+    app.messages.show(if on {
+        "Column sparkline on"
+    } else {
+        "Column sparkline off"
+    });
+}
+
 /// `F` / `:column-frequency` — open the cursor column's value counts as a grid
 /// of its own.
 ///
@@ -273,9 +293,10 @@ pub(super) fn column_frequency(app: &mut App) {
     );
 
     let id = SourceId::virtual_named(&format!("freq {name}"));
-    open_derived(app, id, Box::new(source));
+    let origin = session.id.clone();
+    open_derived(app, id, Box::new(source), Some(origin));
     app.messages.show(format!(
-        "{distinct} distinct value(s) in {name} — :bd or H to go back"
+        "{distinct} distinct value(s) in {name} — q to go back"
     ));
 }
 
@@ -354,12 +375,45 @@ pub fn open_as_table(app: &mut App, path: &Path) {
 /// Show `source` in the grid under the virtual identity `id` — a table that was
 /// *computed* rather than read from a file (a frequency table today; a query
 /// result or a groupby later).
-pub(super) fn open_derived(app: &mut App, id: SourceId, source: Box<dyn TableSource>) {
+pub(super) fn open_derived(
+    app: &mut App,
+    id: SourceId,
+    source: Box<dyn TableSource>,
+    origin: Option<SourceId>,
+) {
     debug_assert!(id.is_virtual(), "a derived table has no file behind it");
     enter_table_view(app);
     app.open_buffers.retain(|stored| *stored != id);
     app.open_buffers.push(id.clone());
-    app.table = Some(Session::new(id, source));
+    let mut session = Session::new(id, source);
+    session.origin = origin;
+    app.table = Some(session);
+}
+
+/// `q` / `:bd` in a computed table — go back to the table it was derived from.
+///
+/// The same paradigm as a `*cell …*` buffer: a frequency table is something you
+/// open to answer one question and then back out of, so it is dropped rather
+/// than stashed (`F` recomputes it in a keystroke) and its entry leaves the
+/// buffer list instead of accumulating there.
+///
+/// Returns false when the open table isn't a derived one (nothing to go back to).
+pub(super) fn close_derived_table(app: &mut App) -> bool {
+    let Some(origin) = app
+        .table
+        .as_ref()
+        .and_then(|s| s.origin.clone())
+    else {
+        return false;
+    };
+    let derived = app.table.as_ref().map(|s| s.id.clone());
+    open_as_table(app, &origin.to_path());
+    if let Some(id) = derived {
+        // `open_as_table` stashed it on the way past; drop it for good.
+        app.table_buffers.remove(&id);
+        app.open_buffers.retain(|stored| *stored != id);
+    }
+    true
 }
 
 /// Hand the screen to the table view: stash whatever was open, and detach
@@ -742,6 +796,17 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
         }
         Command::TableColumnFrequency => {
             column_frequency(app);
+            return true;
+        }
+        Command::TableToggleSparkline => {
+            toggle_sparkline(app);
+            return true;
+        }
+        Command::TableCloseDerived => {
+            if !close_derived_table(app) {
+                app.messages
+                    .show("Not a computed table — :table-close leaves the grid");
+            }
             return true;
         }
         Command::TableYankRow => {
@@ -1653,6 +1718,68 @@ mod tests {
     }
 
     /// …and `q` keeps meaning nothing in an ordinary buffer.
+    #[test]
+    fn q_backs_out_of_a_derived_table_to_the_one_it_came_from() {
+        let mut app = app_with_csv("city,n\noslo,1\nlima,2\noslo,3\n");
+        let origin = app.table.as_ref().unwrap().id.clone();
+        handle(&mut app, &Command::MoveDown); // somewhere other than row 0
+        handle(&mut app, &Command::TableColumnFrequency);
+        let derived = app.table.as_ref().unwrap().id.clone();
+        assert_eq!(app.table.as_ref().unwrap().origin, Some(origin.clone()));
+
+        // `q` — the same "back out of the temporary thing" as in a cell buffer.
+        handle(&mut app, &Command::TableCloseDerived);
+        assert_eq!(app.view(), View::Table);
+        let session = app.table.as_ref().expect("back in the original table");
+        assert_eq!(session.id, origin);
+        assert_eq!(session.state.cursor_row, 1, "the original cursor is preserved");
+
+        // The frequency table is gone rather than stashed: `F` rebuilds it in a
+        // keystroke, and a buffer list that accumulates `*freq …*` entries is
+        // worse than one that doesn't.
+        assert!(!app.table_buffers.contains_key(&derived));
+        assert!(!app.open_buffers.contains(&derived));
+    }
+
+    #[test]
+    fn bd_in_a_derived_table_goes_back_too() {
+        let mut app = app_with_csv("city\noslo\n");
+        let origin = app.table.as_ref().unwrap().id.clone();
+        handle(&mut app, &Command::TableColumnFrequency);
+        super::super::execute(&mut app, &Command::BufferClose);
+        assert_eq!(app.table.as_ref().map(|s| s.id.clone()), Some(origin));
+    }
+
+    #[test]
+    fn q_on_a_file_backed_table_says_there_is_nowhere_to_go_back_to() {
+        let mut app = app_with_csv("city\noslo\n");
+        handle(&mut app, &Command::TableCloseDerived);
+        // Still in the grid, and told why rather than silently doing nothing.
+        assert!(app.table.is_some());
+        assert!(
+            app.messages.log.iter().any(|m| m.contains("Not a computed table")),
+            "{:?}",
+            app.messages.log,
+        );
+    }
+
+    #[test]
+    fn the_sparkline_toggles_and_the_row_window_follows() {
+        let mut app = app_with_table(50, 3);
+        assert!(!app.config.table.column_sparkline, "off by default");
+        let with_row = visible_rows(&app);
+
+        handle(&mut app, &Command::TableToggleSparkline);
+        assert!(app.config.table.column_sparkline);
+        // The taller header takes its row from the data, through
+        // `layout::header_rows` — the one place that height is defined.
+        assert_eq!(visible_rows(&app), with_row - 1);
+
+        handle(&mut app, &Command::TableToggleSparkline);
+        assert!(!app.config.table.column_sparkline);
+        assert_eq!(visible_rows(&app), with_row);
+    }
+
     #[test]
     fn q_is_inert_outside_a_cell_buffer() {
         use crossterm::event::{KeyCode, KeyEvent};
