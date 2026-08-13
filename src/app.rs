@@ -926,7 +926,7 @@ fn draw_frame(
             app.fold.ranges = app.highlighter.fold_ranges(&app.buffer.rope);
             // Discard any stored folds whose start lines no longer exist.
             let valid: std::collections::BTreeSet<usize> =
-                app.fold.ranges.iter().map(|&(s, _)| s).collect();
+                app.fold.ranges.iter().map(|r| r.start).collect();
             app.fold.folded.retain(|s| valid.contains(s));
         }
 

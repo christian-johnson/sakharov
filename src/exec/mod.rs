@@ -423,24 +423,25 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- Code folding ---
         Command::EnterFoldMode => {
             app.mode = crate::mode::Mode::Fold;
-            let mut hints = vec![
-                ("a".into(), "toggle fold at cursor".into()),
-                ("A".into(), "toggle all folds".into()),
-            ];
-            if app.notebook.is_some() {
-                hints.push(("o".into(), "expand/collapse full cell output".into()));
-            }
-            app.popup = Some(crate::popup::Popup::which_key("z", hints));
+            app.popup = Some(crate::popup::Popup::which_key("z", fold_hints(app)));
             return;
         }
         Command::FoldToggle => {
-            let cursor_line = {
-                let rope = &app.buffer.rope;
-                let pos = app.selection.head.min(rope.len_chars());
-                if rope.len_chars() == 0 { 0 } else { rope.char_to_line(pos) }
-            };
-            app.fold.toggle_at_line(cursor_line);
+            app.fold.toggle_at_line(cursor_line(app));
             normalize_cursor_folds(app);
+            return;
+        }
+        Command::FoldClose => {
+            if !app.fold.close_at_line(cursor_line(app)) {
+                app.messages.show("Nothing to fold here");
+            }
+            normalize_cursor_folds(app);
+            return;
+        }
+        Command::FoldOpen => {
+            if !app.fold.open_at_line(cursor_line(app)) {
+                app.messages.show("No fold to open here");
+            }
             return;
         }
         Command::FoldToggleAll => {
@@ -450,6 +451,19 @@ pub fn execute(app: &mut App, cmd: &Command) {
             } else {
                 app.fold.open_all();
             }
+            return;
+        }
+        Command::FoldCloseAll => {
+            app.fold.close_all();
+            normalize_cursor_folds(app);
+            return;
+        }
+        Command::FoldOpenAll => {
+            app.fold.open_all();
+            return;
+        }
+        Command::FoldCloseType | Command::FoldOpenType => {
+            fold_by_type(app, matches!(cmd, Command::FoldCloseType));
             return;
         }
 
@@ -1253,6 +1267,80 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
     hints
 }
 
+/// The buffer line the cursor is on (0 for an empty buffer).
+fn cursor_line(app: &App) -> usize {
+    let rope = &app.buffer.rope;
+    if rope.len_chars() == 0 {
+        return 0;
+    }
+    rope.char_to_line(app.selection.head.min(rope.len_chars()))
+}
+
+/// Which-key hints for the `z` sub-mode.
+///
+/// Generated from `input::fold_command` the same way `goto_hints` is generated
+/// from `input::goto_command`, and pinned to it by
+/// `fold_hints_only_advertise_real_bindings`.  The `zo`/`zc` bug this replaced
+/// was exactly a hint-vs-dispatch drift: the docs promised fold open/close and
+/// the keys ran a notebook command, so the two are now derived from one table.
+fn fold_hints(app: &App) -> Vec<(String, String)> {
+    let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
+    let mut hints = vec![
+        hint("a", "toggle fold at cursor"),
+        hint("c", "close fold at cursor"),
+        hint("o", "open fold at cursor"),
+        hint("A", "toggle all folds"),
+        hint("M", "close every fold"),
+        hint("R", "open every fold"),
+    ];
+    // Only advertise the type folds when the cursor is actually inside a
+    // foldable block, and name the block so the effect is unambiguous.
+    if let Some(ty) = app.fold.type_at_line(cursor_line(app)) {
+        let what = ty.describe();
+        hints.push(hint("t", &format!("fold every {what} block")));
+        hints.push(hint("T", &format!("unfold every {what} block")));
+    }
+    if app.notebook.is_some() {
+        hints.push(hint("O", "expand/collapse full cell output"));
+    }
+    hints
+}
+
+/// Fold (or unfold) every block of the same kind, depth and key as the one the
+/// cursor is in — the "collapse all the records that look like this" operation.
+fn fold_by_type(app: &mut App, close: bool) {
+    let line = cursor_line(app);
+    let Some(ty) = app.fold.type_at_line(line) else {
+        app.messages.show("Cursor is not inside a foldable block");
+        return;
+    };
+    let what = ty.describe();
+    let n = if close {
+        app.fold.close_type(&ty)
+    } else {
+        app.fold.open_type(&ty)
+    };
+    // The count is the point: it tells you whether you just collapsed the 128
+    // sibling records you expected or one stray block.
+    let total = app.fold.starts_of_type(&ty).len();
+    app.messages.show(if n == 0 {
+        format!(
+            "All {total} {what} block{} already {}",
+            if total == 1 { "" } else { "s" },
+            if close { "folded" } else { "open" }
+        )
+    } else {
+        format!(
+            "{} {n} of {total} {what} block{}",
+            if close { "Folded" } else { "Unfolded" },
+            if total == 1 { "" } else { "s" }
+        )
+    });
+    if close {
+        normalize_cursor_folds(app);
+    }
+}
+
 /// True when vertical motion should flow through the notebook cell stack
 /// rather than staying inside the buffer (i.e. a notebook is open and we're
 /// not in the full-screen single-cell overlay).
@@ -1843,6 +1931,124 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use ropey::Rope;
+
+    // --- Code folding ---------------------------------------------------
+
+    /// The JSON log shape the type-folding feature exists for: repeated
+    /// records, each with the same keys.
+    const JSON_LOG: &str = "{\n  \"entries\": [\n    {\n      \"ts\": 1,\n      \"payload\": {\n        \"a\": 1\n      }\n    },\n    {\n      \"ts\": 2,\n      \"payload\": {\n        \"a\": 2\n      }\n    }\n  ]\n}\n";
+
+    fn app_with_json(src: &str) -> App {
+        let mut app = App::new(None, Config::load()).unwrap();
+        app.viewport_height = 40;
+        app.viewport_width = 80;
+        app.buffer.rope = Rope::from_str(src);
+        app.fold.ranges =
+            crate::fold::compute_fold_ranges(&app.buffer.rope, crate::highlight::Language::Json);
+        assert!(!app.fold.ranges.is_empty(), "fixture must have folds");
+        app
+    }
+
+    fn goto_line(app: &mut App, line: usize) {
+        app.selection = Selection::point(app.buffer.rope.line_to_char(line));
+    }
+
+    /// `zo`/`zc` used to run the notebook output-expand command in every view,
+    /// so in a plain file they answered "Not a notebook" and folding was only
+    /// reachable through `za`.
+    #[test]
+    fn zo_and_zc_fold_a_plain_text_buffer_instead_of_asking_for_a_notebook() {
+        let mut app = app_with_json(JSON_LOG);
+        goto_line(&mut app, 5); // inside the first payload
+
+        execute(&mut app, &Command::FoldClose);
+        assert_eq!(app.fold.folded.iter().copied().collect::<Vec<_>>(), vec![4]);
+        assert_ne!(app.messages.current(), Some("Not a notebook"));
+
+        execute(&mut app, &Command::FoldOpen);
+        assert!(app.fold.folded.is_empty());
+    }
+
+    /// Closing a fold the cursor is inside must not leave the cursor on a
+    /// hidden line — it has to come back to the fold's visible start.
+    #[test]
+    fn closing_a_fold_brings_the_cursor_out_of_the_hidden_lines() {
+        let mut app = app_with_json(JSON_LOG);
+        goto_line(&mut app, 5);
+        execute(&mut app, &Command::FoldClose);
+        let line = app.buffer.rope.char_to_line(app.selection.head);
+        assert_eq!(line, 4, "cursor sits on the fold indicator, not inside it");
+        assert!(!app.fold.is_hidden(line));
+    }
+
+    #[test]
+    fn zt_folds_every_record_of_the_same_shape_and_says_how_many() {
+        let mut app = app_with_json(JSON_LOG);
+        goto_line(&mut app, 3); // a field inside the first record
+
+        execute(&mut app, &Command::FoldCloseType);
+        assert_eq!(
+            app.fold.folded.iter().copied().collect::<Vec<_>>(),
+            vec![2, 8],
+            "both records fold, from a cursor inside only one of them"
+        );
+        let msg = app.messages.current().unwrap_or_default().to_string();
+        assert!(msg.contains('2'), "the count is the point: {msg}");
+
+        execute(&mut app, &Command::FoldOpenType);
+        assert!(app.fold.folded.is_empty());
+    }
+
+    #[test]
+    fn zt_outside_any_block_explains_itself_rather_than_doing_nothing() {
+        let mut app = app_with_json(JSON_LOG);
+        app.fold.ranges.clear(); // as if the cursor sat in unstructured text
+        execute(&mut app, &Command::FoldCloseType);
+        assert_eq!(
+            app.messages.current(),
+            Some("Cursor is not inside a foldable block")
+        );
+    }
+
+    #[test]
+    fn zm_and_zr_close_and_open_everything() {
+        let mut app = app_with_json(JSON_LOG);
+        execute(&mut app, &Command::FoldCloseAll);
+        assert_eq!(app.fold.folded.len(), app.fold.ranges.len());
+        execute(&mut app, &Command::FoldOpenAll);
+        assert!(app.fold.folded.is_empty());
+    }
+
+    /// Same promise as the `g` which-key popup: every advertised key must be
+    /// one `input::fold_command` really dispatches.  This pairing is what the
+    /// `zo` bug broke, so it is pinned rather than trusted.
+    #[test]
+    fn fold_hints_only_advertise_real_bindings() {
+        let mut app = app_with_json(JSON_LOG);
+        goto_line(&mut app, 5); // inside a block, so `t`/`T` are offered too
+        let hints = fold_hints(&app);
+        assert!(
+            hints.iter().any(|(k, _)| k == "t"),
+            "inside a foldable block the type folds must be offered"
+        );
+        for (key, desc) in hints {
+            let c = key.chars().next().expect("non-empty key");
+            assert!(
+                crate::input::fold_command(c).is_some(),
+                "z{key} is advertised as \"{desc}\" but dispatches nothing"
+            );
+        }
+    }
+
+    /// The type folds are meaningless with the cursor outside every block, so
+    /// they are not advertised there.
+    #[test]
+    fn fold_hints_omit_the_type_folds_outside_a_block() {
+        let mut app = app_with_json(JSON_LOG);
+        app.fold.ranges.clear();
+        let hints = fold_hints(&app);
+        assert!(!hints.iter().any(|(k, _)| k == "t" || k == "T"));
+    }
 
     /// The which-key popup is a promise about what the next keypress does, so
     /// every key it advertises must be one the `g` sub-mode actually

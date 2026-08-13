@@ -119,7 +119,23 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   reported to stderr and the built-in defaults are used instead.
 - `/` and `?` incremental search, `n/N` cycle matches
 - `gw` jump mode (2-char labels over visible word starts)
-- Code folding (`zc/zo/za`), git gutter marks, word wrap toggle
+- **Code folding** (`fold.rs`): `za` toggle, `zc`/`zo` close/open one level (repeat to walk
+  outward/inward), `zA` toggle-all, `zM`/`zR` close/open all, and **`zt`/`zT` fold or unfold
+  every block *like the one at the cursor*** — matched on the `FoldRange`'s
+  `(kind, depth, label)` identity, where `label` is the owning key for languages that have
+  keys (JSON pairs, YAML mappings). That triple is why `zt` on a JSON `"payload": {…}` folds
+  every other `payload` and leaves the `metadata` beside it open, and why `zt` on one record
+  of a JSON log collapses every record. `depth` comes from `fold::assign_depths`
+  (containment-based, applied by *both* producers — tree-sitter and `markdown.rs` — so
+  "same nesting level" means one thing). `zt` folds *regions*, so a scalar field on a single
+  line has nothing to collapse; hiding scalar rows across records is a different mechanism
+  and is not implemented.
+  The `z` which-key popup is generated from `exec::fold_hints`, pinned to
+  `input::fold_command` by `fold_hints_only_advertise_real_bindings` — the same
+  hint-vs-dispatch pairing as the `g` sub-mode. It exists because `zo`/`zc` were once
+  documented as fold open/close while unconditionally running the notebook
+  output-expand command, so in a plain file they answered "Not a notebook".
+- Git gutter marks, word wrap toggle
 - Multiple buffers (`H`/`L` cycle prev/next), clipboard integration
 - **Bracketed paste** — enabled at startup (`EnableBracketedPaste`, released in
   `restore_terminal`); a terminal paste arrives as one `Event::Paste` and goes to
@@ -199,7 +215,7 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   cell-type/structural-undo) has no default key — use the command palette or `:` command line
 - **Output truncation is per-cell and expandable** — long output is capped at
   `notebook.max_output_lines` (tracebacks at `max_traceback_lines`) with a
-  `... (N more lines — zo to expand)` row. `zo` (fold sub-mode) / `:expand-output`
+  `... (N more lines — zO to expand)` row. `zO` (fold sub-mode) / `:expand-output`
   (`Command::NotebookToggleOutputExpand`) toggles `NotebookState.expanded_outputs` for the
   focused cell, lifting the caps so every line becomes a real output row that `j`/`k` and the
   row-granular scroll reach. The caps are resolved once into a `notebook_ui::OutputLimits`
@@ -704,7 +720,10 @@ src/
                         supplied `Wrap` geometry)
   indent.rs           — Auto-indent computation on Enter / open-line; indent::unit()
                         gives the configured indent string (spaces unless expand_tabs=false)
-  fold.rs             — tree-sitter-driven fold ranges for the plain-text editor
+  fold.rs             — FoldRange {start, end, depth, kind, label} + FoldState (which are
+                        closed, open/close/toggle, and the (kind, depth, label) type-matching
+                        behind zt/zT); tree-sitter fold ranges + assign_depths, shared with
+                        markdown.rs so depth means the same thing in both
   markdown.rs         — custom Markdown (.md/.markdown/.qmd) highlighter + section/fence
                         folding; produces the same Vec<Span> / Vec<FoldRange> (no tree-sitter)
   jump.rs             — `gw` label-jump: generate 2-char labels over word starts

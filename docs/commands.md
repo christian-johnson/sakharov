@@ -226,15 +226,57 @@ Press `z` in Normal mode to enter Fold sub-mode; the available keys are shown in
 |---------|-------------|-------|-------------|
 | `enter-fold-mode` | `z` | `:fold` | Enter fold sub-mode (shows key hint popup) |
 | `fold-toggle` | `za` | `:fold-toggle` | Toggle fold on the innermost foldable region at the cursor |
+| `fold-close` | `zc` | `:fold-close` | Close the innermost *open* fold at the cursor — repeat to collapse outward one level at a time |
+| `fold-open` | `zo` | `:fold-open` | Open the outermost folded region at the cursor — repeat to reveal one level at a time |
 | `fold-toggle-all` | `zA` | `:fold-toggle-all` | Toggle all folds: close all if any are open, else open all |
+| `fold-close-all` | `zM` | `:fold-close-all` | Close every fold |
+| `fold-open-all` | `zR` | `:fold-open-all` | Open every fold |
+| `fold-close-type` | `zt` | `:fold-close-type`, `:fold-type` | Fold **every block like the one at the cursor** — same kind, same nesting depth, same owning key |
+| `fold-open-type` | `zT` | `:fold-open-type`, `:unfold-type` | Unfold every block like the one at the cursor |
 
 Foldable constructs are detected via tree-sitter:
 - **Python**: `def`, `class`, `for`, `while`, `if`, `with`, `try`, decorated definitions
 - **Rust**: `fn`, `impl`, `struct`, `enum`, `trait`, `mod`, `match`, closures
 - **JavaScript/TypeScript**: `function`, arrow functions, `class`, `if`, `for`, `while`, `switch`, `try`
+- **JSON / YAML / TOML**: objects, arrays, mappings, tables
+- **Markdown**: header sections and fenced code blocks
 
 A fold indicator line shows the first line of the folded region with a `▶ N lines` badge.
 The cursor is automatically snapped past folds when moving down, and to the fold-start when moving up.
+
+### Folding repeated structure (`zt` / `zT`)
+
+`zt` is for files that are the same shape over and over — a JSON log, a big
+config, an array of records. Each foldable region is identified by three things:
+its syntactic **kind** (`object`, `function_item`, `section`, …), its **nesting
+depth**, and the **key it is the value of** where the language has keys (JSON
+pairs, YAML mappings). `zt` folds every region sharing all three with the one at
+the cursor, and reports the count.
+
+Given a log of records like this:
+
+```json
+{ "entries": [
+    { "ts": 1, "payload": { … }, "metadata": { … } },
+    { "ts": 2, "payload": { … }, "metadata": { … } } ] }
+```
+
+- cursor anywhere inside the **first record** → `zt` collapses **every record**
+  to one line each, giving you the shape of the whole file
+- cursor inside a **`payload`** block → `zt` collapses **every `payload`** and
+  leaves the `metadata` blocks beside them open, because the owning key is part
+  of the identity
+- cursor on an `##` heading in Markdown → `zt` folds every sibling `##` section
+  and leaves the `###`s nested inside them alone
+
+`zT` reverses it. The which-key popup names the block you are on (`fold every
+"payload" block`), so you can see what `zt` will do before pressing it.
+
+**What `zt` cannot do:** it folds *regions*, and a scalar field like
+`"timestamp": "2024-01-01"` is a single line, so there is no region to collapse.
+Hiding individual scalar fields across every record is a different mechanism
+(dropping rows from the display rather than collapsing a range) and is not
+implemented.
 
 ## Notebook Cell Folding
 
@@ -242,7 +284,7 @@ The cursor is automatically snapped past folds when moving down, and to the fold
 |---------|-------------|-------|-------------|
 | `notebook-toggle-fold-cell` | — | `:fold-cell` | Toggle collapse of the focused cell |
 | `notebook-toggle-all-folds` | — | `:fold-all-cells` | Toggle all cells: fold all if any are expanded, else unfold all |
-| `notebook-toggle-output-expand` | `zo` | `:expand-output`, `:output-expand` | Show the focused cell's output in full, ignoring the `max_output_lines` / `max_traceback_lines` caps |
+| `notebook-toggle-output-expand` | `zO` | `:expand-output`, `:output-expand` | Show the focused cell's output in full, ignoring the `max_output_lines` / `max_traceback_lines` caps |
 
 A folded cell shows: first line of source + `▶ N lines · M outputs` indicator.
 Entering Insert (`i`) on a folded cell auto-unfolds it.
@@ -341,9 +383,10 @@ a notebook is open (they shadow the normal bindings):
   (column preserved). `k` is the exact inverse, so vertical motion flows
   continuously through the whole notebook.
 - Long output is capped at `notebook.max_output_lines` (tracebacks at
-  `max_traceback_lines`) and ends in a `... (N more lines — zo to expand)` row.
-  `zo` (or `:expand-output`) lifts the cap for that cell so `j`/`k` scroll through
-  all of it; `zo` again re-collapses it.
+  `max_traceback_lines`) and ends in a `... (N more lines — zO to expand)` row.
+  `zO` (or `:expand-output`) lifts the cap for that cell so `j`/`k` scroll through
+  all of it; `zO` again re-collapses it. (Capitalised because `zo` is fold-open
+  in every view, including inside a notebook cell.)
 - `Ctrl+E` executes the focused cell (works on any terminal). `Shift+Enter` /
   `Ctrl+Enter` also execute it, but only on terminals that support keyboard-enhancement
   reporting (kitty protocol) — otherwise a modified Enter is indistinguishable from a

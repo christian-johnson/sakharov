@@ -35,8 +35,8 @@ pub(super) fn normalize_cursor_folds_directional(app: &mut App, pre_exec_line: u
         // Find the fold that contains this hidden line.
         let snap_line = app.fold.folded.iter()
             .filter_map(|&start| app.fold.range_starting_at(start))
-            .find(|&(s, e)| line_idx > s && line_idx <= e)
-            .map(|(_, e)| (e + 1).min(rope.len_lines().saturating_sub(1)))
+            .find(|r| line_idx > r.start && line_idx <= r.end)
+            .map(|r| (r.end + 1).min(rope.len_lines().saturating_sub(1)))
             .unwrap_or_else(|| app.fold.normalize_line(line_idx));
         let new_pos = rope.line_to_char(snap_line);
         app.selection = Selection::point(new_pos);

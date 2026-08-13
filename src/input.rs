@@ -745,17 +745,36 @@ fn sync_notebook_cell(app: &mut App, notify_lsp: bool) {
 // Fold mode (after 'z')
 // ---------------------------------------------------------------------------
 
+/// The single dispatch table for the `z` (fold) sub-mode.
+///
+/// `exec::fold_hints` generates the which-key popup from this, so an advertised
+/// key and the key that actually fires can't drift apart — which is what went
+/// wrong before: `zo`/`zc` were documented as fold open/close but ran the
+/// notebook output-expand command in every view.
+pub fn fold_command(c: char) -> Option<Command> {
+    Some(match c {
+        'a' => Command::FoldToggle,
+        'c' => Command::FoldClose,
+        'o' => Command::FoldOpen,
+        'A' => Command::FoldToggleAll,
+        'M' => Command::FoldCloseAll,
+        'R' => Command::FoldOpenAll,
+        't' => Command::FoldCloseType,
+        'T' => Command::FoldOpenType,
+        // Capitalised: `zo` is fold-open in every view, so the notebook's
+        // output-expand needed a key of its own rather than shadowing it.
+        'O' => Command::NotebookToggleOutputExpand,
+        _ => return None,
+    })
+}
+
 fn handle_fold(app: &mut App, key: KeyEvent) {
     app.mode = Mode::Normal;
     app.popup = None;
-    match key.code {
-        KeyCode::Char('a') => exec::execute(app, &Command::FoldToggle),
-        KeyCode::Char('A') => exec::execute(app, &Command::FoldToggleAll),
-        KeyCode::Char('o') | KeyCode::Char('c') => {
-            exec::execute(app, &Command::NotebookToggleOutputExpand)
+    if let KeyCode::Char(c) = key.code {
+        if let Some(cmd) = fold_command(c) {
+            exec::execute(app, &cmd);
         }
-        KeyCode::Esc => {}
-        _ => {}
     }
 }
 

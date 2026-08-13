@@ -258,7 +258,7 @@ pub fn fold_ranges(rope: &Rope) -> Vec<FoldRange> {
             if is_fence(trimmed) {
                 if let Some(s) = fence_start.take() {
                     if line_idx > s {
-                        ranges.push((s, line_idx));
+                        ranges.push(FoldRange::new(s, line_idx, "fence"));
                     }
                 }
                 in_fence = false;
@@ -285,12 +285,16 @@ pub fn fold_ranges(rope: &Rope) -> Vec<FoldRange> {
             }
         }
         if end > line {
-            ranges.push((line, end));
+            ranges.push(FoldRange::new(line, end, "section"));
         }
     }
 
-    ranges.sort_by_key(|&(s, _)| s);
-    ranges.dedup_by_key(|&mut (s, _)| s);
+    ranges.sort_by_key(|r| r.start);
+    ranges.dedup_by_key(|r| r.start);
+    // Section depth comes from containment like every other language's, so `zt`
+    // on an `##` heading folds the sibling `##` sections and not the `###`s
+    // nested inside them.
+    crate::fold::assign_depths(&mut ranges);
     ranges
 }
 
@@ -331,12 +335,19 @@ code
 ";
         let rope = Rope::from_str(src);
         let ranges = fold_ranges(&rope);
+        let span = |start, end| {
+            ranges
+                .iter()
+                .find(|r| r.start == start && r.end == end)
+                .unwrap_or_else(|| panic!("no ({start}, {end}) in {ranges:?}"))
+        };
         // # A (line 0) extends to just before # C (line 4) → (0, 3)
-        assert!(ranges.contains(&(0, 3)), "ranges = {ranges:?}");
-        // ## B (line 2) extends to just before # C → (2, 3)
-        assert!(ranges.contains(&(2, 3)), "ranges = {ranges:?}");
+        assert_eq!(span(0, 3).kind, "section");
+        assert_eq!(span(0, 3).depth, 0);
+        // ## B (line 2) extends to just before # C → (2, 3), nested in # A
+        assert_eq!(span(2, 3).depth, 1, "a subsection sits one level in");
         // fenced block spans its two fence lines (5, 7)
-        assert!(ranges.contains(&(5, 7)), "ranges = {ranges:?}");
+        assert_eq!(span(5, 7).kind, "fence");
     }
 
     #[test]

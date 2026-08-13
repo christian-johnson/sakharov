@@ -1121,7 +1121,7 @@ pub(crate) fn output_rows_content(
         }
         if lines.len() > max {
             let extra = lines.len() - max;
-            rows.push(format!("... ({extra} more lines — zo to expand)"));
+            rows.push(format!("... ({extra} more lines — zO to expand)"));
         }
     }
 
@@ -1568,7 +1568,7 @@ fn draw_truncation_row(
         return;
     }
     let extra = total - max;
-    let text = format!("... ({extra} more lines — zo to expand)");
+    let text = format!("... ({extra} more lines — zO to expand)");
     draw_output_row(frame, area, current_row, octx, &text, Style::default().fg(crate::theme::active().dim));
 }
 

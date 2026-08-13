@@ -204,8 +204,14 @@ commands! {
         // --- Code folding ---
         FoldToggle => "fold-toggle", aliases: ["za"], palette: "Toggle fold at cursor  [za]";
         FoldToggleAll => "fold-toggle-all", aliases: ["zA"], palette: "Toggle all folds  [zA]";
+        FoldClose => "fold-close", aliases: ["zc"], palette: "Close the fold at the cursor  [zc]";
+        FoldOpen => "fold-open", aliases: ["zo"], palette: "Open the fold at the cursor  [zo]";
+        FoldCloseAll => "fold-close-all", aliases: ["zM"], palette: "Close every fold  [zM]";
+        FoldOpenAll => "fold-open-all", aliases: ["zR"], palette: "Open every fold  [zR]";
+        FoldCloseType => "fold-close-type", aliases: ["zt", "fold-type"], palette: "Fold every block like this one — same kind, depth and key  [zt]";
+        FoldOpenType => "fold-open-type", aliases: ["zT", "unfold-type"], palette: "Unfold every block like this one  [zT]";
         NotebookToggleFoldCell => "notebook-toggle-fold-cell", aliases: ["fold-cell"], palette: "Toggle cell fold  [:fold-cell]";
-        NotebookToggleOutputExpand => "notebook-toggle-output-expand", aliases: ["expand-output", "output-expand"], palette: "Show full cell output (no line cap)  [zo, :expand-output]";
+        NotebookToggleOutputExpand => "notebook-toggle-output-expand", aliases: ["expand-output", "output-expand"], palette: "Show full cell output (no line cap)  [zO, :expand-output]";
         NotebookToggleAllFolds => "notebook-toggle-all-folds", aliases: ["fold-all-cells"], palette: "Toggle all cell folds  [:fold-all-cells]";
 
         // --- Tabular data view ---
