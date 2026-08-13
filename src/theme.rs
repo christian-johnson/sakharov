@@ -258,6 +258,10 @@ pub struct TableSpec {
     /// The `table.null_display` stand-in for an empty cell. Falls back to `ui.dim`.
     #[serde(default)]
     pub null: Option<String>,
+    /// The distribution sparkline under a numeric column's name.
+    /// Falls back to `table.numeric`.
+    #[serde(default)]
+    pub sparkline: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +326,8 @@ pub struct Theme {
     pub table_truncation: Color,
     pub table_numeric: Color,
     pub table_null: Color,
+    /// Distribution sparkline in the second header row.
+    pub table_sparkline: Color,
     pub modes: ModeColors,
     /// Style per highlight index (see `highlight::HIGHLIGHT_NAMES` + `MD_*`).
     syntax: Vec<Style>,
@@ -588,6 +594,8 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     let table_truncation = pick(&[c(&spec.table.truncation)], dim);
     let table_numeric = pick(&[c(&spec.table.numeric)], info);
     let table_null = pick(&[c(&spec.table.null)], dim);
+    // Follows the numeric colour: the sparkline *is* the numeric column's shape.
+    let table_sparkline = pick(&[c(&spec.table.sparkline)], table_numeric);
 
     // --- Syntax palette ---
     let keyword = c(&spec.syntax.keyword);
@@ -710,6 +718,7 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         table_truncation,
         table_numeric,
         table_null,
+        table_sparkline,
         modes,
         syntax,
     }

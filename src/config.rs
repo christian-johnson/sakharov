@@ -440,9 +440,22 @@ pub struct TableConfig {
     /// Text drawn in place of an empty cell.
     #[serde(default = "default_table_null_display")]
     pub null_display: String,
+    /// Rows scanned when summarising a column (the header sparkline and the
+    /// `S` panel).  A summary is a full column scan, and the sparkline needs one
+    /// per visible column, so this bounds the cost on a very large table; a
+    /// summary that read fewer rows than the table has says so.
+    #[serde(default = "default_table_summary_max_rows")]
+    pub summary_max_rows: usize,
+    /// Draw a second header row: a block-glyph sparkline of each numeric
+    /// column's distribution.  Costs one data row of screen height, and is what
+    /// makes a skew or an outlier visible without opening a summary.
+    #[serde(default = "default_table_column_sparkline")]
+    pub column_sparkline: bool,
 }
 
 fn default_table_auto_open() -> bool { true }
+fn default_table_column_sparkline() -> bool { true }
+fn default_table_summary_max_rows() -> usize { 200_000 }
 fn default_table_max_col_width() -> usize { 32 }
 fn default_table_min_col_width() -> usize { 3 }
 fn default_table_row_numbers() -> bool { true }
@@ -460,6 +473,8 @@ impl Default for TableConfig {
             max_rows: default_table_max_rows(),
             sample_rows: default_table_sample_rows(),
             null_display: default_table_null_display(),
+            column_sparkline: default_table_column_sparkline(),
+            summary_max_rows: default_table_summary_max_rows(),
         }
     }
 }

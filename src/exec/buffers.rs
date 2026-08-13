@@ -131,7 +131,12 @@ pub fn open_path(app: &mut App, path: &std::path::Path) {
     // the file that was just opened until the next keypress.
     app.show_splash = false;
 
-    if is_special_path(path) {
+    if app.table_buffers.contains_key(&SourceId::of(path)) {
+        // A derived table (a frequency table, later a query result) is virtual,
+        // so it would otherwise fall into the special-buffer branch below and
+        // open as an empty text buffer named after itself.
+        super::table::open_as_table(app, path);
+    } else if is_special_path(path) {
         switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
     } else if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
         open_as_notebook(app, path);

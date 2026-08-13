@@ -13,7 +13,7 @@ use crate::{
     app::{App, View},
     command::Command,
     source::SourceId,
-    table::{self, csv::CsvSource, layout, TableSource},
+    table::{self, csv::CsvSource, layout, summary::{self, ColumnSummary}, TableSource},
 };
 
 /// An open tabular data source plus where the cursor is in it.
@@ -26,9 +26,68 @@ pub struct Session {
     /// It is the stash key, the buffer-list entry, and the status-line name —
     /// `app.buffer` has no path while the grid is open.
     pub id: SourceId,
+    /// Per-column statistics, computed once on demand and kept.
+    ///
+    /// Cached because a summary is a full scan of the column: the header
+    /// sparkline needs one per visible column *per frame*, which is only
+    /// affordable if the answer is remembered.  Keyed by column index; keyed
+    /// alongside `summaries_rows` so a source that has since loaded more rows
+    /// recomputes instead of reporting stale statistics.
+    summaries: std::collections::HashMap<usize, ColumnSummary>,
+    summaries_rows: usize,
 }
 
 impl Session {
+    /// A session over `source`, identified by `id`.
+    pub fn new(id: SourceId, source: Box<dyn TableSource>) -> Self {
+        Self {
+            source,
+            state: table::TableState::new(),
+            id,
+            summaries: std::collections::HashMap::new(),
+            summaries_rows: 0,
+        }
+    }
+
+    /// The cached summary for `col`, if one has been computed.
+    ///
+    /// Read-only, so the renderer can call it: a column whose summary hasn't
+    /// been computed yet simply draws nothing this frame.  [`ensure_summaries`]
+    /// is what fills the cache, from the exec layer where mutation belongs.
+    ///
+    /// [`ensure_summaries`]: Self::ensure_summaries
+    pub fn summary(&self, col: usize) -> Option<&ColumnSummary> {
+        (self.summaries_rows == self.source.loaded_rows())
+            .then(|| self.summaries.get(&col))
+            .flatten()
+    }
+
+    /// [`ensure_summaries`] for the renderer's tests, which draw a session
+    /// directly rather than going through a frame of the exec layer.
+    ///
+    /// [`ensure_summaries`]: Self::ensure_summaries
+    #[cfg(test)]
+    pub(crate) fn ensure_summaries_for_test(&mut self, cols: impl IntoIterator<Item = usize>) {
+        self.ensure_summaries(cols, usize::MAX);
+    }
+
+    /// Compute and cache summaries for `cols`, skipping any already cached.
+    fn ensure_summaries(&mut self, cols: impl IntoIterator<Item = usize>, max_rows: usize) {
+        // A source that has loaded more rows since invalidates every summary:
+        // statistics over half a file are not statistics over the file.
+        let rows = self.source.loaded_rows();
+        if self.summaries_rows != rows {
+            self.summaries.clear();
+            self.summaries_rows = rows;
+        }
+        for col in cols {
+            if !self.summaries.contains_key(&col) {
+                self.summaries
+                    .insert(col, summary::summarize(self.source.as_ref(), col, max_rows));
+            }
+        }
+    }
+
     /// Name shown in the status line.
     pub fn display_name(&self) -> String {
         self.id.label().to_string()
@@ -61,6 +120,181 @@ impl Session {
             .map(|c| self.source.cell(row, c).unwrap_or(""))
             .collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Column intelligence
+// ---------------------------------------------------------------------------
+
+/// `S` / `:column-summary` — statistics for the cursor's column, in a float.
+///
+/// The question a new dataset actually raises: how much is missing, what range
+/// does it cover, is it skewed, which categories dominate.
+pub(super) fn column_summary(app: &mut App) {
+    let Some(session) = app.table.as_mut() else {
+        app.messages.show("No table open");
+        return;
+    };
+    let col = session.state.cursor_col;
+    if session.source.columns().get(col).is_none() {
+        app.messages.show("No column here");
+        return;
+    }
+    let max_rows = app.config.table.summary_max_rows;
+    let Some(session) = app.table.as_mut() else { return };
+    session.ensure_summaries([col], max_rows);
+    let session = app.table.as_ref().expect("still open");
+    let Some(stats) = session.summary(col) else { return };
+    let column = &session.source.columns()[col];
+    let title = format!(" {} ", column.name);
+    let body = summary_text(column, stats, session.source.row_count());
+    app.popup = Some(crate::popup::Popup::documentation(&title, &body));
+}
+
+/// Lay a summary out as text for the float.
+///
+/// Deliberately labelled with the row count it *covered*: for a source that
+/// holds only a window of its rows, statistics over the loaded rows are not
+/// statistics over the dataset, and quietly presenting them as such would be the
+/// worst kind of wrong.
+fn summary_text(
+    column: &table::Column,
+    stats: &ColumnSummary,
+    total: Option<usize>,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let kind = match column.ty {
+        table::ColumnType::Int => "integer",
+        table::ColumnType::Float => "number",
+        table::ColumnType::Bool => "boolean",
+        table::ColumnType::Text => "text",
+    };
+    let _ = writeln!(out, "{kind} · {} rows scanned", stats.rows);
+    // Never let a partial scan read as the whole dataset: the row count it
+    // actually covered is stated, and the shortfall called out.
+    if total.is_some_and(|t| t > stats.rows) {
+        let _ = writeln!(out, "(of {} — see table.summary_max_rows)", total.unwrap_or(0));
+    }
+    out.push('\n');
+
+    let pct = |n: usize| -> String {
+        if stats.rows == 0 {
+            return String::new();
+        }
+        format!("  ({:.1}%)", n as f64 * 100.0 / stats.rows as f64)
+    };
+    let _ = writeln!(out, "  values    {}", stats.present());
+    let _ = writeln!(out, "  missing   {}{}", stats.nulls, pct(stats.nulls));
+    let _ = writeln!(out, "  distinct  {}", stats.distinct);
+
+    if let (Some(q), Some(mean)) = (stats.quantiles, stats.mean) {
+        out.push('\n');
+        let _ = writeln!(out, "  min       {}", summary::fmt_num(q[0]));
+        let _ = writeln!(out, "  p25       {}", summary::fmt_num(q[1]));
+        let _ = writeln!(out, "  median    {}", summary::fmt_num(q[2]));
+        let _ = writeln!(out, "  p75       {}", summary::fmt_num(q[3]));
+        let _ = writeln!(out, "  max       {}", summary::fmt_num(q[4]));
+        let _ = writeln!(out, "  mean      {}", summary::fmt_num(mean));
+    }
+    if stats.has_distribution() {
+        out.push('\n');
+        let _ = writeln!(out, "  {}", summary::sparkline(&stats.hist, summary::HIST_BINS));
+    }
+    if !stats.top.is_empty() {
+        out.push('\n');
+        let _ = writeln!(out, "  most common");
+        let width = stats.top.iter().map(|(v, _)| v.chars().count().min(24)).max().unwrap_or(0);
+        for (value, count) in &stats.top {
+            let shown: String = value.chars().take(24).collect();
+            let _ = writeln!(out, "    {shown:<width$}  {count}");
+        }
+        if stats.distinct > stats.top.len() {
+            let _ = writeln!(
+                out,
+                "    … {} more (:column-frequency for all)",
+                stats.distinct - stats.top.len()
+            );
+        }
+    }
+    out
+}
+
+/// `F` / `:column-frequency` — open the cursor column's value counts as a grid
+/// of its own.
+///
+/// A derived table: the first source in the editor that is computed rather than
+/// read, and the rehearsal for the groupby and pivot that come later.  It is a
+/// grid rather than a float because it is data — sortable, scrollable, and its
+/// own cells worth reading in full.
+pub(super) fn column_frequency(app: &mut App) {
+    let Some(session) = app.table.as_ref() else {
+        app.messages.show("No table open");
+        return;
+    };
+    let col = session.state.cursor_col;
+    let Some(column) = session.source.columns().get(col) else {
+        app.messages.show("No column here");
+        return;
+    };
+    let name = column.name.clone();
+    let scan_cap = app.config.table.summary_max_rows;
+    let counts = summary::frequency(session.source.as_ref(), col, scan_cap);
+    if counts.is_empty() {
+        app.messages.show("Nothing to count — the column is empty");
+        return;
+    }
+
+    let scanned = session.source.loaded_rows().min(scan_cap);
+    let rows: Vec<Vec<String>> = counts
+        .iter()
+        .map(|(value, count)| {
+            let share = if scanned == 0 {
+                String::new()
+            } else {
+                format!("{:.2}", *count as f64 * 100.0 / scanned as f64)
+            };
+            vec![value.clone(), count.to_string(), share]
+        })
+        .collect();
+    let columns = derived_columns(
+        &[
+            (&name, table::ColumnType::Text),
+            ("count", table::ColumnType::Int),
+            ("percent", table::ColumnType::Float),
+        ],
+        &rows,
+    );
+    let distinct = rows.len();
+    let source = table::MemSource::with_columns(
+        columns,
+        rows,
+        format!("{distinct} distinct × 3 cols"),
+    );
+
+    let id = SourceId::virtual_named(&format!("freq {name}"));
+    open_derived(app, id, Box::new(source));
+    app.messages.show(format!(
+        "{distinct} distinct value(s) in {name} — :bd or H to go back"
+    ));
+}
+
+/// Columns for a derived table: declared types, widths measured from the rows.
+fn derived_columns(spec: &[(&str, table::ColumnType)], rows: &[Vec<String>]) -> Vec<table::Column> {
+    spec.iter()
+        .enumerate()
+        .map(|(i, (name, ty))| table::Column {
+            name: (*name).to_string(),
+            ty: *ty,
+            width_hint: rows
+                .iter()
+                .filter_map(|r| r.get(i))
+                .map(|v| layout::display_width(&layout::sanitize(v)))
+                .chain(std::iter::once(layout::display_width(name)))
+                .max()
+                .unwrap_or(0),
+        })
+        .collect()
 }
 
 /// An in-flight background load, polled once per frame by the run loop.
@@ -97,6 +331,40 @@ pub fn is_table_path(path: &Path) -> bool {
 /// lands the editor shows an empty buffer with a "Loading…" message and the
 /// status spinner running.
 pub fn open_as_table(app: &mut App, path: &Path) {
+    enter_table_view(app);
+    super::register_buffer(&mut app.open_buffers, path);
+
+    // A session stashed on the way out comes back whole — same parse, same
+    // cursor cell.  This is what makes `Enter` into a cell buffer and back a
+    // round trip rather than a reload.
+    if let Some(session) = app.table_buffers.remove(&SourceId::of(path)) {
+        app.table = Some(session);
+        return;
+    }
+    if super::is_special_path(path) {
+        // A virtual table with no stash behind it: there is no file to load, so
+        // say so rather than trying to parse its name as CSV.
+        app.messages
+            .show(format!("{} is no longer open", path.to_string_lossy()));
+        return;
+    }
+    start_load(app, path);
+}
+
+/// Show `source` in the grid under the virtual identity `id` — a table that was
+/// *computed* rather than read from a file (a frequency table today; a query
+/// result or a groupby later).
+pub(super) fn open_derived(app: &mut App, id: SourceId, source: Box<dyn TableSource>) {
+    debug_assert!(id.is_virtual(), "a derived table has no file behind it");
+    enter_table_view(app);
+    app.open_buffers.retain(|stored| *stored != id);
+    app.open_buffers.push(id.clone());
+    app.table = Some(Session::new(id, source));
+}
+
+/// Hand the screen to the table view: stash whatever was open, and detach
+/// `app.buffer` so nothing in the editor holds a writable handle on the data.
+fn enter_table_view(app: &mut App) {
     super::save_current_special_buffer(app);
     super::teardown_current_buffer(app);
     app.table = None;
@@ -115,17 +383,6 @@ pub fn open_as_table(app: &mut App, path: &Path) {
     app.git_diff.clear();
     super::recompute_highlights(app);
     super::rebuild_diag_cache(app);
-
-    super::register_buffer(&mut app.open_buffers, path);
-
-    // A session stashed on the way out comes back whole — same parse, same
-    // cursor cell.  This is what makes `Enter` into a cell buffer and back a
-    // round trip rather than a reload.
-    if let Some(session) = app.table_buffers.remove(&SourceId::of(path)) {
-        app.table = Some(session);
-        return;
-    }
-    start_load(app, path);
 }
 
 /// `:csv` — open the current buffer's file in the table view.
@@ -391,11 +648,7 @@ pub fn poll_table_load(app: &mut App) -> bool {
                 .and_then(|n| n.to_str())
                 .unwrap_or("table")
                 .to_string();
-            app.table = Some(Session {
-                source: Box::new(source),
-                state: table::TableState::new(),
-                id: SourceId::of(&path),
-            });
+            app.table = Some(Session::new(SourceId::of(&path), Box::new(source)));
             if cols == 0 {
                 app.messages
                     .show(format!("{name} has no columns — nothing to show"));
@@ -481,6 +734,14 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
         }
         Command::TableYankCell => {
             yank_cell(app);
+            return true;
+        }
+        Command::TableColumnSummary => {
+            column_summary(app);
+            return true;
+        }
+        Command::TableColumnFrequency => {
+            column_frequency(app);
             return true;
         }
         Command::TableYankRow => {
@@ -611,9 +872,10 @@ pub(super) fn refusal(cmd: &Command) -> Option<Refusal> {
     })
 }
 
-/// Data rows that fit on screen (the header takes one row of the grid area).
+/// Data rows that fit on screen (the header takes one or two rows of the grid
+/// area — `layout::header_rows` is the single definition of how many).
 fn visible_rows(app: &App) -> usize {
-    layout::visible_rows(app.viewport_height as u16)
+    layout::visible_rows(app.viewport_height as u16, &app.config.table)
 }
 
 /// Keep the cursor cell on screen.  The column half delegates to
@@ -663,6 +925,24 @@ pub(super) fn update_scroll(app: &mut App) {
     let first = session.state.scroll_row;
     let last = (first + rows_visible.max(1)).min(total_rows);
     session.source.ensure_rows(first..last);
+
+    // Summaries for the columns about to be drawn.  Here rather than in the
+    // renderer because each one is a full scan of its column: the work has to
+    // happen where it can be cached, and at most a screenful of columns is ever
+    // new on a given frame.
+    if cfg.column_sparkline {
+        let visible: Vec<usize> = layout::compute(
+            session.source.as_ref(),
+            session.state.scroll_col,
+            width,
+            &cfg,
+        )
+        .columns
+        .iter()
+        .map(|v| v.idx)
+        .collect();
+        session.ensure_summaries(visible, cfg.summary_max_rows);
+    }
 }
 
 #[cfg(test)]
@@ -690,18 +970,156 @@ mod tests {
         // Pin the settings the geometry depends on — `Config::load()` picks up
         // the developer's own config file.
         app.config.editor.scroll_off = 2;
-        app.config.table = TableConfig::default();
-        app.table = Some(Session {
-            source: Box::new(source(rows, cols)),
-            state: table::TableState::new(),
-            id: SourceId::of(Path::new("t.csv")),
-        });
+        app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
+        app.table = Some(Session::new(
+            SourceId::of(Path::new("t.csv")),
+            Box::new(source(rows, cols)),
+        ));
         app
     }
 
     fn cursor(app: &App) -> (usize, usize) {
         let s = &app.table.as_ref().unwrap().state;
         (s.cursor_row, s.cursor_col)
+    }
+
+    /// An app in the table view over `text`, parsed as CSV.
+    fn app_with_csv(text: &str) -> App {
+        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        app.viewport_height = 11;
+        app.viewport_width = 80;
+        app.config.editor.scroll_off = 2;
+        app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
+        let src = CsvSource::from_reader(text.as_bytes(), b',', &app.config.table).unwrap();
+        app.table = Some(Session::new(SourceId::of(Path::new("t.csv")), Box::new(src)));
+        app
+    }
+
+    fn popup_text(app: &App) -> String {
+        match app.popup.as_ref().map(|p| &p.content) {
+            Some(crate::popup::PopupContent::Text(state)) => state.lines.join("\n"),
+            _ => panic!("expected a text float"),
+        }
+    }
+
+    #[test]
+    fn column_summary_describes_a_numeric_column() {
+        let mut app = app_with_csv("city,price\noslo,10\nlima,20\nbern,30\n");
+        handle(&mut app, &Command::MoveRight); // onto `price`
+        handle(&mut app, &Command::TableColumnSummary);
+
+        let text = popup_text(&app);
+        assert!(text.contains("integer"), "got {text}");
+        assert!(text.contains("min       10"), "got {text}");
+        assert!(text.contains("median    20"), "got {text}");
+        assert!(text.contains("max       30"), "got {text}");
+        assert!(text.contains("mean      20"), "got {text}");
+        assert!(text.contains("distinct  3"), "got {text}");
+        // A measurement column is summarised by its shape, not its top values.
+        assert!(!text.contains("most common"), "got {text}");
+    }
+
+    #[test]
+    fn column_summary_of_a_text_column_lists_its_common_values() {
+        let mut app = app_with_csv("city,n\noslo,1\noslo,2\nlima,3\n");
+        handle(&mut app, &Command::TableColumnSummary);
+
+        let text = popup_text(&app);
+        assert!(text.contains("text"), "got {text}");
+        assert!(text.contains("most common"), "got {text}");
+        assert!(text.contains("oslo"), "got {text}");
+        // No range statistics for a category column — a "median city" is not a
+        // thing, and printing one would be worse than printing nothing.
+        assert!(!text.contains("median"), "got {text}");
+    }
+
+    #[test]
+    fn column_summary_counts_missing_values_separately_from_zeros() {
+        // An empty *field* — a blank line would be skipped by the parser, and
+        // a missing value in real data is an empty field.
+        let mut app = app_with_csv("n,tag\n1,a\n,b\n3,c\n");
+        handle(&mut app, &Command::TableColumnSummary);
+        let text = popup_text(&app);
+        assert!(text.contains("missing   1"), "got {text}");
+        assert!(text.contains("values    2"), "got {text}");
+        // The blank row must not drag the mean down to 1.33.
+        assert!(text.contains("mean      2"), "got {text}");
+    }
+
+    #[test]
+    fn frequency_opens_the_value_counts_as_a_derived_grid() {
+        let mut app = app_with_csv("city,n\noslo,1\nlima,2\noslo,3\n");
+        handle(&mut app, &Command::TableColumnFrequency);
+
+        // Still the table view, now over a virtual source with no file behind it
+        // — so nothing in the editor can be pointed at a path to write.
+        assert_eq!(app.view(), View::Table);
+        let session = app.table.as_ref().expect("derived table open");
+        assert!(session.id.is_virtual());
+        assert!(session.path().is_none(), "a derived table has no file");
+        assert_eq!(session.display_name(), "*freq city*");
+
+        // value / count / percent, most frequent first.
+        let cols: Vec<&str> = session.source.columns().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(cols, vec!["city", "count", "percent"]);
+        assert_eq!(session.source.cell(0, 0), Some("oslo"));
+        assert_eq!(session.source.cell(0, 1), Some("2"));
+        assert_eq!(session.source.cell(1, 0), Some("lima"));
+        assert_eq!(session.source.loaded_rows(), 2);
+
+        // It joins the buffer list under its virtual id, and `open_path` routes
+        // back to the grid rather than opening a blank buffer named after it.
+        let id = session.id.clone();
+        assert!(app.open_buffers.contains(&id));
+        super::super::buffers::open_path(&mut app, Path::new("t.csv"));
+        assert!(app.table_buffers.contains_key(&id), "the derived table is stashed");
+        super::super::buffers::open_path(&mut app, &id.to_path());
+        assert_eq!(app.view(), View::Table);
+        assert_eq!(app.table.as_ref().unwrap().id, id, "came back to the same table");
+    }
+
+    #[test]
+    fn a_derived_table_has_no_text_to_fall_back_to() {
+        let mut app = app_with_csv("city\noslo\n");
+        handle(&mut app, &Command::TableColumnFrequency);
+        // `:table-close` means "edit this as text", which a computed table has
+        // none of — it must say so rather than strand an empty buffer.
+        handle(&mut app, &Command::TableClose);
+        assert!(app.table.is_none());
+        assert!(app.messages.log.iter().any(|m| m.contains("Closed")), "{:?}", app.messages.log);
+    }
+
+    #[test]
+    fn a_capped_summary_says_how_much_it_read() {
+        // A summary is a full column scan, so it is capped; overstating its
+        // reach would be the worst kind of wrong, so the panel names the number
+        // of rows it actually covered.
+        let text: String = std::iter::once("n".to_string())
+            .chain((0..50).map(|i| i.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = app_with_csv(&text);
+        app.config.table.summary_max_rows = 10;
+        handle(&mut app, &Command::TableColumnSummary);
+
+        let panel = popup_text(&app);
+        assert!(panel.contains("10 rows scanned"), "got {panel}");
+        assert!(panel.contains("of 50"), "got {panel}");
+        // Statistics reflect the scanned prefix, not the whole column.
+        assert!(panel.contains("max       9"), "got {panel}");
+    }
+
+    #[test]
+    fn summaries_are_computed_once_and_kept() {
+        let mut app = app_with_csv("n\n1\n2\n3\n");
+        let session = app.table.as_mut().unwrap();
+        assert!(session.summary(0).is_none(), "nothing cached yet");
+        session.ensure_summaries([0], usize::MAX);
+        assert_eq!(session.summary(0).unwrap().mean, Some(2.0));
+        // The renderer reads the cache every frame; it must not have to scan.
+        let before = session.summaries.len();
+        session.ensure_summaries([0], usize::MAX);
+        assert_eq!(session.summaries.len(), before);
     }
 
     /// End-to-end: a real file goes through the background load, the run loop's
@@ -715,7 +1133,7 @@ mod tests {
         std::fs::write(&path, "a,b\n1,x\n2,y\n").unwrap();
 
         let mut app = App::new(None, crate::config::Config::load()).expect("app");
-        app.config.table = TableConfig::default();
+        app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
         open_as_table(&mut app, &path);
 
         // The load is off-thread: the view is still Text and the buffer is
@@ -765,7 +1183,7 @@ mod tests {
         std::fs::write(&path, "a,b\n1,x\n").unwrap();
 
         let mut app = App::new(None, crate::config::Config::load()).expect("app");
-        app.config.table = TableConfig::default();
+        app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
         app.show_splash = true;
 
         crate::exec::open_path(&mut app, &path);
@@ -789,7 +1207,7 @@ mod tests {
     #[test]
     fn a_missing_file_reports_the_error_and_does_not_strand_the_view() {
         let mut app = App::new(None, crate::config::Config::load()).expect("app");
-        app.config.table = TableConfig::default();
+        app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
         let path = std::env::temp_dir().join("sv-table-does-not-exist.csv");
         let _ = std::fs::remove_file(&path);
         open_as_table(&mut app, &path);
@@ -957,14 +1375,13 @@ mod tests {
         app.viewport_width = 80;
         app.config.editor.scroll_off = 2;
         app.config.editor.word_wrap = false;
-        app.config.table = TableConfig::default();
-        app.table = Some(Session {
-            source: Box::new(
+        app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
+        app.table = Some(Session::new(
+            SourceId::of(Path::new("notes.csv")),
+            Box::new(
                 CsvSource::from_reader(text.as_bytes(), b',', &TableConfig::default()).unwrap(),
             ),
-            state: table::TableState::new(),
-            id: SourceId::of(Path::new("notes.csv")),
-        });
+        ));
         // Cursor on the long value.
         handle(&mut app, &Command::MoveDown);
         handle(&mut app, &Command::MoveRight);

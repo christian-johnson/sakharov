@@ -222,6 +222,8 @@ commands! {
         TableYankCell => "table-yank-cell", aliases: ["yank-cell"], palette: "Copy the cursor cell to the clipboard  [y]";
         TableYankRow => "table-yank-row", aliases: ["yank-row"], palette: "Copy the cursor row to the clipboard as TSV  [x]";
         TableCloseCell => "table-close-cell", aliases: ["cell-back", "back-to-table"], palette: "Return from a cell buffer to its table  [:bd]";
+        TableColumnSummary => "column-summary", aliases: ["summary", "describe"], palette: "Statistics for the cursor's column  [S]";
+        TableColumnFrequency => "column-frequency", aliases: ["frequency", "value-counts"], palette: "Count the cursor column's values as a new table  [F]";
 
         // --- Toggles / config ---
         ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";

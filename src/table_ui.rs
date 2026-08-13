@@ -20,7 +20,7 @@ use ratatui::{
 use crate::{
     config::TableConfig,
     exec::table::Session,
-    table::{layout, TableSource},
+    table::{layout, summary, TableSource},
     theme,
 };
 
@@ -40,13 +40,23 @@ pub fn render(frame: &mut Frame, area: Rect, session: &Session, cfg: &TableConfi
     }
 
     let geom = layout::compute(source, state.scroll_col, area.width, cfg);
-    let rows_visible = layout::visible_rows(area.height);
+    let header_rows = layout::header_rows(cfg);
+    let rows_visible = layout::visible_rows(area.height, cfg);
 
     // --- header ---
     frame.render_widget(
         Paragraph::new(header_line(&geom, source, area.width)),
-        Rect { height: layout::HEADER_ROWS.min(area.height), ..area },
+        Rect { height: layout::NAME_ROWS.min(area.height), ..area },
     );
+    // Second header row: each numeric column's distribution, drawn from the
+    // summary the session has already computed (never computed here — the
+    // renderer must not scan the data).
+    if cfg.column_sparkline && area.height > layout::NAME_ROWS {
+        frame.render_widget(
+            Paragraph::new(sparkline_line(&geom, session, area.width)),
+            Rect { y: area.y + layout::NAME_ROWS, height: 1, ..area },
+        );
+    }
 
     // --- data rows ---
     let total = source.loaded_rows();
@@ -55,7 +65,7 @@ pub fn render(frame: &mut Frame, area: Rect, session: &Session, cfg: &TableConfi
         if row >= total {
             break;
         }
-        let y = area.y + layout::HEADER_ROWS + screen_row as u16;
+        let y = area.y + header_rows + screen_row as u16;
         if y >= area.y + area.height {
             break;
         }
@@ -89,6 +99,35 @@ fn header_line<'a>(geom: &layout::Layout, source: &'a dyn TableSource, width: u1
         spans.push(Span::styled(" ".repeat(layout::COL_GAP as usize), style));
     }
     pad_to_width(&mut spans, width, style);
+    Line::from(spans)
+}
+
+/// The distribution row under the column names.
+///
+/// Only numeric columns have anything to draw; a text column's slot is blank
+/// rather than filled with something meaningless (the order of category counts
+/// is arbitrary, so a "distribution" of them would be a shape the data doesn't
+/// have).  A column whose summary hasn't been computed yet is also blank — it
+/// arrives on the next frame.
+fn sparkline_line<'a>(geom: &layout::Layout, session: &'a Session, width: u16) -> Line<'a> {
+    let th = theme::active();
+    let bg = Style::default().bg(th.table_header_bg);
+    let bar = bg.fg(th.table_sparkline);
+
+    let mut spans = vec![Span::styled(" ".repeat(geom.gutter as usize), bg)];
+    for vis in &geom.columns {
+        let glyphs = session
+            .summary(vis.idx)
+            .map(|s| summary::sparkline(&s.hist, vis.width as usize))
+            .unwrap_or_default();
+        let pad = (vis.width as usize).saturating_sub(layout::display_width(&glyphs));
+        spans.push(Span::styled(glyphs, bar));
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), bg));
+        }
+        spans.push(Span::styled(" ".repeat(layout::COL_GAP as usize), bg));
+    }
+    pad_to_width(&mut spans, width, bg);
     Line::from(spans)
 }
 
@@ -218,7 +257,6 @@ fn pad_to_width(spans: &mut Vec<Span<'static>>, width: u16, style: Style) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::table::TableState;
     use ratatui::{backend::TestBackend, Terminal};
 
     fn session(text: &str) -> Session {
@@ -228,11 +266,7 @@ mod tests {
             &TableConfig::default(),
         )
         .unwrap();
-        Session {
-            source: Box::new(src),
-            state: TableState::new(),
-            id: crate::source::SourceId::of(std::path::Path::new("t.csv")),
-        }
+        Session::new(crate::source::SourceId::of(std::path::Path::new("t.csv")), Box::new(src))
     }
 
     /// Render into a fixed-size test backend and return the screen as lines.
@@ -253,11 +287,15 @@ mod tests {
             .collect()
     }
 
+    /// The default config with the distribution row **off**: these tests are
+    /// about where the grid draws its cells, and the sparkline row is covered
+    /// separately (`the_sparkline_row_sits_under_the_names_and_costs_a_row`).
     fn cfg() -> TableConfig {
         TableConfig {
             row_numbers: true,
             min_col_width: 3,
             max_col_width: 10,
+            column_sparkline: false,
             ..Default::default()
         }
     }
@@ -330,6 +368,44 @@ mod tests {
         let s = session("");
         let lines = draw(&s, &cfg(), 40, 3);
         assert!(lines[0].contains("no columns"), "got {:?}", lines[0]);
+    }
+
+    #[test]
+    fn the_sparkline_row_sits_under_the_names_and_costs_a_row() {
+        let s = session("city,n\noslo,1\nlima,5\nbern,9\n");
+        let on = TableConfig { column_sparkline: true, ..cfg() };
+        // The summary cache is filled by the exec layer, not the renderer.
+        let mut s = s;
+        s.ensure_summaries_for_test([0, 1]);
+
+        let lines = draw(&s, &on, 30, 6);
+        assert!(lines[0].contains("city"), "names stay on the first row: {:?}", lines[0]);
+        // Second row: block glyphs for the numeric column only. A text column
+        // has no distribution, so its slot is blank rather than misleading.
+        let bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        assert!(
+            lines[1].chars().any(|c| bars.contains(&c)),
+            "expected distribution glyphs, got {:?}",
+            lines[1],
+        );
+        assert!(!lines[1].contains("oslo"), "data must not start here: {:?}", lines[1]);
+        // Data begins one row lower than it would without the sparkline.
+        assert!(lines[2].starts_with("1 oslo"), "got {:?}", lines[2]);
+
+        // ...and with it off, the same table draws data immediately under the names.
+        let lines = draw(&s, &cfg(), 30, 6);
+        assert!(lines[1].starts_with("1 oslo"), "got {:?}", lines[1]);
+    }
+
+    #[test]
+    fn a_column_without_a_computed_summary_draws_a_blank_slot() {
+        // The renderer never scans the data: a summary that hasn't been computed
+        // yet is simply absent this frame, and must not panic or fabricate one.
+        let s = session("n\n1\n2\n");
+        let on = TableConfig { column_sparkline: true, ..cfg() };
+        let lines = draw(&s, &on, 20, 5);
+        assert_eq!(lines[1], "", "no summary cached, so nothing to draw");
+        assert!(lines[2].starts_with("1"), "data still begins after the header");
     }
 
     #[test]

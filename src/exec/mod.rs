@@ -1104,7 +1104,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::TableOpenCell
         | Command::TablePeekCell
         | Command::TableYankCell
-        | Command::TableYankRow => {
+        | Command::TableYankRow
+        | Command::TableColumnSummary
+        | Command::TableColumnFrequency => {
             app.messages.show("No table open");
             return;
         }
@@ -2181,8 +2183,9 @@ mod tests {
     fn goto_hints_only_advertise_real_bindings() {
         let mut app = App::new(None, Config::load()).unwrap();
         for hints in [goto_hints(&app), {
-            app.table = Some(crate::exec::table::Session {
-                source: Box::new(
+            app.table = Some(crate::exec::table::Session::new(
+                crate::source::SourceId::of(std::path::Path::new("t.csv")),
+                Box::new(
                     crate::table::csv::CsvSource::from_reader(
                         "a,b\n1,2\n".as_bytes(),
                         b',',
@@ -2190,9 +2193,7 @@ mod tests {
                     )
                     .unwrap(),
                 ),
-                state: crate::table::TableState::new(),
-                id: crate::source::SourceId::of(std::path::Path::new("t.csv")),
-            });
+            ));
             goto_hints(&app)
         }] {
             assert!(!hints.is_empty());
@@ -2211,8 +2212,9 @@ mod tests {
     #[test]
     fn the_table_views_goto_hints_include_the_cell_peek() {
         let mut app = App::new(None, Config::load()).unwrap();
-        app.table = Some(crate::exec::table::Session {
-            source: Box::new(
+        app.table = Some(crate::exec::table::Session::new(
+            crate::source::SourceId::of(std::path::Path::new("t.csv")),
+            Box::new(
                 crate::table::csv::CsvSource::from_reader(
                     "a,b\n1,2\n".as_bytes(),
                     b',',
@@ -2220,9 +2222,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            state: crate::table::TableState::new(),
-            id: crate::source::SourceId::of(std::path::Path::new("t.csv")),
-        });
+        ));
         let hints = goto_hints(&app);
         assert!(hints.iter().any(|(k, d)| k == "k" && d.contains("peek")));
         // And nothing that would do nothing here.

@@ -16,20 +16,30 @@ use super::{Column, TableSource};
 
 /// Blank columns drawn between two data columns.
 pub const COL_GAP: u16 = 1;
-/// Rows of the grid area taken by the column-name header.
-pub const HEADER_ROWS: u16 = 1;
+/// Rows of the grid area taken by the column-name row itself.
+pub const NAME_ROWS: u16 = 1;
 /// Appended to a value that did not fit its column.
 pub const ELLIPSIS: char = '…';
 /// Stands in for a line break inside a cell, so a multi-line value stays one
 /// row tall and still reads as having structure.
 pub const NEWLINE_GLYPH: char = '↵';
 
+/// Rows of the grid area the header occupies: the column names, plus the
+/// distribution sparkline when it is enabled.
+///
+/// A function of config, computed **here and only here** — the renderer and the
+/// scroll math both offset their rows by it, and if they ever disagreed by one,
+/// the cursor would sit on a different row than the one drawn under it.
+pub fn header_rows(cfg: &TableConfig) -> u16 {
+    NAME_ROWS + u16::from(cfg.column_sparkline)
+}
+
 /// Data rows that fit in a grid area `area_height` rows tall.
 ///
 /// The scroll math and the renderer both size the row window with this, so the
 /// last row on screen is always a row the cursor can reach.
-pub fn visible_rows(area_height: u16) -> usize {
-    area_height.saturating_sub(HEADER_ROWS) as usize
+pub fn visible_rows(area_height: u16, cfg: &TableConfig) -> usize {
+    area_height.saturating_sub(header_rows(cfg)) as usize
 }
 
 /// Display width of `s` (after [`sanitize`]; East-Asian wide chars count 2).
@@ -215,7 +225,7 @@ pub fn scroll_col_for_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::table::VecSource;
+    use crate::table::MemSource;
 
     fn cfg() -> TableConfig {
         TableConfig {
@@ -280,7 +290,7 @@ mod tests {
 
     #[test]
     fn column_width_is_clamped_to_the_configured_bounds() {
-        let src = VecSource::new(
+        let src = MemSource::new(
             &["id", "description"],
             &[&["1", "a value far longer than ten columns"], &["2", "x"]],
         );
@@ -293,15 +303,15 @@ mod tests {
 
     #[test]
     fn a_wide_header_widens_a_narrow_column() {
-        let src = VecSource::new(&["measurement"], &[&["1"], &["2"]]);
+        let src = MemSource::new(&["measurement"], &[&["1"], &["2"]]);
         // Header is 11 chars, capped to max_col_width = 10.
         assert_eq!(column_width(&src.columns()[0], &cfg()), 10);
     }
 
     // --- layout -----------------------------------------------------------
 
-    fn wide_source() -> VecSource {
-        VecSource::new(
+    fn wide_source() -> MemSource {
+        MemSource::new(
             &["aaaa", "bbbb", "cccc", "dddd"],
             &[&["1", "2", "3", "4"], &["5", "6", "7", "8"]],
         )
@@ -366,16 +376,45 @@ mod tests {
     }
 
     #[test]
+    fn header_height_is_config_driven_and_data_rows_follow_it() {
+        // The header's height must be a function of config computed *here* — the
+        // renderer offsets its rows by it and the scroll math sizes its window by
+        // it, so a second definition anywhere would put the cursor on a
+        // different row than the one drawn under it.
+        let plain = TableConfig { column_sparkline: false, ..cfg() };
+        let sparked = TableConfig { column_sparkline: true, ..cfg() };
+        assert_eq!(header_rows(&plain), 1);
+        assert_eq!(header_rows(&sparked), 2);
+
+        for height in 0u16..12 {
+            for cfg in [&plain, &sparked] {
+                // Header + data rows never claim more than the area has.
+                assert!(
+                    header_rows(cfg) as usize + visible_rows(height, cfg) <= height as usize
+                        || visible_rows(height, cfg) == 0,
+                    "height {height} overcommitted",
+                );
+            }
+            // Turning the sparkline on costs exactly one data row, never more.
+            let lost = visible_rows(height, &plain) - visible_rows(height, &sparked);
+            assert!(lost <= 1, "height {height}: lost {lost} rows");
+        }
+    }
+
+    #[test]
     fn layout_contains_cursor_after_scroll() {
         // The invariant tying the scroll math to the renderer: for any viewport
         // width and any cursor column, the layout drawn after adjusting
         // scroll_col shows the cursor's column in full.  If this ever fails,
         // the cursor is drawn on a cell that is partly or wholly off-screen.
-        let src = VecSource::new(
+        let src = MemSource::new(
             &["one", "twotwo", "threethree", "f", "fivefive"],
             &[&["1", "2", "3", "4", "5"]],
         );
-        let cfg = cfg();
+        for cfg in [
+            TableConfig { column_sparkline: false, ..cfg() },
+            TableConfig { column_sparkline: true, ..cfg() },
+        ] {
         for width in 4u16..40 {
             for cursor_col in 0..src.columns().len() {
                 for start in 0..src.columns().len() {
@@ -396,6 +435,7 @@ mod tests {
                     }
                 }
             }
+        }
         }
     }
 }

@@ -680,6 +680,38 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   the palette, `:theme`, buffer switching, the toggles). `Command::GotoLine`
   (`:42`) is *implemented* rather than refused: it addresses a row
 
+### Phase D1 (column intelligence) — complete
+- **`table/summary.rs`** — `ColumnSummary` (rows scanned, nulls, distinct, min/max, mean,
+  `[p0 p25 p50 p75 p100]` interpolated like numpy/pandas, a `HIST_BINS`-bin histogram, and a
+  top-values table), plus `frequency` (every distinct value + count) and `sparkline`
+  (resample a histogram to N block glyphs, taking the **max** per output column so a narrow
+  spike stays visible). Pure Rust over `TableSource`, strictly read-only.
+- **`S` / `:column-summary`** — statistics for the cursor's column in the scrollable text
+  float (the same passive→focused popup as LSP hover). Numeric columns get range/quartiles/
+  mean/distribution; text and boolean columns get a most-common list instead — the order of
+  category counts is arbitrary, so a "median city" or a category "distribution" would be a
+  shape the data doesn't have.
+- **`F` / `:column-frequency`** — the cursor column's value counts as a **derived table**:
+  a `MemSource` (value/count/percent) installed under a `SourceId::Virtual` via
+  `exec::table::open_derived`. The first source in the editor that is computed rather than
+  read, and the rehearsal for D3's groupby/pivot. It has no file behind it, so
+  `session.path()` is `None` and `:table-close` says so rather than stranding an empty
+  buffer; `exec::open_path` routes a virtual id that has a stashed session back to the grid
+  instead of into the special-buffer branch, so `H`/`L` cycling onto it works.
+- **Distribution sparkline in the header** (`[table] column_sparkline`, default on) — a
+  second header row of block glyphs per numeric column. **`layout::header_rows(cfg)` is the
+  single definition of the header's height** (`NAME_ROWS` + the sparkline row); the renderer
+  offsets its data rows by it and `layout::visible_rows` sizes the row window from it, so the
+  two cannot drift (pinned by `header_height_is_config_driven_and_data_rows_follow_it`, and
+  `layout_contains_cursor_after_scroll` now runs with the row on *and* off). Theme key
+  `table.sparkline` (falls back to `table.numeric`).
+- **Summaries are cached in the `Session`** (`summaries`, keyed by column index and
+  invalidated when `loaded_rows` changes) and filled from `exec::table::update_scroll` for
+  the columns about to be drawn — never from the renderer, which must not scan data. Each
+  scan is capped at `[table] summary_max_rows` (default 200k) because the sparkline needs one
+  summary per *visible* column; `ColumnSummary::rows` records what was actually read and the
+  panel states it whenever it is less than the table holds.
+
 ### Known rough edges / not yet implemented
 - No split panes
 - The kernel is a single REPL, so cells still *run* one at a time — but they queue (`:run-all`,
@@ -692,6 +724,9 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   cell *outputs* always wrap and are never clipped)
 - The table view is read-only, loads the whole file into memory (capped at
   `table.max_rows`), and has no sort/filter/search yet — see Phase T1's closing note.
+- Column summaries are computed synchronously on the frame a column first becomes visible:
+  bounded by `table.summary_max_rows`, but a wide table's first frame can still hitch.
+  Moving them off the UI thread is what the deferred jobs registry (plan D0.5) is for.
   A stashed session keeps its whole parse in memory until `:bd`/`:table-close`
 
 ## Architecture
@@ -773,10 +808,15 @@ src/
     mod.rs            — TableSource trait (the one thing a new backend implements),
                         Column/ColumnType, sampling-based type inference
     layout.rs         — THE geometry model: column widths, visible columns,
-                        cell truncation (fit_cell), row window, column scroll.
+                        cell truncation (fit_cell), row window (header_rows /
+                        visible_rows), column scroll.
                         Renderer + scroll math must both derive geometry here
+    summary.rs        — ColumnSummary + summarize/frequency/sparkline: pure-Rust
+                        column statistics over any TableSource (read-only)
     state.rs          — TableState: cursor (row, col) + scroll anchor
     csv.rs            — CsvSource: delimiter sniffing + `csv`-crate parse, row cap
+    mod.rs's MemSource — a TableSource that owns its rows: what a *derived* table
+                        (frequency today, groupby/pivot later) is made of
   table_ui.rs         — ratatui renderer for the grid (header, gutter, cells)
   render_util.rs      — helpers shared by ui.rs and notebook_ui.rs: SingleLineWidget,
                         jump-label overlay, diagnostic underline, char_display_width,
@@ -875,7 +915,7 @@ docs/
   Because scroll always follows the cursor now, the command-only `notebook-scroll-down`/`-up`
   nudges snap back to the focused cell on the next frame.
 - **The table view's geometry lives in `table::layout`** — `column_width`,
-  `compute`, `visible_rows`, `fit_cell`, `scroll_col_for_cursor`. The renderer and
+  `compute`, `header_rows`, `visible_rows`, `fit_cell`, `scroll_col_for_cursor`. The renderer and
   the scroll math must agree cell-for-cell, so any change to how a column is sized
   or which columns/rows are on screen goes through those functions (the table's
   equivalent of `nb_cell_height`/`cell_output_rows` for notebooks).

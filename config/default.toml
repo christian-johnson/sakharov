@@ -225,6 +225,16 @@ sample_rows = 1000
 # Text drawn in place of an empty cell (e.g. "-" or "NULL").
 null_display = ""
 
+# Rows scanned when summarising a column (sparkline + the `S` panel). A summary
+# is a full column scan, so this bounds the cost on a very large table; a
+# summary that read fewer rows than the table holds says so in the panel.
+summary_max_rows = 200000
+
+# Draw a second header row: a sparkline of each numeric column's distribution,
+# so a skew or an outlier is visible without opening a summary. Costs one row
+# of grid height. Column stats are also available on demand with `S`.
+column_sparkline = true
+
 # Per-language editor overrides, keyed by language id.
 # `indent_width` sets the spaces-per-indent for that language (auto-indent,
 # Tab, and indent-/dedent-region); languages without an entry use

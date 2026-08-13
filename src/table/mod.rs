@@ -17,6 +17,7 @@
 pub mod csv;
 pub mod layout;
 pub mod state;
+pub mod summary;
 
 pub use state::TableState;
 
@@ -122,19 +123,29 @@ pub fn infer_type<'a>(values: impl Iterator<Item = &'a str>) -> ColumnType {
     }
 }
 
-/// An in-memory [`TableSource`] over literal rows, for tests.
+/// A [`TableSource`] that owns its rows outright.
 ///
-/// Lets the layout/renderer tests state their fixtures as a grid of strings
-/// without going through a parser or the filesystem.
-#[cfg(test)]
-pub(crate) struct VecSource {
+/// What a *derived* table is made of: a frequency table, a groupby result, any
+/// view computed from another source rather than read from a file.  Also the
+/// natural test fixture, since a grid of strings needs no parser or filesystem.
+pub struct MemSource {
     columns: Vec<Column>,
     rows: Vec<Vec<String>>,
+    /// What the status line calls this table.
+    description: String,
 }
 
-#[cfg(test)]
-impl VecSource {
-    /// Build from a header row followed by data rows.
+impl MemSource {
+    /// Build from explicit columns and rows — for a derived table, whose column
+    /// types are known rather than inferred.
+    pub fn with_columns(columns: Vec<Column>, rows: Vec<Vec<String>>, description: String) -> Self {
+        Self { columns, rows, description }
+    }
+
+    /// Build from a header row followed by data rows, inferring types and widths
+    /// the way a parsed file would.  Test fixtures state their data this way;
+    /// the derived tables the editor builds know their column types already.
+    #[cfg(test)]
     pub fn new(header: &[&str], rows: &[&[&str]]) -> Self {
         let rows: Vec<Vec<String>> = rows
             .iter()
@@ -156,12 +167,12 @@ impl VecSource {
                 }
             })
             .collect();
-        Self { columns, rows }
+        let description = format!("{} rows", rows.len());
+        Self { columns, rows, description }
     }
 }
 
-#[cfg(test)]
-impl TableSource for VecSource {
+impl TableSource for MemSource {
     fn columns(&self) -> &[Column] {
         &self.columns
     }
@@ -175,7 +186,7 @@ impl TableSource for VecSource {
         self.rows.get(row)?.get(col).map(String::as_str)
     }
     fn describe(&self) -> String {
-        format!("{} rows", self.rows.len())
+        self.description.clone()
     }
 }
 

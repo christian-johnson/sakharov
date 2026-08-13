@@ -322,6 +322,12 @@ impl Keymap {
         table.insert(KeyBinding::key(KeyCode::Enter), vec![Command::TableOpenCell]);
         table.insert(KeyBinding::char('y'), vec![Command::TableYankCell]);
         table.insert(KeyBinding::char('x'), vec![Command::TableYankRow]);
+        // Column intelligence: S describes the cursor's column, F counts its
+        // values into a table of their own.  `S` is unbound in Normal mode, and
+        // `F` (find-char-backward) is refused in a grid anyway — there are no
+        // characters to search along a row of cells.
+        table.insert(KeyBinding::char('S'), vec![Command::TableColumnSummary]);
+        table.insert(KeyBinding::char('F'), vec![Command::TableColumnFrequency]);
 
         // --- `*cell …*` buffer overrides ---
         //

@@ -213,6 +213,8 @@ than restated.
 
 ## D1 — Column intelligence
 
+**Status: done.**
+
 *Independent of D0. Ship first.*
 
 Summary statistics, a frequency table, and an in-header sparkline — all in pure
