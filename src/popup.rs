@@ -54,6 +54,9 @@ pub enum PopupTarget {
     RestoreRecovery,
     /// Switch to the theme named by the confirmed item's [`ConfirmPayload::Choice`].
     SwitchTheme,
+    /// Open the kernel variable named by the confirmed item's
+    /// [`ConfirmPayload::Choice`] as a grid.
+    ViewVariable,
 }
 
 /// Typed data carried by a confirmed [`ListItem`]. Replaces the old
@@ -166,6 +169,23 @@ impl ListItem {
         self.payload
             .clone()
             .unwrap_or_else(|| ConfirmPayload::Label(self.label.clone()))
+    }
+
+    /// Convenience constructor for an item whose confirmed value is a name
+    /// rather than a location (the theme picker, the variable explorer).
+    pub fn choice(
+        label: impl Into<String>,
+        detail: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            detail: Some(detail.into()),
+            kind: None,
+            payload: Some(ConfirmPayload::Choice(value.into())),
+            documentation: None,
+            resolve_data: None,
+        }
     }
 
     /// Convenience constructor for navigate items (buffer/symbol/diagnostic pickers).
@@ -634,6 +654,18 @@ impl Popup {
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.55),
             on_confirm: PopupTarget::SwitchTheme,
+        }
+    }
+
+    /// The kernel's namespace; confirms by opening the selected variable as a
+    /// grid.
+    pub fn variables(items: Vec<ListItem>) -> Self {
+        Self {
+            title: Some("kernel variables".into()),
+            content: PopupContent::List(ListState::new(items)),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.55),
+            on_confirm: PopupTarget::ViewVariable,
         }
     }
 

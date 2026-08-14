@@ -231,6 +231,7 @@ commands! {
         TableGroupBy => "group-by-column", aliases: ["group", "groupby"], palette: "Group rows by the cursor column and count them  [gr]";
         TableUndoTransform => "undo-transform", palette: "Drop the last sort/filter/group  [u]";
         TableClearTransforms => "clear-transforms", aliases: ["reset-table"], palette: "Drop every sort/filter/group  [gx]";
+        KernelVariables => "kernel-variables", aliases: ["vars", "variables"], palette: "List the kernel's variables; Enter opens a dataframe as a grid  [gv]";
         SchemaBrowser => "schema", aliases: ["tables", "schema-browser"], palette: "Browse the tables in every attached database  [gt]";
         SqlBuffer => "sql", aliases: ["query", "sql-buffer"], palette: "Open the SQL scratch buffer  [:sql]";
         SqlRun => "run-query", aliases: ["sql-run"], palette: "Run the SQL buffer's query and show the result as a grid  [Ctrl+E]";
@@ -256,6 +257,8 @@ commands! {
         Shell(String) => "shell", palette: "Run a shell command  [:shell <cmd>]";
         // Render the current notebook / markdown document via Quarto.
         ExportDocument(String) => "export", palette: "Export via Quarto to pdf/html/docx…  [:export <fmt>]";
+        // Open a kernel dataframe as a grid (`:view df`).
+        ViewVariable(String) => "view", palette: "Open a kernel dataframe as a grid  [:view <name>]";
         // Attach a local database file read-only (`:attach <path> [as <alias>]`).
         Attach(String) => "attach", palette: "Attach a local database file, read-only  [:attach <path>]";
         // Drop one attachment by alias, or all of them when the argument is empty.
@@ -310,6 +313,11 @@ impl Command {
             }
             // Bare `:attach` lists what is attached; bare `:detach` drops it all.
             "attach" => Some(Command::Attach(arg.unwrap_or("").trim().to_string())),
+            // `:view` with no name lists the namespace instead of erroring.
+            "view" => match arg.map(str::trim).filter(|a| !a.is_empty()) {
+                Some(name) => Some(Command::ViewVariable(name.to_string())),
+                None => Some(Command::KernelVariables),
+            },
             "detach" => Some(Command::Detach(arg.unwrap_or("").trim().to_string())),
             "goto-line" => {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;
@@ -337,7 +345,7 @@ mod tests {
     fn palette_entries_round_trip_through_parse() {
         // These palette entries name argument-taking commands, so the bare name
         // intentionally parses to None (the user supplies the argument on the `:` line).
-        const ARG_COMMANDS: &[&str] = &["write-as", "shell"];
+        const ARG_COMMANDS: &[&str] = &["write-as", "shell", "view"];
         for (name, _desc) in Command::palette_entries() {
             if ARG_COMMANDS.contains(&name) {
                 continue;

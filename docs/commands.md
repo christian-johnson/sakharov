@@ -311,6 +311,8 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table or a query result) and go back to where it came from — also what `:bd` does there (`:table-back`) |
 | `sql` | — | Open the SQL scratch buffer (`:query`, `:sql-buffer`) |
 | `run-query` | `Ctrl+E` (in the SQL buffer) | Run the query and show the result as a grid (`:sql-run`) |
+| `kernel-variables` | `gv` | List the kernel's variables; `Enter` opens a dataframe as a grid (`:vars`, `:variables`) |
+| `view` | — | `:view df` opens a kernel dataframe as a grid; bare `:view` lists them |
 | `attach` | — | Attach a local database file read-only: `:attach <path> [as <alias>]`; bare `:attach` lists what is attached |
 | `detach` | — | `:detach <alias>` drops one attachment; bare `:detach` drops them all |
 | `schema` | `gt` | Browse every table in every attached database; `Enter` opens one (`:tables`, `:schema-browser`) |
@@ -395,6 +397,33 @@ keeps DSN parsing, environment precedence and TLS options out of the editor. It 
 means a SQLite file needs DuckDB's `sqlite` extension already installed — the editor
 will not `INSTALL`/`LOAD` native code at runtime, which is the same hole the
 statement gate exists to keep shut.
+
+### The kernel bridge — and remote databases
+
+`gv` lists what is in the notebook kernel's namespace; `Enter` on a dataframe (or
+`:view df`) opens it in the grid, with every motion, summary and transform the
+editor has. It works from any view, so the grid you open is often the one a
+notebook two buffers over built. `q` backs out to where you were.
+
+This is where a **remote or authenticated database** is browsed:
+
+```python
+import polars as pl
+df = pl.read_database("select * from orders limit 1000", conn)
+```
+
+then `gv`. The connection, and the credential it needs, live in the cell — reviewed
+and versioned like the rest of the analysis — and the editor never learns either.
+
+The frame is fetched by writing it to a parquet file in the state directory and
+opening that, so `:view` needs a library that can write one: polars natively,
+pandas or a DuckDB relation with `pyarrow`. What you get is a **snapshot** taken
+when you asked; re-run `:view` to refresh it. Requests queue behind a running cell
+(the kernel serves one at a time, which is what keeps anything from reading a
+namespace mid-execution), so a busy kernel says so rather than appearing to hang.
+
+Only a **bound name** is ever sent — `:view` refuses anything that isn't an
+identifier, and the kernel looks it up rather than evaluating it.
 
 **Queries read; they never write.** The editor never opens a database read-write,
 and a statement that would modify data or write a file is refused before it reaches

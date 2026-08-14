@@ -620,6 +620,9 @@ pub fn goto_command(view: crate::app::View, c: char) -> Option<Command> {
         'a' => Command::LspCodeActions,
         'c' => Command::CommentRegion,
         'k' => Command::LspShowDocumentation,
+        // The kernel's namespace is reachable from every view: the grid you
+        // want to open is often the one the notebook two buffers over built.
+        'v' => Command::KernelVariables,
         _ => return None,
     })
 }
@@ -904,6 +907,9 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
         }
         PopupTarget::RestoreRecovery => {
             crate::recovery::handle_choice(app, payload.as_text());
+        }
+        PopupTarget::ViewVariable => {
+            exec::execute(app, &Command::ViewVariable(payload.as_text().to_string()));
         }
         PopupTarget::SwitchTheme => {
             exec::apply_theme(app, payload.as_text());

@@ -87,6 +87,83 @@ try:
 except Exception:
     pass
 
+# --- the editor's view of the namespace ------------------------------------
+#
+# Introspection is kept to type, shape and size.  Touching a live object can run
+# arbitrary user code through a property or __getattr__ — unavoidable when
+# inspecting a namespace at all — so we ask for as little as possible, and never
+# for anything that materialises values.
+
+def _shape_of(obj):
+    try:
+        shape = getattr(obj, 'shape', None)
+        if isinstance(shape, tuple) and all(isinstance(d, int) for d in shape):
+            return ' x '.join(str(d) for d in shape)
+    except Exception:
+        pass
+    try:
+        if isinstance(obj, (list, tuple, dict, set, str, bytes)):
+            return str(len(obj))
+    except Exception:
+        pass
+    return ''
+
+# Can `:view` open this as a grid?  Anything with columns and rows: polars and
+# pandas frames, pyarrow tables, duckdb relations.
+def _viewable(obj):
+    if hasattr(obj, 'write_parquet') or hasattr(obj, 'to_parquet'):
+        return True
+    mod = type(obj).__module__.split('.')[0]
+    return mod in ('duckdb', 'pyarrow') and hasattr(obj, 'columns')
+
+def _list_vars():
+    items = []
+    for name, value in list(_ns.items()):
+        if name.startswith('_') or name in ('In', 'Out'):
+            continue
+        if type(value).__name__ in ('module', 'function', 'builtin_function_or_method', 'type'):
+            continue
+        try:
+            items.append({
+                'name': name,
+                'type': type(value).__name__,
+                'shape': _shape_of(value),
+                'viewable': _viewable(value),
+            })
+        except Exception:
+            continue
+    items.sort(key=lambda i: (not i['viewable'], i['name']))
+    return items
+
+# Write `name` to `path` as parquet, for the editor to open in the grid.
+#
+# Parquet rather than Arrow IPC because the editor already reads it (it is how
+# every .parquet file opens), so the bridge needs no second reader and no arrow
+# version to agree on.  The frame itself never crosses the pipe.
+def _export_var(name, path):
+    if name not in _ns:
+        raise RuntimeError('no variable called ' + repr(name))
+    obj = _ns[name]
+    if hasattr(obj, 'write_parquet'):          # polars DataFrame, duckdb relation
+        obj.write_parquet(path)
+    elif hasattr(obj, 'to_parquet'):           # pandas DataFrame (needs pyarrow)
+        obj.to_parquet(path)
+    elif hasattr(obj, 'arrow'):                # duckdb relation, older API
+        import pyarrow.parquet as _pq
+        _pq.write_table(obj.arrow(), path)
+    else:
+        raise RuntimeError(
+            repr(name) + ' is a ' + type(obj).__name__ +
+            ', which has no table to export (try a polars/pandas DataFrame)')
+    rows = -1
+    try:
+        shape = getattr(obj, 'shape', None)
+        if isinstance(shape, tuple) and shape:
+            rows = int(shape[0])
+    except Exception:
+        pass
+    _emit({'t': 'export', 'path': path, 'rows': rows, 'name': name})
+
 class _Fwd(io.TextIOBase):
     def __init__(self, name):
         self._name = name
@@ -136,6 +213,29 @@ while True:
         kind = hdr.get('kind') or 'exec'
         if hdr.get('tag'):
             cell_name = hdr['tag']
+
+    # --- editor requests -----------------------------------------------
+    #
+    # These read the namespace the user's own code built.  That is the whole
+    # point: a database connection made in a cell, with the user's own driver
+    # and their own credentials, is reachable here — the editor never has to
+    # hold a secret to show you what came back.
+    #
+    # Both take a *bound name*, never an expression: the editor validates it as
+    # an identifier and we look it up in the namespace.  Nothing typed in the
+    # editor is ever eval'd.
+    if kind == 'vars':
+        _emit({'t': 'vars', 'items': _list_vars()})
+        _emit({'t': 'done'})
+        continue
+
+    if kind == 'export':
+        try:
+            _export_var(hdr.get('tag') or '', hdr.get('path') or '')
+        except Exception as exc:
+            _emit({'t': 'error', 'text': str(exc)})
+        _emit({'t': 'done'})
+        continue
 
     # An unknown kind is answered rather than ignored: a newer editor talking to
     # an older kernel must get a reply, or it waits forever for one.

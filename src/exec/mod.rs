@@ -1,4 +1,5 @@
 mod attach;
+mod bridge;
 mod buffers;
 mod export;
 mod format;
@@ -1119,6 +1120,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
             attach::detach(app, arg);
             return;
         }
+        // The kernel bridge: what the user's own code built, in the grid.
+        Command::KernelVariables => {
+            bridge::list_variables(app);
+            return;
+        }
+        Command::ViewVariable(name) => {
+            bridge::view_variable(app, name);
+            return;
+        }
         Command::SchemaBrowser => {
             attach::open_schema_browser(app);
             return;
@@ -1289,6 +1299,7 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
             hint("r", "group rows by this column"),
             hint("x", "clear sorts and filters"),
             hint("t", "browse attached tables"),
+            hint("v", "kernel variables"),
             hint("b", "buffer picker"),
         ];
     }
@@ -1305,6 +1316,9 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
         hint("c", "comment/uncomment selection"),
         hint("D", "diagnostic picker"),
     ];
+    if app.compute.active_key().is_some() {
+        hints.push(hint("v", "kernel variables"));
+    }
     let lsp_active = app
         .current_language()
         .map(|l| app.lsp.is_ready(l))
@@ -1889,7 +1903,7 @@ pub fn process_kernel_events(app: &mut App) -> bool {
             let cell = match consumer {
                 Some(Consumer::NotebookCell(ref id)) => notebook_for_key(app, &key)
                     .and_then(|(nb, _)| nb.cells.iter().position(|c| &c.id == id)),
-                None => None,
+                _ => None,
             };
             match msg.body {
                 MessageBody::Ready => {
@@ -1905,6 +1919,21 @@ pub fn process_kernel_events(app: &mut App) -> bool {
                         append_stream(&mut nb.cells[idx].outputs, &name, &text);
                     }
                 }
+                // Replies to the editor's own requests.  Routed by consumer,
+                // like everything else: a listing that arrives after the popup
+                // was dismissed, or from a kernel that has since been restarted,
+                // belongs to nobody and is dropped rather than shown.
+                MessageBody::Vars(items) => {
+                    if matches!(consumer, Some(Consumer::VariableList)) {
+                        bridge::show_variables(app, &items);
+                    }
+                }
+                MessageBody::Export { path, rows } => {
+                    if let Some(Consumer::ViewVariable(ref name)) = consumer {
+                        let name = name.clone();
+                        bridge::open_exported(app, &name, &path, rows);
+                    }
+                }
                 MessageBody::Image { png } => {
                     if let (Some(idx), Some((nb, _))) = (cell, notebook_for_key(app, &key)) {
                         nb.cells[idx].outputs.push(Output::DisplayData {
@@ -1914,11 +1943,19 @@ pub fn process_kernel_events(app: &mut App) -> bool {
                     }
                 }
                 MessageBody::Error { traceback } => {
-                    if let (Some(idx), Some((nb, _))) = (cell, notebook_for_key(app, &key)) {
-                        // Build against the whole cell list so `File "<id>"`
-                        // frames resolve to jump targets; then push.
-                        let out = crate::notebook::build_error_output(&traceback, &nb.cells);
-                        nb.cells[idx].outputs.push(out);
+                    if for_notebook {
+                        if let (Some(idx), Some((nb, _))) = (cell, notebook_for_key(app, &key)) {
+                            // Build against the whole cell list so `File "<id>"`
+                            // frames resolve to jump targets; then push.
+                            let out = crate::notebook::build_error_output(&traceback, &nb.cells);
+                            nb.cells[idx].outputs.push(out);
+                        }
+                    } else if consumer.is_some() {
+                        // An editor request failed — there is no cell to put a
+                        // traceback in, and dropping it would leave the request
+                        // looking like it simply never came back.
+                        let line = traceback.lines().last().unwrap_or(&traceback);
+                        announce.push(line.trim().to_string());
                     }
                 }
                 MessageBody::Done => {
@@ -2695,6 +2732,81 @@ mod tests {
         assert!(app.messages.log.iter().any(|m| m.contains("Cell [2] finished")));
 
         let _ = std::fs::remove_file(&target);
+    }
+
+    /// The kernel bridge, end to end against a real interpreter: `gv` lists
+    /// what the user's own code built, and `:view` reaches into that namespace
+    /// by name.
+    ///
+    /// This is the path that replaces database credentials in the editor — you
+    /// connect in a cell and look at what comes back — so it is worth exercising
+    /// against a live kernel rather than a mocked protocol.
+    #[test]
+    fn the_kernel_bridge_lists_the_namespace_and_fetches_by_name() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 not available — skipping kernel bridge test");
+            return;
+        }
+        let mut app = App::new(None, Config::load()).unwrap();
+        let dir = unique_tmp_dir("kernelvars");
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, "vars");
+        if let Some((ref mut nb, _)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("rows = [1, 2, 3]\nname = 'oslo'");
+        }
+        notebook::load_focused_cell(&mut app);
+        execute(&mut app, &Command::NotebookExecuteCell);
+
+        let pump = |app: &mut App, until: &dyn Fn(&App) -> bool, what: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !until(app) {
+                process_kernel_events(app);
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        pump(
+            &mut app,
+            &|app| app.notebook.as_ref().is_some_and(|(nb, _)| nb.cells[0].execution_count.is_some()),
+            "the cell to run",
+        );
+
+        // `gv` — the namespace, as a picker.
+        execute(&mut app, &Command::KernelVariables);
+        pump(&mut app, &|app| app.popup.is_some(), "the variable list");
+        let labels: Vec<String> = match app.popup.as_ref().map(|p| &p.content) {
+            Some(crate::popup::PopupContent::List(state)) => {
+                state.items.iter().map(|i| i.label.clone()).collect()
+            }
+            _ => panic!("expected a list popup"),
+        };
+        assert!(labels.contains(&"rows".to_string()), "{labels:?}");
+        assert!(labels.contains(&"name".to_string()), "{labels:?}");
+        // Imports and functions are not data, and would bury what is.
+        assert!(!labels.iter().any(|l| l == "json"), "{labels:?}");
+
+        // `:view` on something with no table says so — the request reached the
+        // namespace and looked the name up, which is the part under test (a
+        // real dataframe needs polars/pandas, which the test can't assume).
+        app.popup = None;
+        app.messages.log.clear();
+        execute(&mut app, &Command::ViewVariable("rows".into()));
+        pump(
+            &mut app,
+            &|app| app.messages.log.iter().any(|m| m.contains("no table to export")),
+            "the export refusal",
+        );
+
+        // ...and a name that is not bound is reported rather than silently
+        // producing an empty grid.
+        app.messages.log.clear();
+        execute(&mut app, &Command::ViewVariable("nope".into()));
+        pump(
+            &mut app,
+            &|app| app.messages.log.iter().any(|m| m.contains("no variable called")),
+            "the missing-name error",
+        );
+        assert!(app.table.is_none(), "nothing opened");
     }
 
     /// Two notebooks in one project get **two kernels**: a variable defined in

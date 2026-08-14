@@ -64,18 +64,65 @@ pub enum RequestKind {
     /// traceback frame reports `File "<tag>", line N` — the editor maps the tag
     /// back to a jump target.
     Exec { tag: String },
+    /// List the namespace's variables (the variable explorer).
+    Vars,
+    /// Write the dataframe bound to `var` out to `path` as parquet, so the grid
+    /// can open it.  `var` is a *bound name*, validated as an identifier by the
+    /// caller — never an expression, so nothing typed in the editor is eval'd.
+    Export { var: String, path: PathBuf },
 }
 
 impl RequestKind {
     fn name(&self) -> &'static str {
         match self {
             Self::Exec { .. } => "exec",
+            Self::Vars => "vars",
+            Self::Export { .. } => "export",
         }
     }
 
     fn tag(&self) -> Option<&str> {
         match self {
             Self::Exec { tag } => Some(tag),
+            Self::Vars => None,
+            Self::Export { var, .. } => Some(var),
+        }
+    }
+
+    /// Where the reply should be written, for the request kinds that produce a
+    /// file rather than a stream.
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Export { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// One entry of the kernel's namespace, as the variable explorer shows it.
+///
+/// Type, shape and whether it can be opened as a grid — deliberately nothing
+/// that materialises a value.  Introspecting a live object already risks running
+/// user code through a property; asking for as little as possible is the only
+/// available mitigation.
+#[derive(Debug, Clone)]
+pub struct VarInfo {
+    pub name: String,
+    pub type_name: String,
+    /// `"1200 x 8"`, a length, or empty when the object has no shape.
+    pub shape: String,
+    /// Whether `:view` can open it as a grid.
+    pub viewable: bool,
+}
+
+impl VarInfo {
+    fn from_json(v: &Value) -> Self {
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_owned();
+        Self {
+            name: s("name"),
+            type_name: s("type"),
+            shape: s("shape"),
+            viewable: v.get("viewable").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 }
@@ -90,6 +137,10 @@ pub enum Consumer {
     /// A notebook cell, by its **stable id** — not its index, which a
     /// structural edit can shift while the cell is still running.
     NotebookCell(String),
+    /// The variable explorer, waiting for a listing.
+    VariableList,
+    /// `:view <name>`, waiting for that variable to be written out.
+    ViewVariable(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +175,10 @@ pub enum MessageBody {
     Image { png: Vec<u8> },
     /// An uncaught exception traceback.
     Error { traceback: String },
+    /// The namespace's variables, in reply to [`RequestKind::Vars`].
+    Vars(Vec<VarInfo>),
+    /// A variable was written out, in reply to [`RequestKind::Export`].
+    Export { path: PathBuf, rows: Option<usize> },
     /// The request finished.
     Done,
     /// The kernel process exited / closed its stdout.
@@ -195,6 +250,9 @@ impl KernelSession {
         let mut header = serde_json::json!({ "id": id, "kind": kind.name() });
         if let Some(tag) = kind.tag() {
             header["tag"] = Value::String(tag.to_owned());
+        }
+        if let Some(path) = kind.path() {
+            header["path"] = Value::String(path.to_string_lossy().into_owned());
         }
         self.stdin.write_all(b"__KI_REQ__")?;
         self.stdin.write_all(header.to_string().as_bytes())?;
@@ -302,6 +360,24 @@ fn reader_thread(
             Some("error") => MessageBody::Error {
                 traceback: v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_owned(),
             },
+            Some("vars") => {
+                let items = v
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().map(VarInfo::from_json).collect())
+                    .unwrap_or_default();
+                MessageBody::Vars(items)
+            }
+            Some("export") => {
+                let Some(path) = v.get("path").and_then(|p| p.as_str()) else {
+                    continue;
+                };
+                let rows = v
+                    .get("rows")
+                    .and_then(Value::as_i64)
+                    .and_then(|n| (n >= 0).then_some(n as usize));
+                MessageBody::Export { path: PathBuf::from(path), rows }
+            }
             Some("done") => MessageBody::Done,
             _ => continue,
         };
