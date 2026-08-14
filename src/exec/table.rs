@@ -13,7 +13,8 @@ use crate::{
     app::{App, View},
     command::Command,
     source::SourceId,
-    table::{self, csv::CsvSource, layout, summary::{self, ColumnSummary}, TableSource},
+    table::{self, csv::CsvSource, layout, summary::{self, ColumnSummary},
+           transform::{Agg, Predicate, Transform}, TableSource},
 };
 
 /// What a row of a *catalog* table names, so `Enter` can open it.
@@ -30,8 +31,16 @@ pub enum Drill {
 
 /// An open tabular data source plus where the cursor is in it.
 pub struct Session {
-    /// The data.  Boxed so a future source (SQL, parquet) needs no changes here.
-    pub source: Box<dyn TableSource>,
+    /// The data as it was opened.  Boxed so a new backend needs no changes here.
+    base: Box<dyn TableSource>,
+    /// The transforms applied to `base`, innermost first.  A **stack**: `u` pops
+    /// the last one, which is the natural undo for a read-only view and reuses
+    /// the key that already means undo.
+    stack: Vec<Transform>,
+    /// The result of folding `stack` over `base`.  `None` when the stack is
+    /// empty, in which case [`source`](Self::source) *is* the base — so an
+    /// untransformed table costs nothing.
+    derived: Option<Box<dyn TableSource>>,
     pub state: table::TableState,
     /// What this table *is*: the file it was opened from, or (later, for a query
     /// result or a derived table) a virtual identity with no file behind it.
@@ -61,13 +70,126 @@ impl Session {
     /// A session over `source`, identified by `id`.
     pub fn new(id: SourceId, source: Box<dyn TableSource>) -> Self {
         Self {
-            source,
+            base: source,
+            stack: Vec::new(),
+            derived: None,
             state: table::TableState::new(),
             id,
             origin: None,
             drill: None,
             summaries: std::collections::HashMap::new(),
             summaries_rows: 0,
+        }
+    }
+
+    /// The data as the grid sees it: the base, or the top of the transform
+    /// stack once anything has been applied.  **Every** reader goes through
+    /// here, so a filtered grid cannot accidentally be drawn from the unfiltered
+    /// source.
+    pub fn source(&self) -> &dyn TableSource {
+        match self.derived.as_deref() {
+            Some(source) => source,
+            None => self.base.as_ref(),
+        }
+    }
+
+    /// The same, for the one caller that mutates: `ensure_rows`, which moves a
+    /// windowed source's window to what is about to be drawn.
+    fn source_mut(&mut self) -> &mut dyn TableSource {
+        match self.derived.as_deref_mut() {
+            Some(source) => source,
+            None => self.base.as_mut(),
+        }
+    }
+
+    /// Swap the data out from under a session, for tests that need a specific
+    /// shape without going through a file and a background load.
+    #[cfg(test)]
+    pub(crate) fn replace_source(&mut self, source: Box<dyn TableSource>) {
+        self.base = source;
+        self.derived = None;
+        self.stack.clear();
+    }
+
+    /// The transforms currently applied, innermost first.
+    pub fn transforms(&self) -> &[Transform] {
+        &self.stack
+    }
+
+    /// Apply one more transform, or leave the stack untouched and say why not.
+    pub(super) fn push_transform(&mut self, op: Transform, max_rows: usize) -> Result<(), String> {
+        self.stack.push(op);
+        match self.rebuild(max_rows) {
+            Ok(()) => Ok(()),
+            Err(why) => {
+                self.stack.pop();
+                // Rebuild again so the view is what the surviving stack says it
+                // is, not the half-built state the failure left behind.
+                let _ = self.rebuild(max_rows);
+                Err(why)
+            }
+        }
+    }
+
+    /// Drop the most recent transform.  Returns what was dropped.
+    pub(super) fn pop_transform(&mut self, max_rows: usize) -> Option<Transform> {
+        let popped = self.stack.pop()?;
+        let _ = self.rebuild(max_rows);
+        Some(popped)
+    }
+
+    /// Drop every transform, back to the table as it was opened.
+    pub(super) fn clear_transforms(&mut self, max_rows: usize) -> usize {
+        let n = self.stack.len();
+        self.stack.clear();
+        let _ = self.rebuild(max_rows);
+        n
+    }
+
+    /// Fold the stack over the base, from scratch.
+    ///
+    /// From scratch rather than incrementally, because popping is the whole
+    /// point of a stack and an incremental undo would have to keep every
+    /// intermediate source alive.  Each step is pushed down when the source can
+    /// do it and executed locally when it can't — the difference is invisible
+    /// here, which is the design.
+    fn rebuild(&mut self, max_rows: usize) -> Result<(), String> {
+        let mut current: Option<Box<dyn TableSource>> = None;
+        let mut failure = None;
+        for op in &self.stack {
+            let src: &dyn TableSource = match current.as_deref() {
+                Some(s) => s,
+                None => self.base.as_ref(),
+            };
+            let next = match src.derive(op) {
+                Some(derived) => derived,
+                // Local execution *reads* the source, and a windowed source can
+                // only answer for the rows on screen — filtering those and
+                // calling the result a filtered table would be a lie the grid
+                // tells convincingly.
+                None if src.is_windowed() => {
+                    failure = Some(format!(
+                        "This source can't {} — it is read a window at a time",
+                        op.label(src.columns()),
+                    ));
+                    break;
+                }
+                None => Box::new(table::transform::apply_local(src, op, max_rows)),
+            };
+            current = Some(next);
+        }
+        self.derived = current;
+        // The shape changed under the cursor; the caller's `update_scroll` puts
+        // it back on screen, but it must not be left pointing off the end.
+        let rows = self.source().loaded_rows();
+        let cols = self.source().columns().len();
+        self.state.clamp(rows, cols);
+        // Statistics describe the data in view, and that is now different data.
+        self.summaries.clear();
+        self.summaries_rows = usize::MAX;
+        match failure {
+            Some(why) => Err(why),
+            None => Ok(()),
         }
     }
 
@@ -79,7 +201,7 @@ impl Session {
     ///
     /// [`ensure_summaries`]: Self::ensure_summaries
     pub fn summary(&self, col: usize) -> Option<&ColumnSummary> {
-        (self.summaries_rows == self.source.loaded_rows())
+        (self.summaries_rows == self.source().loaded_rows())
             .then(|| self.summaries.get(&col))
             .flatten()
     }
@@ -97,7 +219,7 @@ impl Session {
     fn ensure_summaries(&mut self, cols: impl IntoIterator<Item = usize>, max_rows: usize) {
         // A source that has loaded more rows since invalidates every summary:
         // statistics over half a file are not statistics over the file.
-        let rows = self.source.loaded_rows();
+        let rows = self.source().loaded_rows();
         if self.summaries_rows != rows {
             self.summaries.clear();
             self.summaries_rows = rows;
@@ -105,7 +227,7 @@ impl Session {
         for col in cols {
             if !self.summaries.contains_key(&col) {
                 self.summaries
-                    .insert(col, summary::summarize(self.source.as_ref(), col, max_rows));
+                    .insert(col, summary::summarize(self.source(), col, max_rows));
             }
         }
     }
@@ -124,13 +246,13 @@ impl Session {
     /// The cursor cell's **untruncated** value — what the grid can only show a
     /// clipped, single-line rendering of.
     pub fn cursor_value(&self) -> Option<&str> {
-        self.source
+        self.source()
             .cell(self.state.cursor_row, self.state.cursor_col)
     }
 
     /// Header of the cursor's column.
     pub fn cursor_column_name(&self) -> Option<&str> {
-        self.source
+        self.source()
             .columns()
             .get(self.state.cursor_col)
             .map(|c| c.name.as_str())
@@ -138,8 +260,8 @@ impl Session {
 
     /// Every value in `row`, in column order (missing cells read as empty).
     fn row_values(&self, row: usize) -> Vec<&str> {
-        (0..self.source.columns().len())
-            .map(|c| self.source.cell(row, c).unwrap_or(""))
+        (0..self.source().columns().len())
+            .map(|c| self.source().cell(row, c).unwrap_or(""))
             .collect()
     }
 }
@@ -158,7 +280,7 @@ pub(super) fn column_summary(app: &mut App) {
         return;
     };
     let col = session.state.cursor_col;
-    if session.source.columns().get(col).is_none() {
+    if session.source().columns().get(col).is_none() {
         app.messages.show("No column here");
         return;
     }
@@ -167,9 +289,9 @@ pub(super) fn column_summary(app: &mut App) {
     session.ensure_summaries([col], max_rows);
     let session = app.table.as_ref().expect("still open");
     let Some(stats) = session.summary(col) else { return };
-    let column = &session.source.columns()[col];
+    let column = &session.source().columns()[col];
     let title = format!(" {} ", column.name);
-    let body = summary_text(column, stats, session.source.row_count());
+    let body = summary_text(column, stats, session.source().row_count());
     app.popup = Some(crate::popup::Popup::documentation(&title, &body));
 }
 
@@ -270,19 +392,19 @@ pub(super) fn column_frequency(app: &mut App) {
         return;
     };
     let col = session.state.cursor_col;
-    let Some(column) = session.source.columns().get(col) else {
+    let Some(column) = session.source().columns().get(col) else {
         app.messages.show("No column here");
         return;
     };
     let name = column.name.clone();
     let scan_cap = app.config.table.summary_max_rows;
-    let counts = summary::frequency(session.source.as_ref(), col, scan_cap);
+    let counts = summary::frequency(session.source(), col, scan_cap);
     if counts.is_empty() {
         app.messages.show("Nothing to count — the column is empty");
         return;
     }
 
-    let scanned = session.source.loaded_rows().min(scan_cap);
+    let scanned = session.source().loaded_rows().min(scan_cap);
     let rows: Vec<Vec<String>> = counts
         .iter()
         .map(|(value, count)| {
@@ -333,6 +455,164 @@ fn derived_columns(spec: &[(&str, table::ColumnType)], rows: &[Vec<String>]) -> 
                 .unwrap_or(0),
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Transforms
+// ---------------------------------------------------------------------------
+
+/// Rows a locally-executed transform will scan.
+///
+/// A transform a source can't push down is executed by reading it, so this is
+/// the same bound the loader already applies to a CSV.  A *windowed* source
+/// never gets here — `Session::rebuild` refuses rather than filtering the
+/// screenful that happens to be loaded.
+fn transform_scan_cap(app: &App) -> usize {
+    app.config.table.max_rows
+}
+
+/// Push `op` and report what happened.
+fn apply_transform(app: &mut App, op: Transform) {
+    let cap = transform_scan_cap(app);
+    let Some(session) = app.table.as_mut() else {
+        app.messages.show("No table open");
+        return;
+    };
+    let label = op.label(session.source().columns());
+    match session.push_transform(op, cap) {
+        Ok(()) => {
+            let shape = session.source().describe();
+            app.messages.show(format!("{label} — {shape} (u undoes)"));
+        }
+        Err(why) => app.messages.show(why),
+    }
+    update_scroll(app);
+}
+
+/// `gs` — sort by the cursor column, cycling ascending → descending → unsorted.
+///
+/// Cycling on the same key rather than spending two bindings: the third press
+/// putting the table back is also how you discover that the sort was a *view*
+/// and the file was never touched.
+pub(super) fn sort_cursor_column(app: &mut App) {
+    let Some(session) = app.table.as_ref() else {
+        app.messages.show("No table open");
+        return;
+    };
+    let col = session.state.cursor_col;
+    let cap = transform_scan_cap(app);
+    match session.transforms().last() {
+        Some(Transform::Sort { col: c, desc }) if *c == col => {
+            let was_desc = *desc;
+            if let Some(session) = app.table.as_mut() {
+                let _ = session.pop_transform(cap);
+            }
+            if was_desc {
+                app.messages.show("Unsorted");
+                update_scroll(app);
+                return;
+            }
+            apply_transform(app, Transform::Sort { col, desc: true });
+        }
+        _ => apply_transform(app, Transform::Sort { col, desc: false }),
+    }
+}
+
+/// `gf` — ask what to filter the cursor column by.
+pub(super) fn prompt_filter(app: &mut App) {
+    if app.table.is_none() {
+        app.messages.show("No table open");
+        return;
+    }
+    app.command_buf.clear();
+    app.mode = crate::mode::Mode::Prompt { kind: crate::mode::PromptKind::TableFilter };
+}
+
+/// The answer to that prompt.
+pub(crate) fn apply_filter(app: &mut App, input: &str) {
+    let Some(session) = app.table.as_ref() else { return };
+    let col = session.state.cursor_col;
+    match Predicate::parse(input) {
+        Ok(pred) => apply_transform(app, Transform::Filter { col, pred }),
+        Err(why) => app.messages.show(why),
+    }
+}
+
+/// `gr` — ask which aggregates to compute alongside the group counts.
+pub(super) fn prompt_group(app: &mut App) {
+    if app.table.is_none() {
+        app.messages.show("No table open");
+        return;
+    }
+    app.command_buf.clear();
+    app.mode = crate::mode::Mode::Prompt { kind: crate::mode::PromptKind::TableGroupBy };
+}
+
+/// The answer to that prompt: `sum qty, mean price`, or empty for counts alone.
+pub(crate) fn apply_group(app: &mut App, input: &str) {
+    let Some(session) = app.table.as_ref() else { return };
+    let keys = vec![session.state.cursor_col];
+    let columns = session.source().columns().to_vec();
+    match parse_aggs(input, &columns) {
+        Ok(aggs) => apply_transform(app, Transform::GroupBy { keys, aggs }),
+        Err(why) => app.messages.show(why),
+    }
+}
+
+/// Parse `sum qty, mean price` against the table's columns.
+///
+/// Column *names*, not indices: this is typed by a person looking at a header
+/// row.  An unknown name is an error rather than a silently dropped clause —
+/// a groupby missing a column you asked for is the kind of wrong that gets
+/// believed.
+fn parse_aggs(input: &str, columns: &[table::Column]) -> Result<Vec<(usize, Agg)>, String> {
+    let mut out = Vec::new();
+    for clause in input.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+        let mut words = clause.split_whitespace();
+        let (Some(name), Some(column)) = (words.next(), words.next()) else {
+            return Err(format!("`{clause}` should read like `sum qty`"));
+        };
+        let agg = Agg::parse(name).ok_or_else(|| {
+            format!("`{name}` is not one of count/sum/mean/min/max")
+        })?;
+        let idx = columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(column))
+            .ok_or_else(|| format!("no column called `{column}`"))?;
+        out.push((idx, agg));
+    }
+    Ok(out)
+}
+
+/// `u` — pop the last transform.  The read-only view's undo.
+pub(super) fn undo_transform(app: &mut App) {
+    let cap = transform_scan_cap(app);
+    let Some(session) = app.table.as_mut() else { return };
+    let columns = session.source().columns().to_vec();
+    match session.pop_transform(cap) {
+        Some(op) => {
+            let label = op.label(&columns);
+            app.messages.show(format!("Undid {label}"));
+        }
+        None => app
+            .messages
+            .show("Nothing to undo — the table view never changes the file"),
+    }
+    update_scroll(app);
+}
+
+/// `gx` — back to the table as it was opened.
+pub(super) fn clear_transforms(app: &mut App) {
+    let cap = transform_scan_cap(app);
+    let Some(session) = app.table.as_mut() else {
+        app.messages.show("No table open");
+        return;
+    };
+    match session.clear_transforms(cap) {
+        0 => app.messages.show("No transforms to clear"),
+        n => app.messages.show(format!("Cleared {n} transform(s)")),
+    }
+    update_scroll(app);
 }
 
 /// What a finished load hands back: the source, plus the two things only the
@@ -708,12 +988,12 @@ pub(super) fn yank_row(app: &mut App) {
         return;
     };
     let row = session.state.cursor_row;
-    if row >= session.source.loaded_rows() {
+    if row >= session.source().loaded_rows() {
         app.messages.show("No row here");
         return;
     }
     let line = row_tsv(session, row);
-    let cols = session.source.columns().len();
+    let cols = session.source().columns().len();
     crate::clipboard::write(&line);
     app.messages
         .show(format!("Yanked row {} ({cols} columns)", row + 1));
@@ -835,8 +1115,8 @@ pub fn poll_table_load(app: &mut App) -> bool {
 /// behaves exactly as it does elsewhere.
 pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
     debug_assert_eq!(app.view(), View::Table);
-    let rows = app.table.as_ref().map_or(0, |s| s.source.loaded_rows());
-    let cols = app.table.as_ref().map_or(0, |s| s.source.columns().len());
+    let rows = app.table.as_ref().map_or(0, |s| s.source().loaded_rows());
+    let cols = app.table.as_ref().map_or(0, |s| s.source().columns().len());
     let page = (visible_rows(app) / 2).max(1);
 
     let moved = |app: &mut App, f: &dyn Fn(&mut table::TableState)| {
@@ -904,6 +1184,31 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
         }
         Command::TableColumnFrequency => {
             column_frequency(app);
+            return true;
+        }
+
+        // --- transforms ---
+        Command::TableSort => {
+            sort_cursor_column(app);
+            return true;
+        }
+        Command::TableFilter => {
+            prompt_filter(app);
+            return true;
+        }
+        Command::TableGroupBy => {
+            prompt_group(app);
+            return true;
+        }
+        // `u` is undo everywhere in the editor; the read-only view's undo is
+        // popping the transform stack, which is the only thing here that
+        // *was* changed.
+        Command::TableUndoTransform | Command::Undo => {
+            undo_transform(app);
+            return true;
+        }
+        Command::TableClearTransforms => {
+            clear_transforms(app);
             return true;
         }
         Command::TableToggleSparkline => {
@@ -999,7 +1304,6 @@ pub(super) fn refusal(cmd: &Command) -> Option<Refusal> {
         | Command::PasteBefore
         | Command::OpenLineBelow
         | Command::OpenLineAbove
-        | Command::Undo
         | Command::Redo
         | Command::CommentRegion
         | Command::IndentRegion
@@ -1063,10 +1367,10 @@ pub(super) fn update_scroll(app: &mut App) {
     let Some(session) = app.table.as_mut() else {
         return;
     };
-    let total_rows = session.source.loaded_rows();
+    let total_rows = session.source().loaded_rows();
     session
         .state
-        .clamp(total_rows, session.source.columns().len());
+        .clamp(total_rows, session.source().columns().len());
 
     // --- rows ---
     if rows_visible > 0 {
@@ -1086,7 +1390,7 @@ pub(super) fn update_scroll(app: &mut App) {
 
     // --- columns ---
     session.state.scroll_col = layout::scroll_col_for_cursor(
-        session.source.as_ref(),
+        session.source(),
         session.state.scroll_col,
         session.state.cursor_col,
         width,
@@ -1097,7 +1401,7 @@ pub(super) fn update_scroll(app: &mut App) {
     // fetch trigger for a windowed source later).
     let first = session.state.scroll_row;
     let last = (first + rows_visible.max(1)).min(total_rows);
-    session.source.ensure_rows(first..last);
+    session.source_mut().ensure_rows(first..last);
 
     // Summaries for the columns about to be drawn.  Here rather than in the
     // renderer because each one is a full scan of its column: the work has to
@@ -1105,7 +1409,7 @@ pub(super) fn update_scroll(app: &mut App) {
     // new on a given frame.
     if cfg.column_sparkline {
         let visible: Vec<usize> = layout::compute(
-            session.source.as_ref(),
+            session.source(),
             session.state.scroll_col,
             width,
             &cfg,
@@ -1233,12 +1537,12 @@ mod tests {
         assert_eq!(session.display_name(), "*freq city*");
 
         // value / count / percent, most frequent first.
-        let cols: Vec<&str> = session.source.columns().iter().map(|c| c.name.as_str()).collect();
+        let cols: Vec<&str> = session.source().columns().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(cols, vec!["city", "count", "percent"]);
-        assert_eq!(session.source.cell(0, 0), Some("oslo"));
-        assert_eq!(session.source.cell(0, 1), Some("2"));
-        assert_eq!(session.source.cell(1, 0), Some("lima"));
-        assert_eq!(session.source.loaded_rows(), 2);
+        assert_eq!(session.source().cell(0, 0), Some("oslo"));
+        assert_eq!(session.source().cell(0, 1), Some("2"));
+        assert_eq!(session.source().cell(1, 0), Some("lima"));
+        assert_eq!(session.source().loaded_rows(), 2);
 
         // It joins the buffer list under its virtual id, and `open_path` routes
         // back to the grid rather than opening a blank buffer named after it.
@@ -1282,6 +1586,102 @@ mod tests {
         assert!(panel.contains("max       9"), "got {panel}");
     }
 
+    /// The `g`-prefixed analytic keys, end to end through the dispatcher the
+    /// keyboard actually uses.
+    #[test]
+    fn sort_filter_and_group_are_view_transforms_that_stack_and_pop() {
+        let mut app = app_with_csv("city,qty\noslo,10\nlima,3\noslo,7\n");
+
+        // `gs` on the qty column sorts ascending; again reverses; again clears.
+        handle(&mut app, &Command::MoveRight);
+        handle(&mut app, &Command::TableSort);
+        let col = |app: &App, c: usize| -> Vec<String> {
+            let s = app.table.as_ref().unwrap();
+            (0..s.source().loaded_rows())
+                .map(|r| s.source().cell(r, c).unwrap_or_default().to_string())
+                .collect()
+        };
+        assert_eq!(col(&app, 1), vec!["3", "7", "10"]);
+        handle(&mut app, &Command::TableSort);
+        assert_eq!(col(&app, 1), vec!["10", "7", "3"]);
+        handle(&mut app, &Command::TableSort);
+        assert_eq!(col(&app, 1), vec!["10", "3", "7"], "back to file order");
+        assert!(app.table.as_ref().unwrap().transforms().is_empty());
+
+        // `gf` asks, and the answer filters.  The prompt is a mode, so the
+        // command only opens it.
+        handle(&mut app, &Command::TableFilter);
+        assert!(matches!(app.mode, crate::mode::Mode::Prompt { .. }));
+        apply_filter(&mut app, "> 5");
+        assert_eq!(col(&app, 1), vec!["10", "7"]);
+
+        // Transforms stack: the sort applies to the filtered rows.
+        handle(&mut app, &Command::TableSort);
+        assert_eq!(col(&app, 1), vec!["7", "10"]);
+        assert_eq!(app.table.as_ref().unwrap().transforms().len(), 2);
+
+        // `u` is the read-only view's undo: it pops one, and eventually says
+        // there was never anything to undo *about the file*.
+        handle(&mut app, &Command::Undo);
+        assert_eq!(col(&app, 1), vec!["10", "7"]);
+        handle(&mut app, &Command::Undo);
+        assert_eq!(col(&app, 1), vec!["10", "3", "7"]);
+        handle(&mut app, &Command::Undo);
+        assert!(
+            app.messages.log.iter().any(|m| m.contains("never changes the file")),
+            "{:?}",
+            app.messages.log,
+        );
+
+        // `gr` groups by the cursor column, counting.
+        handle(&mut app, &Command::MoveLeft);
+        handle(&mut app, &Command::TableGroupBy);
+        apply_group(&mut app, "");
+        let names: Vec<String> = app
+            .table
+            .as_ref()
+            .unwrap()
+            .source()
+            .columns()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        assert_eq!(names, vec!["city", "count"]);
+        assert_eq!(col(&app, 0), vec!["oslo", "lima"]);
+        assert_eq!(col(&app, 1), vec!["2", "1"]);
+
+        // ...and `gx` puts the whole table back.
+        handle(&mut app, &Command::TableClearTransforms);
+        assert_eq!(col(&app, 0), vec!["oslo", "lima", "oslo"]);
+    }
+
+    #[test]
+    fn a_bad_aggregate_says_what_is_wrong_and_changes_nothing() {
+        let mut app = app_with_csv("city,qty\noslo,10\n");
+        handle(&mut app, &Command::TableGroupBy);
+        apply_group(&mut app, "sum nope");
+        assert!(
+            app.messages.log.iter().any(|m| m.contains("no column called `nope`")),
+            "{:?}",
+            app.messages.log,
+        );
+        assert!(app.table.as_ref().unwrap().transforms().is_empty());
+    }
+
+    /// A transform changes the shape under the cursor, and the summaries
+    /// describe the shape — so they must not survive it.
+    #[test]
+    fn a_transform_invalidates_the_cached_summaries() {
+        let mut app = app_with_csv("n\n1\n2\n3\n4\n");
+        app.table.as_mut().unwrap().ensure_summaries_for_test([0]);
+        assert_eq!(app.table.as_ref().unwrap().summary(0).unwrap().mean, Some(2.5));
+        handle(&mut app, &Command::TableFilter);
+        apply_filter(&mut app, "> 2");
+        assert!(app.table.as_ref().unwrap().summary(0).is_none(), "stale stats dropped");
+        app.table.as_mut().unwrap().ensure_summaries_for_test([0]);
+        assert_eq!(app.table.as_ref().unwrap().summary(0).unwrap().mean, Some(3.5));
+    }
+
     #[test]
     fn summaries_are_computed_once_and_kept() {
         let mut app = app_with_csv("n\n1\n2\n3\n");
@@ -1323,8 +1723,8 @@ mod tests {
         }
 
         let session = app.table.as_ref().expect("table loaded");
-        assert_eq!(session.source.loaded_rows(), 2);
-        assert_eq!(session.source.cell(1, 1), Some("y"));
+        assert_eq!(session.source().loaded_rows(), 2);
+        assert_eq!(session.source().cell(1, 1), Some("y"));
         assert_eq!(session.display_name(), "data.csv");
         assert_eq!(app.view(), View::Table);
         assert!(app.table_pending.is_none());
@@ -1413,9 +1813,9 @@ mod tests {
 
         let session = app.table.as_ref().expect("parquet loaded");
         assert_eq!(app.view(), View::Table);
-        assert_eq!(session.source.row_count(), Some(4));
-        assert_eq!(session.source.cell(3, 1), Some("r3"));
-        assert!(session.source.describe().contains("duckdb"));
+        assert_eq!(session.source().row_count(), Some(4));
+        assert_eq!(session.source().cell(3, 1), Some("r3"));
+        assert!(session.source().describe().contains("duckdb"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1438,9 +1838,9 @@ mod tests {
         await_load(&mut app);
 
         let session = app.table.as_ref().expect("csv loaded via duckdb");
-        assert!(session.source.describe().contains("duckdb"), "got {}", session.source.describe());
-        assert_eq!(session.source.row_count(), Some(2));
-        assert_eq!(session.source.cell(1, 1), Some("y"));
+        assert!(session.source().describe().contains("duckdb"), "got {}", session.source().describe());
+        assert_eq!(session.source().row_count(), Some(2));
+        assert_eq!(session.source().cell(1, 1), Some("y"));
         // Same file, so the text view is still reachable — the engine choice is
         // about how it is read, not about what it is.
         close_table(&mut app);
@@ -1772,7 +2172,7 @@ mod tests {
         // Blank the cell under the cursor by pointing at a column past the data.
         let source =
             CsvSource::from_reader("a,b\n1,\n".as_bytes(), b',', &TableConfig::default()).unwrap();
-        app.table.as_mut().unwrap().source = Box::new(source);
+        app.table.as_mut().unwrap().replace_source(Box::new(source));
         handle(&mut app, &Command::MoveRight);
 
         handle(&mut app, &Command::TableOpenCell);
@@ -1809,7 +2209,7 @@ mod tests {
             &TableConfig::default(),
         )
         .unwrap();
-        app.table.as_mut().unwrap().source = Box::new(source);
+        app.table.as_mut().unwrap().replace_source(Box::new(source));
         let line = row_tsv(app.table.as_ref().unwrap(), 0);
         assert!(!line.contains('\n'));
         assert_eq!(line, "one↵two\tx");

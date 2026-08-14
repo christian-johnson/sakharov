@@ -340,7 +340,7 @@ impl Default for TableStatuslineConfig {
 }
 
 fn default_table_statusline_left() -> Vec<String> {
-    vec!["mode".into(), "file".into(), "table_shape".into()]
+    vec!["mode".into(), "file".into(), "table_shape".into(), "table_transforms".into()]
 }
 fn default_table_statusline_right() -> Vec<String> {
     vec!["spinner".into(), "table_column".into(), "table_position".into()]

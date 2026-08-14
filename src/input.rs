@@ -563,14 +563,18 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
             let name = app.command_buf.trim().to_string();
             app.command_buf.clear();
             app.mode = Mode::Normal;
-            // Empty input cancels quietly rather than erroring.
-            if name.is_empty() {
+            // Empty input cancels quietly rather than erroring — except for the
+            // groupby, where "no aggregates" is the answer most of the time and
+            // Enter on an empty prompt is how you give it.
+            if name.is_empty() && kind != PromptKind::TableGroupBy {
                 return;
             }
             app.show_splash = false;
             match kind {
                 PromptKind::NewFile => exec::create_new_file(app, &name),
                 PromptKind::NewNotebook => exec::create_new_notebook(app, &name),
+                PromptKind::TableFilter => exec::table_filter(app, &name),
+                PromptKind::TableGroupBy => exec::table_group_by(app, &name),
             }
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -629,6 +633,10 @@ fn table_goto_command(c: char) -> Option<Command> {
     Some(match c {
         'd' => Command::TableColumnSummary,
         'c' => Command::TableColumnFrequency,
+        's' => Command::TableSort,
+        'f' => Command::TableFilter,
+        'r' => Command::TableGroupBy,
+        'x' => Command::TableClearTransforms,
         't' => Command::SchemaBrowser,
         _ => return None,
     })

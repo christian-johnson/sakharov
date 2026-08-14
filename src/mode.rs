@@ -12,6 +12,10 @@ pub enum PromptKind {
     NewFile,
     /// Create a new `.ipynb` notebook with the entered name.
     NewNotebook,
+    /// Filter the table's cursor column (`> 100`, `= oslo`, `~ osl`, `null`).
+    TableFilter,
+    /// Group the table by its cursor column, with optional aggregates.
+    TableGroupBy,
 }
 
 /// Editor mode.

@@ -303,6 +303,11 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `column-summary` | `S`, `gd` | Statistics for the cursor's column in a float: values/missing/distinct, min–max, quartiles, mean, distribution (`:summary`, `:describe`) |
 | `column-frequency` | `F`, `gc` | Count the cursor column's values into a new grid of its own (`:frequency`, `:value-counts`) |
 | `toggle-column-sparkline` | `s` | Show/hide the distribution row under the column names (`:sparkline`, `:column-sparkline`) |
+| `sort-column` | `gs` | Sort by the cursor column; again reverses it, again removes it (`:sort`) |
+| `filter-column` | `gf` | Filter rows on the cursor column — prompts for `> 100`, `= oslo`, `~ osl`, `null`, `not null` (`:filter`) |
+| `group-by-column` | `gr` | Group rows by the cursor column and count them; prompts for extra aggregates like `sum qty, mean price` (`:group`) |
+| `undo-transform` | `u` | Drop the last sort/filter/group |
+| `clear-transforms` | `gx` | Drop every sort/filter/group (`:reset-table`) |
 | `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table or a query result) and go back to where it came from — also what `:bd` does there (`:table-back`) |
 | `sql` | — | Open the SQL scratch buffer (`:query`, `:sql-buffer`) |
 | `run-query` | `Ctrl+E` (in the SQL buffer) | Run the query and show the result as a grid (`:sql-run`) |
@@ -325,6 +330,28 @@ them would be a shape the data doesn't have.
 value counts into a grid of their own — a *computed* table, with no file behind it.
 `q` backs out of it to the table it came from, the same way `q` backs out of a cell
 buffer; `:bd` does the same, and `H`/`L` step past it without losing it.
+
+### Sort, filter, group
+
+`gs` sorts by the cursor column, `gf` filters it, `gr` groups by it. They **stack**:
+each one derives a new view from the one before, so `gf` then `gs` sorts the filtered
+rows. `u` — undo, the same key as everywhere else — pops the last one, and `gx` drops
+them all. The status line shows the stack (`sort:price↓ · filter:qty>0`), because
+otherwise a filtered grid is indistinguishable from a small dataset.
+
+None of it touches the file. A transform describes a *new* table computed from the
+one you are looking at; the file on disk is never opened for writing at any point.
+
+Where the source can do the work itself it does — a filter on a parquet file is
+executed by DuckDB over the whole file, not over the rows on screen. Otherwise the
+transform runs by scanning, which is why a windowed source refuses a transform it
+cannot push down rather than quietly filtering only the loaded window.
+
+Filter syntax is deliberately small (it is compiled to SQL, and a shape that can be
+generated is not a shape that can be injected): `> 100`, `>= 3`, `< 0`, `= oslo`,
+`!= oslo`, `~ osl` (contains, case-insensitive), `null`, `not null`. A bare word
+means "contains". Aggregates for `gr` read `sum qty, mean price` — `count`, `sum`,
+`mean`, `min`, `max` — and the group count is always included.
 
 Summaries scan at most `summary_max_rows` rows (a summary is a full column scan,
 and the sparkline needs one per visible column); the panel names the number of

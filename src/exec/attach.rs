@@ -244,8 +244,8 @@ mod with_engine {
     pub(in crate::exec) fn open_catalog_row(app: &mut App) {
         let Some(session) = app.table.as_ref() else { return };
         let by_name = |name: &str| -> Option<String> {
-            let idx = session.source.columns().iter().position(|c| c.name == name)?;
-            session.source.cell(session.state.cursor_row, idx).map(str::to_string)
+            let idx = session.source().columns().iter().position(|c| c.name == name)?;
+            session.source().cell(session.state.cursor_row, idx).map(str::to_string)
         };
         let (Some(db), Some(schema), Some(table)) =
             (by_name("database"), by_name("schema"), by_name("name"))
@@ -365,18 +365,18 @@ mod tests {
         assert_eq!(app.view(), View::Table);
         let session = app.table.as_ref().expect("schema browser open");
         assert_eq!(session.drill, Some(super::super::table::Drill::Catalog));
-        let names: Vec<&str> = session.source.columns().iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<&str> = session.source().columns().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["database", "schema", "name", "type", "columns"]);
-        assert_eq!(session.source.cell(0, 0), Some("analytics"));
-        assert_eq!(session.source.cell(0, 2), Some("sales"));
+        assert_eq!(session.source().cell(0, 0), Some("analytics"));
+        assert_eq!(session.source().cell(0, 2), Some("sales"));
 
         // `Enter` on a catalog row opens that table rather than reading the
         // cell's text — the row *names* something.
         super::super::execute(&mut app, &Command::TableOpenCell);
         let opened = app.table.as_ref().expect("the table opened");
         assert_eq!(opened.display_name(), "*analytics.main.sales*");
-        assert_eq!(opened.source.row_count(), Some(2));
-        assert_eq!(opened.source.cell(1, 1), Some("lima"));
+        assert_eq!(opened.source().row_count(), Some(2));
+        assert_eq!(opened.source().cell(1, 1), Some("lima"));
 
         // ...and `q` walks back out: table → catalog, the same paradigm as any
         // other computed view.

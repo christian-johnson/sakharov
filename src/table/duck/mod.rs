@@ -291,6 +291,24 @@ impl TableSource for DuckDbSource {
         let _ = self.fetch(rows.start);
     }
 
+    /// The point of this backend: only the window on screen is ever in memory.
+    fn is_windowed(&self) -> bool {
+        true
+    }
+
+    /// Every transform pushes down: this source is a *query*, so a derivation is
+    /// one more layer of subquery, executed by the engine over the whole table
+    /// rather than over the window that happens to be on screen.
+    fn derive(&self, op: &crate::table::transform::Transform) -> Option<Box<dyn TableSource>> {
+        let sql = op.to_sql(&self.sql, &self.columns)?;
+        // A fresh handle on the same database — including whatever is attached
+        // to it, since the derived query still names those tables.
+        let conn = self.conn.try_clone().ok()?;
+        Self::query(conn, sql, self.label.clone())
+            .ok()
+            .map(|s| Box::new(s) as Box<dyn TableSource>)
+    }
+
     fn describe(&self) -> String {
         let rows = match self.total {
             Some(n) => format!("{n} rows"),
@@ -570,6 +588,78 @@ mod tests {
         let src = DuckDbSource::query(mem(), "SELECT 1 AS \"we\"\"ird\"", "q").unwrap();
         assert_eq!(src.columns()[0].name, "we\"ird");
         assert_eq!(src.cell(0, 0), Some("1"));
+    }
+
+    /// The test the whole two-path design rests on.
+    ///
+    /// A transform executed by the engine and the same transform executed by
+    /// scanning must produce the same grid, cell for cell.  Without this,
+    /// pushdown drifts from local execution and a filtered view quietly lies
+    /// about the data — the one failure a read-only viewer can still commit.
+    #[test]
+    fn pushdown_and_local_execution_agree() {
+        use crate::table::transform::{apply_local, Agg, Predicate, Transform};
+        use crate::table::MemSource;
+
+        let rows: &[&[&str]] = &[
+            &["oslo", "10"],
+            &["oslo", "7"],
+            &["oslo", ""],
+            &["lima", "3"],
+            &["lima", "5"],
+            &["bern", "1"],
+            // A group whose every value is missing: `sum` of nothing is NULL,
+            // not zero, and both paths have to say so.
+            &["kyiv", ""],
+        ];
+        let local_src = MemSource::new(&["city", "qty"], rows);
+        let duck = DuckDbSource::query(
+            mem(),
+            "SELECT * FROM (VALUES ('oslo', 10), ('oslo', 7), ('oslo', NULL), \
+                                   ('lima', 3), ('lima', 5), ('bern', 1), \
+                                   ('kyiv', NULL)) AS t(city, qty)",
+            "fixture",
+        )
+        .expect("fixture query");
+
+        for op in [
+            Transform::Sort { col: 1, desc: false },
+            Transform::Sort { col: 1, desc: true },
+            Transform::Sort { col: 0, desc: false },
+            Transform::Filter { col: 1, pred: Predicate::Gt(4.0) },
+            Transform::Filter { col: 0, pred: Predicate::Eq("oslo".into()) },
+            // A NULL is not "not oslo" in SQL, but it *is* in the grid, where a
+            // missing value is an empty string.  The two paths have to agree on
+            // that too, so the pushdown admits NULL explicitly.
+            Transform::Filter { col: 0, pred: Predicate::Ne("oslo".into()) },
+            Transform::Filter { col: 1, pred: Predicate::IsNull },
+            Transform::GroupBy { keys: vec![0], aggs: vec![] },
+            Transform::GroupBy { keys: vec![0], aggs: vec![(1, Agg::Sum), (1, Agg::Mean)] },
+        ] {
+            let local = apply_local(&local_src, &op, usize::MAX);
+            let pushed = duck.derive(&op).expect("duckdb pushes every transform down");
+
+            let label = format!("{op:?}");
+            assert_eq!(
+                local.columns().iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+                pushed.columns().iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+                "column names differ for {label}",
+            );
+            assert_eq!(
+                local.loaded_rows(),
+                pushed.loaded_rows(),
+                "row counts differ for {label}",
+            );
+            for r in 0..local.loaded_rows() {
+                for c in 0..local.columns().len() {
+                    assert_eq!(
+                        local.cell(r, c),
+                        pushed.cell(r, c),
+                        "cell ({r},{c}) differs for {label}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]

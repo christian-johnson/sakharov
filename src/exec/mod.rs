@@ -21,6 +21,8 @@ pub use lsp::{
 };
 pub use scroll::{normalize_cursor_folds, update_scroll};
 pub use table::{is_table_path, open_as_table, poll_table_load};
+// The minibuffer prompts' answers land here (`input::handle_prompt`).
+pub(crate) use table::{apply_filter as table_filter, apply_group as table_group_by};
 pub use search::{search_compute_matches, search_jump};
 
 // Names used by `execute()` and by sibling submodules via `super::…`.
@@ -1135,7 +1137,12 @@ pub fn execute(app: &mut App, cmd: &Command) {
             table::toggle_sparkline(app);
             return;
         }
-        Command::TableOpenCell
+        Command::TableSort
+        | Command::TableFilter
+        | Command::TableGroupBy
+        | Command::TableUndoTransform
+        | Command::TableClearTransforms
+        | Command::TableOpenCell
         | Command::TablePeekCell
         | Command::TableYankCell
         | Command::TableYankRow
@@ -1277,6 +1284,10 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
             hint("k", "peek cell text"),
             hint("d", "describe this column"),
             hint("c", "count this column's values"),
+            hint("s", "sort by this column"),
+            hint("f", "filter on this column"),
+            hint("r", "group rows by this column"),
+            hint("x", "clear sorts and filters"),
             hint("t", "browse attached tables"),
             hint("b", "buffer picker"),
         ];
@@ -2264,8 +2275,11 @@ mod tests {
         ));
         let hints = goto_hints(&app);
         assert!(hints.iter().any(|(k, d)| k == "k" && d.contains("peek")));
-        // And nothing that would do nothing here.
-        assert!(!hints.iter().any(|(k, _)| k == "s" || k == "w"));
+        // A key whose text meaning is meaningless in a grid either carries the
+        // grid's own meaning (`gs` sorts here, it does not pick a symbol) or is
+        // left out entirely (`gw` labels word starts in text there aren't any of).
+        assert!(hints.iter().any(|(k, d)| k == "s" && d.contains("sort")));
+        assert!(!hints.iter().any(|(k, _)| k == "w"));
     }
 
     #[test]

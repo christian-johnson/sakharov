@@ -621,14 +621,15 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
         kernel,
         table: app.table.as_ref().map(|s| {
             let st = &s.state;
-            let cols = s.source.columns();
+            let cols = s.source().columns();
             crate::statusline::TableView {
-                row: (st.cursor_row + 1, s.source.loaded_rows()),
+                row: (st.cursor_row + 1, s.source().loaded_rows()),
                 col: (st.cursor_col + 1, cols.len()),
                 col_name: cols
                     .get(st.cursor_col)
                     .map(|c| c.name.clone())
                     .unwrap_or_default(),
+                transforms: s.transforms().iter().map(|t| t.label(cols)).collect(),
             }
         }),
     }
@@ -668,6 +669,8 @@ pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
             let label = match kind {
                 PromptKind::NewFile => "New file",
                 PromptKind::NewNotebook => "New notebook",
+                PromptKind::TableFilter => "Filter (> 100 · = oslo · ~ osl · null)",
+                PromptKind::TableGroupBy => "Aggregate (sum qty, mean price)",
             };
             (format!("{label}: {}_", app.command_buf), Style::default())
         }

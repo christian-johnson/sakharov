@@ -183,8 +183,8 @@ mod tests {
 
         assert_eq!(app.view(), View::Table);
         let session = app.table.as_ref().expect("result grid");
-        assert_eq!(session.source.row_count(), Some(3));
-        assert_eq!(session.source.cell(2, 0), Some("2"));
+        assert_eq!(session.source().row_count(), Some(3));
+        assert_eq!(session.source().cell(2, 0), Some("2"));
         assert!(session.id.is_virtual());
 
         // `q` goes back to the query text, so editing and re-running is a loop.
@@ -245,8 +245,8 @@ mod tests {
         super::super::execute(&mut app, &Command::SqlRun);
 
         let session = app.table.as_ref().expect("queried the file by name");
-        assert_eq!(session.source.row_count(), Some(2));
-        assert_eq!(session.source.cell(1, 1), Some("y"));
+        assert_eq!(session.source().row_count(), Some(2));
+        assert_eq!(session.source().cell(1, 1), Some("y"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

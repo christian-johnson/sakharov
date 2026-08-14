@@ -21,6 +21,7 @@ pub mod duck;
 pub mod layout;
 pub mod state;
 pub mod summary;
+pub mod transform;
 
 pub use state::TableState;
 
@@ -97,6 +98,29 @@ pub trait TableSource {
 
     /// Short human description for the status line (e.g. `"12,043 rows × 8 cols"`).
     fn describe(&self) -> String;
+
+    /// Satisfy `op` natively, or `None` to have the caller execute it locally
+    /// ([`transform::apply_local`]).
+    ///
+    /// `&self` on purpose: a transform produces a *new* source and never touches
+    /// its parent, which is what keeps every view in the editor read-only even
+    /// as the derivations stack up.  A backend that can push a filter down to the
+    /// engine must — for a windowed source, executing it locally would mean
+    /// filtering only the rows that happen to be on screen.
+    fn derive(&self, _op: &transform::Transform) -> Option<Box<dyn TableSource>> {
+        None
+    }
+
+    /// True when [`cell`](TableSource::cell) can only answer inside the window
+    /// [`ensure_rows`](TableSource::ensure_rows) last fetched.
+    ///
+    /// Not a performance hint — a correctness one.  Anything that computes over
+    /// a source by *reading* it (a local transform, a summary) sees only the
+    /// window, so for a windowed source that answer would describe the screenful
+    /// rather than the data, and would look entirely plausible.
+    fn is_windowed(&self) -> bool {
+        false
+    }
 }
 
 /// Infer a column's type from sampled values.

@@ -226,6 +226,11 @@ commands! {
         TableColumnFrequency => "column-frequency", aliases: ["frequency", "value-counts"], palette: "Count the cursor column's values as a new table  [F]";
         TableToggleSparkline => "toggle-column-sparkline", aliases: ["sparkline", "column-sparkline"], palette: "Show/hide the distribution row under the column names  [s]";
         TableCloseDerived => "close-derived-table", aliases: ["table-back"], palette: "Leave a computed table and go back to the one it came from  [q]";
+        TableSort => "sort-column", aliases: ["sort"], palette: "Sort by the cursor column — again reverses, again unsorts  [gs]";
+        TableFilter => "filter-column", aliases: ["filter"], palette: "Filter rows on the cursor column  [gf]";
+        TableGroupBy => "group-by-column", aliases: ["group", "groupby"], palette: "Group rows by the cursor column and count them  [gr]";
+        TableUndoTransform => "undo-transform", palette: "Drop the last sort/filter/group  [u]";
+        TableClearTransforms => "clear-transforms", aliases: ["reset-table"], palette: "Drop every sort/filter/group  [gx]";
         SchemaBrowser => "schema", aliases: ["tables", "schema-browser"], palette: "Browse the tables in every attached database  [gt]";
         SqlBuffer => "sql", aliases: ["query", "sql-buffer"], palette: "Open the SQL scratch buffer  [:sql]";
         SqlRun => "run-query", aliases: ["sql-run"], palette: "Run the SQL buffer's query and show the result as a grid  [Ctrl+E]";

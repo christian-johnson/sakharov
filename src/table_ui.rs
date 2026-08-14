@@ -27,7 +27,7 @@ use crate::{
 /// Draw the grid for `session` into `area`.
 pub fn render(frame: &mut Frame, area: Rect, session: &Session, cfg: &TableConfig) {
     let th = theme::active();
-    let source = session.source.as_ref();
+    let source = session.source();
     let state = &session.state;
 
     if source.columns().is_empty() {

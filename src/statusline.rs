@@ -65,6 +65,11 @@ pub struct TableView {
     pub col: (usize, usize),
     /// Name of the column the cursor is in.
     pub col_name: String,
+    /// The sort/filter/group stack, already rendered (`sort:price\u{2193}`).
+    ///
+    /// Without it a filtered grid is indistinguishable from a small dataset,
+    /// which is the one way a read-only viewer can still mislead.
+    pub transforms: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -260,6 +265,12 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
             )],
             Some(t) => vec![Segment::new(format!("col {}/{}", t.col.0, t.col.1), base)],
             None => vec![],
+        },
+        "table_transforms" | "transforms" => match &ctx.table {
+            Some(t) if !t.transforms.is_empty() => {
+                vec![Segment::new(t.transforms.join(" \u{00b7} "), base)]
+            }
+            _ => vec![],
         },
         "table_shape" => match &ctx.table {
             Some(t) => vec![Segment::new(
