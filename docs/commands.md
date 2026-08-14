@@ -393,10 +393,12 @@ attaching one needs none. A remote or authenticated database is a different thin
 and is deliberately out of scope: connect to it in a notebook cell with your own
 driver and your own auth, and view the result with `:view` (see the kernel bridge).
 That keeps connection strings in the channel that gets reviewed and versioned, and
-keeps DSN parsing, environment precedence and TLS options out of the editor. It also
-means a SQLite file needs DuckDB's `sqlite` extension already installed — the editor
-will not `INSTALL`/`LOAD` native code at runtime, which is the same hole the
-statement gate exists to keep shut.
+keeps DSN parsing, environment precedence and TLS options out of the editor.
+
+A `.sqlite`/`.db` file attaches too, read-only, through DuckDB's sqlite reader — which
+the default build carries, so it needs nothing installed. If a build ever lacks it the
+attach fails and says so, rather than the editor fetching native code at runtime: the
+editor never runs `INSTALL`/`LOAD`, which is the same hole the statement gate keeps shut.
 
 ### The kernel bridge — and remote databases
 

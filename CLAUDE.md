@@ -775,9 +775,11 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   so a query can join a parquet file to an attached table. The editor issues the `ATTACH`
   itself precisely because the gate rejects a user-typed one: `READ_ONLY` must not be
   something a query can leave off. An attach is *verified* on a throwaway connection before
-  it is recorded, so a bad file fails now rather than at the next query. SQLite is attached
-  with `(TYPE SQLITE)` and fails cleanly when the extension isn't present — the editor never
-  runs `INSTALL`/`LOAD`, which is the same hole the gate exists to keep shut.
+  it is recorded, so a bad file fails now rather than at the next query. `.sqlite`/`.db`
+  attaches with `(TYPE SQLITE, READ_ONLY)` and **works out of the box** — the bundled
+  amalgamation carries the sqlite reader (verified against `notes.sqlite`); if a build ever
+  lacks it the attach fails cleanly, because the editor never runs `INSTALL`/`LOAD`, which is
+  the same hole the gate exists to keep shut.
 - **`gt` / `:schema`** is the schema browser: a grid over `information_schema` across every
   attached database. No new view — a catalog *is* tabular data. `Session.drill` records that
   a row *names* a thing rather than being one, so `Enter` opens that table (as a derived
