@@ -722,9 +722,19 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
 ### Phase D2 (DuckDB backend) — complete
 - **`table/duck/`** behind the **`dataframe` cargo feature (default on)**;
   `duckdb = { version = "1", features = ["bundled"] }` compiles DuckDB's C++ from source.
-  **Measured cost:** the release binary goes 8.8 MB → 41.9 MB and a cold release build
-  ~30 s → ~3.4 min. `--no-default-features` drops it and is a supported build — the editor
-  still opens CSV/TSV with its own parser, and `:sql`/parquet say what is missing.
+  **Measured cost:** the release binary goes 8.8 MB → 41.9 MB, a cold release build
+  ~30 s → ~3.4 min, and **startup 3.8 ms → 11.0 ms**. `--no-default-features` drops it and
+  is a supported build — the editor still opens CSV/TSV with its own parser, and
+  `:sql`/parquet say what is missing.
+  **The startup cost is not ours and cannot be deferred.** Nothing in the editor touches
+  DuckDB at startup (the only call sites are opening a data file and running a query), but
+  the statically-linked amalgamation has **406 C++ global constructors** against the
+  editor's 2, and those run before `main` whether or not a query is ever issued
+  (`DYLD_PRINT_INITIALIZERS=1` shows the count). Deferring it would mean *dynamically*
+  loading the library — `dlopen` with hand-rolled FFI, or a spawned helper process like the
+  Python kernel. Both were considered and declined: 7 ms is under the threshold where a
+  launch reads as slow, and both cost the single-binary `cargo install`. Do not go looking
+  for editor code to make lazy; there isn't any.
 - **`DuckDbSource`** is the windowed `TableSource` that validates the trait's `ensure_rows`
   design: it holds a *query* plus the ~500-row window on screen, refetching as the cursor
   moves (`fetch`), so a file larger than memory opens. `loaded_rows()` is the whole result

@@ -363,6 +363,12 @@ its job independently.
 | `--no-default-features` | 8.8 MB | ~30 s |
 | default (`dataframe`) | **41.9 MB** | **~3.4 min** (~19 min CPU) |
 
+Startup also pays: **3.8 ms → 11.0 ms** (median, warm). Not editor code — nothing
+touches DuckDB until a data file is opened or a query runs — but the static
+amalgamation carries 406 C++ global constructors that run before `main`. Deferring
+it needs dynamic loading (`dlopen`, or a helper process like the kernel); both were
+declined for costing the single-binary install to save 7 ms.
+
 A 4.8× binary and a first build that goes from half a minute to three and a half.
 That is the real cost of `features = ["bundled"]`, and it is why the feature
 exists: `--no-default-features` is a supported build that still opens CSV/TSV.
