@@ -768,6 +768,83 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   would be hostile. `app.sql_dir` anchors bare filenames (`FROM 'data.csv'`) to the
   directory of whatever was open when `:sql` was invoked, via DuckDB's `file_search_path`;
   it has to be captured then, because switching into the path-less `*sql*` buffer loses it.
+- **`:attach <path> [as <alias>]`** (`exec/attach.rs`) makes a **local database file**
+  readable, always `READ_ONLY`; `:detach [alias]` drops one or all. `duck::connect` is now
+  the single connection builder — in-memory scratch database, `file_search_path` anchored at
+  the working directory, every `app.attachments` entry replayed — and `:sql` goes through it,
+  so a query can join a parquet file to an attached table. The editor issues the `ATTACH`
+  itself precisely because the gate rejects a user-typed one: `READ_ONLY` must not be
+  something a query can leave off. An attach is *verified* on a throwaway connection before
+  it is recorded, so a bad file fails now rather than at the next query. SQLite is attached
+  with `(TYPE SQLITE)` and fails cleanly when the extension isn't present — the editor never
+  runs `INSTALL`/`LOAD`, which is the same hole the gate exists to keep shut.
+- **`gt` / `:schema`** is the schema browser: a grid over `information_schema` across every
+  attached database. No new view — a catalog *is* tabular data. `Session.drill` records that
+  a row *names* a thing rather than being one, so `Enter` opens that table (as a derived
+  table with `origin`, hence `q` walks back out); `None` — every other table — keeps `Enter`
+  meaning "read this cell's full text".
+- **The editor holds no credentials, by decision** (`docs/data-layer-plan.md`). A local file
+  is a path, not a secret; a remote or authenticated database is connected to *in the kernel*
+  by the user's own code and viewed through the bridge below.
+
+### Phase D3 (transforms) — complete
+- **`table/transform.rs`** — `Transform { Sort | Filter | GroupBy }`, `Predicate`, `Agg`.
+  A transform is a *description* of a derived table, applied one of two ways:
+  **pushed down** via `TableSource::derive` (which `DuckDbSource` implements by wrapping its
+  query in a subquery, so a filter over a huge parquet is executed by the engine), or
+  **executed locally** by `apply_local`, which materialises a `MemSource`. `Transform::to_sql`
+  is the single place a transform becomes SQL, so the two can't drift into different queries.
+- **`pushdown_and_local_execution_agree` is the load-bearing test**: the same transform
+  through both paths, cell for cell. It caught two real divergences on the day it was
+  written — a local `sum` over an all-blank group returned `0` where SQL returns NULL, and
+  equal-sized groups came back in an order *neither* path specified. Both were fixed at the
+  source (missing, and a total `ORDER BY count DESC, key ASC` mirrored locally), not in the
+  test. Any new `Transform` variant must extend that test.
+- **`Session` owns the stack** (`base` + `stack: Vec<Transform>` + `derived`), and
+  `Session::source()` is the **only** reader — a filtered grid cannot accidentally be drawn
+  from the unfiltered base. `rebuild` folds the stack from scratch (popping is the point of a
+  stack), clamps the cursor, and drops the cached summaries, since they describe a shape that
+  just changed.
+- **`TableSource::is_windowed`** is a *correctness* flag, not a performance hint: local
+  execution reads the source, and a windowed source can only answer for the rows on screen.
+  `rebuild` refuses a transform it can't push down rather than filtering the screenful and
+  presenting it as a filtered table.
+- Keys sit under the `g` prefix: `gs` sort (cycling asc → desc → off), `gf` filter, `gr`
+  group, `gx` clear, `u` pop. `input::goto_command` now takes the **view** and consults
+  `table_goto_command` first — the grid's analytic commands live under the prefix the editor
+  already uses for "go somewhere / show me more", and `gd`/`gr`, meaningless in a grid, are
+  free to carry a grid meaning. `goto_hints` is pinned to it *per view*.
+- Filter syntax is a closed set of shapes (`> 100`, `= oslo`, `~ osl`, `null`, `not null`),
+  parsed in Rust into a `Predicate` and compiled to SQL — a shape that can be *generated* is
+  not a shape that can be injected. Status-line module `table_transforms` renders the stack.
+- **Not implemented:** pivot (the plan's fourth variant), and column freeze/resize, which are
+  `layout` concerns rather than transforms.
+
+### Phase D4 (kernel bridge) — complete
+- **`gv` / `:vars`** lists the active kernel's namespace as a picker; `Enter` (or
+  `:view df`) opens a dataframe in the grid, as a derived table with `origin`, so `q` backs
+  out to where you were. `gv` is in the *shared* goto map, not the table one: the grid you
+  want is often the one a notebook two buffers over built.
+- **This is where a remote database is browsed.** The user connects in a cell with their own
+  driver and auth (`pl.read_database(...)`), and the result is a frame in the namespace —
+  which is exactly what the bridge shows. The credential never reaches the editor.
+- **Protocol**: two new `RequestKind`s (`Vars`, `Export { var, path }`) on the existing
+  framing, with replies routed by `Consumer` (`VariableList` / `ViewVariable`) like
+  everything else — a listing that arrives after its popup was dismissed belongs to nobody
+  and is dropped. **Transport is a parquet file** under `state_dir()/bridge`, opened with the
+  same `DuckDbSource` every `.parquet` uses and then unlinked: a window of a wide frame is
+  too big for base64 on the line protocol, and parquet needs no second reader (unlike Arrow
+  IPC). Export dispatches to `write_parquet` (polars, duckdb relation) then `to_parquet`
+  (pandas + pyarrow).
+- **Only a bound name crosses.** `:view` refuses anything that isn't an identifier and the
+  runner looks it up in the namespace — nothing typed in the editor is ever `eval`'d.
+  Introspection stays at type/shape/viewable, never anything that materialises a value.
+- Requests **queue behind a running cell** (by design — it is what stops anything reading a
+  namespace mid-execution), so a busy kernel is reported rather than worked around. An
+  editor request that errors now surfaces its message: a non-cell consumer's traceback used
+  to be dropped, which made a failed request look like one that never came back.
+- **The grid is a snapshot**, not a live view: re-run `:view` to refresh. The plan's
+  staleness chip is not implemented.
 
 ### Known rough edges / not yet implemented
 - No split panes
@@ -779,18 +856,21 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
 - Notebook cells have no horizontal scroll: with `:wrap` off, a long code-cell line clips at
   the cell border (markdown cells always wrap, so this only affects code/raw cells —
   cell *outputs* always wrap and are never clipped)
-- The table view is read-only and has no sort/filter/search yet — see Phase T1's closing
-  note. The built-in CSV parser loads the whole file into memory (capped at
-  `table.max_rows`); `[table] engine = "duckdb"` reads a window at a time instead.
-- There is no `:attach` for a persistent database yet, so the schema browser the plan
-  sketches (a grid over `information_schema`) has nothing to browse — `:sql` queries files
-  by name through an in-memory connection. Both land together when attaching does.
-  **`:attach` will be local files only** (`.duckdb`/SQLite — a path, not a secret). The
-  editor deliberately handles **no credentials**: a remote or authenticated database is
-  connected to *in the kernel*, by the user's own code, and viewed through D4's bridge.
-  Besides being the plan's own "writes go through code" rule, remote scanners need
-  `INSTALL`/`LOAD`, which the D2 gate rejects — supporting them editor-side would mean
-  punching a hole in the safety layer to load native extensions at runtime.
+- The table view is read-only and has **no search** (`/` says so rather than searching
+  nothing); sort/filter/group landed in D3. The built-in CSV parser loads the whole file
+  into memory (capped at `table.max_rows`); `[table] engine = "duckdb"` reads a window at
+  a time instead.
+- No **pivot** — D3 shipped sort/filter/groupby; pivot is the one `Transform` variant the
+  plan lists that has no implementation on either path.
+- **`:attach` is local files only** (`.duckdb`/SQLite — a path, not a secret), by decision.
+  The editor handles **no credentials**: a remote or authenticated database is connected to
+  *in the kernel*, by the user's own code, and viewed through `gv` / `:view`. Besides being
+  the plan's own "writes go through code" rule, remote scanners need `INSTALL`/`LOAD`, which
+  the D2 gate rejects — supporting them editor-side would mean punching a hole in the safety
+  layer to load native extensions at runtime. The cost, stated plainly: browsing a *remote*
+  database needs a Python environment with a driver.
+- A table opened from the kernel (`:view df`) is a **snapshot** taken when you asked, not a
+  live view; nothing detects that the frame was reassigned. Re-run `:view` to refresh.
 - Column summaries are computed synchronously on the frame a column first becomes visible:
   bounded by `table.summary_max_rows`, but a wide table's first frame can still hitch.
   Moving them off the UI thread is what the deferred jobs registry (plan D0.5) is for.
@@ -823,6 +903,11 @@ src/
                         routing table; bodies live in the submodules below.
     mod.rs            — execute() dispatch, folding/notebook-motion handlers,
                         refresh_git/poll_git, process_kernel_events, diag cache
+    attach.rs         — `:attach`/`:detach` (local database files, always
+                        READ_ONLY) + `:schema`, the information_schema browser;
+                        `connection()` is the one way anything reaches the engine
+    bridge.rs         — the kernel bridge: `gv` lists the namespace, `:view df`
+                        opens a dataframe as a grid (parquet through state_dir)
     buffers.rs        — buffer-list management: special buffers, buffer switch +
                         stashes (plain-file & via notebook), open_as_notebook,
                         new-file/new-notebook, unsaved_buffer_names quit sweep
@@ -880,6 +965,13 @@ src/
                         Renderer + scroll math must both derive geometry here
     summary.rs        — ColumnSummary + summarize/frequency/sparkline: pure-Rust
                         column statistics over any TableSource (read-only)
+    transform.rs      — Transform/Predicate/Agg: sort, filter, groupby as
+                        *descriptions*, executed by pushdown (to_sql, via
+                        TableSource::derive) or by scanning (apply_local).
+                        The two paths are pinned together by
+                        pushdown_and_local_execution_agree
+    duck/             — DuckDbSource (windowed, pushes every transform down),
+                        connect() + ATTACH, the statement gate
     state.rs          — TableState: cursor (row, col) + scroll anchor
     csv.rs            — CsvSource: delimiter sniffing + `csv`-crate parse, row cap
     mod.rs's MemSource — a TableSource that owns its rows: what a *derived* table
@@ -981,6 +1073,18 @@ docs/
   change to how a cell (or its output block) is sized must go through those two functions.
   Because scroll always follows the cursor now, the command-only `notebook-scroll-down`/`-up`
   nudges snap back to the focused cell on the next frame.
+- **A table's data is read through `Session::source()`, never a field.** The session holds
+  the base source plus a stack of `Transform`s; `source()` returns the top of the stack, so
+  a filtered grid cannot be drawn from the unfiltered base. A transform is *derived*
+  (`TableSource::derive` takes `&self`), never applied in place — that is what keeps every
+  view read-only however deep the derivations go. Adding a `Transform` variant means
+  extending `Transform::to_sql`, `apply_local`, **and** `pushdown_and_local_execution_agree`.
+- **A `TableSource` that answers only inside its window must say so** (`is_windowed`).
+  Anything that computes by *reading* a source — a local transform, a column summary — sees
+  only the window, and a plausible-looking answer about the screenful is worse than a refusal.
+- **The editor never handles a credential.** `:attach` takes a local file path; anything
+  remote or authenticated is connected to in the kernel by the user's own code and viewed
+  through `bridge.rs`. Do not add DSN parsing, an env-var lookup, a prompt, or a keyring.
 - **The table view's geometry lives in `table::layout`** — `column_width`,
   `compute`, `header_rows`, `visible_rows`, `fit_cell`, `scroll_col_for_cursor`. The renderer and
   the scroll math must agree cell-for-cell, so any change to how a column is sized

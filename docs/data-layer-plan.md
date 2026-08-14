@@ -262,9 +262,9 @@ all-null column, single-value column); the extended layout test above.
 
 ## D2 — DuckDB backend
 
-**Status: mostly done.** The engine, the windowed source, the read-only layers, file
-dispatch and `:sql` have shipped. Still open: `:attach` for a persistent database, and
-the schema browser over `information_schema` that depends on it.
+**Status: done.** The engine, the windowed source, the read-only layers, file dispatch,
+`:sql`, `:attach`/`:detach` (local files only, always `READ_ONLY`) and the
+`information_schema` browser (`gt`) have all shipped.
 
 *Needs D0.3.*
 
@@ -389,6 +389,24 @@ the whole table.
 
 ## D3 — Transforms with pushdown
 
+**Status: done, minus pivot.** Sort, filter and groupby ship on both paths; `Pivot` is the
+one variant with no implementation. `Session` holds the stack, `u` pops, `gx` clears, and
+`table_transforms` renders it in the status line.
+
+**What the identity test actually caught**, on the day it was written — both real bugs,
+both fixed at the source rather than in the test:
+
+- a local `sum` over a group whose every value was missing returned `0`, where SQL's `sum`
+  of all NULLs is NULL;
+- two equal-sized groups came back in an order *neither* path specified, so the comparison
+  was nondeterministic. The fix is a total order (`ORDER BY count DESC, key ASC`, mirrored
+  locally), which is a better groupby regardless.
+
+One addition the plan didn't anticipate: `TableSource::is_windowed`. Local execution reads
+a source, and a windowed one can only answer for the rows on screen — so a transform that
+can't be pushed down is *refused* rather than silently applied to the loaded window. That
+is a correctness flag, not a performance hint.
+
 *Needs D2.*
 
 Sort, filter, hide, groupby and pivot — expressed once in the UI, executed three
@@ -440,6 +458,19 @@ from local execution and the grid quietly lies about a filtered dataset.
 ---
 
 ## D4 — Kernel bridge
+
+**Status: done, with one deliberate substitution.** `gv` lists the namespace, `:view df`
+opens a frame as a grid, routed by `Consumer` as designed.
+
+**Transport is parquet, not Arrow IPC.** The reasoning against base64-on-the-line-protocol
+holds exactly as written; the choice between IPC and parquet went the other way once the
+DuckDB backend existed, because the editor can already read parquet and a second reader (and
+a second arrow version to keep in step) buys nothing. The frame still never crosses the pipe:
+the kernel writes a file under `state_dir()`, the editor opens and unlinks it.
+
+**Not implemented:** the staleness chip and `:refresh` — the grid is a snapshot, and
+re-running `:view` is the refresh. `TableSendToKernel` (the reverse arrow) is also not built,
+so the clobber guard it needed has no subject yet.
 
 *Needs D0, D2.*
 
