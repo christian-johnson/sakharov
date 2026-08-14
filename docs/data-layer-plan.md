@@ -609,14 +609,41 @@ edits to the query. Minting a new id each run gives a history you can cycle back
 through with `H`/`L`. The first is better for iterating on one query; the second
 is better for comparing results.
 
-**How do credentials for a remote database get supplied?** Read-only removes the
-worst outcome but not the secret-handling problem. The options are a DSN in
-`config.toml` (convenient, but a connection string in a dotfile), an environment
-variable read at attach time, or requiring the user to `ATTACH` from a notebook
-cell so the credential lives in their own code. The last is most consistent with
-"writes go through code" and needs no new secret storage; it is also the least
-convenient. Not blocking for D2 against local files — decide before the first
-remote backend.
+**How do credentials for a remote database get supplied? — DECIDED: they don't.**
+The editor never handles a credential. The question conflated two cases that turn
+out to be unrelated:
+
+- **A local database file** (`.duckdb`, SQLite) is a *path*, not a secret.
+  `:attach ./analytics.duckdb (READ_ONLY)` needs no credential handling at all,
+  and it is what makes the schema browser meaningful. Keep it.
+- **A remote or authenticated database** belongs to the kernel. The user writes
+  `duckdb.connect(...)` / `pl.read_database(...)` in a cell with their own auth,
+  and the editor views the results through D4's bridge. No DSN in `config.toml`,
+  no environment variable read at attach time, no prompt, no keyring.
+
+Three reasons this is better than merely more cautious:
+
+1. It is what this plan's own rule already says. "The only channel that writes is
+   user code in a notebook, because that is the channel that gets reviewed,
+   versioned, and re-run" — a connection string is exactly that kind of thing.
+   Storing one in a dotfile would have the editor holding a secret to save the
+   user a line of Python.
+2. It collides with the D2 gate. DuckDB reaches Postgres/MySQL/S3 through scanner
+   extensions, which need `INSTALL`/`LOAD` — both of which the gate rejects, with
+   tests. Supporting remote databases editor-side would mean punching a hole in
+   the safety layer specifically to allow loading native extensions at runtime.
+3. It is less code that can be wrong: no DSN parsing, env-var precedence, TLS
+   options, or connection lifecycle — all security-sensitive surface with a
+   well-populated history of subtle bugs.
+
+**The cost, stated plainly:** browsing a *remote* database requires a Python
+environment with the relevant driver. Someone who wants sakharov as a pure SQL
+browser with no Python gets local files and parquet, but not a remote server.
+
+**What this implies for D4:** `:sql` currently targets the editor's own in-memory
+connection. It should also be able to target a *kernel-side* connection by name —
+the query runs in the user's process under their auth, and only the result crosses
+as Arrow. That is a routing choice on top of the bridge, not new machinery.
 
 **Summary statistics on windowed sources: push down or label?** D1 ships before
 pushdown exists, so it must label its row coverage. The question is whether D3

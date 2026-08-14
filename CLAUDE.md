@@ -785,6 +785,12 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
 - There is no `:attach` for a persistent database yet, so the schema browser the plan
   sketches (a grid over `information_schema`) has nothing to browse — `:sql` queries files
   by name through an in-memory connection. Both land together when attaching does.
+  **`:attach` will be local files only** (`.duckdb`/SQLite — a path, not a secret). The
+  editor deliberately handles **no credentials**: a remote or authenticated database is
+  connected to *in the kernel*, by the user's own code, and viewed through D4's bridge.
+  Besides being the plan's own "writes go through code" rule, remote scanners need
+  `INSTALL`/`LOAD`, which the D2 gate rejects — supporting them editor-side would mean
+  punching a hole in the safety layer to load native extensions at runtime.
 - Column summaries are computed synchronously on the frame a column first becomes visible:
   bounded by `table.summary_max_rows`, but a wide table's first frame can still hitch.
   Moving them off the UI thread is what the deferred jobs registry (plan D0.5) is for.
