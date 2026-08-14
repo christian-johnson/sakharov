@@ -1,3 +1,4 @@
+mod attach;
 mod buffers;
 mod export;
 mod format;
@@ -1107,6 +1108,19 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.messages.show("No table open");
             return;
         }
+        // A local database file is a path, not a secret — see `exec::attach`.
+        Command::Attach(arg) => {
+            attach::attach(app, arg);
+            return;
+        }
+        Command::Detach(arg) => {
+            attach::detach(app, arg);
+            return;
+        }
+        Command::SchemaBrowser => {
+            attach::open_schema_browser(app);
+            return;
+        }
         Command::SqlBuffer => {
             sql::open_buffer(app);
             return;
@@ -1261,6 +1275,9 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
             hint("h", "first column"),
             hint("l", "last column"),
             hint("k", "peek cell text"),
+            hint("d", "describe this column"),
+            hint("c", "count this column's values"),
+            hint("t", "browse attached tables"),
             hint("b", "buffer picker"),
         ];
     }
@@ -2202,7 +2219,9 @@ mod tests {
     #[test]
     fn goto_hints_only_advertise_real_bindings() {
         let mut app = App::new(None, Config::load()).unwrap();
-        for hints in [goto_hints(&app), {
+        // Both views: the hints are view-aware, and so is the dispatch, so each
+        // list has to be checked against the map that will actually answer it.
+        for (view, hints) in [(app.view(), goto_hints(&app)), {
             app.table = Some(crate::exec::table::Session::new(
                 crate::source::SourceId::of(std::path::Path::new("t.csv")),
                 Box::new(
@@ -2214,13 +2233,13 @@ mod tests {
                     .unwrap(),
                 ),
             ));
-            goto_hints(&app)
+            (app.view(), goto_hints(&app))
         }] {
             assert!(!hints.is_empty());
             for (key, label) in hints {
                 let c = key.chars().next().expect("hint key is a char");
                 assert!(
-                    crate::input::goto_command(c).is_some(),
+                    crate::input::goto_command(view, c).is_some(),
                     "g{key} is advertised as {label:?} but dispatches nothing"
                 );
             }

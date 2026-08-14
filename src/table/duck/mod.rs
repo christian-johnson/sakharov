@@ -70,6 +70,86 @@ pub fn open_readonly(path: Option<&Path>) -> Result<Connection> {
     }
 }
 
+/// The `ATTACH … (TYPE …)` a database file needs, or `None` for DuckDB's own
+/// format.  `None` is also the answer for an unrecognised extension: DuckDB
+/// sniffs the file itself and gives a better error than a guess would.
+pub fn attach_kind(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("sqlite" | "sqlite3" | "db") => Some("SQLITE"),
+        _ => None,
+    }
+}
+
+/// A connection with every attachment replayed, and bare filenames resolved
+/// against `dir`.
+///
+/// The in-memory database is scratch space that never touches disk; every real
+/// database hanging off it is attached `READ_ONLY`, which is where the guarantee
+/// actually lives.  The editor issues these `ATTACH` statements itself — the
+/// [`gate`] rejects one typed by the user, precisely so that `READ_ONLY` is not
+/// something a query can leave off.
+pub fn connect(attachments: &[crate::table::Attachment], dir: Option<&Path>) -> Result<Connection> {
+    let conn = open_readonly(None)?;
+    // `FROM 'data.csv'` should mean the file next to what you were working on,
+    // not one in whatever directory the editor was launched from.
+    if let Some(dir) = dir.and_then(Path::to_str) {
+        let stmt = format!("SET file_search_path = {}", sql_string_literal(dir));
+        let _ = conn.execute_batch(&stmt);
+    }
+    for a in attachments {
+        conn.execute_batch(&attach_statement(a))
+            .with_context(|| format!("attaching {} as {}", a.path.display(), a.alias))?;
+    }
+    Ok(conn)
+}
+
+/// The `ATTACH` for one attachment.  Always `READ_ONLY`.
+fn attach_statement(a: &crate::table::Attachment) -> String {
+    let options = match a.kind {
+        Some(kind) => format!("(TYPE {kind}, READ_ONLY)"),
+        None => "(READ_ONLY)".to_string(),
+    };
+    format!(
+        "ATTACH {} AS {} {options}",
+        sql_string_literal(&a.path.to_string_lossy()),
+        sql_ident(&a.alias),
+    )
+}
+
+/// `SELECT * FROM "db"."schema"."name"` — the query behind `Enter` on a row of
+/// the schema browser.  Each part is quoted, so a table called `select` or one
+/// with a `"` in its name is addressed rather than parsed.
+pub fn table_query(database: &str, schema: &str, name: &str) -> String {
+    format!(
+        "SELECT * FROM {}.{}.{}",
+        sql_ident(database),
+        sql_ident(schema),
+        sql_ident(name),
+    )
+}
+
+/// Every table and view in every attached database, for the schema browser.
+///
+/// `information_schema` rather than DuckDB's own `duckdb_tables()`: it is the
+/// standard shape, and it already spans attached databases.
+pub fn catalog_query() -> &'static str {
+    "SELECT t.table_catalog AS database, \
+            t.table_schema  AS schema, \
+            t.table_name    AS name, \
+            t.table_type    AS type, \
+            (SELECT count(*) FROM information_schema.columns c \
+              WHERE c.table_catalog = t.table_catalog \
+                AND c.table_schema  = t.table_schema \
+                AND c.table_name    = t.table_name) AS columns \
+       FROM information_schema.tables t \
+      ORDER BY 1, 2, 3"
+}
+
 /// A window onto the result of one query.
 pub struct DuckDbSource {
     conn: Connection,
@@ -290,6 +370,11 @@ fn column_type(ty: &str) -> ColumnType {
 /// `'…'` with embedded quotes doubled — a SQL string literal for `s`.
 fn sql_string_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// `"…"` with embedded double quotes doubled — a quoted SQL identifier for `s`.
+fn sql_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 /// A source is built on a background thread and handed to the UI thread, so it

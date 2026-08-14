@@ -300,12 +300,15 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `table-yank-cell` | `y` | Copy the cursor cell's full value to the clipboard (`:yank-cell`) |
 | `table-yank-row` | `x` | Copy the cursor row to the clipboard as a tab-separated line (`:yank-row`) |
 | `table-close-cell` | `q` (in a cell buffer) | Return from a cell buffer to its table — also what `:bd` does there (`:cell-back`, `:back-to-table`) |
-| `column-summary` | `S` | Statistics for the cursor's column in a float: values/missing/distinct, min–max, quartiles, mean, distribution (`:summary`, `:describe`) |
-| `column-frequency` | `F` | Count the cursor column's values into a new grid of its own (`:frequency`, `:value-counts`) |
+| `column-summary` | `S`, `gd` | Statistics for the cursor's column in a float: values/missing/distinct, min–max, quartiles, mean, distribution (`:summary`, `:describe`) |
+| `column-frequency` | `F`, `gc` | Count the cursor column's values into a new grid of its own (`:frequency`, `:value-counts`) |
 | `toggle-column-sparkline` | `s` | Show/hide the distribution row under the column names (`:sparkline`, `:column-sparkline`) |
 | `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table or a query result) and go back to where it came from — also what `:bd` does there (`:table-back`) |
 | `sql` | — | Open the SQL scratch buffer (`:query`, `:sql-buffer`) |
 | `run-query` | `Ctrl+E` (in the SQL buffer) | Run the query and show the result as a grid (`:sql-run`) |
+| `attach` | — | Attach a local database file read-only: `:attach <path> [as <alias>]`; bare `:attach` lists what is attached |
+| `detach` | — | `:detach <alias>` drops one attachment; bare `:detach` drops them all |
+| `schema` | `gt` | Browse every table in every attached database; `Enter` opens one (`:tables`, `:schema-browser`) |
 
 `.csv` / `.tsv` / `.tab` files open in the table view automatically (turn this off
 with `auto_open = false` under `[table]`); `:table-close` always gives you the raw
@@ -347,6 +350,24 @@ whatever you were looking at when you opened the buffer:
 SELECT * FROM 'sales.csv' WHERE amount > 100 ORDER BY amount DESC
 SELECT * FROM read_parquet('events.parquet') LIMIT 100
 ```
+
+### Databases
+
+`:attach ./analytics.duckdb` makes a **local database file** readable — `READ_ONLY`,
+always — and `gt` (`:schema`) browses what is in it: one grid row per table, `Enter`
+to open that table, `q` to come back. The alias defaults to the filename, so its
+tables are `analytics.main.sales` in any `:sql` query from then on. `:detach` drops
+it again.
+
+**The editor never handles a credential.** A local file is a path, not a secret, so
+attaching one needs none. A remote or authenticated database is a different thing
+and is deliberately out of scope: connect to it in a notebook cell with your own
+driver and your own auth, and view the result with `:view` (see the kernel bridge).
+That keeps connection strings in the channel that gets reviewed and versioned, and
+keeps DSN parsing, environment precedence and TLS options out of the editor. It also
+means a SQLite file needs DuckDB's `sqlite` extension already installed — the editor
+will not `INSTALL`/`LOAD` native code at runtime, which is the same hole the
+statement gate exists to keep shut.
 
 **Queries read; they never write.** The editor never opens a database read-write,
 and a statement that would modify data or write a file is refused before it reaches

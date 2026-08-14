@@ -306,6 +306,11 @@ pub struct App {
     /// `app.buffer` the `*sql*` buffer — which has no path, and so no idea which
     /// project's `data.csv` the query means.
     pub sql_dir: Option<std::path::PathBuf>,
+    /// Local database files attached read-only (`:attach`), replayed onto every
+    /// connection the editor opens.  Paths and names only: a remote or
+    /// authenticated database is reached in the kernel by the user's own code,
+    /// so nothing here is ever a credential.
+    pub attachments: Vec<crate::table::Attachment>,
     /// While a `*cell …*` buffer is open, the table it was read out of (what
     /// `:bd` returns to) plus the settings the cell buffer overrode.
     pub table_cell_origin: Option<crate::exec::table::CellOrigin>,
@@ -595,6 +600,7 @@ impl App {
             table_pending: None,
             table_buffers: std::collections::HashMap::new(),
             sql_dir: None,
+            attachments: Vec::new(),
             table_cell_origin: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
             graphics: GraphicsState::default(),

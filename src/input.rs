@@ -588,7 +588,17 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
 /// `g` does: [`handle_goto`] runs the command, and `exec::goto_hints` labels the
 /// same keys in the which-key popup.  A key that isn't listed here must not
 /// appear in the hints (a test pins that).
-pub fn goto_command(c: char) -> Option<Command> {
+pub fn goto_command(view: crate::app::View, c: char) -> Option<Command> {
+    // The grid's own `g` map, checked first.  `g` is the editor's prefix for
+    // "go somewhere / show me more", and in a table that is a column question:
+    // the analytic commands live here rather than scattered across bare letters,
+    // and a key whose text meaning is meaningless in a grid (`gd` definition,
+    // `gr` references) is free to carry the grid's.
+    if view == crate::app::View::Table {
+        if let Some(cmd) = table_goto_command(c) {
+            return Some(cmd);
+        }
+    }
     Some(match c {
         'g' => Command::GotoFileStart,
         'e' => Command::GotoFileEnd,
@@ -610,6 +620,20 @@ pub fn goto_command(c: char) -> Option<Command> {
     })
 }
 
+/// The `g` sub-mode's table-view meanings, which shadow the text ones.
+///
+/// Only the keys whose grid meaning *differs*: `gg`/`ge`/`gh`/`gl`/`gk`/`gb`
+/// fall through to the shared map, where `exec::table::handle` reinterprets them
+/// against the grid (first row, last column, peek the cell…).
+fn table_goto_command(c: char) -> Option<Command> {
+    Some(match c {
+        'd' => Command::TableColumnSummary,
+        'c' => Command::TableColumnFrequency,
+        't' => Command::SchemaBrowser,
+        _ => return None,
+    })
+}
+
 fn handle_goto(app: &mut App, key: KeyEvent) {
     // Capture whether we entered goto mode from Select (so motions extend).
     let extend = matches!(app.mode, Mode::Goto { extend: true });
@@ -623,7 +647,7 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
     // line motions move the output cursor — both of which a direct rope motion
     // silently bypasses (it moved a hidden or empty buffer instead).
     if let KeyCode::Char(c) = key.code {
-        if let Some(cmd) = goto_command(c) {
+        if let Some(cmd) = goto_command(app.view(), c) {
             exec::execute(app, &cmd);
         }
     }

@@ -16,6 +16,18 @@ use crate::{
     table::{self, csv::CsvSource, layout, summary::{self, ColumnSummary}, TableSource},
 };
 
+/// What a row of a *catalog* table names, so `Enter` can open it.
+///
+/// A grid whose rows are descriptions of other data reads exactly like one whose
+/// rows are data, and the difference has to live somewhere: this is that
+/// somewhere, set by whoever built the catalog rather than sniffed from the
+/// column names at keypress time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drill {
+    /// Rows carry `database` / `schema` / `name` — the schema browser.
+    Catalog,
+}
+
 /// An open tabular data source plus where the cursor is in it.
 pub struct Session {
     /// The data.  Boxed so a future source (SQL, parquet) needs no changes here.
@@ -30,6 +42,10 @@ pub struct Session {
     /// from — where `q` goes back to, mirroring how `q` backs out of a
     /// `*cell …*` buffer.  `None` for a table read from a file.
     pub origin: Option<SourceId>,
+    /// What `Enter` means on a row.  `None` — the ordinary case — reads the
+    /// cell's full text; a catalog's rows *name* things, so `Enter` opens the
+    /// thing instead.
+    pub drill: Option<Drill>,
     /// Per-column statistics, computed once on demand and kept.
     ///
     /// Cached because a summary is a full scan of the column: the header
@@ -49,6 +65,7 @@ impl Session {
             state: table::TableState::new(),
             id,
             origin: None,
+            drill: None,
             summaries: std::collections::HashMap::new(),
             summaries_rows: 0,
         }
@@ -397,6 +414,19 @@ pub fn open_as_table(app: &mut App, path: &Path) {
         return;
     }
     start_load(app, path);
+}
+
+/// What is on screen right now, as a source identity: the open table, else the
+/// open file.  What a newly computed table records as the place `q` goes back
+/// to.
+pub(super) fn current_source_id(app: &App) -> Option<SourceId> {
+    if let Some(session) = app.table.as_ref() {
+        return Some(session.id.clone());
+    }
+    if let Some((nb, _)) = app.notebook.as_ref() {
+        return Some(SourceId::of(&nb.path));
+    }
+    app.buffer.path.as_deref().map(SourceId::of)
 }
 
 /// Show `source` in the grid under the virtual identity `id` — a table that was
@@ -848,7 +878,14 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
 
         // --- reading a cell ---
         Command::TableOpenCell => {
-            open_cell_buffer(app);
+            match app.table.as_ref().and_then(|s| s.drill) {
+                Some(Drill::Catalog) => super::attach::open_catalog_row(app),
+                None => open_cell_buffer(app),
+            }
+            return true;
+        }
+        Command::SchemaBrowser => {
+            super::attach::open_schema_browser(app);
             return true;
         }
         // `K` / `gk` mean "tell me more about the thing under the cursor"

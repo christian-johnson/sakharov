@@ -226,6 +226,7 @@ commands! {
         TableColumnFrequency => "column-frequency", aliases: ["frequency", "value-counts"], palette: "Count the cursor column's values as a new table  [F]";
         TableToggleSparkline => "toggle-column-sparkline", aliases: ["sparkline", "column-sparkline"], palette: "Show/hide the distribution row under the column names  [s]";
         TableCloseDerived => "close-derived-table", aliases: ["table-back"], palette: "Leave a computed table and go back to the one it came from  [q]";
+        SchemaBrowser => "schema", aliases: ["tables", "schema-browser"], palette: "Browse the tables in every attached database  [gt]";
         SqlBuffer => "sql", aliases: ["query", "sql-buffer"], palette: "Open the SQL scratch buffer  [:sql]";
         SqlRun => "run-query", aliases: ["sql-run"], palette: "Run the SQL buffer's query and show the result as a grid  [Ctrl+E]";
 
@@ -250,6 +251,10 @@ commands! {
         Shell(String) => "shell", palette: "Run a shell command  [:shell <cmd>]";
         // Render the current notebook / markdown document via Quarto.
         ExportDocument(String) => "export", palette: "Export via Quarto to pdf/html/docx…  [:export <fmt>]";
+        // Attach a local database file read-only (`:attach <path> [as <alias>]`).
+        Attach(String) => "attach", palette: "Attach a local database file, read-only  [:attach <path>]";
+        // Drop one attachment by alias, or all of them when the argument is empty.
+        Detach(String) => "detach", palette: "Detach an attached database  [:detach <alias>]";
         // Switch to a named color theme (`:theme <name>`; bare `:theme` opens the picker).
         SwitchTheme(String) => "theme";
         // A list of commands executed in sequence (composition / scripting).
@@ -298,6 +303,9 @@ impl Command {
                 let fmt = if fmt.is_empty() { "pdf" } else { fmt };
                 Some(Command::ExportDocument(fmt.to_string()))
             }
+            // Bare `:attach` lists what is attached; bare `:detach` drops it all.
+            "attach" => Some(Command::Attach(arg.unwrap_or("").trim().to_string())),
+            "detach" => Some(Command::Detach(arg.unwrap_or("").trim().to_string())),
             "goto-line" => {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;
                 Some(Command::GotoLine(n))

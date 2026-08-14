@@ -71,23 +71,19 @@ pub(super) fn run(app: &mut App) {
 
 #[cfg(feature = "dataframe")]
 fn run_query(app: &mut App, sql: &str) {
-    use crate::table::duck::{open_readonly, DuckDbSource};
+    use crate::table::duck::DuckDbSource;
 
-    let cwd = app.sql_dir.clone();
-    let conn = match open_readonly(None) {
+    // One connection builder for the whole editor: an in-memory scratch database
+    // anchored at the working directory, with every `:attach`ed database hanging
+    // off it read-only.  So a query can join a parquet file to a table in an
+    // attached database without either of them being writable.
+    let conn = match super::attach::connection(app) {
         Ok(conn) => conn,
         Err(e) => {
             app.messages.show(format!("SQL: {e:#}"));
             return;
         }
     };
-    // `FROM 'data.csv'` should mean the file next to what you were working on,
-    // not one in whatever directory the editor was launched from.
-    if let Some(dir) = cwd.as_deref().and_then(|d| d.to_str()) {
-        // Not user input: the directory comes from the open buffer's path.
-        let set = format!("SET file_search_path = '{}'", dir.replace('\'', "''"));
-        let _ = conn.execute_batch(&set);
-    }
 
     let label = first_line(sql);
     match DuckDbSource::query(conn, sql, label) {

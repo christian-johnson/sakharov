@@ -24,6 +24,22 @@ pub mod summary;
 
 pub use state::TableState;
 
+/// A local database file the editor has attached, read-only.
+///
+/// Deliberately a *path and a name*, never a credential.  A remote or
+/// authenticated database is connected to in the kernel by the user's own code
+/// and viewed through that; the editor holds no secret and parses no DSN.  See
+/// `docs/data-layer-plan.md`, "How do credentials get supplied? — they don't".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    /// SQL name the database is reachable under (`analytics.main.sales`).
+    pub alias: String,
+    /// Absolute path to the database file.
+    pub path: std::path::PathBuf,
+    /// `ATTACH … (TYPE …)` for a foreign format, `None` for DuckDB's own.
+    pub kind: Option<&'static str>,
+}
+
 /// Inferred value type of a column.
 ///
 /// Inferred by sampling rather than declared, since a CSV carries no schema.
