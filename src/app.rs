@@ -136,6 +136,9 @@ pub struct SearchState {
 // Grouped sub-state
 // ---------------------------------------------------------------------------
 
+/// Name of the SQL query buffer.  A `*…*` name, so nothing tries to save it.
+pub const SQL_BUFFER: &str = "*sql*";
+
 /// Terminal-graphics (Kitty/WezTerm) image state.
 pub struct GraphicsState {
     /// Which terminal graphics backend is available (Kitty, WezTerm, or none).
@@ -297,6 +300,12 @@ pub struct App {
     /// restores the exact cursor cell instead of re-parsing the file from disk.
     /// (The counterpart of `file_buffers` / `notebook_buffers`.)
     pub table_buffers: std::collections::HashMap<crate::source::SourceId, crate::exec::table::Session>,
+    /// Directory a bare filename in a `:sql` query resolves against.
+    ///
+    /// Captured when the SQL buffer is opened, because switching into it makes
+    /// `app.buffer` the `*sql*` buffer — which has no path, and so no idea which
+    /// project's `data.csv` the query means.
+    pub sql_dir: Option<std::path::PathBuf>,
     /// While a `*cell …*` buffer is open, the table it was read out of (what
     /// `:bd` returns to) plus the settings the cell buffer overrode.
     pub table_cell_origin: Option<crate::exec::table::CellOrigin>,
@@ -443,6 +452,14 @@ impl App {
                 .is_some_and(|n| n.starts_with("*cell "))
     }
 
+    /// True while the `*sql*` query buffer is the active buffer.
+    ///
+    /// An ordinary text buffer with one addition: the execute keys run its
+    /// contents as a query (see `input::handle_key`), the way they run a cell.
+    pub fn in_sql_buffer(&self) -> bool {
+        self.buffer.path.as_ref().and_then(|p| p.to_str()) == Some(SQL_BUFFER)
+    }
+
     /// The kernel language of the open notebook (e.g. `"python"`), if any.
     /// This is the LSP `languageId` for every code cell.
     pub fn notebook_language(&self) -> Option<&str> {
@@ -577,6 +594,7 @@ impl App {
             table: None,
             table_pending: None,
             table_buffers: std::collections::HashMap::new(),
+            sql_dir: None,
             table_cell_origin: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
             graphics: GraphicsState::default(),

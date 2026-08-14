@@ -146,6 +146,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
     }
 
+    // The same execute keys run the query in the `*sql*` buffer: it is a cell in
+    // everything but name, and the muscle memory should carry over.  Also before
+    // mode dispatch, so it fires while you are still typing the query.
+    if app.in_sql_buffer() {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl_e = ctrl && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'));
+        if ctrl_e || (key.code == KeyCode::Enter && (ctrl || shift)) {
+            exec::execute(app, &Command::SqlRun);
+            return;
+        }
+    }
+
     match app.mode.clone() {
         Mode::Normal => {
             let kb = KeyBinding::from(key);

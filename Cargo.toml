@@ -45,3 +45,15 @@ tree-sitter-css = "0.21"
 tree-sitter-html = "0.20"
 tree-sitter-yaml = "0.6"
 csv = "1"
+
+# Parquet / JSON / SQL, and a windowed source that doesn't hold the file in RAM.
+# `bundled` compiles DuckDB's C++ from source: a long first build and a much
+# larger binary, which is why it is a feature at all — see [features].
+duckdb = { version = "1", features = ["bundled"], optional = true }
+
+[features]
+default = ["dataframe"]
+# The tabular data engine: parquet/JSON/arrow files, `:sql`, and the schema
+# browser. Gated from the start so turning it off is a build flag rather than a
+# refactor; without it the editor still opens CSVs with its own parser.
+dataframe = ["duckdb"]

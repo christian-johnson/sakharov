@@ -15,6 +15,9 @@
 //! * [`crate::table_ui`] — drawing; [`crate::exec::table`] — mutation.
 
 pub mod csv;
+/// DuckDB-backed sources (parquet/JSON/SQL) — behind the `dataframe` feature.
+#[cfg(feature = "dataframe")]
+pub mod duck;
 pub mod layout;
 pub mod state;
 pub mod summary;

@@ -6,6 +6,7 @@ pub(crate) mod notebook;
 mod pickers;
 mod scroll;
 mod search;
+pub(crate) mod sql;
 pub(crate) mod table;
 mod text;
 
@@ -1104,6 +1105,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::TableCloseDerived => {
             app.messages.show("No table open");
+            return;
+        }
+        Command::SqlBuffer => {
+            sql::open_buffer(app);
+            return;
+        }
+        Command::SqlRun => {
+            sql::run(app);
             return;
         }
         // A display preference, so it works from anywhere — the grid does not

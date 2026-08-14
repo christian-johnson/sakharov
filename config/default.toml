@@ -225,6 +225,15 @@ sample_rows = 1000
 # Text drawn in place of an empty cell (e.g. "-" or "NULL").
 null_display = ""
 
+# Which engine reads a delimited-text file:
+#   "builtin" — the bundled CSV parser; holds every row in memory (capped by
+#               max_rows above), and `:table-close` gives back the text.
+#   "duckdb"  — reads a window of rows at a time, so a file larger than memory
+#               opens fine. Slower to start on a small file.
+# Parquet / .jsonl / .ndjson / .arrow always use DuckDB regardless: the built-in
+# parser cannot read them.
+engine = "builtin"
+
 # Rows scanned when summarising a column (sparkline + the `S` panel). A summary
 # is a full column scan, so this bounds the cost on a very large table; a
 # summary that read fewer rows than the table holds says so in the panel.

@@ -233,6 +233,16 @@ pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     crate::recovery::offer_on_open(app, path);
 }
 
+/// The directory a `:sql` query resolves a bare filename against.
+///
+/// The same answer as "where would a new file go": next to what you are working
+/// on.  `FROM 'data.csv'` should mean the CSV beside the notebook, not one in
+/// whatever directory the editor happened to be launched from.
+pub(super) fn sql_working_dir(app: &App) -> Option<std::path::PathBuf> {
+    let dir = current_buffer_dir(app);
+    dir.is_dir().then_some(dir)
+}
+
 /// Resolve the directory new files should be created in: the directory of the
 /// open notebook or current buffer, falling back to the working directory for
 /// special buffers (scratch / messages / dashboard) or unnamed buffers.

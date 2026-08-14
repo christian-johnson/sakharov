@@ -226,6 +226,8 @@ commands! {
         TableColumnFrequency => "column-frequency", aliases: ["frequency", "value-counts"], palette: "Count the cursor column's values as a new table  [F]";
         TableToggleSparkline => "toggle-column-sparkline", aliases: ["sparkline", "column-sparkline"], palette: "Show/hide the distribution row under the column names  [s]";
         TableCloseDerived => "close-derived-table", aliases: ["table-back"], palette: "Leave a computed table and go back to the one it came from  [q]";
+        SqlBuffer => "sql", aliases: ["query", "sql-buffer"], palette: "Open the SQL scratch buffer  [:sql]";
+        SqlRun => "run-query", aliases: ["sql-run"], palette: "Run the SQL buffer's query and show the result as a grid  [Ctrl+E]";
 
         // --- Toggles / config ---
         ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";

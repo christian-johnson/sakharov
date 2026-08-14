@@ -303,7 +303,9 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `column-summary` | `S` | Statistics for the cursor's column in a float: values/missing/distinct, min–max, quartiles, mean, distribution (`:summary`, `:describe`) |
 | `column-frequency` | `F` | Count the cursor column's values into a new grid of its own (`:frequency`, `:value-counts`) |
 | `toggle-column-sparkline` | `s` | Show/hide the distribution row under the column names (`:sparkline`, `:column-sparkline`) |
-| `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table) and go back to the one it came from — also what `:bd` does there (`:table-back`) |
+| `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table or a query result) and go back to where it came from — also what `:bd` does there (`:table-back`) |
+| `sql` | — | Open the SQL scratch buffer (`:query`, `:sql-buffer`) |
+| `run-query` | `Ctrl+E` (in the SQL buffer) | Run the query and show the result as a grid (`:sql-run`) |
 
 `.csv` / `.tsv` / `.tab` files open in the table view automatically (turn this off
 with `auto_open = false` under `[table]`); `:table-close` always gives you the raw
@@ -324,6 +326,37 @@ buffer; `:bd` does the same, and `H`/`L` step past it without losing it.
 Summaries scan at most `summary_max_rows` rows (a summary is a full column scan,
 and the sparkline needs one per visible column); the panel names the number of
 rows it actually covered whenever that is fewer than the table holds.
+
+## SQL and other data formats
+
+`.parquet`, `.jsonl`, `.ndjson` and `.arrow` files open in the grid — they are not
+text, so the grid is the only way to look at them. They are read through DuckDB a
+window of rows at a time, so a file larger than memory opens fine. `.csv` uses the
+built-in parser by default; `engine = "duckdb"` under `[table]` routes delimited
+text through DuckDB too, which is what you want for a CSV bigger than RAM.
+(`.json` deliberately stays a text document — the editor already highlights and
+folds it, and `:table` opens one in the grid on request.)
+
+`:sql` opens a scratch buffer you run as a query with `Ctrl+E` — the same key that
+runs a notebook cell. It is ordinary buffer text, so the editor's motions, undo and
+search all work on it. The result opens as a grid and `q` goes back to the query, so
+editing and re-running is a loop. A bare filename resolves against the directory of
+whatever you were looking at when you opened the buffer:
+
+```sql
+SELECT * FROM 'sales.csv' WHERE amount > 100 ORDER BY amount DESC
+SELECT * FROM read_parquet('events.parquet') LIMIT 100
+```
+
+**Queries read; they never write.** The editor never opens a database read-write,
+and a statement that would modify data or write a file is refused before it reaches
+the engine, with a pointer to where writes belong — a notebook cell, which can be
+reviewed and committed. This is deliberate: a viewer that can `DROP TABLE` by typo
+is a bad trade for the convenience.
+
+All of this needs the `dataframe` feature, which is on by default. Building with
+`--no-default-features` drops DuckDB (and roughly two thirds of the build time);
+CSV/TSV still open with the built-in parser.
 
 The view is **read-only** — edit commands and `:w` are refused rather than applied
 to the buffer behind the grid. Commands that read the *text* of the current

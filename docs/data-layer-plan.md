@@ -262,6 +262,10 @@ all-null column, single-value column); the extended layout test above.
 
 ## D2 — DuckDB backend
 
+**Status: mostly done.** The engine, the windowed source, the read-only layers, file
+dispatch and `:sql` have shipped. Still open: `:attach` for a persistent database, and
+the schema browser over `information_schema` that depends on it.
+
 *Needs D0.3.*
 
 A second `TableSource` that reads parquet, JSON, and huge CSVs without loading
@@ -352,11 +356,19 @@ rejected. Plus one integration test asserting that a mutating statement forced
 past the gate still fails at the connection, so layer 1 is proven to be doing
 its job independently.
 
-**Risk:** `features = ["bundled"]` compiles DuckDB's C++ from source: a long
-first build and a much larger binary, against a project whose release profile is
-currently tuned for size. Measure both before committing and record the numbers
-in the PR — this is the one dependency in the plan that changes the
-`cargo install` experience.
+**Risk, measured** (macOS arm64, release profile, `strip = true`):
+
+| | binary | cold release build |
+|---|---|---|
+| `--no-default-features` | 8.8 MB | ~30 s |
+| default (`dataframe`) | **41.9 MB** | **~3.4 min** (~19 min CPU) |
+
+A 4.8× binary and a first build that goes from half a minute to three and a half.
+That is the real cost of `features = ["bundled"]`, and it is why the feature
+exists: `--no-default-features` is a supported build that still opens CSV/TSV.
+Accepted deliberately — the alternative (linking a system libduckdb) trades the
+build cost for an install prerequisite, which is worse for a `cargo install`
+tool.
 
 **Known wart:** `TableSource::cell` returns `&str`, so an Arrow-backed source
 must format strings it doesn't natively hold. At window size that is cheap and

@@ -318,10 +318,17 @@ fn derived_columns(spec: &[(&str, table::ColumnType)], rows: &[Vec<String>]) -> 
         .collect()
 }
 
+/// What a finished load hands back: the source, plus the two things only the
+/// loader knows — whether it stopped at a row cap, and what to call it.
+pub struct Loaded {
+    source: Box<dyn TableSource + Send>,
+    truncated: bool,
+}
+
 /// An in-flight background load, polled once per frame by the run loop.
 pub struct TableLoad {
     path: PathBuf,
-    rx: Receiver<Result<CsvSource, String>>,
+    rx: Receiver<Result<Loaded, String>>,
 }
 
 impl TableLoad {
@@ -336,13 +343,33 @@ impl TableLoad {
 
 /// True when `path` is a delimited-text file the table view can open.
 pub fn is_table_path(path: &Path) -> bool {
+    is_delimited_text(path) || is_binary_data(path)
+}
+
+/// Delimited text the built-in parser can read (and the text editor can too, so
+/// `:table-close` has somewhere to go).
+fn is_delimited_text(path: &Path) -> bool {
+    matches!(ext(path).as_deref(), Some("csv" | "tsv" | "tab"))
+}
+
+/// A data file that is *only* a table: not text, so there is no meaningful text
+/// view of it and the grid is the only way to look.  Needs the `dataframe`
+/// feature; without it, opening one reports that rather than showing bytes.
+///
+/// `.json` is deliberately absent: a JSON file is usually a document, and the
+/// editor already highlights and folds it as one (`zt` on its records is a
+/// feature). `:table` opens one in the grid on request.
+fn is_binary_data(path: &Path) -> bool {
     matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("csv" | "tsv" | "tab")
+        ext(path).as_deref(),
+        Some("parquet" | "pq" | "jsonl" | "ndjson" | "arrow" | "feather" | "ipc"),
     )
+}
+
+fn ext(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
 }
 
 /// Open `path` in the table view, replacing whatever is currently open.
@@ -407,7 +434,10 @@ pub(super) fn close_derived_table(app: &mut App) -> bool {
         return false;
     };
     let derived = app.table.as_ref().map(|s| s.id.clone());
-    open_as_table(app, &origin.to_path());
+    // Through `open_path` rather than `open_as_table`: an origin may be a file,
+    // a stashed table, or a special buffer (the `*sql*` query a result came
+    // from), and `open_path` is the one dispatcher that knows all three.
+    super::open_path(app, &origin.to_path());
     if let Some(id) = derived {
         // `open_as_table` stashed it on the way past; drop it for good.
         app.table_buffers.remove(&id);
@@ -670,12 +700,48 @@ fn start_load(app: &mut App, path: &Path) {
     let owned = path.to_path_buf();
     let cfg = app.config.table.clone();
     let thread_path = owned.clone();
+    // Parsing *and* the engine's schema/count queries happen here, off the UI
+    // thread: there is no upper bound on what someone will try to open.
     std::thread::spawn(move || {
-        let result = CsvSource::load(&thread_path, &cfg).map_err(|e| e.to_string());
-        let _ = tx.send(result);
+        let _ = tx.send(load_source(&thread_path, &cfg));
     });
     app.table_pending = Some(TableLoad { path: owned, rx });
     app.messages.show(format!("Loading {name}…"));
+}
+
+/// Pick a backend for `path` and build its source.  Runs on the loader thread.
+///
+/// The built-in CSV parser holds every row in memory and is the right answer for
+/// the ordinary case; DuckDB reads a window at a time and is the only answer for
+/// parquet, newline-delimited JSON, arrow, and a CSV bigger than memory.
+fn load_source(path: &Path, cfg: &crate::config::TableConfig) -> Result<Loaded, String> {
+    if prefers_duckdb(path, cfg) {
+        #[cfg(feature = "dataframe")]
+        {
+            return crate::table::duck::DuckDbSource::open_file(path)
+                .map(|source| Loaded { source: Box::new(source), truncated: false })
+                .map_err(|e| format!("{e:#}"));
+        }
+        #[cfg(not(feature = "dataframe"))]
+        return Err(format!(
+            "{} needs the dataframe feature (built without it)",
+            path.display(),
+        ));
+    }
+    CsvSource::load(path, cfg)
+        .map(|source| Loaded { truncated: source.truncated(), source: Box::new(source) })
+        .map_err(|e| e.to_string())
+}
+
+/// Whether `path` should go through DuckDB rather than the built-in parser.
+///
+/// A delimited-text file follows `[table] engine`; anything the built-in parser
+/// cannot read at all (parquet, arrow, ndjson) has no choice.
+fn prefers_duckdb(path: &Path, cfg: &crate::config::TableConfig) -> bool {
+    if is_delimited_text(path) {
+        return cfg.engine.eq_ignore_ascii_case("duckdb");
+    }
+    true
 }
 
 /// Install a finished load, if one is ready.  Returns true when state changed.
@@ -692,8 +758,7 @@ pub fn poll_table_load(app: &mut App) -> bool {
     app.table_pending = None;
 
     match result {
-        Ok(source) => {
-            let truncated = source.truncated();
+        Ok(Loaded { source, truncated }) => {
             let rows = source.loaded_rows();
             let cols = source.columns().len();
             let shape = source.describe();
@@ -702,7 +767,7 @@ pub fn poll_table_load(app: &mut App) -> bool {
                 .and_then(|n| n.to_str())
                 .unwrap_or("table")
                 .to_string();
-            app.table = Some(Session::new(SourceId::of(&path), Box::new(source)));
+            app.table = Some(Session::new(SourceId::of(&path), source));
             if cols == 0 {
                 app.messages
                     .show(format!("{name} has no columns — nothing to show"));
@@ -716,9 +781,15 @@ pub fn poll_table_load(app: &mut App) -> bool {
         }
         Err(e) => {
             app.messages.show(format!("Failed to load table: {e}"));
-            // Fall back to the text view of the same file rather than leaving
-            // the user in a blank detached buffer with no way back.
-            super::lsp::open_file_at(app, &path, 0, 0);
+            // Don't leave the user in the blank detached buffer with no way
+            // back.  A delimited-text file has a text view worth falling back
+            // to; a parquet does not — showing its bytes as text would be worse
+            // than the error, so fall back to scratch instead.
+            if is_delimited_text(&path) {
+                super::lsp::open_file_at(app, &path, 0, 0);
+            } else {
+                super::switch_to_special_buffer(app, "*scratch*");
+            }
         }
     }
     true
@@ -1266,6 +1337,78 @@ mod tests {
         }
         assert_eq!(app.view(), View::Table);
         assert_eq!(app.table_load_name(), None, "cleared once the load lands");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Drive the run loop's poll until the load lands.
+    #[cfg(feature = "dataframe")]
+    fn await_load(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.table_pending.is_some() && std::time::Instant::now() < deadline {
+            poll_table_load(app);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(feature = "dataframe")]
+    #[test]
+    fn a_parquet_file_opens_in_the_grid_through_the_dispatcher() {
+        let dir = std::env::temp_dir().join(format!("sv-pq-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sales.parquet");
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = crate::table::duck::open_readonly(None).unwrap();
+            conn.execute_batch(&format!(
+                "COPY (SELECT i AS id, 'r' || i AS name FROM range(0, 4) t(i)) \
+                 TO '{}' (FORMAT PARQUET)",
+                path.display(),
+            ))
+            .expect("write the fixture");
+        }
+
+        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
+        // Parquet is not text, so `open_path` — the one "user picked a file"
+        // dispatcher — must route it to the grid without being asked.
+        super::super::buffers::open_path(&mut app, &path);
+        await_load(&mut app);
+
+        let session = app.table.as_ref().expect("parquet loaded");
+        assert_eq!(app.view(), View::Table);
+        assert_eq!(session.source.row_count(), Some(4));
+        assert_eq!(session.source.cell(3, 1), Some("r3"));
+        assert!(session.source.describe().contains("duckdb"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "dataframe")]
+    #[test]
+    fn the_engine_setting_routes_a_csv_through_duckdb() {
+        let dir = std::env::temp_dir().join(format!("sv-engine-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.csv");
+        std::fs::write(&path, "a,b\n1,x\n2,y\n").unwrap();
+
+        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        app.config.table = TableConfig {
+            column_sparkline: false,
+            engine: "duckdb".to_string(),
+            ..TableConfig::default()
+        };
+        open_as_table(&mut app, &path);
+        await_load(&mut app);
+
+        let session = app.table.as_ref().expect("csv loaded via duckdb");
+        assert!(session.source.describe().contains("duckdb"), "got {}", session.source.describe());
+        assert_eq!(session.source.row_count(), Some(2));
+        assert_eq!(session.source.cell(1, 1), Some("y"));
+        // Same file, so the text view is still reachable — the engine choice is
+        // about how it is read, not about what it is.
+        close_table(&mut app);
+        assert_eq!(app.view(), View::Text);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

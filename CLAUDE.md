@@ -719,6 +719,46 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   summary per *visible* column; `ColumnSummary::rows` records what was actually read and the
   panel states it whenever it is less than the table holds.
 
+### Phase D2 (DuckDB backend) — complete
+- **`table/duck/`** behind the **`dataframe` cargo feature (default on)**;
+  `duckdb = { version = "1", features = ["bundled"] }` compiles DuckDB's C++ from source.
+  **Measured cost:** the release binary goes 8.8 MB → 41.9 MB and a cold release build
+  ~30 s → ~3.4 min. `--no-default-features` drops it and is a supported build — the editor
+  still opens CSV/TSV with its own parser, and `:sql`/parquet say what is missing.
+- **`DuckDbSource`** is the windowed `TableSource` that validates the trait's `ensure_rows`
+  design: it holds a *query* plus the ~500-row window on screen, refetching as the cursor
+  moves (`fetch`), so a file larger than memory opens. `loaded_rows()` is the whole result
+  (the grid can address every row) while `cell()` returns `None` outside the window.
+  Row fetches project through **`CAST(COLUMNS(*) AS VARCHAR)`** — positional, so
+  `SELECT a, a` doesn't read the first column twice, and one uniform way to read a value;
+  the column's *declared* type comes from `DESCRIBE` and is what drives alignment.
+- **Read-only, in three layers** (see the module docs): `duck::open_readonly` is the only
+  place a connection is created — a database file is opened with
+  `Config::access_mode(AccessMode::ReadOnly)`, and reading *files* uses an in-memory
+  database (which cannot itself be read-only; the honest guarantee there is that it is
+  scratch space that never touches disk). `duck::gate::check` allowlists read-only leading
+  keywords — including DuckDB's **`FROM`-first** syntax — rejects a **second statement**
+  after a `;` (`SELECT 1; DROP TABLE t`), strips comments so they can't hide either, and
+  allows `PRAGMA`/`CALL` only by name. DuckDB's own safe mode is deliberately **not** used:
+  `enable_external_access = false` also blocks `read_parquet`/`read_csv`, which is the
+  backend's whole purpose. A test asserts a read-only connection refuses a write with the
+  gate bypassed entirely, so layer 1 is pinned independently of layer 2.
+- **File dispatch**: `.parquet`/`.pq`/`.jsonl`/`.ndjson`/`.arrow`/`.feather`/`.ipc` open in
+  the grid automatically (`is_binary_data`); `.json` deliberately does **not** — it is
+  usually a document, and the editor already highlights and folds it. `[table] engine =
+  "builtin" | "duckdb"` chooses how *delimited text* is read. The background load
+  (`load_source`, on the loader thread) now returns a boxed `TableSource + Send`, so the
+  engine choice is invisible to everything downstream. A failed load of a non-text file
+  falls back to `*scratch*` rather than showing parquet bytes as text.
+- **`:sql`** (`exec/sql.rs`) opens the `*sql*` scratch buffer; `Ctrl+E` (or
+  `Shift`/`Ctrl+Enter` — the notebook's execute keys, handled in `input::handle_key` before
+  mode dispatch so they fire from Insert too) runs it and opens the result as a grid under
+  the stable virtual id `*sql result*`. `q` goes back to the query, so edit-and-rerun is a
+  loop. A refused or failing query **keeps the buffer text** — losing a query to a typo
+  would be hostile. `app.sql_dir` anchors bare filenames (`FROM 'data.csv'`) to the
+  directory of whatever was open when `:sql` was invoked, via DuckDB's `file_search_path`;
+  it has to be captured then, because switching into the path-less `*sql*` buffer loses it.
+
 ### Known rough edges / not yet implemented
 - No split panes
 - The kernel is a single REPL, so cells still *run* one at a time — but they queue (`:run-all`,
@@ -729,8 +769,12 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
 - Notebook cells have no horizontal scroll: with `:wrap` off, a long code-cell line clips at
   the cell border (markdown cells always wrap, so this only affects code/raw cells —
   cell *outputs* always wrap and are never clipped)
-- The table view is read-only, loads the whole file into memory (capped at
-  `table.max_rows`), and has no sort/filter/search yet — see Phase T1's closing note.
+- The table view is read-only and has no sort/filter/search yet — see Phase T1's closing
+  note. The built-in CSV parser loads the whole file into memory (capped at
+  `table.max_rows`); `[table] engine = "duckdb"` reads a window at a time instead.
+- There is no `:attach` for a persistent database yet, so the schema browser the plan
+  sketches (a grid over `information_schema`) has nothing to browse — `:sql` queries files
+  by name through an in-memory connection. Both land together when attaching does.
 - Column summaries are computed synchronously on the frame a column first becomes visible:
   bounded by `table.summary_max_rows`, but a wide table's first frame can still hitch.
   Moving them off the UI thread is what the deferred jobs registry (plan D0.5) is for.
