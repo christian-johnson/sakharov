@@ -519,6 +519,30 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   feature-scoped silently leaves e.g. `gd`/`gr` routed to nobody). A request that
   finds no owner says which feature and which config key, instead of the old
   misleading "LSP server initializing".
+- **`:lsp-doctor`** (`exec/doctor.rs`, aliases `:doctor` / `:lsp-status`) writes a
+  `*lsp-doctor*` report on why LSP features do or don't work for the current buffer.
+  It exists because every LSP failure looks identical from the outside — an empty
+  result, or none — while the cause is anywhere in a chain the user cannot see. The
+  report walks that chain in order: detected language → Python venv (without one the
+  server is never started) → each configured server and whether its binary resolves on
+  `$PATH` (`which`, resolved the way the spawn will) → per-server process liveness
+  (`LspClient::exited` — a server that dies after initializing still looks
+  `initialized` and simply never answers), handshake state, in-flight requests, open
+  documents including *this* one, stderr count, and the capabilities it actually
+  advertised → which server each feature routes to → diagnostics counts → a `Problems`
+  section. It is strictly read-only introspection (`LspManager::health` /
+  `feature_route` / `synced_notebooks`) and sends no requests.
+  **`LspManager::route_idx` is the single routing rule**, with the "must be
+  initialized" condition as a parameter: `server_idx_for_feature` (real dispatch) asks
+  with it, the doctor asks both ways, and the difference between the two answers is
+  what surfaces "your requests are falling through to the catch-all while the server
+  you configured is down". A second hand-rolled copy of the routing would be a report
+  that describes a dispatch the editor doesn't perform.
+  The report **wraps itself** at `WIDTH` (78): it is read in an ordinary buffer, whose
+  default is no soft wrap, so a long problem line would clip with the informative half
+  off screen. With no server running the routing table prints one "undetermined" line
+  rather than nine per-feature complaints about `features` scoping — config that is
+  very likely fine.
 
 ### Data safety (Phase B hardening)
 - **Buffer switching never loses edits**: plain-file buffers are stashed in memory
@@ -587,6 +611,22 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   the full text stays reachable (see Phase T2 below).
   Widths are clamped to `[table.min_col_width, table.max_col_width]` and measured
   in *display* columns (`unicode_width`), so CJK/emoji don't shear the grid
+- **The grid fills the viewport rather than truncating beside blank space**
+  (`layout::column_widths`, `[table] fill_width`, default on). Every column starts
+  at `column_width` (its natural width, clamped); when they *all* fit with room to
+  spare, the slack is apportioned to the columns `max_col_width` cut short,
+  proportionally to what each is missing and **never past `natural_width`** — so
+  two boolean columns stay boolean-sized while the free-text column beside them
+  runs to the right edge. Proportional split rounds down, so a largest-remainder
+  tail hands out the last few columns one at a time or the grid stops short of the
+  edge. **Widths are a function of the column set and the viewport, never of
+  `scroll_col`** — a column that changed width as the grid scrolled under it would
+  make `scroll_col_for_cursor` chase its own tail. The two can't interact anyway:
+  filling only happens when nothing is scrolled off. `VisibleColumn.want` carries
+  the laid-out width so `shows_fully` compares against it rather than re-deriving
+  from `column_width`, which no longer knows the viewport.
+  `scroll_col_for_cursor` also **pulls back left** after scrolling right, so a
+  widened terminal never shows blank space with columns hidden off the left edge
 - Navigation reuses the ordinary motions, reinterpreted against the grid by
   `exec::table::handle`: `h/j/k/l` by cell, `w/b` by column, `0/$` first/last
   column, `gg/G` first/last row, `J` half-screen page down (the `Keymap::table`
@@ -605,8 +645,8 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   `app.table_pending`), `exec::poll_table_load` installs it from the run loop, and
   the load stops at `table.max_rows` and says so. A failed load falls back to the
   text view rather than stranding the user in the blank detached buffer
-- Config `[table]`: `auto_open`, `max_col_width`, `min_col_width`, `row_numbers`,
-  `max_rows`, `sample_rows`, `null_display`. Theme `[table]`: `header`,
+- Config `[table]`: `auto_open`, `max_col_width`, `min_col_width`, `fill_width`,
+  `row_numbers`, `max_rows`, `sample_rows`, `null_display`. Theme `[table]`: `header`,
   `header_background`, `grid`, `row_highlight`, `cursor`, `truncation`, `numeric`,
   `null`. Status line: `[statusline.table]` layout + `table_position`,
   `table_column`, `table_shape` modules
@@ -926,6 +966,9 @@ src/
     search.rs         — incremental search match computation + jump
     lsp.rs            — LSP request dispatch, event handling, did_change, jumps,
                         code actions / workspace-edit application
+    doctor.rs         — :lsp-doctor: read-only walk of the whole LSP chain
+                        (language → venv → binaries → processes → capabilities →
+                        feature routing → documents), written to *lsp-doctor*
     pickers.rs        — popup pickers + grep front-ends (command palette, file/
                         buffer/symbol/diagnostic pickers, grep buffer/project)
     notebook.rs       — cell load/save/stash, notebook LSP open/close/reopen,

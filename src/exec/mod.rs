@@ -1,6 +1,7 @@
 mod attach;
 mod bridge;
 mod buffers;
+mod doctor;
 mod export;
 mod format;
 mod lsp;
@@ -985,6 +986,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::LspGotoImplementation => { lsp::lsp_request(app, LspRequestKind::Implementation); return; }
         Command::LspRequestCompletion => { lsp::lsp_request(app, LspRequestKind::Completion);     return; }
         Command::LspCodeActions      => { lsp::lsp_code_actions_request(app);                     return; }
+        Command::LspDoctor           => { doctor::lsp_doctor(app);                               return; }
         Command::FormatDocument => {
             if run_shell_formatter(app) {
                 return; // handled (success or failure message already set)

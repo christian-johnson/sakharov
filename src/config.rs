@@ -427,6 +427,12 @@ pub struct TableConfig {
     /// shows enough of its header to be identifiable.
     #[serde(default = "default_table_min_col_width")]
     pub min_col_width: usize,
+    /// When every column fits on screen with room to spare, hand the leftover
+    /// width to the columns `max_col_width` cut short (never past what their
+    /// content needs).  Otherwise a narrow table truncates its text column
+    /// while half the terminal sits blank.
+    #[serde(default = "default_table_fill_width")]
+    pub fill_width: bool,
     /// Show the 1-based row number in a left gutter.
     #[serde(default = "default_table_row_numbers")]
     pub row_numbers: bool,
@@ -466,6 +472,7 @@ fn default_table_summary_max_rows() -> usize { 200_000 }
 fn default_table_engine() -> String { "builtin".to_string() }
 fn default_table_max_col_width() -> usize { 32 }
 fn default_table_min_col_width() -> usize { 3 }
+fn default_table_fill_width() -> bool { true }
 fn default_table_row_numbers() -> bool { true }
 fn default_table_max_rows() -> usize { 1_000_000 }
 fn default_table_sample_rows() -> usize { 1_000 }
@@ -477,6 +484,7 @@ impl Default for TableConfig {
             auto_open: default_table_auto_open(),
             max_col_width: default_table_max_col_width(),
             min_col_width: default_table_min_col_width(),
+            fill_width: default_table_fill_width(),
             row_numbers: default_table_row_numbers(),
             max_rows: default_table_max_rows(),
             sample_rows: default_table_sample_rows(),

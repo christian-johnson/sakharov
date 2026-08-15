@@ -150,6 +150,20 @@ Search is live: the cursor moves to the nearest match as you type. Press `Esc` t
 | `lsp-goto-implementation` | `gi` (via Goto mode) | Jump to the implementation of the symbol |
 | `lsp-request-completion` | `ctrl+space` | Manually trigger completion suggestions |
 | `format-document` | `gf` (via Goto mode) | Format the buffer (shell formatter if configured, else LSP `:fmt`/`:format`) |
+| `lsp-doctor` | — | Diagnose the language server setup for this buffer (`:doctor`, `:lsp-status`) |
+
+### `:lsp-doctor`
+
+Opens a `*lsp-doctor*` report on why LSP features are or aren't working for the
+current buffer. Every LSP failure looks the same from outside — an empty result,
+or none — so the report walks the whole chain in order: the detected language,
+the Python virtualenv (without one the Python server is never started), each
+configured server and whether its binary is on `$PATH`, each running server's
+process/handshake state, the capabilities it actually advertised, whether it has
+*this* document open, which server each feature routes to, how many diagnostics
+have arrived, and a `Problems` section collecting everything that looks wrong.
+It sends no requests — it only reports state the editor already holds. Re-run it
+to refresh; `:bd` closes it.
 
 Diagnostics are shown inline (underline) and as an error/warning count in the status
 bar, for both plain files and per-cell in notebooks. They are keyed by the
@@ -489,9 +503,17 @@ The cell buffer is read-only in the sense that the table view is: it is a virtua
 buffer with no path, so `:w` has nothing to save to and edits never reach the
 data file.
 
+Columns are sized to their content, clamped to `min_col_width`/`max_col_width`.
+When they all fit on screen with room left over, `fill_width` (on by default)
+hands that room to the columns `max_col_width` cut short — so a table of two
+boolean columns and one of free text draws the booleans boolean-sized and lets
+the text column run to the right edge, instead of truncating it beside a blank
+half-screen. No column grows past the width its own content needs, and a table
+too wide to fit is untouched: it scrolls, so there is no blank space to reclaim.
+
 Configuration lives under `[table]` in `config.toml`: `auto_open`,
-`max_col_width`, `min_col_width`, `row_numbers`, `max_rows`, `sample_rows`,
-`null_display`. Colours come from `[table]` in the theme
+`max_col_width`, `min_col_width`, `fill_width`, `row_numbers`, `max_rows`,
+`sample_rows`, `null_display`. Colours come from `[table]` in the theme
 (`header`, `header_background`, `grid`, `row_highlight`, `cursor`, `truncation`,
 `numeric`, `null`), and the status line uses the `[statusline.table]` layout with
 the `table_position`, `table_column`, and `table_shape` modules.

@@ -174,6 +174,7 @@ commands! {
         LspGotoTypeDefinition => "lsp-goto-type-definition", aliases: ["goto-type-definition", "gy"], palette: "Go to type definition  [gy]";
         LspGotoImplementation => "lsp-goto-implementation", aliases: ["goto-implementation", "gi"], palette: "Go to implementation  [gi]";
         LspRequestCompletion => "lsp-request-completion", aliases: ["completion"], palette: "Request completions  [ctrl+space]";
+        LspDoctor => "lsp-doctor", aliases: ["doctor", "lsp-status"], palette: "Diagnose the language server setup for this buffer  [:lsp-doctor]";
         FormatDocument => "format-document", aliases: ["format", "fmt"], palette: "Format buffer via language server  [:fmt]";
 
         // --- Notebook navigation / editing ---

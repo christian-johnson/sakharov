@@ -386,6 +386,19 @@ impl LspClient {
         self.doc_versions.contains_key(uri)
     }
 
+    /// How many documents this client has opened on the server.
+    pub fn open_doc_count(&self) -> usize {
+        self.doc_versions.len()
+    }
+
+    /// `Some(status)` once the server process has exited — a server that died
+    /// after a successful handshake still looks `initialized`, and every
+    /// request against it simply never comes back, so `:lsp-doctor` reports
+    /// process liveness separately from the protocol state.
+    pub fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
     /// True if the server advertised `notebookDocumentSync` in its capabilities.
     pub fn supports_notebook_sync(&self) -> bool {
         self.server_capabilities

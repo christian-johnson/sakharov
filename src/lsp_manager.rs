@@ -58,6 +58,76 @@ fn request_feature(kind: LspRequestKind) -> &'static str {
     }
 }
 
+/// The server capability that backs each config feature name.
+///
+/// `diagnostics` has no entry: they are *pushed* by the server
+/// (`textDocument/publishDiagnostics`), so a server advertises nothing to
+/// promise them and their absence can only be observed by none arriving.
+fn feature_capability(feature: &str) -> Option<&'static str> {
+    Some(match feature {
+        "completion"      => "completionProvider",
+        "hover"           => "hoverProvider",
+        "definition"      => "definitionProvider",
+        "references"      => "referencesProvider",
+        "type-definition" => "typeDefinitionProvider",
+        "implementation"  => "implementationProvider",
+        "code-actions"    => "codeActionProvider",
+        "format"          => "documentFormattingProvider",
+        _ => return None,
+    })
+}
+
+/// Whether a capability key is present and not `false`/`null`. Servers answer
+/// with `true`, or with an options object (`{"resolveProvider": true}`); both
+/// mean "supported".
+fn advertises(caps: &Value, key: &str) -> bool {
+    match caps.get(key) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => true,
+    }
+}
+
+/// One running server's live state, as reported by `:lsp-doctor`.
+#[derive(Debug, Clone)]
+pub struct ServerHealth {
+    pub command: String,
+    /// Configured feature scope; empty means the catch-all (all features).
+    pub features: Vec<String>,
+    /// The `initialize` handshake completed.
+    pub initialized: bool,
+    /// `Some(status)` when the process has exited — see [`LspClient::exited`].
+    pub exited: Option<String>,
+    /// Requests sent with no reply yet.
+    pub pending: usize,
+    pub open_docs: usize,
+    /// Whether the document the user is looking at is open on *this* server.
+    pub current_doc_open: bool,
+    /// Notable stderr lines surfaced so far (see `log_server_stderr`).
+    pub stderr_lines: usize,
+    /// `(feature name, advertised)` for every feature with a capability.
+    pub capabilities: Vec<(&'static str, bool)>,
+    pub signature_help: bool,
+    pub completion_resolve: bool,
+    pub notebook_sync: bool,
+    /// "incremental", "full", or "none".
+    pub text_sync: &'static str,
+}
+
+/// Where one feature's requests land, as reported by `:lsp-doctor`.
+#[derive(Debug, Clone)]
+pub struct FeatureRoute {
+    /// The server answering it right now (initialized), if any.
+    pub active: Option<String>,
+    /// The server configured to own it, whether or not it is up yet.  Differs
+    /// from `active` exactly when the intended server is still starting (or
+    /// failed), and requests are meanwhile falling through to a catch-all.
+    pub configured: Option<String>,
+    /// False when `active` is a server that never advertised the capability —
+    /// the request is dispatched and comes back empty every time.
+    pub capable: bool,
+}
+
 /// A processed event from any language server.
 #[derive(Debug)]
 pub enum LspEvent {
@@ -917,20 +987,110 @@ impl LspManager {
     /// Priority: a server with a non-empty feature list that includes `feature`
     /// takes precedence over an all-features (empty list) server.
     fn server_idx_for_feature(&self, language: &str, feature: &str) -> Option<usize> {
+        self.route_idx(language, feature, true)
+    }
+
+    /// The routing above, with the "must be initialized" condition made
+    /// optional.  `:lsp-doctor` asks for both answers: with the condition it
+    /// gets the server answering right now, without it the server the config
+    /// intends to own the feature — and a difference between the two is
+    /// precisely "your requests are falling through to the catch-all while the
+    /// server you configured is down".
+    fn route_idx(&self, language: &str, feature: &str, require_ready: bool) -> Option<usize> {
         let servers = self.servers.get(language)?;
+        let ready = |s: &ManagedServer| !require_ready || s.client.initialized;
         // First pass: specific-feature server wins.
         for (i, s) in servers.iter().enumerate() {
-            if s.has_specific_features() && s.supports_feature(feature) && s.client.initialized {
+            if s.has_specific_features() && s.supports_feature(feature) && ready(s) {
                 return Some(i);
             }
         }
         // Second pass: first all-features server.
         for (i, s) in servers.iter().enumerate() {
-            if !s.has_specific_features() && s.client.initialized {
+            if !s.has_specific_features() && ready(s) {
                 return Some(i);
             }
         }
         None
+    }
+
+    /// Where `feature`'s requests land — see [`FeatureRoute`]. Read-only
+    /// introspection for `:lsp-doctor`.
+    pub fn feature_route(&self, language: &str, feature: &str) -> FeatureRoute {
+        let name = |idx: usize| self.servers[language][idx].command.clone();
+        let active = self.route_idx(language, feature, true);
+        let capable = active
+            .zip(feature_capability(feature))
+            .map(|(i, cap)| advertises(&self.servers[language][i].client.server_capabilities, cap))
+            // No capability to check (diagnostics), or no server at all: nothing
+            // to report as broken beyond what `active` already says.
+            .unwrap_or(true);
+        FeatureRoute {
+            active: active.map(name),
+            configured: self.route_idx(language, feature, false).map(name),
+            capable,
+        }
+    }
+
+    /// Live state of every server started for `language`.  `current_uri` is the
+    /// document the user is looking at, so the report can say whether each
+    /// server actually has it open — a server that never received `didOpen`
+    /// answers every request about that file with nothing.
+    pub fn health(&mut self, language: &str, current_uri: Option<&str>) -> Vec<ServerHealth> {
+        // Read out before the mutable borrow of `servers` below.
+        let stderr_shown = self.stderr_shown.clone();
+        let Some(servers) = self.servers.get_mut(language) else {
+            return Vec::new();
+        };
+        servers
+            .iter_mut()
+            .enumerate()
+            .map(|(idx, s)| {
+                let caps = s.client.server_capabilities.clone();
+                ServerHealth {
+                    command: s.command.clone(),
+                    features: s.features.clone(),
+                    initialized: s.client.initialized,
+                    exited: s.client.exited().map(|st| st.to_string()),
+                    pending: s.client.pending.len(),
+                    open_docs: s.client.open_doc_count(),
+                    current_doc_open: current_uri.is_some_and(|u| s.client.is_doc_open(u)),
+                    stderr_lines: stderr_shown
+                        .get(&format!("{language}\x00{idx}"))
+                        .copied()
+                        .unwrap_or(0),
+                    capabilities: FEATURE_NAMES
+                        .iter()
+                        .filter_map(|f| {
+                            feature_capability(f).map(|cap| (*f, advertises(&caps, cap)))
+                        })
+                        .collect(),
+                    signature_help: advertises(&caps, "signatureHelpProvider"),
+                    completion_resolve: caps
+                        .get("completionProvider")
+                        .and_then(|c| c.get("resolveProvider"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    notebook_sync: s.client.supports_notebook_sync(),
+                    text_sync: if s.client.supports_incremental_sync() {
+                        "incremental"
+                    } else if caps.get("textDocumentSync").is_some() {
+                        "full"
+                    } else {
+                        "none"
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Notebook URIs currently synced to at least one server, with the number
+    /// of code cells transmitted for each.
+    pub fn synced_notebooks(&self) -> Vec<(String, usize)> {
+        self.notebook_state
+            .iter()
+            .map(|(uri, (cells, _))| (uri.clone(), cells.len()))
+            .collect()
     }
 
     /// The config feature name a request kind routes on — for explaining a

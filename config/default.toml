@@ -212,6 +212,12 @@ max_col_width = 32
 # Narrowest a column is drawn, so short-valued columns still show their header.
 min_col_width = 3
 
+# When every column fits on screen with room to spare, hand the leftover width
+# to the columns max_col_width cut short — never past what their content needs,
+# so a boolean column stays boolean-sized while a free-text column grows into
+# the space. Set false to keep every column at its max_col_width cap.
+fill_width = true
+
 # Show 1-based row numbers in a left gutter.
 row_numbers = true
 

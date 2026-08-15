@@ -106,10 +106,91 @@ pub fn fit_cell(raw: &str, width: usize) -> (String, bool) {
     (out, true)
 }
 
+/// Columns `col` would need to show its widest sampled value and its header in
+/// full — before any clamping.  This is the ceiling [`column_widths`] expands a
+/// column towards; growing past it would only add padding.
+fn natural_width(col: &Column) -> usize {
+    col.width_hint.max(display_width(&col.name))
+}
+
 /// Drawn width of `col`: its natural width, clamped to the configured bounds.
+///
+/// The *base* width, computed from the column alone.  [`column_widths`] is what
+/// the layout actually uses — it may widen a capped column into space the
+/// viewport would otherwise leave blank.
 pub fn column_width(col: &Column, cfg: &TableConfig) -> u16 {
-    let natural = col.width_hint.max(display_width(&col.name));
-    natural.clamp(cfg.min_col_width, cfg.max_col_width) as u16
+    natural_width(col).clamp(cfg.min_col_width, cfg.max_col_width) as u16
+}
+
+/// Drawn width of every column, for a grid `area_width` columns wide.
+///
+/// Each column starts at its [`column_width`].  When all of them fit with room
+/// to spare and `table.fill_width` is on, the leftover columns are handed to the
+/// ones `max_col_width` cut short — proportionally to how much each is missing,
+/// and never past its [`natural_width`].  That is what stops a three-column
+/// table from truncating its one text column while half the terminal sits
+/// blank, without stretching a `true`/`false` column to fill space it has no
+/// content for.
+///
+/// Widths are a function of the whole column set and the viewport, **not** of
+/// `scroll_col`: a column that changed width as the grid scrolled under it
+/// would make [`scroll_col_for_cursor`] chase its own tail.  Expansion only
+/// happens when every column is on screen at once, so the two never interact.
+pub fn column_widths(cols: &[Column], gutter: u16, area_width: u16, cfg: &TableConfig) -> Vec<u16> {
+    let mut widths: Vec<u16> = cols.iter().map(|c| column_width(c, cfg)).collect();
+    if !cfg.fill_width || cols.is_empty() {
+        return widths;
+    }
+
+    let used = widths.iter().map(|&w| w as usize).sum::<usize>()
+        + gutter as usize
+        + COL_GAP as usize * (cols.len() - 1);
+    let slack = match (area_width as usize).checked_sub(used) {
+        Some(s) if s > 0 => s,
+        // Nothing spare — the grid scrolls horizontally, so there is no blank
+        // space to reclaim in the first place.
+        _ => return widths,
+    };
+
+    // What each column is still missing. A column drawn at its natural width
+    // asks for nothing, however much room is left over.
+    let want: Vec<usize> = cols
+        .iter()
+        .zip(&widths)
+        .map(|(c, &w)| natural_width(c).saturating_sub(w as usize))
+        .collect();
+    let total: usize = want.iter().sum();
+    if total == 0 {
+        return widths;
+    }
+
+    let give = slack.min(total);
+    let mut handed = 0usize;
+    for (w, &d) in widths.iter_mut().zip(&want) {
+        let add = d * give / total;
+        *w += add as u16;
+        handed += add;
+    }
+    // Largest-remainder tail: the proportional split rounds down, so walk the
+    // still-unsatisfied columns handing out one column each until the leftover
+    // is gone — otherwise the grid stops a few columns short of the edge.
+    let mut leftover = give - handed;
+    while leftover > 0 {
+        let before = leftover;
+        for (w, col) in widths.iter_mut().zip(cols) {
+            if leftover == 0 {
+                break;
+            }
+            if (*w as usize) < natural_width(col) {
+                *w += 1;
+                leftover -= 1;
+            }
+        }
+        if leftover == before {
+            break;
+        }
+    }
+    widths
 }
 
 /// Width of the row-number gutter, including its trailing separator space.
@@ -130,9 +211,11 @@ pub struct VisibleColumn {
     pub idx: usize,
     /// Screen x offset, relative to the grid area's left edge.
     pub x: u16,
-    /// Columns actually available to draw in — less than
-    /// [`column_width`] when clipped by the right edge.
+    /// Columns actually available to draw in — less than `want` when clipped
+    /// by the right edge.
     pub width: u16,
+    /// The width this column was laid out at ([`column_widths`]).
+    pub want: u16,
 }
 
 /// Where everything sits for one frame.
@@ -153,10 +236,8 @@ impl Layout {
     /// True when column `idx` is on screen *and* not clipped by the right edge.
     /// The cursor column must satisfy this, or part of the cell it is sitting
     /// on is off-screen.
-    pub fn shows_fully(&self, idx: usize, cfg: &TableConfig, cols: &[Column]) -> bool {
-        self.find(idx)
-            .zip(cols.get(idx))
-            .is_some_and(|(v, c)| v.width >= column_width(c, cfg))
+    pub fn shows_fully(&self, idx: usize) -> bool {
+        self.find(idx).is_some_and(|v| v.width >= v.want)
     }
 }
 
@@ -177,15 +258,15 @@ pub fn compute(
         columns: Vec::new(),
     };
 
+    let widths = column_widths(cols, gutter, area_width, cfg);
     let mut x = gutter;
-    for (idx, col) in cols.iter().enumerate().skip(scroll_col) {
+    for (idx, &want) in widths.iter().enumerate().skip(scroll_col) {
         let remaining = area_width.saturating_sub(x);
         if remaining == 0 {
             break;
         }
-        let want = column_width(col, cfg);
         let width = want.min(remaining);
-        layout.columns.push(VisibleColumn { idx, x, width });
+        layout.columns.push(VisibleColumn { idx, x, width, want });
         if width < want {
             // Clipped by the right edge — nothing further can fit.
             break;
@@ -197,9 +278,11 @@ pub fn compute(
 
 /// The smallest `scroll_col` that keeps `cursor_col` fully on screen.
 ///
-/// Scrolls left when the cursor is left of the viewport, and right by the
-/// minimum number of columns otherwise — so horizontal movement advances a
-/// column at a time instead of paging.
+/// Scrolls right by the minimum number of columns needed to reveal the cursor,
+/// then pulls back as far left as the cursor allows — so horizontal movement
+/// advances a column at a time, and a viewport that grew (a resize, or a table
+/// that now fits) never shows blank space on the right while columns sit hidden
+/// off the left edge.
 pub fn scroll_col_for_cursor(
     source: &dyn TableSource,
     scroll_col: usize,
@@ -207,17 +290,14 @@ pub fn scroll_col_for_cursor(
     area_width: u16,
     cfg: &TableConfig,
 ) -> usize {
-    if cursor_col < scroll_col {
-        return cursor_col;
-    }
-    let cols = source.columns();
-    let mut scroll = scroll_col;
+    let mut scroll = scroll_col.min(cursor_col);
     // Terminates: `scroll == cursor_col` always shows the cursor column (the
     // first column is placed unconditionally by `compute`).
-    while scroll < cursor_col
-        && !compute(source, scroll, area_width, cfg).shows_fully(cursor_col, cfg, cols)
-    {
+    while scroll < cursor_col && !compute(source, scroll, area_width, cfg).shows_fully(cursor_col) {
         scroll += 1;
+    }
+    while scroll > 0 && compute(source, scroll - 1, area_width, cfg).shows_fully(cursor_col) {
+        scroll -= 1;
     }
     scroll
 }
@@ -227,13 +307,21 @@ mod tests {
     use super::*;
     use crate::table::MemSource;
 
+    /// Base config for the packing/scrolling tests: fill is off so a width is
+    /// exactly `column_width`, which is what those assertions are about.
+    /// `fill_cfg` covers the expanding case.
     fn cfg() -> TableConfig {
         TableConfig {
             row_numbers: false,
             min_col_width: 3,
             max_col_width: 10,
+            fill_width: false,
             ..Default::default()
         }
+    }
+
+    fn fill_cfg() -> TableConfig {
+        TableConfig { fill_width: true, ..cfg() }
     }
 
     // --- cell fitting -----------------------------------------------------
@@ -349,8 +437,86 @@ mod tests {
         let layout = compute(&src, 0, 7, &cfg());
         assert_eq!(layout.columns.len(), 2);
         assert_eq!(layout.columns[1].width, 2);
-        assert!(!layout.shows_fully(1, &cfg(), src.columns()));
-        assert!(layout.shows_fully(0, &cfg(), src.columns()));
+        assert!(!layout.shows_fully(1));
+        assert!(layout.shows_fully(0));
+    }
+
+    // --- filling the viewport --------------------------------------------
+
+    /// Longer than the viewports the fill tests use, so the text column's
+    /// demand is never fully satisfied and the slack is what bounds it.
+    const LONG_NOTE: &str = "a free-text note that runs on well past the width of \
+        any terminal these tests pretend to have, so the column can always take \
+        whatever room is going spare";
+
+    /// The motivating shape: two short columns and one free-text column whose
+    /// values are longer than any sane terminal, in a viewport wide enough for
+    /// all three with room to spare.
+    fn mixed_source() -> MemSource {
+        MemSource::new(
+            &["ok", "flag", "note"],
+            &[
+                &["true", "false", LONG_NOTE],
+                &["false", "true", "another long free-text value"],
+            ],
+        )
+    }
+
+    #[test]
+    fn leftover_width_goes_to_the_columns_that_were_truncated() {
+        let src = mixed_source();
+        let base = column_widths(src.columns(), 0, 80, &cfg());
+        assert_eq!(base, vec![5, 5, 10], "capped at max_col_width without fill");
+
+        let filled = column_widths(src.columns(), 0, 80, &fill_cfg());
+        // The short columns already show their content in full, so they keep
+        // their size — only the truncated text column grows.
+        assert_eq!(filled[0], 5);
+        assert_eq!(filled[1], 5);
+        assert!(filled[2] > 10, "text column grew, got {}", filled[2]);
+        let used: u16 = filled.iter().sum::<u16>() + COL_GAP * 2;
+        assert_eq!(used, 80, "the grid reaches the right edge exactly");
+    }
+
+    #[test]
+    fn a_column_never_grows_past_the_width_its_content_needs() {
+        // Far more room than the data can use: every column lands on its
+        // natural width and the rest of the viewport is simply left blank —
+        // padding a column beyond its longest value buys nothing.
+        let src = mixed_source();
+        let filled = column_widths(src.columns(), 0, 400, &fill_cfg());
+        let natural: Vec<u16> = src.columns().iter().map(|c| natural_width(c) as u16).collect();
+        assert_eq!(filled, natural);
+    }
+
+    #[test]
+    fn a_table_too_wide_to_fit_keeps_its_capped_widths() {
+        // Nothing to reclaim: the grid scrolls horizontally, so filling would
+        // only push more columns off the right edge.
+        let src = mixed_source();
+        assert_eq!(
+            column_widths(src.columns(), 0, 12, &fill_cfg()),
+            column_widths(src.columns(), 0, 12, &cfg()),
+        );
+    }
+
+    #[test]
+    fn the_gutter_is_charged_against_the_space_available_to_fill() {
+        let src = mixed_source();
+        let with_numbers = TableConfig { row_numbers: true, ..fill_cfg() };
+        let gutter = gutter_width(src.loaded_rows(), &with_numbers);
+        assert!(gutter > 0);
+        let filled = column_widths(src.columns(), gutter, 80, &with_numbers);
+        let used: u16 = filled.iter().sum::<u16>() + COL_GAP * 2 + gutter;
+        assert_eq!(used, 80);
+    }
+
+    #[test]
+    fn scrolling_right_pulls_back_left_rather_than_leaving_blank_space() {
+        // A viewport that grew (resize, or a table that now fits) must not
+        // leave the right edge blank while columns hide off the left.
+        let src = wide_source();
+        assert_eq!(scroll_col_for_cursor(&src, 3, 3, 40, &cfg()), 0);
     }
 
     #[test]
@@ -414,6 +580,8 @@ mod tests {
         for cfg in [
             TableConfig { column_sparkline: false, ..cfg() },
             TableConfig { column_sparkline: true, ..cfg() },
+            TableConfig { column_sparkline: false, ..fill_cfg() },
+            TableConfig { column_sparkline: true, ..fill_cfg() },
         ] {
         for width in 4u16..40 {
             for cursor_col in 0..src.columns().len() {
@@ -426,16 +594,42 @@ mod tests {
                     );
                     // The only case where the cursor column may be clipped is a
                     // viewport too narrow for that single column.
-                    let want = column_width(&src.columns()[cursor_col], &cfg);
+                    let want = layout.find(cursor_col).unwrap().want;
                     if width >= want {
                         assert!(
-                            layout.shows_fully(cursor_col, &cfg, src.columns()),
+                            layout.shows_fully(cursor_col),
                             "cursor col {cursor_col} clipped at width {width} (scroll {scroll})"
                         );
                     }
                 }
             }
         }
+        }
+    }
+
+    #[test]
+    fn a_filled_layout_never_overruns_the_viewport() {
+        // Filling hands out real screen columns, so the sum of what it hands
+        // out plus the gaps and the gutter must still fit — an over-wide
+        // column would push the last one off the edge it was widened to reach.
+        let src = MemSource::new(
+            &["id", "flag", "note", "other"],
+            &[
+                &["1", "true", "a value considerably longer than the cap", "short"],
+                &["22", "false", "another long one", "x"],
+            ],
+        );
+        for row_numbers in [false, true] {
+            let cfg = TableConfig { row_numbers, ..fill_cfg() };
+            for width in 1u16..200 {
+                let layout = compute(&src, 0, width, &cfg);
+                if let Some(last) = layout.columns.last() {
+                    assert!(
+                        last.x + last.width <= width,
+                        "width {width}: layout runs past the right edge",
+                    );
+                }
+            }
         }
     }
 }
