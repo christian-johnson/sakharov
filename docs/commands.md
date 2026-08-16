@@ -323,11 +323,11 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `undo-transform` | `u` | Drop the last sort/filter/group |
 | `clear-transforms` | `gx` | Drop every sort/filter/group (`:reset-table`) |
 | `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table or a query result) and go back to where it came from — also what `:bd` does there (`:table-back`) |
-| `sql` | — | Open the SQL scratch buffer (`:query`, `:sql-buffer`) |
+| `sql` | `q` closes it | Open the SQL scratch buffer (`:query`, `:sql-buffer`) |
 | `run-query` | `Ctrl+E` (in the SQL buffer) | Run the query and show the result as a grid (`:sql-run`) |
 | `kernel-variables` | `gv` | List the kernel's variables; `Enter` opens a dataframe as a grid (`:vars`, `:variables`) |
 | `view` | — | `:view df` opens a kernel dataframe as a grid; bare `:view` lists them |
-| `attach` | — | Attach a local database file read-only: `:attach <path> [as <alias>]`; bare `:attach` lists what is attached |
+| `attach` | — | Attach a local database file read-only: `:attach <path> [as <alias>]`; bare `:attach` prompts for the path (and names what is already attached) |
 | `detach` | — | `:detach <alias>` drops one attachment; bare `:detach` drops them all |
 | `schema` | `gt` | Browse every table in every attached database; `Enter` opens one (`:tables`, `:schema-browser`) |
 
@@ -386,7 +386,11 @@ folds it, and `:table` opens one in the grid on request.)
 `:sql` opens a scratch buffer you run as a query with `Ctrl+E` — the same key that
 runs a notebook cell. It is ordinary buffer text, so the editor's motions, undo and
 search all work on it. The result opens as a grid and `q` goes back to the query, so
-editing and re-running is a loop. A bare filename resolves against the directory of
+editing and re-running is a loop; `q` (or `:bd`) *in* the query buffer leaves it for
+whatever you were looking at when you opened it, keeping the query text for next
+time. A failing query keeps the text too and reports the engine's error — in the
+minibuffer flattened to one line, in full in `*Messages*`. A bare filename resolves
+against the directory of
 whatever you were looking at when you opened the buffer:
 
 ```sql
@@ -400,7 +404,9 @@ SELECT * FROM read_parquet('events.parquet') LIMIT 100
 always — and `gt` (`:schema`) browses what is in it: one grid row per table, `Enter`
 to open that table, `q` to come back. The alias defaults to the filename, so its
 tables are `analytics.main.sales` in any `:sql` query from then on. `:detach` drops
-it again.
+it again.  A bare `:attach` — which is all the command palette can invoke — prompts
+for the path in the minibuffer, the way `:new-file` does, and names what is already
+attached while it asks.
 
 **The editor never handles a credential.** A local file is a path, not a secret, so
 attaching one needs none. A remote or authenticated database is a different thing

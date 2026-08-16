@@ -25,11 +25,12 @@ pub use scroll::{normalize_cursor_folds, update_scroll};
 pub use table::{is_table_path, open_as_table, poll_table_load};
 // The minibuffer prompts' answers land here (`input::handle_prompt`).
 pub(crate) use table::{apply_filter as table_filter, apply_group as table_group_by};
+pub(crate) use attach::attach as attach_database;
 pub use search::{search_compute_matches, search_jump};
 
 // Names used by `execute()` and by sibling submodules via `super::…`.
 use buffers::{
-    navigate_buffer, register_buffer, save_current_special_buffer,
+    navigate_buffer, register_buffer,
     take_stashed_file_buffer, teardown_current_buffer, unsaved_buffer_names,
 };
 use format::run_shell_formatter;
@@ -595,21 +596,27 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::BufferClose | Command::BufferForceClose => {
             let force = matches!(cmd, Command::BufferForceClose);
 
-            // A `*cell …*` buffer, and equally a computed table, is closed by
-            // going back to the table it came from — the only place it makes
-            // sense to return to.
-            if table::close_cell_buffer(app) || table::close_derived_table(app) {
+            // A `*cell …*` buffer, a computed table and the `*sql*` query buffer
+            // are *backed out of* rather than closed: each was opened from
+            // somewhere, and that somewhere is the only place it makes sense to
+            // return to.  Without this they hit the refusal below and there is
+            // no way out of them at all.
+            if table::close_cell_buffer(app)
+                || table::close_derived_table(app)
+                || sql::close_buffer(app)
+            {
                 return;
             }
 
-            // Special buffers cannot be closed.
-            let is_special = app.buffer.path.as_deref()
-                .map(is_special_path)
-                .unwrap_or(false);
-            if is_special {
-                let name = app.buffer.path.as_ref()
-                    .and_then(|p| p.to_str())
-                    .unwrap_or("this buffer");
+            // What is being closed.  In the table view `app.buffer` is a
+            // detached, path-less buffer — the identity lives in the session,
+            // and reading it from the buffer closed nothing at all.
+            let key = table::current_source_id(app);
+
+            // Special buffers cannot be closed.  A table over a real file is
+            // not one of them, however virtual its detached buffer looks.
+            if key.as_ref().is_some_and(crate::source::SourceId::is_virtual) {
+                let name = key.as_ref().map_or("this buffer", |k| k.label());
                 app.messages.show(format!("Cannot close special buffer {name}"));
                 return;
             }
@@ -627,14 +634,6 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 return;
             }
 
-            // Determine the path to remove (notebook path, not virtual cell path).
-            let path_to_remove: Option<std::path::PathBuf> =
-                if let Some((ref nb, _)) = app.notebook {
-                    Some(nb.path.clone())
-                } else {
-                    app.buffer.path.clone()
-                };
-
             // Tear down notebook/LSP for the current buffer.
             if app.notebook.is_some() {
                 notebook::save_focused_cell(app);
@@ -647,28 +646,37 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.lsp.did_close(lang, old_path);
             }
 
-            // Remove the closed buffer from the buffer list and any stash.
-            if let Some(ref p) = path_to_remove {
-                let key = crate::source::SourceId::of(p);
-                app.open_buffers.retain(|stored| *stored != key);
-                app.notebook_buffers.remove(&key);
-                app.file_buffers.remove(&key);
-                app.table_buffers.remove(&key);
+            // Remove the closed buffer from the buffer list and every stash.
+            let mut closed_idx = 0;
+            if let Some(ref key) = key {
+                closed_idx = app.open_buffers.iter().position(|s| s == key).unwrap_or(0);
+                app.open_buffers.retain(|stored| stored != key);
+                app.notebook_buffers.remove(key);
+                app.file_buffers.remove(key);
+                app.table_buffers.remove(key);
+                app.cursor_positions.remove(key);
                 // Closing a notebook shuts its kernel down — otherwise the
                 // Python process outlives the buffer for the rest of the
                 // session, holding whatever it had loaded.
-                if app.compute.shutdown(&key) {
+                if app.compute.shutdown(key) {
                     app.messages.show(format!("Kernel shut down ({})", key.label()));
                 }
             }
 
             // Drop the closed buffer's contents now: the buffer-switch below
-            // stashes whatever is in `app.buffer`, and the buffer we just
-            // closed must not be resurrected into the stash.
+            // stashes whatever is in `app.buffer` (and in `app.table`), and the
+            // buffer we just closed must not be resurrected into the stash.
             app.buffer = crate::buffer::Buffer::new_empty();
+            app.table = None;
 
-            // Pick the next buffer: prefer real files over *Messages*, fall back to *scratch*.
+            // Land on the closed buffer's neighbour — the entry that slid into
+            // its place, else the one before it — rather than restarting from
+            // the head of the list.  *Messages* is skipped as a destination;
+            // *scratch* is the fallback when nothing real is left.
             let next = app.open_buffers.iter()
+                .cycle()
+                .skip(closed_idx.min(app.open_buffers.len().saturating_sub(1)))
+                .take(app.open_buffers.len())
                 .find(|id| id.label() != "*Messages*")
                 .map(|id| id.to_path())
                 .unwrap_or_else(|| std::path::PathBuf::from("*scratch*"));
@@ -1115,6 +1123,15 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         // A local database file is a path, not a secret — see `exec::attach`.
         Command::Attach(arg) => {
+            // Bare `:attach` needs a path, and the palette can only ever invoke
+            // it bare — so ask for one in the minibuffer, the same way
+            // `:new-file` / `:new-notebook` do, instead of answering with a
+            // listing the user did not ask for.
+            if arg.trim().is_empty() {
+                app.command_buf.clear();
+                app.mode = Mode::Prompt { kind: crate::mode::PromptKind::Attach };
+                return;
+            }
             attach::attach(app, arg);
             return;
         }
@@ -2531,6 +2548,67 @@ mod tests {
 
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    /// Going back to a buffer must land where you left it — otherwise moving
+    /// between two files means scrolling back to your place every single time.
+    #[test]
+    fn buffer_switch_restores_the_cursor_position() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        let dir = unique_tmp_dir("cursorpos");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "l0\nl1\nl2\nl3\nl4\n").unwrap();
+        std::fs::write(&b, "other\n").unwrap();
+
+        open_path(&mut app, &a);
+        // Park the cursor on line 4, column 1.
+        let head = app.buffer.rope.line_to_char(3) + 1;
+        app.selection = Selection::point(head);
+
+        open_path(&mut app, &b);
+        assert_eq!(app.selection.head, 0, "a fresh buffer opens at its start");
+
+        open_path(&mut app, &a);
+        assert_eq!(
+            app.selection.head, head,
+            "returning to a buffer must restore the cursor, not reset to line 1"
+        );
+
+        // And the same for a special buffer, which is not stashed at all.
+        switch_to_special_buffer(&mut app, "*scratch*");
+        let scratch_head = app.buffer.rope.line_to_char(1);
+        app.selection = Selection::point(scratch_head);
+        open_path(&mut app, &b);
+        switch_to_special_buffer(&mut app, "*scratch*");
+        assert_eq!(app.selection.head, scratch_head);
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    /// Bare `:attach` (which is all the command palette can ever invoke) must
+    /// ask for the path it needs, the way `:new-file` does — not answer a
+    /// question nobody asked and look like it did nothing.
+    #[test]
+    fn bare_attach_asks_for_a_path() {
+        let config = Config::load();
+        let mut app = App::new(None, config).unwrap();
+
+        execute(&mut app, &Command::parse("attach").expect("attach parses"));
+        assert_eq!(
+            app.mode,
+            Mode::Prompt { kind: crate::mode::PromptKind::Attach },
+            "the palette's bare `attach` must open the path prompt"
+        );
+
+        // An argument given on the `:` line still runs directly.
+        app.mode = Mode::Normal;
+        execute(&mut app, &Command::Attach("/nonexistent/nope.duckdb".into()));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.messages.current().unwrap_or("").contains("No such database file"));
     }
 
     #[test]

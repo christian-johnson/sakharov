@@ -43,7 +43,7 @@ pub(super) fn anchor_dir(app: &App) -> Option<PathBuf> {
 }
 
 /// `:attach <path> [as <alias>]` — make a local database file readable.
-pub(super) fn attach(app: &mut App, arg: &str) {
+pub(crate) fn attach(app: &mut App, arg: &str) {
     let (path_arg, alias_arg) = split_as(arg);
     if path_arg.is_empty() {
         // Bare `:attach` is a question, not a mistake — answer it.

@@ -16,6 +16,8 @@ pub enum PromptKind {
     TableFilter,
     /// Group the table by its cursor column, with optional aggregates.
     TableGroupBy,
+    /// Path (and optional alias) of a local database file to attach read-only.
+    Attach,
 }
 
 /// Editor mode.

@@ -188,6 +188,15 @@ pub fn for_each_jump_label_char(
 }
 
 /// A 1-row widget that clears its area with `style` then prints `text`.
+///
+/// The text is flattened to one printable line on the way in
+/// ([`table::layout::sanitize`](crate::table::layout::sanitize)).  This is the
+/// minibuffer, and what it prints is not always the editor's own prose: a
+/// DuckDB binder error, an LSP diagnostic and a signature hint all arrive as
+/// whatever the other side wrote, and a `\n` or `\r` stored as a cell symbol is
+/// emitted raw by the backend — scrolling the terminal mid-flush and shifting
+/// every cell drawn after it, damage that survives until a full redraw because
+/// ratatui's own buffer never saw it.
 pub struct SingleLineWidget {
     pub text: String,
     pub style: Style,
@@ -198,11 +207,12 @@ impl Widget for SingleLineWidget {
         if area.height == 0 || area.width == 0 {
             return;
         }
+        let text = crate::table::layout::sanitize(&self.text);
         let y = area.top();
         for col in area.left()..area.right() {
             buf[(col, y)].set_char(' ').set_style(self.style);
         }
-        for (x, c) in (area.left()..area.right()).zip(self.text.chars()) {
+        for (x, c) in (area.left()..area.right()).zip(text.chars()) {
             buf[(x, y)].set_char(c).set_style(self.style);
         }
     }
@@ -223,6 +233,29 @@ mod tests {
         assert_eq!(segs[2].0, 12);
         // Every segment fits the width.
         assert!(segs.iter().all(|&(_, s)| s.chars().count() <= 10));
+    }
+
+    /// A DuckDB binder error is several lines with a caret diagram; an LSP
+    /// diagnostic can be any shape at all.  A raw `\n` stored as a cell symbol
+    /// is printed verbatim by the backend, scrolling the terminal mid-flush and
+    /// shifting everything drawn after it — damage ratatui's own buffer never
+    /// sees, so it survives until a full redraw.
+    #[test]
+    fn the_minibuffer_flattens_a_multi_line_message() {
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = RatBuffer::empty(area);
+        SingleLineWidget {
+            text: "Catalog Error: no such table\nLINE 1: SELECT\n\t^".to_string(),
+            style: Style::default(),
+        }
+        .render(area, &mut buf);
+
+        let row: String = (0..area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(
+            !row.contains('\n') && !row.contains('\r') && !row.contains('\t'),
+            "no control character may reach the terminal: {row:?}",
+        );
+        assert!(row.starts_with("Catalog Error: no such table"));
     }
 
     #[test]

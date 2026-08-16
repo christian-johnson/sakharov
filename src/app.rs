@@ -306,6 +306,10 @@ pub struct App {
     /// `app.buffer` the `*sql*` buffer — which has no path, and so no idea which
     /// project's `data.csv` the query means.
     pub sql_dir: Option<std::path::PathBuf>,
+    /// What was on screen when the SQL buffer was opened — where `q` goes back
+    /// to.  The query buffer is a temporary thing you back out of, like a
+    /// `*cell …*` buffer, and `:bd` refuses to close a `*…*` name outright.
+    pub sql_origin: Option<crate::source::SourceId>,
     /// Local database files attached read-only (`:attach`), replayed onto every
     /// connection the editor opens.  Paths and names only: a remote or
     /// authenticated database is reached in the kernel by the user's own code,
@@ -392,6 +396,13 @@ pub struct App {
     /// buffer switches (the file is otherwise reloaded from disk).  Entries
     /// are removed when restored or when the buffer is closed with `:bd`.
     pub file_buffers: std::collections::HashMap<crate::source::SourceId, Buffer>,
+    /// Where the cursor was when a text buffer was last left, as `(line, column)`
+    /// — the position a later switch back to it restores.  Kept apart from
+    /// `file_buffers` because it outlives it: a buffer whose stash was dropped
+    /// (or that was never stashed, like `*scratch*`) still deserves to reopen
+    /// where it was left.  Lines/columns rather than a char index so the
+    /// restore can go through `lsp::open_file_at`, which speaks positions.
+    pub cursor_positions: std::collections::HashMap<crate::source::SourceId, (usize, usize)>,
     /// Crash-recovery bookkeeping (recovery dir, debounce, written-file index).
     pub recovery: crate::recovery::Recovery,
     /// Recovery prompts queued at startup / on open, shown one at a time.
@@ -600,6 +611,7 @@ impl App {
             table_pending: None,
             table_buffers: std::collections::HashMap::new(),
             sql_dir: None,
+            sql_origin: None,
             attachments: Vec::new(),
             table_cell_origin: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
@@ -633,6 +645,7 @@ impl App {
             sig_help_deferred: false,
             notebook_buffers: std::collections::HashMap::new(),
             file_buffers: std::collections::HashMap::new(),
+            cursor_positions: std::collections::HashMap::new(),
             recovery,
             pending_recoveries: std::collections::VecDeque::new(),
             active_recovery: None,

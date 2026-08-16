@@ -240,8 +240,33 @@ impl DuckDbSource {
         }
         self.window = start..start + cells.len();
         self.cells = cells;
+        self.measure_window();
         self.fetches.set(self.fetches.get() + 1);
         Ok(())
+    }
+
+    /// Widen each column's `width_hint` to the widest value in the window just
+    /// fetched.  `DESCRIBE` only knows names, so without this a column is laid
+    /// out at its *header's* width and every value is clipped to it — a `name`
+    /// column showing `ord…` for `orders`, with the rest of the terminal blank.
+    ///
+    /// The hint only ever grows.  Layout must not be a function of `scroll_col`
+    /// (`table::layout`'s own invariant: a column that changed width as the grid
+    /// scrolled under it would make the scroll math chase its own tail), and a
+    /// monotonic maximum is the closest a windowed source can get to that — it
+    /// settles after the first window and never oscillates. `max_col_width`
+    /// caps what any of it can cost.
+    fn measure_window(&mut self) {
+        for (idx, col) in self.columns.iter_mut().enumerate() {
+            let widest = self
+                .cells
+                .iter()
+                .filter_map(|row| row.get(idx))
+                .map(|v| crate::table::layout::display_width(&crate::table::layout::sanitize(v)))
+                .max()
+                .unwrap_or(0);
+            col.width_hint = col.width_hint.max(widest);
+        }
     }
 
     /// Row windows fetched so far — for the test that pins the windowing.
@@ -350,8 +375,8 @@ fn describe(conn: &Connection, sql: &str) -> Result<Vec<Column>> {
         columns.push(Column {
             name: name.clone(),
             ty: column_type(&ty),
-            // A window's worth of values sets the real width once fetched; the
-            // header is the floor until then.
+            // The header is the floor; `DuckDbSource::measure_window` raises
+            // this to the widest value once a window has actually been read.
             width_hint: name.chars().count(),
         });
     }
@@ -434,6 +459,33 @@ mod tests {
         assert_eq!(src.cell(0, 0), Some("1"));
         assert_eq!(src.cell(0, 1), Some("a"));
         assert_eq!(src.cell(0, 3), Some("true"));
+    }
+
+    /// `DESCRIBE` knows names, not values, so a column laid out from the header
+    /// alone clips every value to it: the schema browser's `name` column drew
+    /// `orders` as `ord…` while the rest of the terminal sat blank, because
+    /// `fill_width` expands a column only towards its natural width.
+    #[test]
+    fn a_column_is_measured_against_the_values_in_the_window_not_its_header() {
+        use crate::config::TableConfig;
+        use crate::table::layout;
+
+        let src = DuckDbSource::query(
+            mem(),
+            "SELECT 'orders' AS name UNION ALL SELECT 'order_line_items'",
+            "test",
+        )
+        .expect("query runs");
+
+        let col = &src.columns()[0];
+        assert!(
+            col.width_hint >= "order_line_items".len(),
+            "the widest value in the window sets the width, not the 4-char header",
+        );
+        let cfg = TableConfig::default();
+        let (text, truncated) =
+            layout::fit_cell("orders", layout::column_width(col, &cfg) as usize);
+        assert_eq!((text.as_str(), truncated), ("orders", false));
     }
 
     #[test]
@@ -672,3 +724,4 @@ mod tests {
         assert_eq!(column_type("STRUCT(a INTEGER)"), ColumnType::Text);
     }
 }
+

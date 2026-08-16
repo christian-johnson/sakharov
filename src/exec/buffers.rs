@@ -25,14 +25,21 @@ pub fn is_special_path(path: &std::path::Path) -> bool {
     SourceId::of(path).is_virtual()
 }
 
-/// Save the scratch buffer rope when leaving it (so edits survive switches).
+/// Save a special buffer's rope when leaving it, so its text survives the
+/// switch — `*scratch*`'s notes, and equally the query typed into `*sql*`.
+///
+/// Two special buffers are excluded, both because their text has a live source
+/// that the stash would freeze: `*Messages*` is rebuilt from the message log
+/// every time it is opened, and a `*cell …*` buffer is re-read from the grid by
+/// whoever opens it (`table::open_cell_buffer` seeds and evicts that rope).
 pub(super) fn save_current_special_buffer(app: &mut App) {
-    if let Some(ref path) = app.buffer.path.clone() {
-        if path.to_str() == Some("*scratch*") {
-            app.special_buffer_ropes
-                .insert("*scratch*".to_string(), app.buffer.rope.clone());
-        }
+    let Some(name) = app.buffer.path.as_deref().and_then(|p| p.to_str()) else { return };
+    if !is_special_path(std::path::Path::new(name)) || name == "*Messages*" || app.in_cell_buffer()
+    {
+        return;
     }
+    app.special_buffer_ropes
+        .insert(name.to_string(), app.buffer.rope.clone());
 }
 
 /// Stash or close whatever is currently open (notebook or plain file) so it
@@ -40,6 +47,11 @@ pub(super) fn save_current_special_buffer(app: &mut App) {
 /// closed with the LSP (skipping virtual/special paths, which were never
 /// opened with it) and its unsaved edits are kept in memory.
 pub(super) fn teardown_current_buffer(app: &mut App) {
+    remember_cursor(app);
+    // Every "show something else" path goes through here, so this is the one
+    // place a special buffer's text has to be kept — including the way into the
+    // table view, which is how `q` leaves `*sql*` for a grid.
+    save_current_special_buffer(app);
     // A table session holds no unsaved state (the view is read-only), but it
     // does hold a parsed copy of the file and the cursor cell — stash both, so
     // reading a cell in its own buffer and coming straight back lands on the
@@ -71,7 +83,6 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
 
 /// Switch the editor to a named special buffer (`*scratch*` or `*Messages*`).
 pub fn switch_to_special_buffer(app: &mut App, name: &str) {
-    save_current_special_buffer(app);
     teardown_current_buffer(app);
 
     let rope = match name {
@@ -105,7 +116,11 @@ pub fn switch_to_special_buffer(app: &mut App, name: &str) {
     buf.path = Some(std::path::PathBuf::from(name));
 
     app.buffer = buf;
-    app.selection = Selection::point(0);
+    let (line, col) = remembered_cursor(app, std::path::Path::new(name));
+    let line = line.min(app.buffer.rope.len_lines().saturating_sub(1));
+    let head = app.buffer.rope.line_to_char(line)
+        + col.min(app.buffer.rope.line(line).len_chars().saturating_sub(1));
+    app.selection = Selection::point(head.min(app.buffer.rope.len_chars()));
     app.scroll_row = 0;
     app.scroll_col = 0;
     app.insert_session_active = false;
@@ -130,6 +145,9 @@ pub fn open_path(app: &mut App, path: &std::path::Path) {
     // goes through a popup, so without this the dashboard stays painted over
     // the file that was just opened until the next keypress.
     app.show_splash = false;
+    // Before anything is torn down: where the cursor is *now* is what the
+    // buffer being left should reopen at (and `path` may be that buffer).
+    remember_cursor(app);
 
     if app.table_buffers.contains_key(&SourceId::of(path)) {
         // A derived table (a frequency table, later a query result) is virtual,
@@ -143,7 +161,11 @@ pub fn open_path(app: &mut App, path: &std::path::Path) {
     } else if app.config.table.auto_open && super::table::is_table_path(path) {
         super::table::open_as_table(app, path);
     } else {
-        lsp::open_file_at(app, path, 0, 0);
+        // Reopen where it was left.  `open_file_at`'s explicit position is for
+        // callers that mean one (a jump, a diagnostic); "the user picked this
+        // file" means "put me back where I was".
+        let (line, col) = remembered_cursor(app, path);
+        lsp::open_file_at(app, path, line, col);
     }
 }
 
@@ -184,9 +206,6 @@ pub(super) fn navigate_buffer(app: &mut App, delta: i32) {
 /// Called when the user selects a notebook from the buffer picker.
 pub fn open_as_notebook(app: &mut App, path: &std::path::Path) {
     use crate::{notebook::Notebook, notebook_state::NotebookState};
-
-    // Save scratch content when leaving it.
-    save_current_special_buffer(app);
 
     // Stash or close whatever is currently open.
     teardown_current_buffer(app);
@@ -339,6 +358,29 @@ pub(crate) fn create_new_notebook(app: &mut App, name: &str) {
     }
     open_as_notebook(app, &path);
     app.messages.show(format!("Created {name}"));
+}
+
+/// Record where the cursor is in the text buffer being left, so switching back
+/// to it lands where it was rather than at line 1.  Notebooks and tables keep
+/// their own cursor in their own state, and neither is `app.buffer`, so this
+/// only ever speaks for a plain (or special) text buffer.
+pub(crate) fn remember_cursor(app: &mut App) {
+    if app.notebook.is_some() || app.table.is_some() {
+        return;
+    }
+    let Some(path) = app.buffer.path.as_deref() else { return };
+    let head = app.selection.head.min(app.buffer.rope.len_chars());
+    let line = app.buffer.rope.char_to_line(head);
+    let col = head - app.buffer.rope.line_to_char(line);
+    app.cursor_positions.insert(SourceId::of(path), (line, col));
+}
+
+/// The remembered `(line, column)` for `path`, or the top of the file.
+pub(crate) fn remembered_cursor(app: &App, path: &std::path::Path) -> (usize, usize) {
+    app.cursor_positions
+        .get(&SourceId::of(path))
+        .copied()
+        .unwrap_or((0, 0))
 }
 
 /// Stash the current plain-file buffer so unsaved edits and undo history

@@ -667,10 +667,18 @@ pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Command => (format!(":{}", app.command_buf), Style::default()),
         Mode::Prompt { kind } => {
             let label = match kind {
-                PromptKind::NewFile => "New file",
-                PromptKind::NewNotebook => "New notebook",
-                PromptKind::TableFilter => "Filter (> 100 · = oslo · ~ osl · null)",
-                PromptKind::TableGroupBy => "Aggregate (sum qty, mean price)",
+                PromptKind::NewFile => "New file".to_string(),
+                PromptKind::NewNotebook => "New notebook".to_string(),
+                PromptKind::TableFilter => "Filter (> 100 · = oslo · ~ osl · null)".to_string(),
+                PromptKind::TableGroupBy => "Aggregate (sum qty, mean price)".to_string(),
+                // The prompt is also where bare `:attach` used to answer "what
+                // is attached?", so it still answers it.
+                PromptKind::Attach if !app.attachments.is_empty() => format!(
+                    "Attach read-only, path [as alias] (attached: {})",
+                    app.attachments.iter().map(|a| a.alias.as_str())
+                        .collect::<Vec<_>>().join(", ")
+                ),
+                PromptKind::Attach => "Attach database, read-only (path [as alias])".to_string(),
             };
             (format!("{label}: {}_", app.command_buf), Style::default())
         }

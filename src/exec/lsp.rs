@@ -651,7 +651,6 @@ pub fn jump_to_location(app: &mut App, loc: &LspLocation) {
 pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, character: usize) {
     // Redirect special buffer names to their own switch handler.
     if super::is_special_path(path) {
-        super::save_current_special_buffer(app);
         super::switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
         return;
     }
@@ -666,9 +665,6 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
         app.messages.show(format!("Cannot open: {}", path.display()));
         return;
     };
-
-    // Save scratch content when leaving it.
-    super::save_current_special_buffer(app);
 
     // If a notebook is open, preserve its .ipynb path in the buffer list
     // before stashing it below.

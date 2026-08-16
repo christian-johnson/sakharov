@@ -759,7 +759,6 @@ pub(super) fn close_derived_table(app: &mut App) -> bool {
 /// Hand the screen to the table view: stash whatever was open, and detach
 /// `app.buffer` so nothing in the editor holds a writable handle on the data.
 fn enter_table_view(app: &mut App) {
-    super::save_current_special_buffer(app);
     super::teardown_current_buffer(app);
     app.table = None;
     app.table_cell_origin = None;
@@ -1740,6 +1739,37 @@ mod tests {
             Some(SourceId::of(&path)),
         );
         assert!(app.buffer.rope.to_string().starts_with("a,b"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `:bd` in the grid used to read the identity off `app.buffer`, which the
+    /// table view deliberately leaves detached and path-less — so it removed
+    /// nothing, and the "closed" table came straight back from `H`/`L` or the
+    /// buffer picker, stashed by the very switch that was supposed to close it.
+    #[test]
+    fn closing_a_file_backed_table_really_closes_it() {
+        let dir = std::env::temp_dir().join(format!("sv-table-bd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.csv");
+        std::fs::write(&path, "a,b\n1,x\n2,y\n").unwrap();
+
+        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
+        crate::exec::open_path(&mut app, &path);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.table.is_none() && std::time::Instant::now() < deadline {
+            poll_table_load(&mut app);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.view(), View::Table);
+
+        crate::exec::execute(&mut app, &crate::command::Command::BufferClose);
+
+        let id = SourceId::of(&path);
+        assert!(app.table.is_none(), "the grid must be gone");
+        assert!(!app.open_buffers.contains(&id), "closed table must leave the buffer list");
+        assert!(!app.table_buffers.contains_key(&id), "and must not be stashed on the way out");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

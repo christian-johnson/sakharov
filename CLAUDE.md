@@ -549,6 +549,20 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   (`app.file_buffers`, keyed by canonical path — rope, modified flag, *and* undo history) when
   navigated away from, and restored on return; notebooks were already stashed in
   `app.notebook_buffers`. `:bd` removes the stash entry.
+- **Buffer switching returns you to where you were**: `app.cursor_positions` records
+  `(line, column)` per `SourceId` when a text buffer is left (`buffers::remember_cursor`, called
+  from `teardown_current_buffer` *and* at the top of `open_path`, since the buffer being left may
+  be the one being opened), and `open_path` reopens a plain file at that position instead of
+  passing `0, 0` to `lsp::open_file_at` — whose explicit position is for callers that mean one
+  (a jump, a diagnostic). Special buffers get the same treatment in `switch_to_special_buffer`.
+  Kept separate from `file_buffers` because it outlives it: a buffer that was never stashed
+  (`*scratch*`) still deserves to reopen where it was left. The intra-cell cursor of a notebook
+  is *not* covered — `load_focused_cell` resets it on every cell move, in-session too.
+- **`:bd` reads the identity from `table::current_source_id`, not `app.buffer`**: in the table
+  view `app.buffer` is detached and path-less, so closing off the buffer's path removed nothing —
+  the table left the screen, was re-stashed by the switch that followed, and came straight back
+  from `H`/`L`. It also clears `app.table` before switching away (or the stash resurrects it) and
+  lands on the closed buffer's *neighbour* rather than restarting at the head of the list.
 - **`:q` sweeps every buffer** (`exec::unsaved_buffer_names`): the active buffer/notebook, stashed
   notebooks, and stashed plain files. Any unsaved one blocks quit (`:q!` forces). `:wq` saves the
   active buffer and refuses to quit while others are dirty. Special buffers are exempt by design.
@@ -782,6 +796,13 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   Row fetches project through **`CAST(COLUMNS(*) AS VARCHAR)`** — positional, so
   `SELECT a, a` doesn't read the first column twice, and one uniform way to read a value;
   the column's *declared* type comes from `DESCRIBE` and is what drives alignment.
+  **`measure_window` sets the column widths from the values actually fetched**: `DESCRIBE`
+  knows names, not values, so a column laid out from its header alone clips every value to
+  it (the schema browser drawing `orders` as `ord…` while the rest of the terminal sat
+  blank — `layout::column_widths` expands a column only towards its `natural_width`, which
+  *is* the header when nothing has measured the data). The hint only ever grows: layout must
+  not be a function of `scroll_col`, and a monotonic maximum is the closest a windowed source
+  gets to that.
 - **Read-only, in three layers** (see the module docs): `duck::open_readonly` is the only
   place a connection is created — a database file is opened with
   `Config::access_mode(AccessMode::ReadOnly)`, and reading *files* uses an in-memory
@@ -808,8 +829,19 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   would be hostile. `app.sql_dir` anchors bare filenames (`FROM 'data.csv'`) to the
   directory of whatever was open when `:sql` was invoked, via DuckDB's `file_search_path`;
   it has to be captured then, because switching into the path-less `*sql*` buffer loses it.
+  **`q` / `:bd` in the query buffer backs out of it** (`sql::close_buffer`, called from the
+  `BufferClose` arm beside `close_cell_buffer`/`close_derived_table`; `q` comes from a
+  `Keymap::sql` override layer selected by `App::in_sql_buffer`, the same shape as the cell
+  buffer's). `app.sql_origin` is captured next to `sql_dir` for the same reason — once the
+  switch has happened there is nothing on screen to infer it from. Without this the buffer
+  was a **trap**: `:bd` refuses every `*…*` name outright, `q` was unbound, and the only way
+  out was to run something.
 - **`:attach <path> [as <alias>]`** (`exec/attach.rs`) makes a **local database file**
-  readable, always `READ_ONLY`; `:detach [alias]` drops one or all. `duck::connect` is now
+  readable, always `READ_ONLY`; `:detach [alias]` drops one or all. **Bare `:attach` opens a
+  `PromptKind::Attach` minibuffer prompt** for the path (the prompt line names what is already
+  attached, which is what bare `:attach` used to answer) — the command palette can only ever
+  invoke a command bare, so answering with a listing there made `attach` look inert.
+  `duck::connect` is now
   the single connection builder — in-memory scratch database, `file_search_path` anchored at
   the working directory, every `app.attachments` entry replayed — and `:sql` goes through it,
   so a query can join a parquet file to an attached table. The editor issues the `ATTACH`
@@ -1087,7 +1119,17 @@ docs/
   reads as a hang. The query is also skipped outright on Kitty/Ghostty, where the
   flags are pushed regardless of the answer
 - Minibuffer messages go through `app.messages.show(...)` (see `app::Messages`), which appends
-  to the *Messages* log at show time — never write a message field directly
+  to the *Messages* log at show time — never write a message field directly.
+  **`SingleLineWidget` flattens what it draws** (`table::layout::sanitize`): the minibuffer
+  prints text the editor did not write — a DuckDB binder error with a caret diagram, an LSP
+  diagnostic, a signature hint — and a `\n`/`\r` stored as a cell symbol is emitted raw by
+  the backend, scrolling the terminal mid-flush and shifting every cell drawn after it.
+  ratatui's own buffer never sees that, so the garbling survives until a full redraw. The
+  untruncated text stays readable in *Messages*
+- **A special buffer's text is stashed by `teardown_current_buffer`**
+  (`save_current_special_buffer`, one call site) — `*scratch*`'s notes and equally the query
+  typed into `*sql*`, whichever view is being switched to. `*Messages*` and `*cell …*`
+  buffers are excluded: both are rebuilt from a live source, which a stash would freeze
 - **Every renderer color comes from the active theme** — grab `let th = theme::active();` and
   use its fields (`th.popup_bg`, `th.accent`, `th.error`, …); never write `Color::Rgb`/ANSI
   literals in renderers. A new kind of colored element gets a `Theme` field (with a documented

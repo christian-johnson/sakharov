@@ -107,6 +107,7 @@ pub struct Keymap {
     notebook: HashMap<KeyBinding, Vec<Command>>,
     table: HashMap<KeyBinding, Vec<Command>>,
     cell: HashMap<KeyBinding, Vec<Command>>,
+    sql: HashMap<KeyBinding, Vec<Command>>,
 }
 
 impl Keymap {
@@ -118,6 +119,7 @@ impl Keymap {
         let mut notebook: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut table: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut cell: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        let mut sql: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
 
         // Helper macro to insert into both maps
         macro_rules! both {
@@ -343,7 +345,15 @@ impl Keymap {
         // Normal mode otherwise, so nothing is shadowed.
         cell.insert(KeyBinding::char('q'), vec![Command::TableCloseCell]);
 
-        Self { normal, select, notebook, table, cell }
+        // --- `*sql*` buffer overrides ---
+        //
+        // Same bargain as a cell buffer: a temporary thing you back out of with
+        // `q`.  Without it the query buffer is a trap — it cannot be closed
+        // (`:bd` refuses every `*…*` name) and the only way out is to run
+        // something.
+        sql.insert(KeyBinding::char('q'), vec![Command::BufferClose]);
+
+        Self { normal, select, notebook, table, cell, sql }
     }
 
     pub fn lookup_normal(&self, kb: &KeyBinding) -> Option<&[Command]> {
@@ -364,6 +374,10 @@ impl Keymap {
 
     pub fn lookup_cell(&self, kb: &KeyBinding) -> Option<&[Command]> {
         self.cell.get(kb).map(Vec::as_slice)
+    }
+
+    pub fn lookup_sql(&self, kb: &KeyBinding) -> Option<&[Command]> {
+        self.sql.get(kb).map(Vec::as_slice)
     }
 
     pub fn set_normal(&mut self, kb: KeyBinding, cmds: Vec<Command>) {

@@ -46,6 +46,9 @@ pub(super) fn open_buffer(app: &mut App) {
     // Anchor relative filenames to what you were last looking at, before the
     // switch replaces `app.buffer` with the path-less SQL buffer.
     app.sql_dir = super::buffers::sql_working_dir(app);
+    // …and where `q` goes back to, for the same reason: once the switch has
+    // happened there is nothing left on screen to infer it from.
+    app.sql_origin = super::table::current_source_id(app);
     // Seed the template only the first time; after that the buffer holds
     // whatever the user last typed, which is the point of a scratch buffer.
     app.special_buffer_ropes
@@ -53,6 +56,26 @@ pub(super) fn open_buffer(app: &mut App) {
         .or_insert_with(|| ropey::Rope::from_str(TEMPLATE));
     super::switch_to_special_buffer(app, SQL_BUFFER);
     app.messages.show("SQL buffer — Ctrl+E runs the query");
+}
+
+/// `q` / `:bd` in the query buffer — leave it for whatever `:sql` was invoked
+/// from, falling back to the scratch buffer.  Returns false when the SQL buffer
+/// is not what's open, so the caller can carry on with its own close.
+///
+/// The query text is not lost: leaving a special buffer stashes its rope, and
+/// `:sql` seeds the template only when there is nothing stashed.
+pub(super) fn close_buffer(app: &mut App) -> bool {
+    if !app.in_sql_buffer() {
+        return false;
+    }
+    let origin = app
+        .sql_origin
+        .take()
+        .filter(|id| id != &SourceId::virtual_named(SQL_BUFFER))
+        .map(|id| id.to_path())
+        .unwrap_or_else(|| std::path::PathBuf::from("*scratch*"));
+    super::open_path(app, &origin);
+    true
 }
 
 /// `Ctrl+E` / `:run-query` — run the buffer's contents and show the result.
@@ -151,6 +174,52 @@ mod tests {
         super::super::execute(&mut app, &Command::SqlRun);
         super::super::execute(&mut app, &Command::SqlBuffer);
         assert_eq!(app.buffer.rope.to_string(), "SELECT 7 AS n\n");
+    }
+
+    /// The query buffer used to be a trap: `:bd` refuses every `*…*` name, `q`
+    /// was unbound, and the only way out was to run something.
+    #[test]
+    fn q_backs_out_of_the_sql_buffer_to_where_it_came_from() {
+        let dir = std::env::temp_dir().join(format!("sv-sqlexit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.md");
+        std::fs::write(&file, "hello\n").unwrap();
+
+        let mut app = app();
+        super::super::open_path(&mut app, &file);
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        assert!(app.in_sql_buffer());
+        // `q` is bound to BufferClose in the SQL buffer's override map.
+        assert!(app
+            .keymap
+            .lookup_sql(&crate::keymap::KeyBinding::char('q'))
+            .is_some_and(|c| matches!(c, [Command::BufferClose])));
+
+        app.buffer.rope = ropey::Rope::from_str("SELECT 1\n");
+        super::super::execute(&mut app, &Command::BufferClose);
+
+        assert!(!app.in_sql_buffer(), "must leave the query buffer");
+        assert_eq!(
+            app.buffer.path.as_deref().map(SourceId::of),
+            Some(SourceId::of(&file)),
+            "and land back where :sql was invoked from",
+        );
+        // The query is kept — coming back shows what was typed, not the template.
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        assert_eq!(app.buffer.rope.to_string(), "SELECT 1\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With nothing else open there is still a way out.
+    #[test]
+    fn q_falls_back_to_scratch_when_there_is_no_origin() {
+        let mut app = app();
+        app.sql_origin = None;
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        app.sql_origin = None;
+        super::super::execute(&mut app, &Command::BufferClose);
+        assert!(!app.in_sql_buffer());
     }
 
     #[test]

@@ -182,6 +182,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     .keymap
                     .lookup_cell(&kb)
                     .or_else(|| app.keymap.lookup_normal(&kb)),
+                // The `*sql*` buffer is a text view with the same one override:
+                // `q` leaves it for wherever `:sql` was invoked from.
+                crate::app::View::Text if app.in_sql_buffer() => app
+                    .keymap
+                    .lookup_sql(&kb)
+                    .or_else(|| app.keymap.lookup_normal(&kb)),
                 crate::app::View::Text => app.keymap.lookup_normal(&kb),
             }
             .map(|v| v.to_vec());
@@ -575,6 +581,7 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
                 PromptKind::NewNotebook => exec::create_new_notebook(app, &name),
                 PromptKind::TableFilter => exec::table_filter(app, &name),
                 PromptKind::TableGroupBy => exec::table_group_by(app, &name),
+                PromptKind::Attach => exec::attach_database(app, &name),
             }
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
