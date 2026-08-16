@@ -142,6 +142,10 @@ pub struct Highlighter {
     /// True when the open file is Markdown (`.md`/`.qmd`). Markdown is highlighted
     /// and folded by the custom, non-tree-sitter `crate::markdown` module.
     pub markdown: bool,
+    /// True for `.sql` files and the `*sql*` query buffer, highlighted by the
+    /// custom `crate::sql_highlight` lexer (same reason as markdown: no usable
+    /// grammar at this tree-sitter ABI).
+    pub sql: bool,
     config: Option<HighlightConfiguration>,
     /// Reused across calls — avoids allocating a new Parser on every highlight pass.
     ts_highlighter: TsHighlighter,
@@ -157,6 +161,7 @@ impl Highlighter {
         Self {
             language,
             markdown: crate::markdown::is_markdown(path),
+            sql: crate::sql_highlight::is_sql(path),
             config,
             ts_highlighter: TsHighlighter::new(),
         }
@@ -181,6 +186,9 @@ impl Highlighter {
     pub fn highlight(&mut self, rope: &Rope) -> Result<Vec<Span>> {
         if self.markdown {
             return Ok(crate::markdown::highlight(rope));
+        }
+        if self.sql {
+            return Ok(crate::sql_highlight::highlight(rope));
         }
         let config = match &self.config {
             Some(c) => c,
@@ -308,6 +316,7 @@ mod tests {
             let mut hl = Highlighter {
                 language: Some(lang),
                 markdown: false,
+                sql: false,
                 config: Some(config),
                 ts_highlighter: TsHighlighter::new(),
             };

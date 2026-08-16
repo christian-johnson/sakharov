@@ -16,6 +16,7 @@ pub fn lang_to_ext(lang: &str) -> &'static str {
         "c" => "c",
         "html" => "html",
         "css" => "css",
+        "sql" => "sql",
         _ => "txt",
     }
 }
@@ -35,6 +36,7 @@ pub fn ext_to_lang(ext: &str) -> Option<&'static str> {
         "c" | "h" => Some("c"),
         "html" | "htm" => Some("html"),
         "css" => Some("css"),
+        "sql" => Some("sql"),
         _ => None,
     }
 }

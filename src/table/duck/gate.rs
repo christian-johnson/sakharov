@@ -123,7 +123,7 @@ fn pragma_name(sql: &str) -> String {
 /// Replaces rather than removes, so byte offsets in the result still line up
 /// with the input (and a comment can't glue two words together).  Quoted text is
 /// respected: a `--` inside a string literal is data, not a comment.
-fn strip_comments(sql: &str) -> String {
+pub fn strip_comments(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
     let mut quote: Option<char> = None;

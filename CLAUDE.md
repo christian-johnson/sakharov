@@ -25,6 +25,9 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 - Markdown (`.md`/`.markdown`/`.qmd`): custom (non-tree-sitter) highlighting in `markdown.rs` —
   per-level header colours, **bold**/*italic*, inline `code`/fenced blocks, links, blockquotes,
   list markers — plus header-section + code-fence folding (same `zc/zo/za` interface)
+- SQL (`.sql`, and the `*sql*` query buffer): custom (non-tree-sitter) highlighting in
+  `sql_highlight.rs` — keywords, types, built-in constants, called functions, string
+  literals vs quoted identifiers, numbers, `--`/`/* */` comments. No folding
 - Scroll with configurable `scroll_off`; horizontal scroll tracks cursor correctly
 - **Vertical motion is visual when text is soft-wrapped** — `j`/`k` (and the arrows, and
   `Ctrl+d`/`Ctrl+u`, which are runs of them) step one *screen row*, preserving the display
@@ -793,6 +796,13 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   design: it holds a *query* plus the ~500-row window on screen, refetching as the cursor
   moves (`fetch`), so a file larger than memory opens. `loaded_rows()` is the whole result
   (the grid can address every row) while `cell()` returns `None` outside the window.
+  **The query is normalized once in `DuckDbSource::query` to be safe to inline**: every read
+  wraps it in a subquery (`fetch`, `count`, each pushed-down transform), and neither a
+  trailing `;` nor a trailing `-- comment` can sit inside parentheses — the first made
+  `FROM (SELECT 42 AS answer;) AS "src"` a parser error against a statement the user never
+  typed, and only at the *fetch*, since `count` swallows its error. Comments are stripped
+  (`gate::strip_comments`; they mean nothing to the engine, and the user's buffer is
+  untouched), then the terminator, then a newline is appended.
   Row fetches project through **`CAST(COLUMNS(*) AS VARCHAR)`** — positional, so
   `SELECT a, a` doesn't read the first column twice, and one uniform way to read a value;
   the column's *declared* type comes from `DESCRIBE` and is what drives alignment.
@@ -826,7 +836,22 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   mode dispatch so they fire from Insert too) runs it and opens the result as a grid under
   the stable virtual id `*sql result*`. `q` goes back to the query, so edit-and-rerun is a
   loop. A refused or failing query **keeps the buffer text** — losing a query to a typo
-  would be hostile. `app.sql_dir` anchors bare filenames (`FROM 'data.csv'`) to the
+  would be hostile.
+  **What runs is one statement, not the buffer**: the selection if there is one, else the
+  statement the cursor is in (`sql::statement_at` splits on top-level `;` — one inside a
+  string literal or a comment is text, and a range of only whitespace/comments is not a
+  statement, so a cursor on the trailing blank line runs the query above it). The buffer is
+  a scratch pad holding several queries and the engine takes one statement at a time; before
+  this, writing a query under the template's own `SELECT 42 AS answer;` was refused with
+  "one statement at a time", which reads as the editor ignoring what you just typed.
+  **A failing query opens its error in the focused text float** (`sql::show_error` →
+  `Popup::text_focused`, the same popup as hover and the cell peek): an engine error is the
+  message *plus* a suggestion *plus* a `LINE n:` caret, and the minibuffer is one row. It
+  opens focused because a passive float is dismissed by the next keystroke, which would take
+  the explanation with it; a genuinely short error stays in the minibuffer.
+  The buffer is **syntax-highlighted** — `switch_to_special_buffer` builds the highlighter
+  from the buffer's *name* rather than passing `None`, so a virtual buffer can have a syntax
+  (`sql_highlight::is_sql` matches `*sql*` and any `.sql` file). `app.sql_dir` anchors bare filenames (`FROM 'data.csv'`) to the
   directory of whatever was open when `:sql` was invoked, via DuckDB's `file_search_path`;
   it has to be captured then, because switching into the path-less `*sql*` buffer loses it.
   **`q` / `:bd` in the query buffer backs out of it** (`sql::close_buffer`, called from the
@@ -1021,6 +1046,11 @@ src/
                         markdown.rs so depth means the same thing in both
   markdown.rs         — custom Markdown (.md/.markdown/.qmd) highlighter + section/fence
                         folding; produces the same Vec<Span> / Vec<FoldRange> (no tree-sitter)
+  sql_highlight.rs    — custom SQL lexer (.sql files + the *sql* buffer) producing the same
+                        Vec<Span>. Hand-written for the same reason as markdown.rs: the SQL
+                        grammar crate (tree-sitter-sequel) is built against the
+                        tree-sitter 0.23+ ABI, and this editor is pinned to 0.22.
+                        Lexical only, so a half-typed query still colours sensibly
   jump.rs             — `gw` label-jump: generate 2-char labels over word starts
   highlight.rs        — tree-sitter-highlight integration; produces Vec<Span>.
                         Highlighter dispatches to markdown.rs for .md/.qmd (highlight + fold_ranges).

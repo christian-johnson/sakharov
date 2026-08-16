@@ -125,7 +125,9 @@ pub fn switch_to_special_buffer(app: &mut App, name: &str) {
     app.scroll_col = 0;
     app.insert_session_active = false;
     app.lsp_language = None;
-    app.highlighter = crate::highlight::Highlighter::new(None);
+    // The name, not `None`: a special buffer has no file, but it can still have
+    // a syntax — `*sql*` is SQL, and detection is the highlighter's business.
+    app.highlighter = crate::highlight::Highlighter::new(Some(std::path::Path::new(name)));
     recompute_highlights(app);
     app.mode = Mode::Normal;
     app.git_diff.clear();

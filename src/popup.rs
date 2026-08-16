@@ -620,6 +620,21 @@ impl Popup {
         }
     }
 
+    /// Scrollable text that opens **already focused**: `j`/`k` scroll it from
+    /// the first keypress and only `Esc` closes it.
+    ///
+    /// For text the user must be able to *read* rather than glance at — an
+    /// engine error whose useful half (the `LINE n:` caret, the "did you mean")
+    /// is below the first line. A passive float would be dismissed by the very
+    /// next keystroke, taking the explanation with it.
+    pub fn text_focused(title: &str, content: &str) -> Self {
+        let mut popup = Self::documentation(title, content);
+        if let PopupContent::Text(ref mut text) = popup.content {
+            text.focused = true;
+        }
+        popup
+    }
+
     /// Fuzzy-filterable navigate list (buffer picker, symbol picker, diagnostics).
     pub fn navigate(title: &str, items: Vec<ListItem>) -> Self {
         Self {

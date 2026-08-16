@@ -324,7 +324,7 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `clear-transforms` | `gx` | Drop every sort/filter/group (`:reset-table`) |
 | `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table or a query result) and go back to where it came from — also what `:bd` does there (`:table-back`) |
 | `sql` | `q` closes it | Open the SQL scratch buffer (`:query`, `:sql-buffer`) |
-| `run-query` | `Ctrl+E` (in the SQL buffer) | Run the query and show the result as a grid (`:sql-run`) |
+| `run-query` | `Ctrl+E` (in the SQL buffer) | Run the statement at the cursor (or the selection) and show the result as a grid (`:sql-run`) |
 | `kernel-variables` | `gv` | List the kernel's variables; `Enter` opens a dataframe as a grid (`:vars`, `:variables`) |
 | `view` | — | `:view df` opens a kernel dataframe as a grid; bare `:view` lists them |
 | `attach` | — | Attach a local database file read-only: `:attach <path> [as <alias>]`; bare `:attach` prompts for the path (and names what is already attached) |
@@ -385,13 +385,17 @@ folds it, and `:table` opens one in the grid on request.)
 
 `:sql` opens a scratch buffer you run as a query with `Ctrl+E` — the same key that
 runs a notebook cell. It is ordinary buffer text, so the editor's motions, undo and
-search all work on it. The result opens as a grid and `q` goes back to the query, so
+search all work on it. **`Ctrl+E` runs the statement the cursor is in** (or the
+selection, if there is one), not the whole buffer — so the buffer holds as many
+queries as you like, separated by `;`, and writing a new one under the last one
+just works. The buffer is syntax-highlighted (as is any `.sql` file). A failing
+query opens the engine's full error in a scrollable float — `j`/`k` to read it,
+`Esc` to close — rather than clipping it to the minibuffer, and it keeps your query
+text either way. The result opens as a grid and `q` goes back to the query, so
 editing and re-running is a loop; `q` (or `:bd`) *in* the query buffer leaves it for
 whatever you were looking at when you opened it, keeping the query text for next
-time. A failing query keeps the text too and reports the engine's error — in the
-minibuffer flattened to one line, in full in `*Messages*`. A bare filename resolves
-against the directory of
-whatever you were looking at when you opened the buffer:
+time. A bare filename resolves against the directory of whatever you were looking
+at when you opened the buffer:
 
 ```sql
 SELECT * FROM 'sales.csv' WHERE amount > 100 ORDER BY amount DESC

@@ -947,7 +947,7 @@ pub(super) fn peek_cell(app: &mut App) {
 
 /// Inner text width of a `FractionOfScreen(0.6)` centered float, mirroring
 /// `popup_ui::compute_width` (0.6 of the terminal, at least 20) minus borders.
-fn popup_text_width(viewport_width: usize) -> usize {
+pub(super) fn popup_text_width(viewport_width: usize) -> usize {
     let w = ((viewport_width as f32 * 0.6) as usize).max(20);
     w.saturating_sub(2).max(1)
 }

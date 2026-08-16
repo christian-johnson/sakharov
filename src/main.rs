@@ -32,6 +32,7 @@ mod selection;
 mod source;
 mod spinner;
 mod splash;
+mod sql_highlight;
 mod statusline;
 mod symbols;
 mod table;

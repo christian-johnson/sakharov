@@ -23,7 +23,9 @@ use crate::table::TableSource;
 /// otherwise, and the one thing nobody guesses is that a file can be queried
 /// directly by name.
 const TEMPLATE: &str = "\
--- Ctrl+E runs this query.  Files can be queried by name:\n\
+-- Ctrl+E runs the statement the cursor is in (or the selection).\n\
+-- Keep as many queries here as you like, separated by `;`.\n\
+-- Files can be queried by name:\n\
 --   SELECT * FROM 'data.csv' WHERE amount > 100\n\
 --   SELECT * FROM read_parquet('sales.parquet') LIMIT 100\n\
 -- Reads only: a statement that would write is refused.\n\
@@ -78,18 +80,100 @@ pub(super) fn close_buffer(app: &mut App) -> bool {
     true
 }
 
-/// `Ctrl+E` / `:run-query` — run the buffer's contents and show the result.
+/// `Ctrl+E` / `:run-query` — run a statement from the buffer and show the result.
+///
+/// *A* statement, not the whole buffer: the buffer is a scratch pad you keep
+/// several queries in (the template itself ships one), and the engine runs one
+/// statement at a time.  A selection wins if there is one; otherwise it is the
+/// statement the cursor is in, which is what every SQL console does and what
+/// makes appending a query below the last one work.
 pub(super) fn run(app: &mut App) {
     if !app.in_sql_buffer() {
         app.messages.show("Not the SQL buffer (:sql opens it)");
         return;
     }
-    let sql = app.buffer.rope.to_string();
+    let text = app.buffer.rope.to_string();
     // Keep the text: `switch_to_special_buffer` reads the stash, and running a
     // query navigates away from the buffer being run.
     app.special_buffer_ropes
         .insert(SQL_BUFFER.to_string(), app.buffer.rope.clone());
+
+    let chars: Vec<char> = text.chars().collect();
+    let sql: String = if app.selection.end() > app.selection.start() {
+        let (a, b) = (app.selection.start(), app.selection.end().min(chars.len()));
+        chars[a..b].iter().collect()
+    } else {
+        match statement_at(&chars, app.selection.head) {
+            Some(range) => chars[range].iter().collect(),
+            None => {
+                app.messages.show("Nothing to run — the buffer has no statement");
+                return;
+            }
+        }
+    };
     run_query(app, &sql);
+}
+
+/// The statement `cursor` sits in, as a char range into `chars`.
+///
+/// Statements are split on top-level `;` — one inside a string literal or a
+/// comment is text, not a separator.  A range that is only whitespace and
+/// comments is not a statement, so a cursor parked on the trailing blank line
+/// runs the last real query above it rather than reporting "nothing to run".
+fn statement_at(chars: &[char], cursor: usize) -> Option<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut start = 0usize;
+    let mut quote: Option<char> = None;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '-' if chars.get(i + 1) == Some(&'-') => {
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                '/' if chars.get(i + 1) == Some(&'*') => {
+                    i += 2;
+                    while i < chars.len() && !(chars[i - 1] == '*' && chars[i] == '/') {
+                        i += 1;
+                    }
+                }
+                // The `;` belongs to the statement it ends: the gate accepts a
+                // trailing one, and keeping it means the ranges tile the buffer.
+                ';' => {
+                    ranges.push(start..i + 1);
+                    start = i + 1;
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    ranges.push(start..chars.len());
+
+    let real: Vec<std::ops::Range<usize>> =
+        ranges.into_iter().filter(|r| has_statement(&chars[r.clone()])).collect();
+    real.iter()
+        .find(|r| cursor < r.end)
+        .or_else(|| real.last())
+        .cloned()
+}
+
+/// Whether `chars` holds anything but whitespace and comments.
+fn has_statement(chars: &[char]) -> bool {
+    let text: String = chars.iter().collect();
+    text.lines()
+        .map(|l| l.split("--").next().unwrap_or("").trim())
+        .any(|l| !l.is_empty() && l != ";")
 }
 
 #[cfg(feature = "dataframe")]
@@ -102,10 +186,7 @@ fn run_query(app: &mut App, sql: &str) {
     // attached database without either of them being writable.
     let conn = match super::attach::connection(app) {
         Ok(conn) => conn,
-        Err(e) => {
-            app.messages.show(format!("SQL: {e:#}"));
-            return;
-        }
+        Err(e) => return show_error(app, &format!("{e:#}")),
     };
 
     let label = first_line(sql);
@@ -127,8 +208,41 @@ fn run_query(app: &mut App, sql: &str) {
         }
         // A refused or failing query leaves the buffer alone: the text is the
         // thing being iterated on, and losing it to a typo would be hostile.
-        Err(e) => app.messages.show(format!("SQL: {e:#}")),
+        Err(e) => show_error(app, &format!("{e:#}")),
     }
+}
+
+/// Report a failed query.
+///
+/// An engine error is not one line: DuckDB answers a typo with the message, a
+/// suggestion, and a `LINE n:` caret pointing at the offending token — and the
+/// minibuffer is one row, so all of that except the first few words used to be
+/// unreadable. Anything with more to say than fits there opens the same
+/// scrollable float as hover and the cell peek, focused, so `j`/`k` walk it and
+/// `Esc` closes it. A genuinely short error stays in the minibuffer, where a
+/// float would be ceremony.
+#[cfg(feature = "dataframe")]
+fn show_error(app: &mut App, error: &str) {
+    let error = error.trim();
+    let first = error.lines().next().unwrap_or(error);
+    app.messages.show(format!("SQL: {first}"));
+
+    let inner = super::table::popup_text_width(app.viewport_width);
+    if error.lines().count() <= 1 && crate::table::layout::display_width(error) + 5 <= inner {
+        return;
+    }
+    let wrapped: Vec<String> = error
+        .lines()
+        .flat_map(|line| {
+            crate::render_util::wrap_segments(line, inner)
+                .into_iter()
+                .map(|(_, seg)| seg.to_string())
+        })
+        .collect();
+    app.popup = Some(crate::popup::Popup::text_focused(
+        " SQL error ",
+        &wrapped.join("\n"),
+    ));
 }
 
 #[cfg(not(feature = "dataframe"))]
@@ -174,6 +288,19 @@ mod tests {
         super::super::execute(&mut app, &Command::SqlRun);
         super::super::execute(&mut app, &Command::SqlBuffer);
         assert_eq!(app.buffer.rope.to_string(), "SELECT 7 AS n\n");
+    }
+
+    /// A special buffer has no file, but it can still have a syntax — the
+    /// wiring, not just the lexer, has to carry that.
+    #[test]
+    fn the_query_buffer_is_highlighted_as_sql() {
+        let mut app = app();
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        assert!(app.highlighter.sql, "the *sql* buffer highlights as SQL");
+        let spans = app.highlighter.highlight(&app.buffer.rope).expect("highlight runs");
+        assert!(!spans.is_empty(), "the template alone has comments and a keyword");
+        // ...and so does an ordinary `.sql` file.
+        assert!(crate::highlight::Highlighter::new(Some(std::path::Path::new("q.sql"))).sql);
     }
 
     /// The query buffer used to be a trap: `:bd` refuses every `*…*` name, `q`
@@ -233,6 +360,95 @@ mod tests {
         );
     }
 
+    /// The buffer is a scratch pad, and the template ships a statement of its
+    /// own — so writing a query underneath it used to run into "one statement
+    /// at a time", which reads as the editor ignoring what you just typed.
+    #[test]
+    fn a_query_written_under_the_template_is_the_one_that_runs() {
+        let mut app = app();
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        let text = format!("{}\nSELECT 7 AS n\n", app.buffer.rope);
+        app.buffer.rope = ropey::Rope::from_str(&text);
+        // Cursor where you would leave it: at the end of what you just typed.
+        app.selection = crate::selection::Selection::point(app.buffer.rope.len_chars() - 1);
+
+        let chars: Vec<char> = text.chars().collect();
+        let picked: String = chars[statement_at(&chars, app.selection.head).unwrap()]
+            .iter()
+            .collect();
+        assert_eq!(picked.trim(), "SELECT 7 AS n");
+
+        // ...and with the cursor back up on the template's own query, that one
+        // runs instead — the cursor picks, nothing else.
+        let on_template = text.find("SELECT 42").unwrap();
+        let picked: String = chars[statement_at(&chars, on_template + 2).unwrap()]
+            .iter()
+            .collect();
+        assert!(picked.contains("SELECT 42 AS answer;"));
+        assert!(!picked.contains("SELECT 7"));
+    }
+
+    /// The buffer as it ships must run — template comments, trailing `;` and
+    /// all.  It did not: the terminator survived into the subquery the window
+    /// fetch wraps the statement in, and came back as a parser error against
+    /// text the user never wrote.
+    #[cfg(feature = "dataframe")]
+    #[test]
+    fn the_template_runs_as_it_ships() {
+        let mut app = app();
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        super::super::execute(&mut app, &Command::SqlRun);
+
+        let session = app.table.as_ref().unwrap_or_else(|| {
+            panic!("the shipped template must run: {:?}", app.messages.current())
+        });
+        assert_eq!(session.source().cell(0, 0), Some("42"));
+
+        // ...and so does the same statement with the comments deleted.
+        super::super::execute(&mut app, &Command::TableCloseDerived);
+        app.buffer.rope = ropey::Rope::from_str("SELECT 42 AS answer;\n");
+        super::super::execute(&mut app, &Command::SqlRun);
+        assert!(
+            app.table.is_some(),
+            "a bare statement with a trailing semicolon: {:?}",
+            app.messages.current(),
+        );
+    }
+
+    /// The same thing end to end, through the engine.
+    #[cfg(feature = "dataframe")]
+    #[test]
+    fn appending_to_the_template_and_running_returns_the_new_result() {
+        let mut app = app();
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        let text = format!("{}\nSELECT 7 AS n\n", app.buffer.rope);
+        app.buffer.rope = ropey::Rope::from_str(&text);
+        app.selection = crate::selection::Selection::point(app.buffer.rope.len_chars() - 1);
+        super::super::execute(&mut app, &Command::SqlRun);
+
+        let session = app.table.as_ref().expect("a grid, not a refusal");
+        assert_eq!(session.source().columns()[0].name, "n");
+        assert_eq!(session.source().cell(0, 0), Some("7"));
+    }
+
+    #[test]
+    fn statements_split_on_top_level_semicolons_only() {
+        let pick = |sql: &str, cursor: usize| -> String {
+            let chars: Vec<char> = sql.chars().collect();
+            chars[statement_at(&chars, cursor).unwrap()].iter().collect::<String>().trim().to_string()
+        };
+        // A `;` inside a literal or a comment separates nothing.
+        assert_eq!(pick("SELECT ';' AS c", 0), "SELECT ';' AS c");
+        assert_eq!(pick("SELECT 1 -- ; not a split\n", 0), "SELECT 1 -- ; not a split");
+        assert_eq!(pick("SELECT /* ; */ 1", 0), "SELECT /* ; */ 1");
+        // A cursor past the last statement, on the trailing blank line, still
+        // runs the query above it rather than an empty range.
+        assert_eq!(pick("SELECT 1;\n\n", 11), "SELECT 1;");
+        // Nothing but comments is nothing to run.
+        let chars: Vec<char> = "-- just a note\n".chars().collect();
+        assert!(statement_at(&chars, 0).is_none());
+    }
+
     #[test]
     fn the_result_label_is_the_first_real_line() {
         assert_eq!(first_line("-- a comment\n\nSELECT 1;\n"), "SELECT 1");
@@ -283,20 +499,58 @@ mod tests {
         assert!(app.table.is_none());
     }
 
+    /// An engine error is several lines — the message, a suggestion, and a
+    /// `LINE n:` caret under the offending token — and the minibuffer is one
+    /// row. All but the first few words used to be unreadable.
     #[cfg(feature = "dataframe")]
     #[test]
-    fn a_broken_query_reports_the_engine_error_without_losing_the_text() {
+    fn a_broken_query_opens_its_error_in_a_scrollable_float() {
+        use crate::popup::PopupContent;
+
         let mut app = app();
         super::super::execute(&mut app, &Command::SqlBuffer);
         app.buffer.rope = ropey::Rope::from_str("SELECT * FROM no_such_table\n");
         super::super::execute(&mut app, &Command::SqlRun);
+
         assert!(
             app.messages.log.iter().any(|m| m.starts_with("SQL:")),
             "{:?}",
             app.messages.log,
         );
+        let popup = app.popup.as_ref().expect("the error opens a float");
+        let PopupContent::Text(ref text) = popup.content else {
+            panic!("an error is scrollable text");
+        };
+        assert!(
+            text.focused,
+            "focused from the first keypress — a passive float would be dismissed \
+             by the next key, taking the explanation with it",
+        );
+        assert!(text.lines.len() > 1, "the whole error, not its first line");
+        assert!(
+            text.lines.iter().any(|l| l.contains("no_such_table")),
+            "{:?}",
+            text.lines,
+        );
+        // Every line fits the float, so nothing is clipped away.
+        let inner = super::super::table::popup_text_width(app.viewport_width);
+        assert!(text.lines.iter().all(|l| crate::table::layout::display_width(l) <= inner));
+
+        // ...and the query text is untouched, as before.
         assert!(app.in_sql_buffer());
         assert!(app.buffer.rope.to_string().contains("no_such_table"));
+    }
+
+    /// A one-line refusal is a minibuffer message; a float there is ceremony.
+    #[cfg(feature = "dataframe")]
+    #[test]
+    fn a_short_refusal_stays_in_the_minibuffer() {
+        let mut app = app();
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        app.buffer.rope = ropey::Rope::from_str("-- nothing here\n");
+        super::super::execute(&mut app, &Command::SqlRun);
+        assert!(app.popup.is_none(), "no float for a one-liner");
+        assert!(app.messages.current().is_some());
     }
 
     #[cfg(feature = "dataframe")]
@@ -320,3 +574,5 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+

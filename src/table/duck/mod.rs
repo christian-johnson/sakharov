@@ -154,7 +154,8 @@ pub fn catalog_query() -> &'static str {
 pub struct DuckDbSource {
     conn: Connection,
     /// The query this source is a window onto.  Every fetch wraps it in a
-    /// subquery rather than re-parsing or rewriting it.
+    /// subquery rather than re-parsing or rewriting it, so it is normalized on
+    /// the way in (see [`DuckDbSource::query`]) to be safe to inline.
     sql: String,
     columns: Vec<Column>,
     /// Rows currently in `cells`.
@@ -179,6 +180,21 @@ impl DuckDbSource {
         if let Err(rejected) = gate::check(&sql) {
             bail!(rejected.0);
         }
+        // Every read of this source inlines the query as a subquery — here, in
+        // `count`, and in each pushed-down transform — so what is stored has to
+        // be safe to put inside parentheses.  Two things aren't:
+        //
+        //   * a trailing `;`, which is how everyone writes SQL and which makes
+        //     `FROM (SELECT 1;) AS "src"` a parser error, reported against a
+        //     wrapped statement the user never typed;
+        //   * a trailing `-- comment`, which would swallow the closing paren.
+        //
+        // Comments mean nothing to the engine, so they go (the buffer the user
+        // is editing is untouched); then the terminator; then a newline, so
+        // anything missed by the first two still can't reach a closing paren.
+        // Once here, rather than at each of the four places that wrap it.
+        let sql = gate::strip_comments(&sql);
+        let sql = format!("{}\n", sql.trim_end().trim_end_matches(';').trim_end());
         let columns = describe(&conn, &sql)?;
         if columns.is_empty() {
             bail!("the query returned no columns");
@@ -486,6 +502,26 @@ mod tests {
         let (text, truncated) =
             layout::fit_cell("orders", layout::column_width(col, &cfg) as usize);
         assert_eq!((text.as_str(), truncated), ("orders", false));
+    }
+
+    /// A query is inlined as a subquery to read a window out of it, so anything
+    /// that cannot sit inside parentheses has to be normalized away first — a
+    /// trailing `;` (how everyone writes SQL) produced `syntax error at or near
+    /// ";"` against a wrapped statement the user never typed, and only at the
+    /// *fetch*, since `count` swallows its error.
+    #[test]
+    fn a_trailing_semicolon_or_comment_does_not_break_the_row_window() {
+        for sql in [
+            "SELECT 42 AS answer;",
+            "SELECT 42 AS answer ;  \n",
+            "SELECT 42 AS answer -- the answer",
+            "SELECT 42 AS answer; -- the answer\n",
+        ] {
+            let src = DuckDbSource::query(mem(), sql, "test")
+                .unwrap_or_else(|e| panic!("{sql:?} should run: {e:#}"));
+            assert_eq!(src.cell(0, 0), Some("42"), "{sql:?}");
+            assert_eq!(src.row_count(), Some(1), "{sql:?} must also count");
+        }
     }
 
     #[test]
