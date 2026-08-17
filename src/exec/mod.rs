@@ -528,13 +528,54 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.messages.show("Special buffer — nothing to save");
             return;
         }
+        Command::WriteAs(_) if app.notebook.is_some() => {
+            app.messages.show("Notebook — :write-as saves the focused cell's text only; use :w to save the notebook");
+            return;
+        }
         Command::WriteAs(path) => {
             let path = path.clone();
+            let old_lang = app.lsp_language.clone();
+            let old_path = app.buffer.path.clone();
+
             let result = app.buffer.save(Some(&path), false);
-            report_save(app, result, |app| {
+            let ok = report_save(app, result, |app| {
                 app.messages.show(format!("Saved {path}"));
                 refresh_git(app);
             });
+            if !ok {
+                return;
+            }
+
+            // The buffer now lives at a new path — its identity (highlighter,
+            // language, LSP registration, buffer-list membership) must follow
+            // it, the same way `open_file_at` sets these up for a freshly
+            // opened file.
+            if let Some(new_path) = app.buffer.path.clone() {
+                if let (Some(lang), Some(old_path)) = (old_lang, old_path) {
+                    if old_path != new_path {
+                        app.lsp.did_close(&lang, &old_path);
+                    }
+                }
+
+                let new_lang = crate::app::language_for_path(Some(&new_path)).map(str::to_owned);
+                app.lsp_language = new_lang.clone();
+                app.highlighter = crate::highlight::Highlighter::new(Some(&new_path));
+                recompute_highlights(app);
+
+                if let Some(ref lang) = new_lang {
+                    let file_dir = new_path.parent().filter(|p| !p.as_os_str().is_empty());
+                    if let Some(server_config) = app.config.language_servers.get(lang).cloned() {
+                        app.lsp.ensure_server(lang, &server_config, file_dir);
+                    }
+                    if app.lsp.is_ready(lang) {
+                        let text = app.buffer.rope.to_string();
+                        app.lsp.did_open(lang, &new_path, &text);
+                    }
+                }
+
+                register_buffer(&mut app.open_buffers, &new_path);
+                rebuild_diag_cache(app);
+            }
             return;
         }
         Command::NewFile => {
@@ -933,6 +974,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- Search ---
         Command::SearchForward => {
             app.mode = Mode::Search { forward: true };
+            app.search.query.clear();
             app.search.just_opened = true;
             app.search.active = false;
             search_compute_matches(app);
@@ -940,6 +982,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::SearchBackward => {
             app.mode = Mode::Search { forward: false };
+            app.search.query.clear();
             app.search.just_opened = true;
             app.search.active = false;
             search_compute_matches(app);

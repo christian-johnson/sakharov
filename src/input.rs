@@ -890,6 +890,13 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
             if let Some(cmd) = Command::parse(text) {
                 crate::history::record(app, cmd.name());
                 exec::execute(app, &cmd);
+            } else if matches!(text, "write-as" | "save-as" | "shell" | "view") {
+                // These commands need an argument the palette can't supply —
+                // drop into the command line with the name pre-filled so the
+                // user only has to type the argument, instead of silently
+                // failing to parse.
+                app.mode = Mode::Command;
+                app.command_buf = format!("{text} ");
             } else {
                 app.messages.show(format!("Unknown command: {text}"));
             }
