@@ -837,7 +837,7 @@ fn run_loop(
     // resized).  When idle the loop just polls for events — zero render work,
     // zero tree-sitter work, instead of a full redraw 60× per second.
     let mut needs_redraw = true;
-    loop {
+    'outer: loop {
         if needs_redraw {
             needs_redraw = false;
             draw_frame(terminal, app)?;
@@ -880,6 +880,17 @@ fn run_loop(
                         needs_redraw = true;
                     }
                     _ => {}
+                }
+                // Same hang-up race as above, but for the drain loop: a pty
+                // whose master side has closed reports POLLIN/EOF as
+                // permanently "ready", so `event::poll(0)` below never goes
+                // false and `event::read()` never errors — without this check
+                // an orphaned process would spin here forever instead of
+                // just failing to loop back to the outer check.
+                if stdin_hung_up() {
+                    #[cfg(unix)]
+                    PENDING_SIGNAL.store(libc::SIGHUP, std::sync::atomic::Ordering::SeqCst);
+                    break 'outer;
                 }
                 if !event::poll(std::time::Duration::from_millis(0))? {
                     break;
