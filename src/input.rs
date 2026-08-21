@@ -43,6 +43,7 @@ fn keymap_layer(app: &App) -> crate::keymap::Layer {
     match app.view() {
         View::Notebook => Layer::Notebook,
         View::Table => Layer::Table,
+        View::Vcs => Layer::Vcs,
         View::Text if app.in_cell_buffer() => Layer::Cell,
         View::Text if app.in_sql_buffer() => Layer::Sql,
         View::Text => Layer::Normal,
@@ -606,6 +607,14 @@ pub fn goto_command(view: crate::view::View, c: char) -> Option<Command> {
                 return Some(cmd);
             }
         }
+        // The graph's own `g` map, for the same reason: `gd` (definition) and
+        // `gr` (references) mean nothing here and are free to carry the
+        // graph's meanings.
+        crate::view::View::Vcs => {
+            if let Some(cmd) = crate::exec::vcs::goto_command(c) {
+                return Some(cmd);
+            }
+        }
         // A notebook cell is text, so the text meanings are the right ones.
         crate::view::View::Notebook | crate::view::View::Text => {}
     }
@@ -629,6 +638,10 @@ pub fn goto_command(view: crate::view::View, c: char) -> Option<Command> {
         // The kernel's namespace is reachable from every view: the grid you
         // want to open is often the one the notebook two buffers over built.
         'v' => Command::KernelVariables,
+        // The repository is reachable from every view, like the kernel's
+        // namespace: the history you want to look at is rarely a property of
+        // whichever file happens to be open.
+        'V' => Command::VcsOpen,
         _ => return None,
     })
 }
@@ -920,6 +933,13 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
         }
         PopupTarget::RestoreRecovery => {
             crate::recovery::handle_choice(app, payload.as_text());
+        }
+        PopupTarget::ApplyVcsPlan => {
+            if payload.as_text() == "apply" {
+                exec::vcs::apply_confirmed(app);
+            } else {
+                app.messages.show("Nothing applied");
+            }
         }
         PopupTarget::ViewVariable => {
             exec::execute(app, &Command::ViewVariable(payload.as_text().to_string()));

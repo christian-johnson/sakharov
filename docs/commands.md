@@ -612,3 +612,113 @@ and see what your terminal actually reports.) All notebook commands also work fr
 command palette and `:` line. Normal editing keys, `g`-prefixed LSP bindings (`gd`,
 `gr`, `gk`, `ga`, …), `:`, and `ctrl+s` (save notebook to disk) behave exactly as in a
 plain buffer.
+
+---
+
+## Version control (`:vc`)
+
+A visual git client: commits are blocks, parent links are arrows, and you
+rearrange history by grabbing an arrow and dropping it somewhere else.
+
+The organising idea is that **nothing here is a git verb**. You state a shape —
+"this branch should sit on top of that one" — and the editor works out the
+commands that would produce it. Fast-forwarding is not a concept you are taught;
+it is simply what comes out when a branch moves and nothing needed rewriting.
+
+### Two kinds of action
+
+| | What happens | Which commands |
+|---|---|---|
+| **Planned** | Only the picture changes. Reaches the repository once, at `:vc-apply`, behind a confirmation and a backup. | grab/drop, `d`, `m`, `u`, `gx` |
+| **Immediate** | Runs now. | `c`, `s`, `S`, `Enter`, commit, fetch, pull, push |
+
+The line between them is *could this make a commit unreachable* — which is
+exactly what the backup refs exist to cover.
+
+### Opening and moving around
+
+| Command | Default Key | Alias | Description |
+|---------|-------------|-------|-------------|
+| `version-control` | `gV` | `:vc`, `:git` | Open the graph for the repository containing the current file |
+| `version-control-close` | `q` | `:vc-close` | Leave the graph |
+| `version-control-refresh` | `r` | `:vc-refresh` | Re-read the repository (discards the plan) |
+| — | `h` `j` `k` `l` | — | Move between blocks, arrows and branch labels. `j`/`k` alternate block → arrow → block, which is how an arrow gets selected at all |
+| — | `J` / `K`, `gg` / `ge` | — | Page down/up; first / last commit |
+| `version-control-show` | `Enter` | `:vc-show` | Open the selected commit's diff in an ordinary buffer |
+| `yank-selection` | `y` | — | Copy the selected commit's full hash |
+
+### Rearranging history
+
+Grab something, move the cursor to a commit, drop it. **While it is held the
+graph rearranges under the cursor**, so what you see before pressing Space the
+second time is what you would get. `Esc` puts it back down.
+
+| Holding | Dropping it on a commit means |
+|---------|-------------------------------|
+| an **arrow** | the commit it comes from now follows the one you dropped it on |
+| a **block** | the same, said about that commit's first parent |
+| a **branch label** | the branch now points there |
+
+| Command | Default Key | Alias | Description |
+|---------|-------------|-------|-------------|
+| `version-control-grab` | `Space` | `:vc-grab` | Pick up / put down whatever is under the cursor |
+| `version-control-drop` | `d`, `gd` | `:vc-drop` | Remove the selected commit; its children attach to its parent |
+| `version-control-merge` | `m`, `gm` | `:vc-merge` | Plan a merge of the selection into the current branch. The merge commit is drawn before it exists |
+| `version-control-undo-edit` | `u` | `:vc-undo-edit` | Take back the last planned change |
+| `version-control-reset` | `gx` | `:vc-reset` | Discard every planned change |
+
+Two shapes are refused rather than drawn: a commit cannot become its own
+ancestor, and a **merge cannot be replayed onto a new parent** (the same limit
+`git rebase` has without `--rebase-merges`).
+
+### Applying
+
+| Command | Default Key | Alias | Description |
+|---------|-------------|-------|-------------|
+| `version-control-apply` | `ga` | `:vc-apply`, `:apply` | Show the derived git commands, then run them |
+| `version-control-undo` | — | `:vc-undo` | Put every branch back where it was before the last apply |
+| `version-control-abort` | — | `:vc-abort` | Abort the cherry-pick / merge a conflict left in progress |
+| `version-control-continue` | — | `:vc-continue` | Resume after resolving a conflict |
+
+`:vc-apply` refuses outright while the work tree is dirty — replaying commits
+over uncommitted work is the reliable way to lose it. Before the first write it
+saves every local branch under `refs/sakharov/undo/<stamp>/<branch>`; `:vc-undo`
+restores them and deletes the backup. A real ref rather than the reflog, because
+it survives `gc` and covers branches that were never checked out.
+
+A **conflict** stops the run where it stopped and names the conflicted files.
+Resolve them in the ordinary editor, then `:vc-continue` — or `:vc-abort` to back
+out. (A dedicated merge-conflict resolver view is on the roadmap.)
+
+### Everyday actions
+
+| Command | Default Key | Alias | Description |
+|---------|-------------|-------|-------------|
+| `version-control-checkout` | `c`, `gc` | `:vc-checkout`, `:checkout` | Check out the branch under the cursor. On a remote-tracking branch it creates the matching local one; on a bare commit it detaches HEAD and says so |
+| `version-control-stage` | `s` | `:vc-stage`, `:stage` | Stage every change in the work tree |
+| `version-control-unstage` | `S` | `:vc-unstage`, `:unstage` | Unstage everything |
+| `version-control-commit` | — | `:vc-commit <message>` | Commit what is staged |
+| `version-control-branch` | — | `:vc-branch <name>` | Create a branch at the selected commit and check it out |
+| `version-control-fetch` | — | `:vc-fetch`, `:fetch` | Fetch from every remote |
+| `version-control-pull` | — | `:vc-pull`, `:pull` | Pull the current branch (`--ff-only`) |
+| `version-control-push` | — | `:vc-push`, `:push` | Push the current branch, setting the upstream if it has none |
+| `version-control-upstream` | — | `:vc-upstream <remote/branch>` | Set the current branch's upstream |
+
+Fetch, pull and push run on a background thread through **your** git, so your
+`.gitconfig`, hooks and credential helper all apply. The editor never handles a
+credential.
+
+### What the graph shows
+
+The **HEAD block** sits directly above the commit it names — not at the top of
+the graph, where its arrow would have to span however deep HEAD happens to be —
+and carries the work-tree summary. Each commit block shows its abbreviated hash,
+ref labels, subject, author, age and `+added -removed`.
+
+History is walked back 400 commits from every local branch, HEAD, and the
+upstream of each local branch (without those, an "ahead by 3" is a label
+pointing at commits that were never loaded). When the walk stops at the limit
+the graph says so rather than letting the oldest block pass for a root.
+
+Status-line modules: `vcs_head`, `vcs_plan` (hidden until something is planned),
+`vcs_worktree`, `vcs_selection`. Theme keys live under `[vcs]`.

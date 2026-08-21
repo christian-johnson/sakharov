@@ -52,6 +52,9 @@ pub enum View {
     Notebook,
     /// Tabular data grid (CSV/TSV/parquet — see [`crate::table`]).
     Table,
+    /// The version-control graph (see [`crate::vcs`]): commits as blocks,
+    /// parent links as arrows, rearranged by direct manipulation.
+    Vcs,
 }
 
 impl View {
@@ -66,7 +69,7 @@ impl View {
     pub fn has_text_buffer(self) -> bool {
         match self {
             View::Text | View::Notebook => true,
-            View::Table => false,
+            View::Table | View::Vcs => false,
         }
     }
 }
@@ -294,5 +297,6 @@ mod tests {
         assert!(View::Text.has_text_buffer());
         assert!(View::Notebook.has_text_buffer());
         assert!(!View::Table.has_text_buffer());
+        assert!(!View::Vcs.has_text_buffer());
     }
 }

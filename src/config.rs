@@ -293,6 +293,9 @@ pub struct StatuslineConfig {
     /// Layout used in the tabular data view (`:csv`).
     #[serde(default = "default_table_layout")]
     pub table: StatuslineLayout,
+    /// `[statusline.vcs]` — the version-control graph.
+    #[serde(default = "default_vcs_layout")]
+    pub vcs: StatuslineLayout,
     /// String inserted between adjacent modules.  Default `""` relies on each
     /// module's own padding (a single leading/trailing space) for visual
     /// separation.  Try `">"`, `"|"`, `"/"`, or `"\\"` for a powerline-inspired
@@ -327,6 +330,7 @@ impl StatuslineConfig {
             },
             View::Notebook => self.notebook.clone(),
             View::Table => self.table.clone(),
+            View::Vcs => self.vcs.clone(),
         }
     }
 }
@@ -365,6 +369,12 @@ fn default_table_layout() -> StatuslineLayout {
         &["spinner", "table_column", "table_position"],
     )
 }
+fn default_vcs_layout() -> StatuslineLayout {
+    StatuslineLayout::new(
+        &["mode", "file", "vcs_head", "vcs_plan"],
+        &["spinner", "vcs_worktree", "vcs_selection"],
+    )
+}
 fn default_notebook_layout() -> StatuslineLayout {
     StatuslineLayout::new(
         &["mode", "file"],
@@ -385,6 +395,7 @@ impl Default for StatuslineConfig {
             right: default_statusline_right(),
             notebook: default_notebook_layout(),
             table: default_table_layout(),
+            vcs: default_vcs_layout(),
             separator: String::new(),
             styles: HashMap::new(),
         }

@@ -40,6 +40,8 @@ mod table;
 mod table_ui;
 mod theme;
 mod ui;
+mod vcs;
+mod vcs_ui;
 mod view;
 
 use std::process;

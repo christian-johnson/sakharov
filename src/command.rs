@@ -237,6 +237,31 @@ commands! {
         SqlBuffer => "sql", aliases: ["query", "sql-buffer"], palette: "Open the SQL scratch buffer  [:sql]";
         SqlRun => "run-query", aliases: ["sql-run"], palette: "Run the SQL buffer's query and show the result as a grid  [Ctrl+E]";
 
+        // --- Version control (see `crate::vcs`) ---
+        // The graph view itself.
+        VcsOpen => "version-control", aliases: ["vc", "git"], palette: "Open the version-control graph  [gV]";
+        VcsClose => "version-control-close", aliases: ["vc-close"], palette: "Leave the version-control graph";
+        VcsRefresh => "version-control-refresh", aliases: ["vc-refresh"], palette: "Re-read the repository  [r]";
+        // Direct manipulation.
+        VcsGrab => "version-control-grab", aliases: ["vc-grab"], palette: "Pick up / put down the commit, arrow or branch under the cursor  [Space]";
+        VcsDrop => "version-control-drop", aliases: ["vc-drop"], palette: "Remove the selected commit from the planned history  [d]";
+        VcsMerge => "version-control-merge", aliases: ["vc-merge"], palette: "Plan a merge of the selection into the current branch  [m]";
+        VcsUndoEdit => "version-control-undo-edit", aliases: ["vc-undo-edit"], palette: "Take back the last planned change  [u]";
+        VcsReset => "version-control-reset", aliases: ["vc-reset"], palette: "Discard every planned change  [gx]";
+        // Committing the plan, and getting back out of it.
+        VcsApply => "version-control-apply", aliases: ["vc-apply", "apply"], palette: "Apply the planned history to the repository";
+        VcsUndo => "version-control-undo", aliases: ["vc-undo"], palette: "Put the branches back as they were before the last apply";
+        VcsAbort => "version-control-abort", aliases: ["vc-abort"], palette: "Abort the cherry-pick / merge left in progress by a conflict";
+        VcsContinue => "version-control-continue", aliases: ["vc-continue"], palette: "Resume after resolving a conflict";
+        // Everyday actions, which happen immediately — they add rather than rewrite.
+        VcsCheckout => "version-control-checkout", aliases: ["vc-checkout", "checkout"], palette: "Check out the branch or commit under the cursor  [c]";
+        VcsShow => "version-control-show", aliases: ["vc-show"], palette: "Show the selected commit's diff  [Enter]";
+        VcsStage => "version-control-stage", aliases: ["vc-stage", "stage"], palette: "Stage every change in the work tree  [s]";
+        VcsUnstage => "version-control-unstage", aliases: ["vc-unstage", "unstage"], palette: "Unstage everything  [S]";
+        VcsFetch => "version-control-fetch", aliases: ["vc-fetch", "fetch"], palette: "Fetch from the remote";
+        VcsPull => "version-control-pull", aliases: ["vc-pull", "pull"], palette: "Pull the current branch from its upstream";
+        VcsPush => "version-control-push", aliases: ["vc-push", "push"], palette: "Push the current branch to its upstream";
+
         // --- Toggles / config ---
         ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";
         ToggleLineNumbers => "toggle-line-numbers", aliases: ["line-numbers"], palette: "Toggle line numbers  [:toggle-line-numbers]";
@@ -264,6 +289,12 @@ commands! {
         Attach(String) => "attach", palette: "Attach a local database file, read-only  [:attach <path>]";
         // Drop one attachment by alias, or all of them when the argument is empty.
         Detach(String) => "detach", palette: "Detach an attached database  [:detach <alias>]";
+        // Create a branch at the cursor (`:vc-branch <name>`).
+        VcsNewBranch(String) => "version-control-branch", palette: "Create a branch at the selected commit  [:vc-branch <name>]";
+        // Commit what is staged (`:vc-commit <message>`).
+        VcsCommit(String) => "version-control-commit", palette: "Commit the staged changes  [:vc-commit <message>]";
+        // Set the current branch's upstream (`:vc-upstream origin/main`).
+        VcsSetUpstream(String) => "version-control-upstream", palette: "Set the current branch's upstream  [:vc-upstream <remote/branch>]";
         // Switch to a named color theme (`:theme <name>`; bare `:theme` opens the picker).
         SwitchTheme(String) => "theme";
         // A list of commands executed in sequence (composition / scripting).
@@ -320,6 +351,21 @@ impl Command {
                 None => Some(Command::KernelVariables),
             },
             "detach" => Some(Command::Detach(arg.unwrap_or("").trim().to_string())),
+            // A branch needs a name, and a commit needs a message: with
+            // neither supplied there is nothing sensible to default to, so
+            // these are the one family here that refuses to parse bare.
+            "version-control-branch" | "vc-branch" | "branch" => {
+                let name = arg.unwrap_or("").trim();
+                (!name.is_empty()).then(|| Command::VcsNewBranch(name.to_string()))
+            }
+            "version-control-commit" | "vc-commit" | "commit" => {
+                let message = arg.unwrap_or("").trim();
+                (!message.is_empty()).then(|| Command::VcsCommit(message.to_string()))
+            }
+            "version-control-upstream" | "vc-upstream" | "upstream" => {
+                let target = arg.unwrap_or("").trim();
+                (!target.is_empty()).then(|| Command::VcsSetUpstream(target.to_string()))
+            }
             "goto-line" => {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;
                 Some(Command::GotoLine(n))
@@ -346,7 +392,14 @@ mod tests {
     fn palette_entries_round_trip_through_parse() {
         // These palette entries name argument-taking commands, so the bare name
         // intentionally parses to None (the user supplies the argument on the `:` line).
-        const ARG_COMMANDS: &[&str] = &["write-as", "shell", "view"];
+        const ARG_COMMANDS: &[&str] = &[
+            "write-as",
+            "shell",
+            "view",
+            "version-control-branch",
+            "version-control-commit",
+            "version-control-upstream",
+        ];
         for (name, _desc) in Command::palette_entries() {
             if ARG_COMMANDS.contains(&name) {
                 continue;
@@ -354,6 +407,16 @@ mod tests {
             let parsed = Command::parse(name)
                 .unwrap_or_else(|| panic!("palette entry {name:?} does not parse"));
             assert_eq!(parsed.name(), name, "palette entry {name:?} parsed to a different command");
+        }
+    }
+
+    #[test]
+    fn the_version_control_view_is_reachable_by_every_name_it_advertises() {
+        for name in ["version-control", "vc", "git"] {
+            assert!(
+                matches!(Command::parse(name), Some(Command::VcsOpen)),
+                "{name} should open the graph"
+            );
         }
     }
 

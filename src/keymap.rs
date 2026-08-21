@@ -120,6 +120,9 @@ pub enum Layer {
     Cell,
     /// In the `*sql*` buffer: `q` leaves for wherever `:sql` was invoked from.
     Sql,
+    /// While the version-control graph is open: `Space` grabs and drops, and
+    /// the everyday git actions sit on single letters.
+    Vcs,
 }
 
 pub struct Keymap {
@@ -129,6 +132,7 @@ pub struct Keymap {
     table: HashMap<KeyBinding, Vec<Command>>,
     cell: HashMap<KeyBinding, Vec<Command>>,
     sql: HashMap<KeyBinding, Vec<Command>>,
+    vcs: HashMap<KeyBinding, Vec<Command>>,
 }
 
 impl Keymap {
@@ -141,6 +145,7 @@ impl Keymap {
         let mut table: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut cell: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut sql: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        let mut vcs: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
 
         // Helper macro to insert into both maps
         macro_rules! both {
@@ -374,7 +379,30 @@ impl Keymap {
         // something.
         sql.insert(KeyBinding::char('q'), vec![Command::BufferClose]);
 
-        Self { normal, select, notebook, table, cell, sql }
+        // --- version-control graph overrides ---
+        //
+        // Space is the grab: it is the one gesture the whole view is built
+        // around, it is unbound in Normal mode (where it opens the palette —
+        // which is still reachable here as `:`), and it is the key a user
+        // reaches for to mean "pick this up".
+        vcs.insert(KeyBinding::char(' '), vec![Command::VcsGrab]);
+        // Enter reads: the selected commit's diff, in an ordinary buffer.
+        vcs.insert(KeyBinding::key(KeyCode::Enter), vec![Command::VcsShow]);
+        // The everyday actions, on the letters they name.  `c`/`d`/`s`/`S`/`m`
+        // are all edit commands in Normal mode, which is meaningless here.
+        vcs.insert(KeyBinding::char('c'), vec![Command::VcsCheckout]);
+        vcs.insert(KeyBinding::char('d'), vec![Command::VcsDrop]);
+        vcs.insert(KeyBinding::char('m'), vec![Command::VcsMerge]);
+        vcs.insert(KeyBinding::char('s'), vec![Command::VcsStage]);
+        vcs.insert(KeyBinding::char('S'), vec![Command::VcsUnstage]);
+        vcs.insert(KeyBinding::char('r'), vec![Command::VcsRefresh]);
+        // `q` backs out, as it does from a cell buffer and a derived table.
+        vcs.insert(KeyBinding::char('q'), vec![Command::VcsClose]);
+        // `J` pages, matching the notebook and the grid.
+        vcs.insert(KeyBinding::char('J'), vec![Command::PageDown]);
+        vcs.insert(KeyBinding::char('K'), vec![Command::PageUp]);
+
+        Self { normal, select, notebook, table, cell, sql, vcs }
     }
 
     /// Look `kb` up in exactly one layer.
@@ -386,6 +414,7 @@ impl Keymap {
             Layer::Table => &self.table,
             Layer::Cell => &self.cell,
             Layer::Sql => &self.sql,
+            Layer::Vcs => &self.vcs,
         };
         map.get(kb).map(Vec::as_slice)
     }

@@ -57,6 +57,8 @@ pub struct ThemeSpec {
     pub notebook: NotebookSpec,
     #[serde(default)]
     pub table: TableSpec,
+    #[serde(default)]
+    pub vcs: VcsSpec,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -231,6 +233,47 @@ pub struct NotebookSpec {
     pub border_error: Option<String>,
 }
 
+/// `[vcs]` — the version-control graph view.
+///
+/// Version-control view colors. Every key falls back to an existing `[ui]`
+/// color, so a theme that says nothing about the graph still draws it in its
+/// own palette rather than in hard-coded ANSI.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VcsSpec {
+    /// Border of a commit block. Falls back to `ui.line_numbers`.
+    #[serde(default)]
+    pub block: Option<String>,
+    /// Border of the block the cursor is on. Falls back to `ui.accent`.
+    #[serde(default)]
+    pub focus: Option<String>,
+    /// Border of whatever is currently being dragged. Falls back to
+    /// `ui.warning` — it is a held object, not a selected one.
+    #[serde(default)]
+    pub grabbed: Option<String>,
+    /// Abbreviated commit hashes. Falls back to `ui.info`.
+    #[serde(default)]
+    pub hash: Option<String>,
+    /// Local branch labels. Falls back to `ui.success`.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Remote-tracking branch labels. Falls back to `ui.dim`.
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// Tag labels. Falls back to `ui.warning`.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// The HEAD block. Falls back to `ui.accent`.
+    #[serde(default)]
+    pub head: Option<String>,
+    /// The arrows between blocks. Falls back to `ui.line_numbers`.
+    #[serde(default)]
+    pub edge: Option<String>,
+    /// A commit the plan would create but that does not exist yet.
+    /// Falls back to `ui.warning`.
+    #[serde(default)]
+    pub pending: Option<String>,
+}
+
 /// `[table]` — the tabular data (CSV) grid view.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TableSpec {
@@ -328,6 +371,18 @@ pub struct Theme {
     pub table_null: Color,
     /// Distribution sparkline in the second header row.
     pub table_sparkline: Color,
+
+    // --- Version-control view ---
+    pub vcs_block: Color,
+    pub vcs_focus: Color,
+    pub vcs_grabbed: Color,
+    pub vcs_hash: Color,
+    pub vcs_branch: Color,
+    pub vcs_remote: Color,
+    pub vcs_tag: Color,
+    pub vcs_head: Color,
+    pub vcs_edge: Color,
+    pub vcs_pending: Color,
     pub modes: ModeColors,
     /// Style per highlight index (see `highlight::HIGHLIGHT_NAMES` + `MD_*`).
     syntax: Vec<Style>,
@@ -597,6 +652,21 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     // Follows the numeric colour: the sparkline *is* the numeric column's shape.
     let table_sparkline = pick(&[c(&spec.table.sparkline)], table_numeric);
 
+    // --- Version-control view ---
+    // Every one derives from a color the theme already defines: a commit graph
+    // introduces no new *kind* of meaning, only new places to put branch-green,
+    // hash-blue and warning-amber.
+    let vcs_block = pick(&[c(&spec.vcs.block)], line_numbers);
+    let vcs_focus = pick(&[c(&spec.vcs.focus)], accent);
+    let vcs_grabbed = pick(&[c(&spec.vcs.grabbed)], warning);
+    let vcs_hash = pick(&[c(&spec.vcs.hash)], info);
+    let vcs_branch = pick(&[c(&spec.vcs.branch)], success);
+    let vcs_remote = pick(&[c(&spec.vcs.remote)], dim);
+    let vcs_tag = pick(&[c(&spec.vcs.tag)], warning);
+    let vcs_head = pick(&[c(&spec.vcs.head)], accent);
+    let vcs_edge = pick(&[c(&spec.vcs.edge)], line_numbers);
+    let vcs_pending = pick(&[c(&spec.vcs.pending)], warning);
+
     // --- Syntax palette ---
     let keyword = c(&spec.syntax.keyword);
     let function = c(&spec.syntax.function);
@@ -710,6 +780,16 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         nb_border_running,
         nb_border_ok,
         nb_border_error,
+        vcs_block,
+        vcs_focus,
+        vcs_grabbed,
+        vcs_hash,
+        vcs_branch,
+        vcs_remote,
+        vcs_tag,
+        vcs_head,
+        vcs_edge,
+        vcs_pending,
         table_header,
         table_header_bg,
         table_grid,

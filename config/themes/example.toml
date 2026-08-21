@@ -154,3 +154,21 @@ truncation        = "#565f89"  # the `…` on a clipped value (← ui.dim)
 numeric           = "#89ddff"  # values in numeric columns  (← ui.info)
 null              = "#565f89"  # the empty-cell stand-in    (← ui.dim)
 sparkline         = "#89ddff"  # header distribution glyphs (← table.numeric)
+
+# ---------------------------------------------------------------------------
+# Version-control graph (`:vc`)
+# ---------------------------------------------------------------------------
+# Every key falls back to a colour the theme already defines: a commit graph
+# introduces no new *kind* of meaning, only new places to put branch-green,
+# hash-blue and warning-amber.
+[vcs]
+block   = "#3b4261"  # commit block border            (← ui.line_numbers)
+focus   = "#7aa2f7"  # border of the block under the cursor (← ui.accent)
+grabbed = "#e0af68"  # border of whatever is being dragged  (← ui.warning)
+hash    = "#89ddff"  # abbreviated commit hashes      (← ui.info)
+branch  = "#9ece6a"  # local branch labels            (← ui.success)
+remote  = "#565f89"  # remote-tracking branch labels  (← ui.dim)
+tag     = "#e0af68"  # tag labels                     (← ui.warning)
+head    = "#7aa2f7"  # the HEAD block                 (← ui.accent)
+edge    = "#3b4261"  # the arrows between blocks      (← ui.line_numbers)
+pending = "#e0af68"  # a commit the plan would create (← ui.warning)

@@ -947,6 +947,82 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
 - **The grid is a snapshot**, not a live view: re-run `:view` to refresh. The plan's
   staleness chip is not implemented.
 
+### Phase V1 (version-control view) — complete
+- **`gV` / `:vc`** opens the commit graph: commits are blocks, parent links are
+  arrows, and history is rearranged by **direct manipulation** — grab an arrow with
+  `Space`, move to another commit, `Space` again.  See `docs/version-control-plan.md`
+  for the design record and `docs/commands.md` for the full key/command reference.
+- **The premise is that no git verb appears in the interaction.** The user states a
+  *shape*; `vcs::derive` works out the commands that would produce it.  Fast-forward
+  is not a case in that code — it is what gets emitted when a ref moves and the
+  replay list came out empty.  Same for reset (a ref moving backwards) and rebase
+  (a replay whose base is below the moved arrow).
+- **Four layers, each a pure function of the one above, and only the last writes**:
+
+  ```
+  vcs/load.rs    Dag   — an immutable snapshot: commits, refs, HEAD, worktree
+  vcs/plan.rs    Plan  — Dag + an ordered stack of Edits → a Projection
+  vcs/derive.rs  Op    — the git commands that would make reality match
+  vcs/apply.rs         — runs them, after a backup ref per local branch
+  ```
+
+  That is what makes "nothing happens until `:vc-apply`" a property of the
+  architecture rather than a promise: no other path reaches a mutating `git`.
+- **`Plan` is a stack, not a mutated copy** — the same shape as `table::Session`'s
+  transform stack, for the same reasons (`u` pops; a rejected edit cannot leave
+  half-applied state) plus one specific to here: the stack records **intent**.
+  "This edge moved from P to Q" is what the derivation needs; a structurally-diffed
+  copy would have to guess it back, and guessing wrong rewrites commits the user
+  never touched.  A **provisional** edit sits beside the stack while something is
+  held, so the graph rearranges live under the cursor and only the drop commits it.
+- **The derivation's load-bearing clause**: a commit needs recreating iff its
+  projected parents differ from its real ones **or any projected ancestor does**.
+  A fixpoint, not a filter — cherry-picking a rewritten parent yields a new oid, so
+  everything above it is new too, even the commits nobody touched.  It is computed
+  over a **projected** topological order (`projected_order`), not the snapshot's: an
+  edit can point a commit at one git listed after it, and deciding a commit before
+  its new parent misses exactly the propagation this exists to compute.
+- **Refusals are stated, never worked around**: a cycle is refused when the edit is
+  *pushed* (and equally when a drag previews one — `state::VcsState::validated`, or
+  the preview draws a graph git has no meaning for); a **merge in the replay list**
+  is refused by name (`cherry-pick` cannot recreate one — the same limit `git rebase`
+  has without `--rebase-merges`); a **dirty work tree** blocks apply before the
+  backup is even written.
+- **Undo is a real ref, not the reflog**: every local branch is saved under
+  `refs/sakharov/undo/<stamp>/<branch>` before the first write.  *Every* branch, not
+  only the ones the projection moved — a replay changes where a branch points
+  without the ref ever having been moved, and a backup that missed those would
+  restore the names while leaving the old commits unreachable.  `:vc-undo` restores
+  and deletes the namespace (the commits are reachable from the branches again).
+- **Shelling out to `git`, not libgit2** — applying must run the user's own git
+  (hooks, `.gitconfig`, credential helper, reflog), so having the *reads* go through
+  a linked library too would mean two implementations of "what does this repository
+  look like" that could disagree.  It also keeps the no-credentials rule intact for
+  push/pull, and adds no dependency (the `dataframe` feature is this repo's standing
+  lesson on what a bundled native library costs).  Parsing is split from running:
+  every parser in `vcs/load.rs` is a pure function of git's output, because the
+  interesting cases (an octopus merge, a detached HEAD, a ref past the horizon) are
+  impossible to construct as fixtures otherwise.  `vcs/apply.rs`'s tests do drive a
+  **real repository** in a temp dir — that layer's whole job is driving git, and a
+  mock would test the mock.
+- **`vcs::layout` is the single geometry model** (the graph's `table::layout`): block
+  positions, lane assignment, arrow routing and the focusable list all come from it,
+  so the renderer and the navigation cannot disagree about what is under the cursor.
+  One commit per row band, newest at the top; a commit's lane is inherited by its
+  first parent so a chain keeps a column.  Commits are deliberately **not** packed
+  several to a row — a generation-packed layout can draw a commit visually above one
+  of its own ancestors, which in a view whose premise is "the picture is the truth"
+  is not cosmetic.
+- **The HEAD block sits directly above the commit it names**, in that commit's lane.
+  At the top of the graph its arrow has to span however deep HEAD happens to be, and
+  a screenful of `│` between a block and its target says nothing.
+- **Planned vs immediate is a deliberate line**: rewriting history (arrows, branch
+  labels, drop, merge) is planned; checkout / stage / unstage / commit / fetch /
+  pull / push happen now.  The line is *could this make a commit unreachable* —
+  which is the same line the backup refs cover.  Network operations and the replay
+  itself run on a background thread (`exec::vcs::VcsJob`, polled by the run loop
+  beside the table load and the Quarto export).
+
 ### Known rough edges / not yet implemented
 - No split panes
 - The kernel is a single REPL, so cells still *run* one at a time — but they queue (`:run-all`,
@@ -970,6 +1046,15 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   the D2 gate rejects — supporting them editor-side would mean punching a hole in the safety
   layer to load native extensions at runtime. The cost, stated plainly: browsing a *remote*
   database needs a Python environment with a driver.
+- The version-control graph has **no search**, and no bisect, submodule, worktree
+  or interactive-add support (out of scope by decision). A **merge cannot be
+  replayed** onto a new parent, so a plan whose replay list contains one is refused
+  rather than flattened — the same limit `git rebase` has without `--rebase-merges`.
+  Conflicts stop the run and are resolved in the ordinary editor; the dedicated
+  merge-conflict resolver is the next view on the roadmap.
+- The graph is a **snapshot** taken when it was read: `r` / `:vc-refresh` re-reads
+  it, and any apply refreshes automatically. Nothing detects a change made in a
+  shell in the meantime.
 - A table opened from the kernel (`:view df`) is a **snapshot** taken when you asked, not a
   live view; nothing detects that the frame was reassigned. Re-run `:view` to refresh.
 - Column summaries are computed synchronously on the frame a column first becomes visible:
@@ -1012,6 +1097,9 @@ src/
     buffers.rs        — buffer-list management: special buffers, buffer switch +
                         stashes (plain-file & via notebook), open_as_notebook,
                         new-file/new-notebook, unsaved_buffer_names quit sweep
+    vcs.rs            — version-control view: open/close, the async load and
+                        job polling, command routing, the grab gesture, the
+                        apply confirmation, and the immediate git actions
     table.rs          — table view: Session (source + state + path), async load
                         + poll, open/close, command routing (motions → cells,
                         edits refused), cursor-follow scroll, session stash, and
@@ -1116,6 +1204,26 @@ src/
                         command). THE place a cross-cutting view concern lives
   stash.rs            — Stashes/Stash: what each view left behind when navigated
                         away from, one map keyed by SourceId
+  vcs/                — version control: the commit graph and history rewriting
+    mod.rs            — Dag/Commit/Oid/Ref/Head/WorkTree: an immutable snapshot.
+                        Oid::pending() identifies a commit the plan would create
+                        (a merge) — one that has no object behind it yet
+    load.rs           — the git queries + their parsers (pure fns over git's
+                        output) and the background read; `git()` is the one
+                        place anything in this module spawns git
+    plan.rs           — Edit/Plan/Projection: the edit stack and the graph it
+                        projects. project_committed() excludes the drag, which
+                        is what lets a drop be told apart from a no-op
+    derive.rs         — Op + derive(): the projection → git commands. THE
+                        algorithm (see "Phase V1" above)
+    apply.rs          — the only module here that writes: preflight, backup
+                        refs, run, undo, abort/resume
+    layout.rs         — THE geometry model: blocks, lanes, arrow routing,
+                        Focus + the focusable list that navigation walks
+    state.rs          — VcsState: snapshot + plan + cursor + the drag state
+                        machine (what dropping one thing on another *means*)
+  vcs_ui.rs           — ratatui renderer for the graph; a Painter writes cells in
+                        stack coordinates, clipped to the viewport
   compute/            — the Python engines, owned by App (not by any view)
     mod.rs            — KernelSession: persistent subprocess, request framing + background
                         reader thread streaming KernelMessages (async, non-blocking);
@@ -1165,6 +1273,7 @@ What each owes the new view:
 | `ui::status_ctx` | how the status line names what is open |
 | `config::StatuslineConfig::layout_for` | its `[statusline.*]` module layout |
 | `stash::Stash` | what it leaves behind when navigated away from |
+| `keymap::Keymap::default_bindings` | the layer's own bindings |
 | `exec::buffers::teardown_current_buffer` | stashing that state |
 | `exec::buffers::open_path` | routing back to it |
 
@@ -1351,6 +1460,9 @@ Phase 4 list has also shipped: `/`?`/`n`/`N` search, multiple buffers + buffer
 picker, and config-driven keybinding overrides in TOML.
 
 ### Still open
+- A **merge-conflict resolver view** (ours / theirs / merged panes over a
+  conflicted file) — the natural next view, and what the version-control view
+  currently hands off to the plain editor
 - Split panes
 - User-defined named commands in TOML (`[commands]` section)
 - Incremental tree-sitter highlighting (avoid full reparse on every keystroke)

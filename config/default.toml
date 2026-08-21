@@ -190,6 +190,15 @@ right = ["diagnostics", "spinner", "cell", "kernel"]
 left  = ["mode", "file", "table_shape", "table_transforms"]
 right = ["spinner", "table_column", "table_position"]
 
+# Status line in the version-control graph (`:vc`).
+#   vcs_head       branch HEAD is on (amber when detached)
+#   vcs_plan       how many changes are planned but not applied (hidden at zero)
+#   vcs_worktree   !conflicted  ●staged  ○unstaged  (each hidden at zero)
+#   vcs_selection  what the cursor is on; says "holding …" mid-drag
+[statusline.vcs]
+left  = ["mode", "file", "vcs_head", "vcs_plan"]
+right = ["spinner", "vcs_worktree", "vcs_selection"]
+
 # Jupyter notebook settings.
 [notebook]
 # Maximum terminal rows an image output may occupy.

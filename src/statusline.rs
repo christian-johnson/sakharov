@@ -54,6 +54,34 @@ pub struct Ctx {
     pub kernel: Option<KernelView>,
     /// Table view only: the grid's shape and where the cursor is in it.
     pub table: Option<TableView>,
+    /// Version-control view only: what is open and what is planned.
+    pub vcs: Option<VcsView>,
+}
+
+/// What the version-control graph is showing — graph view only.
+#[derive(Clone)]
+pub struct VcsView {
+    /// The branch HEAD is on, or `detached at <hash>`.
+    pub head: String,
+    /// True when HEAD is not on a branch, so the chip can say so in a colour
+    /// that reads as a warning rather than as a branch name.
+    pub detached: bool,
+    /// How many planned changes are stacked up.
+    ///
+    /// The single most important thing this status line carries: a graph with
+    /// unapplied edits looks exactly like the repository until you notice
+    /// this, which is the one way this view could mislead.
+    pub planned: usize,
+    /// Uncommitted work: `(staged, unstaged, conflicted)`.
+    pub work: (usize, usize, usize),
+    /// What the cursor is on.
+    pub selection: String,
+    /// What is being dragged, if anything.
+    ///
+    /// Separate from `selection` because during a drag they are two different
+    /// things — the held object and the destination under the cursor — and
+    /// showing the cursor labelled "holding" says the wrong one.
+    pub holding: Option<String>,
 }
 
 /// Cursor position and shape of the open table — table view only.
@@ -254,6 +282,53 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
             None => vec![],
         },
         // --- Table view ---
+        "vcs_head" | "vcs_branch" => match &ctx.vcs {
+            Some(v) if v.detached => {
+                vec![Segment::new(format!("⎇ {}", v.head), base.fg(th.warning))]
+            }
+            Some(v) => vec![Segment::new(format!("⎇ {}", v.head), base.fg(th.vcs_branch))],
+            None => vec![],
+        },
+        "vcs_plan" | "vcs_planned" => match &ctx.vcs {
+            // Hidden at zero, like the diagnostics module: an untouched graph
+            // has nothing to say here, and a permanent "0 planned" trains the
+            // eye to skip the place the warning will appear.
+            Some(v) if v.planned > 0 => vec![Segment::new(
+                format!("✎{} planned", v.planned),
+                base.fg(th.vcs_pending).add_modifier(Modifier::BOLD),
+            )],
+            _ => vec![],
+        },
+        "vcs_worktree" | "vcs_work" => match &ctx.vcs {
+            Some(v) => {
+                let (staged, unstaged, conflicted) = v.work;
+                let mut out = Vec::new();
+                if conflicted > 0 {
+                    out.push(Segment::new(format!("!{conflicted}"), base.fg(th.error)));
+                }
+                if staged > 0 {
+                    out.push(Segment::new(format!("●{staged}"), base.fg(th.git_added)));
+                }
+                if unstaged > 0 {
+                    out.push(Segment::new(format!("○{unstaged}"), base.fg(th.git_modified)));
+                }
+                out
+            }
+            None => vec![],
+        },
+        "vcs_selection" | "vcs_cursor" => match &ctx.vcs {
+            Some(v) => match &v.holding {
+                // Held thing first, then where it would land: that is the
+                // sentence the gesture is making.
+                Some(held) => vec![Segment::new(
+                    format!("{held} → {}", v.selection),
+                    base.fg(th.vcs_grabbed).add_modifier(Modifier::BOLD),
+                )],
+                None => vec![Segment::new(v.selection.clone(), dim_style())],
+            },
+            None => vec![],
+        },
+
         "table_position" | "table_pos" => match &ctx.table {
             Some(t) => vec![Segment::new(format!("{}/{}", t.row.0, t.row.1), base)],
             None => vec![],
@@ -536,6 +611,7 @@ mod tests {
             cell: None,
             kernel,
             table: None,
+            vcs: None,
         }
     }
 

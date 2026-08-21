@@ -627,6 +627,18 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
     // back on, so one that skipped this would read "[No Name]" over a full
     // screen of its own content.
     let (filename, modified, cell, kernel) = match app.view() {
+        // The graph's buffer is detached: the name comes from the repository
+        // it is showing, and it is never "modified" — a plan is not an edit to
+        // a file, and nothing here is saved with `:w`.
+        crate::view::View::Vcs => {
+            let name = app
+                .vcs
+                .as_ref()
+                .and_then(|s| s.root.file_name())
+                .map_or_else(|| "git".to_string(), |n| n.to_string_lossy().into_owned());
+            (name, false, None, None)
+        }
+
         crate::view::View::Table => match app.table.as_ref() {
             // The grid's buffer is detached and has no path, so the name comes
             // from the session.  Read-only, hence never modified.
@@ -672,6 +684,25 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
         spinner: app.spinner.glyph(),
         cell,
         kernel,
+        vcs: app.vcs.as_ref().map(|s| crate::statusline::VcsView {
+            head: match (&s.dag.head.branch, &s.dag.head.target) {
+                (Some(branch), _) => branch.clone(),
+                (None, Some(oid)) => format!("detached at {}", oid.short()),
+                (None, None) => "no commits".to_string(),
+            },
+            detached: s.dag.head.detached(),
+            planned: s.plan.edits().len(),
+            work: (s.dag.work.staged, s.dag.work.unstaged, s.dag.work.conflicted),
+            selection: s
+                .focus
+                .as_ref()
+                .map(|f| crate::vcs_ui::describe_focus(&s.dag, f))
+                .unwrap_or_default(),
+            holding: s
+                .grabbed
+                .as_ref()
+                .map(|f| crate::vcs_ui::describe_focus(&s.dag, f)),
+        }),
         table: app.table.as_ref().map(|s| {
             let st = &s.state;
             let cols = s.source().columns();

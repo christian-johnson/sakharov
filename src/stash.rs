@@ -39,6 +39,11 @@ pub enum Stash {
     Notebook(Box<(Notebook, NotebookState)>),
     /// A tabular data session: the parsed source, transform stack and cursor.
     Table(Box<crate::exec::table::Session>),
+    /// A version-control session: the snapshot, the plan built on it, and the
+    /// cursor.  Stashed like the rest because a half-built plan is work, and
+    /// losing it to a buffer switch would make the view unusable for anything
+    /// taking more than one gesture.
+    Vcs(Box<crate::vcs::state::VcsState>),
 }
 
 impl Stash {
@@ -49,6 +54,7 @@ impl Stash {
             Stash::File(_) => View::Text,
             Stash::Notebook(_) => View::Notebook,
             Stash::Table(_) => View::Table,
+            Stash::Vcs(_) => View::Vcs,
         }
     }
 

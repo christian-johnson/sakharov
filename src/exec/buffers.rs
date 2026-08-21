@@ -71,6 +71,20 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
             }
         }
 
+        // The graph holds no unsaved *file* state, but it does hold a plan —
+        // an unapplied rewrite the user may have spent several gestures
+        // building — and the snapshot it was built against.  Both have to
+        // survive a buffer switch, or the view is only usable in one sitting.
+        crate::view::View::Vcs => {
+            app.vcs_pending = None;
+            if let Some(state) = app.vcs.take() {
+                app.stashes.put(
+                    crate::source::SourceId::virtual_named(crate::app::VCS_BUFFER),
+                    Stash::Vcs(Box::new(state)),
+                );
+            }
+        }
+
         // Stash the open notebook so edits are preserved if the user comes
         // back.  After this `app.buffer` holds stale cell text — do NOT stash
         // it, and do NOT `did_close` it: it was never opened with the LSP under
@@ -174,7 +188,12 @@ pub fn open_path(app: &mut App, path: &std::path::Path) {
     // buffer being left should reopen at (and `path` may be that buffer).
     remember_cursor(app);
 
-    if app.stashes.view_of(&SourceId::of(path)) == Some(crate::view::View::Table) {
+    if path.to_str() == Some(crate::app::VCS_BUFFER) {
+        // The graph is addressed by name like any other virtual source, so
+        // `H`/`L` and the buffer picker land back on it rather than opening an
+        // empty text buffer called `*git*`.
+        super::vcs::open(app);
+    } else if app.stashes.view_of(&SourceId::of(path)) == Some(crate::view::View::Table) {
         // A derived table (a frequency table, later a query result) is virtual,
         // so it would otherwise fall into the special-buffer branch below and
         // open as an empty text buffer named after itself.

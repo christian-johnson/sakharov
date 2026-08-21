@@ -11,6 +11,7 @@ mod scroll;
 mod search;
 pub(crate) mod sql;
 pub(crate) mod table;
+pub(crate) mod vcs;
 mod text;
 
 pub use buffers::{is_special_path, open_as_notebook, open_path, switch_to_special_buffer};
@@ -103,6 +104,13 @@ pub fn execute(app: &mut App, cmd: &Command) {
     match app.view() {
         crate::view::View::Table => {
             if table::handle(app, cmd) {
+                return;
+            }
+        }
+        // The commit graph reinterprets the motions against blocks and arrows,
+        // owns the whole version-control command family, and refuses the rest.
+        crate::view::View::Vcs => {
+            if vcs::handle(app, cmd) {
                 return;
             }
         }
@@ -1069,6 +1077,45 @@ pub fn execute(app: &mut App, cmd: &Command) {
             sql::run(app);
             return;
         }
+
+        // --- Version control ---
+        //
+        // Only `version-control` is reachable from outside the graph: it is
+        // the door in.  Everything else needs a cursor sitting on a commit, an
+        // arrow or a branch, so it is handled by `vcs::handle` above and only
+        // reaches here when the graph is *not* open — which is worth saying
+        // rather than silently ignoring.
+        Command::VcsOpen => {
+            vcs::open(app);
+            return;
+        }
+        Command::VcsClose
+        | Command::VcsRefresh
+        | Command::VcsGrab
+        | Command::VcsDrop
+        | Command::VcsMerge
+        | Command::VcsUndoEdit
+        | Command::VcsReset
+        | Command::VcsApply
+        | Command::VcsUndo
+        | Command::VcsAbort
+        | Command::VcsContinue
+        | Command::VcsCheckout
+        | Command::VcsShow
+        | Command::VcsStage
+        | Command::VcsUnstage
+        | Command::VcsFetch
+        | Command::VcsPull
+        | Command::VcsPush
+        | Command::VcsNewBranch(_)
+        | Command::VcsCommit(_)
+        | Command::VcsSetUpstream(_) => {
+            app.messages.show(format!(
+                "`{}` works in the version-control view (`:vc` opens it)",
+                cmd.name()
+            ));
+            return;
+        }
         // A display preference, so it works from anywhere — the grid does not
         // have to be open to set how the next one is drawn.
         Command::TableToggleSparkline => {
@@ -1217,6 +1264,7 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
     // prefix, and what that means is a property of the view.  A new view either
     // lists its own meanings or explicitly shares the text ones.
     match app.view() {
+        crate::view::View::Vcs => return vcs::goto_hints(),
         crate::view::View::Table => return vec![
             hint("g", "first row"),
             hint("e", "last row"),
@@ -1231,6 +1279,7 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
             hint("x", "clear sorts and filters"),
             hint("t", "browse attached tables"),
             hint("v", "kernel variables"),
+            hint("V", "version control"),
             hint("b", "buffer picker"),
         ],
         // The notebook edits a cell's text, so the text meanings are the right
@@ -1253,6 +1302,8 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
     if app.compute.active_key().is_some() {
         hints.push(hint("v", "kernel variables"));
     }
+    // Always: the repository is not a property of what is open.
+    hints.push(hint("V", "version control"));
     let lsp_active = app
         .current_language()
         .map(|l| app.lsp.is_ready(l))

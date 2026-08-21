@@ -146,6 +146,10 @@ pub const MESSAGES_BUFFER: &str = "*Messages*";
 
 /// The SQL query buffer.  A `*…*` name, so nothing tries to save it.
 pub const SQL_BUFFER: &str = "*sql*";
+/// The version-control graph's virtual identity.  It has no file behind it —
+/// the repository is not a document — so it lives in the buffer list under a
+/// name, like the scratch buffer.
+pub const VCS_BUFFER: &str = "*git*";
 
 /// Name prefix of the `*cell …*` buffers — a grid cell's full text opened for
 /// reading (`*cell 3:price*`).  A family rather than one name, so it is matched
@@ -285,6 +289,12 @@ pub struct App {
     pub table: Option<crate::exec::table::Session>,
     /// In-flight background table load, polled once per frame by the run loop.
     pub table_pending: Option<crate::exec::table::TableLoad>,
+    /// The open version-control graph, when that view owns the screen.
+    pub vcs: Option<crate::vcs::state::VcsState>,
+    /// An in-flight read of the repository.
+    pub vcs_pending: Option<crate::vcs::load::RepoLoad>,
+    /// An in-flight git invocation (a fetch, a push, a replay).
+    pub vcs_job: Option<crate::exec::vcs::VcsJob>,
     /// Directory a bare filename in a `:sql` query resolves against.
     ///
     /// Captured when the SQL buffer is opened, because switching into it makes
@@ -408,7 +418,13 @@ impl App {
             !(self.table.is_some() && self.notebook.is_some()),
             "a table and a notebook must never be open at once"
         );
-        if self.table.is_some() {
+        debug_assert!(
+            !(self.vcs.is_some() && (self.table.is_some() || self.notebook.is_some())),
+            "the version-control graph must never share the screen with another view"
+        );
+        if self.vcs.is_some() || self.vcs_pending.is_some() {
+            View::Vcs
+        } else if self.table.is_some() {
             View::Table
         } else if self.in_notebook_nav() {
             View::Notebook
@@ -428,6 +444,9 @@ impl App {
     pub fn current_source_id(&self) -> Option<crate::source::SourceId> {
         use crate::source::SourceId;
         match self.view() {
+            // The graph has no file behind it, so it is known by its name —
+            // which is what keeps it in the buffer list and reachable by H/L.
+            View::Vcs => Some(SourceId::virtual_named(VCS_BUFFER)),
             View::Table => self.table.as_ref().map(|s| s.id.clone()),
             View::Notebook => self.notebook.as_ref().map(|(nb, _)| SourceId::of(&nb.path)),
             View::Text => self.buffer.path.as_deref().map(SourceId::of),
@@ -607,6 +626,9 @@ impl App {
             attachments: Vec::new(),
             table_cell_origin: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
+            vcs: None,
+            vcs_pending: None,
+            vcs_job: None,
             graphics: GraphicsState::default(),
             cell_focused_edit: false,
             popup: None,
@@ -899,6 +921,7 @@ fn run_loop(
         needs_redraw |= crate::exec::poll_git(app);
         needs_redraw |= crate::exec::poll_export(app);
         needs_redraw |= crate::exec::poll_table_load(app);
+        needs_redraw |= crate::exec::vcs::poll(app);
 
         // Advance the status-bar spinner.  It's "active" whenever a notebook
         // cell is executing or queued, the kernel is booting, an LSP request
@@ -914,7 +937,10 @@ fn run_loop(
             || app.compute.any_busy()
             || app.lsp.has_pending_requests()
             || app.export_pending.is_some()
-            || app.table_pending.is_some();
+            || app.table_pending.is_some()
+            // A repository read, a fetch, or a replay running its way through
+            // a cherry-pick.
+            || crate::exec::vcs::busy(app);
         app.spinner.update(background_active);
         needs_redraw |= background_active;
 
@@ -1035,6 +1061,23 @@ fn draw_frame(
                 // highlighted cell, drawn by the renderer (a terminal cursor in
                 // a grid of cells reads as a text caret inside the value, which
                 // it isn't).
+                // The commit graph.  No text cursor either: the cursor is the
+                // highlighted block or arrow, drawn by the renderer.
+                View::Vcs => {
+                    terminal.draw(|f| {
+                        crate::theme::fill_background(f);
+                        if let Some(chrome) = crate::view::Chrome::split(f.area()) {
+                            if let Some(state) = app.vcs.as_ref() {
+                                crate::vcs_ui::render(f, chrome.content, state);
+                            }
+                            ui::render_chrome(f, app, &chrome);
+                        }
+                        if let Some(ref popup) = app.popup {
+                            crate::popup_ui::render(f, popup, None, &app.config.ui);
+                        }
+                    })?;
+                }
+
                 View::Table => {
                     terminal.draw(|f| {
                         crate::theme::fill_background(f);

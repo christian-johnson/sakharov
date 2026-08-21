@@ -57,6 +57,9 @@ pub enum PopupTarget {
     /// Open the kernel variable named by the confirmed item's
     /// [`ConfirmPayload::Choice`] as a grid.
     ViewVariable,
+    /// Run the version-control plan the popup just listed
+    /// ([`ConfirmPayload::Choice`] is `"apply"` or `"cancel"`).
+    ApplyVcsPlan,
 }
 
 /// Typed data carried by a confirmed [`ListItem`]. Replaces the old
@@ -591,6 +594,46 @@ impl Popup {
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.55),
             on_confirm: PopupTarget::RestoreRecovery,
+        }
+    }
+
+    /// The version-control plan confirmation: the derived git commands, then
+    /// the two answers.
+    ///
+    /// The commands are listed rather than summarised because this is the one
+    /// place a surprise can surface — the graph shows the *shape* that was
+    /// asked for, and a shape that quietly becomes a nine-commit replay is
+    /// exactly what someone would want to see before agreeing.  They carry the
+    /// `cancel` payload so that confirming one by reflex does nothing.
+    pub fn vcs_plan(ops: Vec<String>) -> Self {
+        let mut items: Vec<ListItem> = ops
+            .into_iter()
+            .map(|op| ListItem {
+                label: op,
+                kind: Some("step".into()),
+                payload: Some(ConfirmPayload::Choice("cancel".into())),
+                ..Default::default()
+            })
+            .collect();
+        let count = items.len();
+        items.insert(
+            0,
+            ListItem {
+                label: "Apply these changes".into(),
+                detail: Some(format!(
+                    "{count} git operation{}; every branch is saved first, and :vc-undo puts them back",
+                    if count == 1 { "" } else { "s" }
+                )),
+                payload: Some(ConfirmPayload::Choice("apply".into())),
+                ..Default::default()
+            },
+        );
+        Self {
+            title: Some("Apply the planned history?".into()),
+            content: PopupContent::List(ListState::new(items)),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.7),
+            on_confirm: PopupTarget::ApplyVcsPlan,
         }
     }
 
