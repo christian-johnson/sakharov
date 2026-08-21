@@ -183,6 +183,13 @@ left  = ["mode", "file"]
 # (starting/busy) the standalone spinner is hidden automatically.
 right = ["diagnostics", "spinner", "cell", "kernel"]
 
+# Layout used in the tabular data view (:csv / :table / a query result).
+# `table_shape`, `table_column`, `table_position` and `table_transforms` are
+# grid-only modules and produce nothing in the other views.
+[statusline.table]
+left  = ["mode", "file", "table_shape", "table_transforms"]
+right = ["spinner", "table_column", "table_position"]
+
 # Jupyter notebook settings.
 [notebook]
 # Maximum terminal rows an image output may occupy.

@@ -243,6 +243,7 @@ pub(crate) fn cell_visual_rows(rope: &ropey::Rope, width: Option<usize>) -> usiz
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
+    area: Rect,
     state: &NotebookState,
     nb: &Notebook,
     active: &ActiveCellView<'_>,
@@ -251,20 +252,10 @@ pub fn render(
     cell_pixel_size: Option<(u16, u16)>,
     cache: &mut CellHighlightCache,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
-    let size = frame.area();
-    if size.height < 3 {
+    if area.height == 0 {
         return (vec![], None);
     }
-
-    // Content area — leave last 2 rows for status bar + command line.
-    let content_area = Rect {
-        x: size.x,
-        y: size.y,
-        width: size.width,
-        height: size.height.saturating_sub(2),
-    };
-
-    render_cells(frame, state, nb, active, lsp_diagnostics, content_area, nb_config, cell_pixel_size, cache)
+    render_cells(frame, state, nb, active, lsp_diagnostics, area, nb_config, cell_pixel_size, cache)
 }
 
 // ---------------------------------------------------------------------------
@@ -1680,6 +1671,16 @@ fn single_row(area: Rect, row: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The area `app::draw_frame` hands the notebook renderer: the frame minus
+    /// the two chrome rows.  Tests draw into a full frame, so they have to make
+    /// the same split the real caller does.
+    fn content_area(f: &Frame) -> Rect {
+        crate::view::Chrome::split(f.area())
+            .expect("test terminal is tall enough for the chrome")
+            .content
+    }
+
     use ropey::Rope;
 
     #[test]
@@ -1756,6 +1757,7 @@ mod tests {
             .draw(|f| {
                 let (_imgs, cursor) = render(
                     f,
+                    content_area(f),
                     &state,
                     &nb,
                     &active,
@@ -1882,7 +1884,7 @@ mod tests {
             terminal
                 .draw(|f| {
                     render(
-                        f, &state, &nb, &active,
+                        f, content_area(f), &state, &nb, &active,
                         &std::collections::HashMap::new(),
                         &cfg, None, &mut CellHighlightCache::default(),
                     );
@@ -1973,7 +1975,7 @@ mod tests {
         terminal
             .draw(|f| {
                 render(
-                    f, &state, &nb, &active,
+                    f, content_area(f), &state, &nb, &active,
                     &std::collections::HashMap::new(),
                     &cfg, None, &mut CellHighlightCache::default(),
                 );
@@ -2046,7 +2048,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let (images, _cursor) = render(
-                    f, &state, &nb, &active,
+                    f, content_area(f), &state, &nb, &active,
                     &std::collections::HashMap::new(),
                     &crate::config::NotebookConfig::default(),
                     Some((18, 9)),
@@ -2112,7 +2114,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let (images, cursor) = render(
-                    f, &state, &nb, &active,
+                    f, content_area(f), &state, &nb, &active,
                     &std::collections::HashMap::new(),
                     &crate::config::NotebookConfig::default(),
                     Some((18, 9)),
@@ -2186,7 +2188,7 @@ mod tests {
         terminal
             .draw(|f| {
                 render(
-                    f, &state, &nb, &active,
+                    f, content_area(f), &state, &nb, &active,
                     &std::collections::HashMap::new(),
                     &crate::config::NotebookConfig::default(),
                     None, &mut CellHighlightCache::default(),

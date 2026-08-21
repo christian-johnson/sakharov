@@ -95,13 +95,34 @@ pub fn revert_theme_preview(app: &mut App) {
 pub fn execute(app: &mut App, cmd: &Command) {
     let extend = app.mode == Mode::Select;
 
-    // The table view owns the whole screen and has no text buffer behind it, so
-    // it intercepts the commands it implements (motions become cell movement)
-    // and refuses the ones that would edit.  Everything else — `:q`, the
-    // palette, `:theme`, buffer switching — falls through unchanged.
-    if app.view() == crate::app::View::Table && table::handle(app, cmd) {
-        return;
+    // One arm per view (see `crate::view`).  A view that owns the screen gets
+    // to reinterpret commands against its own data before the text path sees
+    // them — in the grid, motions become cell movement and the editing commands
+    // are refused.  Everything it does not consume — `:q`, the palette,
+    // `:theme`, buffer switching — falls through unchanged.
+    match app.view() {
+        crate::view::View::Table => {
+            if table::handle(app, cmd) {
+                return;
+            }
+        }
+        // The notebook edits its focused cell *in* `app.buffer`, so the text
+        // path is its path; its only interception is the output-block browsing
+        // just below.  Plain text needs none at all.
+        crate::view::View::Notebook | crate::view::View::Text => {}
     }
+
+    // Falling through is fine for a command that needs no rope — `:q`, `:bd`,
+    // `:sql`, entering a sub-mode all mean the same thing in every view.  What
+    // must never fall through is a command `crate::view::refusal` classifies:
+    // in a view whose buffer is detached and path-less, those would read or
+    // write an empty rope.  A bufferless view consuming its commands without
+    // consulting `refusal` is exactly the bug this catches.
+    debug_assert!(
+        app.view().has_text_buffer() || crate::view::refusal(cmd).is_none(),
+        "{} needs a text buffer but reached the text path in a bufferless view",
+        cmd.name()
+    );
 
     // Capture cursor line before the command so we can detect movement direction.
     let pre_exec_line: usize = {
@@ -1347,7 +1368,7 @@ fn at_first_visual_row(app: &App) -> bool {
 fn goto_hints(app: &App) -> Vec<(String, String)> {
     let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
 
-    if app.view() == crate::app::View::Table {
+    if app.view() == crate::view::View::Table {
         return vec![
             hint("g", "first row"),
             hint("e", "last row"),

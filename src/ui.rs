@@ -1,6 +1,6 @@
 use ratatui::{
     buffer::Buffer as RatBuffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Style},
     widgets::Widget,
     Frame,
@@ -28,27 +28,39 @@ pub fn render(frame: &mut Frame, app: &App) {
         return;
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(size);
+    // The same split every view uses — see `view::Chrome`.  `render` is only
+    // reached with `size.height >= 3`, which is exactly when the split succeeds.
+    let Some(chrome) = crate::view::Chrome::split(size) else { return };
 
-    let lines_area = chunks[0];
-    let status_area = chunks[1];
-    let cmd_area = chunks[2];
-
-    render_lines(frame, app, lines_area);
-    render_status(frame, app, status_area);
-    render_command(frame, app, cmd_area);
+    render_lines(frame, app, chrome.content);
+    render_chrome(frame, app, &chrome);
 
     // Position the hardware cursor so the terminal blinks at the right spot.
-    if let Some((cx, cy)) = cursor_screen_pos(app, lines_area) {
+    if let Some((cx, cy)) = cursor_screen_pos(app, chrome.content) {
         frame.set_cursor_position((cx, cy));
     }
+}
+
+/// Draw the two rows of chrome every view shares: the status line, laid out
+/// with the module list this view asks for, and the command line beneath it.
+///
+/// Every view calls this rather than rendering the status line itself.  The
+/// three call sites in `draw_frame` used to build their own `Rect`s and pass
+/// their own pair of module lists, which is three chances to put the status
+/// line on the wrong row and three places to update when a module is added.
+pub fn render_chrome(frame: &mut Frame, app: &App, chrome: &crate::view::Chrome) {
+    let layout = app.config.statusline.layout_for(app.view());
+    let ctx = status_ctx(app);
+    crate::statusline::render(
+        frame,
+        chrome.status,
+        &ctx,
+        &layout.left,
+        &layout.right,
+        &app.config.statusline.separator,
+        &app.config.statusline.styles,
+    );
+    render_command(frame, app, chrome.command);
 }
 
 // ---------------------------------------------------------------------------
@@ -633,19 +645,6 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
             }
         }),
     }
-}
-
-fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let ctx = status_ctx(app);
-    crate::statusline::render(
-        frame,
-        area,
-        &ctx,
-        &app.config.statusline.left,
-        &app.config.statusline.right,
-        &app.config.statusline.separator,
-        &app.config.statusline.styles,
-    );
 }
 
 // ---------------------------------------------------------------------------

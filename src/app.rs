@@ -23,6 +23,7 @@ use crate::{
     notebook_state::NotebookState,
     selection::Selection,
     ui,
+    view::View,
 };
 
 // ---------------------------------------------------------------------------
@@ -232,30 +233,6 @@ impl Messages {
     pub fn current(&self) -> Option<&str> {
         self.current.as_deref()
     }
-}
-
-// ---------------------------------------------------------------------------
-// Top-level view
-// ---------------------------------------------------------------------------
-
-/// Which top-level view owns the screen and the keyboard.
-///
-/// The views are mutually exclusive by construction: each non-`Text` variant
-/// requires its own `App` field to be populated, and opening one tears the
-/// other down (see `exec::buffers::teardown_current_buffer`).  Derive it with
-/// [`App::view`] rather than testing the individual `Option`s — the three
-/// dispatch points (`app::draw_frame`, `exec::update_scroll`, and the
-/// `input` keymap layer) must agree on which view is active, and a
-/// hand-rolled condition at each one drifts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
-    /// Plain text buffer.  Also the view for a notebook's full-screen
-    /// focused-cell overlay, which is edited exactly like a file.
-    Text,
-    /// Notebook cell-stack view.
-    Notebook,
-    /// Tabular data grid (CSV/TSV today — see [`crate::table`]).
-    Table,
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,119 +1012,89 @@ fn draw_frame(
                     crate::popup_ui::render(f, popup, None, &app.config.ui);
                 }
             })?;
-        } else if app.view() == View::Table {
-            // Tabular data grid.  No text cursor: the cursor is the highlighted
-            // cell, drawn by the renderer (a terminal cursor in a grid of cells
-            // reads as a text caret inside the value, which it isn't).
-            terminal.draw(|f| {
-                crate::theme::fill_background(f);
-                let size = f.area();
-                if size.height >= 3 {
-                    if let Some(ref session) = app.table {
-                        let grid = ratatui::layout::Rect {
-                            height: size.height.saturating_sub(2),
-                            ..size
-                        };
-                        crate::table_ui::render(f, grid, session, &app.config.table);
-
-                        let status_area = ratatui::layout::Rect {
-                            x: size.x,
-                            y: size.y + size.height.saturating_sub(2),
-                            width: size.width,
-                            height: 1,
-                        };
-                        let ctx = ui::status_ctx(app);
-                        crate::statusline::render(
-                            f, status_area, &ctx,
-                            &app.config.statusline.table.left,
-                            &app.config.statusline.table.right,
-                            &app.config.statusline.separator,
-                            &app.config.statusline.styles,
-                        );
-                        let cmd_area = ratatui::layout::Rect {
-                            x: size.x,
-                            y: size.y + size.height.saturating_sub(1),
-                            width: size.width,
-                            height: 1,
-                        };
-                        ui::render_command(f, app, cmd_area);
-                    }
-                }
-                if let Some(ref popup) = app.popup {
-                    crate::popup_ui::render(f, popup, None, &app.config.ui);
-                }
-            })?;
-        } else if app.view() == View::Notebook {
-            // Notebook multi-cell view — the focused cell is in app.buffer.
-            // Lifted out of the draw closure so we can restore the hardware
-            // cursor to it *after* the Kitty image flush (which moves the
-            // terminal cursor to each image's origin and would otherwise leave
-            // the block cursor sitting on top of an image).
-            let mut nb_cursor: Option<(u16, u16)> = None;
-            terminal.draw(|f| {
-                crate::theme::fill_background(f);
-                let size = f.area();
-
-                if size.height >= 3 {
-                    if let Some((ref nb, ref state)) = app.notebook {
-                        let active = crate::notebook_ui::ActiveCellView {
-                            rope: &app.buffer.rope,
-                            cursor: app.selection.head,
-                            sel_anchor: app.selection.anchor,
-                            output_row: app.notebook.as_ref().and_then(|(_, s)| s.output_row),
-                            output_col: app.notebook.as_ref().map(|(_, s)| s.output_col).unwrap_or(0),
-                            output_anchor: app.notebook.as_ref().and_then(|(_, s)| s.output_anchor),
-                            mode: &app.mode,
-                            jump_labels: &app.jump.labels,
-                            jump_typed: &app.jump.typed,
-                            word_wrap: app.config.editor.word_wrap,
-                        };
-                        let (images, cursor_pos) =
-                            crate::notebook_ui::render(f, state, nb, &active, &app.lsp.diagnostics, &app.config.notebook, app.graphics.cell_pixel_size, &mut app.nb_highlight);
-                        app.graphics.pending = images;
-                        nb_cursor = cursor_pos;
-
-                        let status_area = ratatui::layout::Rect {
-                            x: size.x,
-                            y: size.y + size.height.saturating_sub(2),
-                            width: size.width,
-                            height: 1,
-                        };
-                        let cmd_area = ratatui::layout::Rect {
-                            x: size.x,
-                            y: size.y + size.height.saturating_sub(1),
-                            width: size.width,
-                            height: 1,
-                        };
-                        // Status-line context is built the same way for both the
-                        // plain editor and the notebook view (see ui::status_ctx);
-                        // only the module *layout* differs (notebook variant here).
-                        let ctx = ui::status_ctx(app);
-                        crate::statusline::render(
-                            f, status_area, &ctx,
-                            &app.config.statusline.notebook.left,
-                            &app.config.statusline.notebook.right,
-                            &app.config.statusline.separator,
-                            &app.config.statusline.styles,
-                        );
-                        ui::render_command(f, app, cmd_area);
-                    }
-                }
-                if let Some(ref popup) = app.popup {
-                    crate::popup_ui::render(f, popup, nb_cursor, &app.config.ui);
-                }
-            })?;
-            frame_cursor = nb_cursor;
         } else {
-            // Plain text editor or full-screen focused-cell overlay.
-            terminal.draw(|f| {
-                crate::theme::fill_background(f);
-                ui::render(f, app);
-                if let Some(ref popup) = app.popup {
-                    let cursor_pos = ui::cursor_screen_pos(app, f.area());
-                    crate::popup_ui::render(f, popup, cursor_pos, &app.config.ui);
+            // One arm per view.  Exhaustive on purpose (see `crate::view`): a
+            // new view must state how it draws, rather than falling into the
+            // plain-text branch and silently rendering an empty buffer.
+            match app.view() {
+                // Tabular data grid.  No text cursor: the cursor is the
+                // highlighted cell, drawn by the renderer (a terminal cursor in
+                // a grid of cells reads as a text caret inside the value, which
+                // it isn't).
+                View::Table => {
+                    terminal.draw(|f| {
+                        crate::theme::fill_background(f);
+                        if let (Some(chrome), Some(session)) =
+                            (crate::view::Chrome::split(f.area()), app.table.as_ref())
+                        {
+                            crate::table_ui::render(f, chrome.content, session, &app.config.table);
+                            ui::render_chrome(f, app, &chrome);
+                        }
+                        if let Some(ref popup) = app.popup {
+                            crate::popup_ui::render(f, popup, None, &app.config.ui);
+                        }
+                    })?;
                 }
-            })?;
+
+                // Notebook multi-cell view — the focused cell is in app.buffer.
+                // The cursor is lifted out of the draw closure so it can be
+                // restored *after* the Kitty image flush (which moves the
+                // terminal cursor to each image's origin and would otherwise
+                // leave the block cursor sitting on top of an image).
+                View::Notebook => {
+                    let mut nb_cursor: Option<(u16, u16)> = None;
+                    terminal.draw(|f| {
+                        crate::theme::fill_background(f);
+                        if let (Some(chrome), Some((nb, state))) =
+                            (crate::view::Chrome::split(f.area()), app.notebook.as_ref())
+                        {
+                            let active = crate::notebook_ui::ActiveCellView {
+                                rope: &app.buffer.rope,
+                                cursor: app.selection.head,
+                                sel_anchor: app.selection.anchor,
+                                output_row: state.output_row,
+                                output_col: state.output_col,
+                                output_anchor: state.output_anchor,
+                                mode: &app.mode,
+                                jump_labels: &app.jump.labels,
+                                jump_typed: &app.jump.typed,
+                                word_wrap: app.config.editor.word_wrap,
+                            };
+                            let (images, cursor_pos) = crate::notebook_ui::render(
+                                f,
+                                chrome.content,
+                                state,
+                                nb,
+                                &active,
+                                &app.lsp.diagnostics,
+                                &app.config.notebook,
+                                app.graphics.cell_pixel_size,
+                                &mut app.nb_highlight,
+                            );
+                            app.graphics.pending = images;
+                            nb_cursor = cursor_pos;
+                            ui::render_chrome(f, app, &chrome);
+                        }
+                        if let Some(ref popup) = app.popup {
+                            crate::popup_ui::render(f, popup, nb_cursor, &app.config.ui);
+                        }
+                    })?;
+                    frame_cursor = nb_cursor;
+                }
+
+                // Plain text editor, and the notebook's full-screen
+                // focused-cell overlay, which is edited exactly like a file.
+                View::Text => {
+                    terminal.draw(|f| {
+                        crate::theme::fill_background(f);
+                        ui::render(f, app);
+                        if let Some(ref popup) = app.popup {
+                            let cursor_pos = ui::cursor_screen_pos(app, f.area());
+                            crate::popup_ui::render(f, popup, cursor_pos, &app.config.ui);
+                        }
+                    })?;
+                }
+            }
         }
 
         // Every view goes through the same flush: ratatui owns the screen during

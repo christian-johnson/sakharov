@@ -166,29 +166,29 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             // notebook override map shadows the normal bindings — e.g. J/K move
             // between cells, Shift+Enter executes — falling back to the normal
             // bindings for everything else.
-            let in_notebook = app.view() == crate::app::View::Notebook;
+            let in_notebook = app.view() == crate::view::View::Notebook;
             let cmds = match app.view() {
-                crate::app::View::Notebook => app
+                crate::view::View::Notebook => app
                     .keymap
                     .lookup_notebook(&kb)
                     .or_else(|| app.keymap.lookup_normal(&kb)),
-                crate::app::View::Table => app
+                crate::view::View::Table => app
                     .keymap
                     .lookup_table(&kb)
                     .or_else(|| app.keymap.lookup_normal(&kb)),
                 // A `*cell …*` buffer is a text view with one override: `q`
                 // returns to the grid it was read out of.
-                crate::app::View::Text if app.in_cell_buffer() => app
+                crate::view::View::Text if app.in_cell_buffer() => app
                     .keymap
                     .lookup_cell(&kb)
                     .or_else(|| app.keymap.lookup_normal(&kb)),
                 // The `*sql*` buffer is a text view with the same one override:
                 // `q` leaves it for wherever `:sql` was invoked from.
-                crate::app::View::Text if app.in_sql_buffer() => app
+                crate::view::View::Text if app.in_sql_buffer() => app
                     .keymap
                     .lookup_sql(&kb)
                     .or_else(|| app.keymap.lookup_normal(&kb)),
-                crate::app::View::Text => app.keymap.lookup_normal(&kb),
+                crate::view::View::Text => app.keymap.lookup_normal(&kb),
             }
             .map(|v| v.to_vec());
             if let Some(cmds) = cmds {
@@ -599,13 +599,13 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
 /// `g` does: [`handle_goto`] runs the command, and `exec::goto_hints` labels the
 /// same keys in the which-key popup.  A key that isn't listed here must not
 /// appear in the hints (a test pins that).
-pub fn goto_command(view: crate::app::View, c: char) -> Option<Command> {
+pub fn goto_command(view: crate::view::View, c: char) -> Option<Command> {
     // The grid's own `g` map, checked first.  `g` is the editor's prefix for
     // "go somewhere / show me more", and in a table that is a column question:
     // the analytic commands live here rather than scattered across bare letters,
     // and a key whose text meaning is meaningless in a grid (`gd` definition,
     // `gr` references) is free to carry the grid's.
-    if view == crate::app::View::Table {
+    if view == crate::view::View::Table {
         if let Some(cmd) = table_goto_command(c) {
             return Some(cmd);
         }

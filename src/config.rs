@@ -288,11 +288,11 @@ pub struct StatuslineConfig {
     #[serde(default = "default_statusline_right")]
     pub right: Vec<String>,
     /// Layout used while a notebook is open (the multi-cell view).
-    #[serde(default)]
-    pub notebook: NotebookStatuslineConfig,
+    #[serde(default = "default_notebook_layout")]
+    pub notebook: StatuslineLayout,
     /// Layout used in the tabular data view (`:csv`).
-    #[serde(default)]
-    pub table: TableStatuslineConfig,
+    #[serde(default = "default_table_layout")]
+    pub table: StatuslineLayout,
     /// String inserted between adjacent modules.  Default `""` relies on each
     /// module's own padding (a single leading/trailing space) for visual
     /// separation.  Try `">"`, `"|"`, `"/"`, or `"\\"` for a powerline-inspired
@@ -312,51 +312,70 @@ pub struct StatuslineConfig {
     pub styles: HashMap<String, String>,
 }
 
-/// Status line layout for the notebook view.
-#[derive(Debug, Deserialize, Clone)]
-pub struct NotebookStatuslineConfig {
-    #[serde(default = "default_nb_statusline_left")]
-    pub left: Vec<String>,
-    #[serde(default = "default_nb_statusline_right")]
-    pub right: Vec<String>,
-}
-
-/// `[statusline.table]` — module layout for the tabular data view.
-#[derive(Debug, Deserialize, Clone)]
-pub struct TableStatuslineConfig {
-    #[serde(default = "default_table_statusline_left")]
-    pub left: Vec<String>,
-    #[serde(default = "default_table_statusline_right")]
-    pub right: Vec<String>,
-}
-
-impl Default for TableStatuslineConfig {
-    fn default() -> Self {
-        Self {
-            left: default_table_statusline_left(),
-            right: default_table_statusline_right(),
+impl StatuslineConfig {
+    /// The module layout for `view`.
+    ///
+    /// Exhaustive on purpose: a new view either gets its own `[statusline.*]`
+    /// section or explicitly says it shares the plain editor's — and it has to
+    /// say which, here, rather than silently inheriting one.
+    pub fn layout_for(&self, view: crate::view::View) -> StatuslineLayout {
+        use crate::view::View;
+        match view {
+            View::Text => StatuslineLayout {
+                left: self.left.clone(),
+                right: self.right.clone(),
+            },
+            View::Notebook => self.notebook.clone(),
+            View::Table => self.table.clone(),
         }
     }
 }
 
-fn default_table_statusline_left() -> Vec<String> {
-    vec!["mode".into(), "file".into(), "table_shape".into(), "table_transforms".into()]
-}
-fn default_table_statusline_right() -> Vec<String> {
-    vec!["spinner".into(), "table_column".into(), "table_position".into()]
+/// A single view's status-line module layout.
+///
+/// One struct for every view rather than one per view: the layout *is* two
+/// ordered lists of module names, and which view it describes is the field it
+/// is stored in.  Adding a view means adding a field to [`StatuslineConfig`]
+/// and an arm to [`StatuslineConfig::layout_for`] — not a third near-identical
+/// struct with its own `Default` impl and pair of default functions.
+///
+/// Both fields default to empty here; the real per-view defaults live in
+/// `config/default.toml` and reach this through the deep merge, so a user who
+/// sets only `left` keeps the default `right`.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct StatuslineLayout {
+    #[serde(default)]
+    pub left: Vec<String>,
+    #[serde(default)]
+    pub right: Vec<String>,
 }
 
+impl StatuslineLayout {
+    fn new(left: &[&str], right: &[&str]) -> Self {
+        Self {
+            left: left.iter().map(|s| (*s).to_string()).collect(),
+            right: right.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+}
+
+fn default_table_layout() -> StatuslineLayout {
+    StatuslineLayout::new(
+        &["mode", "file", "table_shape", "table_transforms"],
+        &["spinner", "table_column", "table_position"],
+    )
+}
+fn default_notebook_layout() -> StatuslineLayout {
+    StatuslineLayout::new(
+        &["mode", "file"],
+        &["diagnostics", "spinner", "cell", "kernel"],
+    )
+}
 fn default_statusline_left() -> Vec<String> {
     vec!["mode".into(), "git".into(), "file".into()]
 }
 fn default_statusline_right() -> Vec<String> {
     vec!["diagnostics".into(), "spinner".into(), "position".into(), "scroll".into()]
-}
-fn default_nb_statusline_left() -> Vec<String> {
-    vec!["mode".into(), "file".into()]
-}
-fn default_nb_statusline_right() -> Vec<String> {
-    vec!["diagnostics".into(), "cell".into(), "kernel".into()]
 }
 
 impl Default for StatuslineConfig {
@@ -364,19 +383,10 @@ impl Default for StatuslineConfig {
         Self {
             left: default_statusline_left(),
             right: default_statusline_right(),
-            notebook: NotebookStatuslineConfig::default(),
-            table: TableStatuslineConfig::default(),
+            notebook: default_notebook_layout(),
+            table: default_table_layout(),
             separator: String::new(),
             styles: HashMap::new(),
-        }
-    }
-}
-
-impl Default for NotebookStatuslineConfig {
-    fn default() -> Self {
-        Self {
-            left: default_nb_statusline_left(),
-            right: default_nb_statusline_right(),
         }
     }
 }

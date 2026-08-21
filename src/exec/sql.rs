@@ -459,7 +459,7 @@ mod tests {
     #[cfg(feature = "dataframe")]
     #[test]
     fn a_query_opens_its_result_as_a_grid_and_q_returns_to_the_query() {
-        use crate::app::View;
+        use crate::view::View;
 
         let mut app = app();
         super::super::execute(&mut app, &Command::SqlBuffer);

@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use crate::{
-    app::{App, View},
+    app::App,
     command::Command,
     source::SourceId,
     table::{self, csv::CsvSource, layout, summary::{self, ColumnSummary},
            transform::{Agg, Predicate, Transform}, TableSource},
+    view::View,
 };
 
 /// What a row of a *catalog* table names, so `Enter` can open it.
@@ -1108,6 +1109,10 @@ pub fn poll_table_load(app: &mut App) -> bool {
 // Command routing
 // ---------------------------------------------------------------------------
 
+/// What the user types to get from the grid to somewhere a text command works.
+/// Named in every refusal message, so it is stated once.
+const ESCAPE_HATCH: &str = ":table-close";
+
 /// Handle `cmd` in the table view.  Returns true when it was consumed, so
 /// `execute()` skips the text-buffer path entirely; anything not listed here
 /// (`:q`, the command palette, `:theme`, buffer switching, …) falls through and
@@ -1244,9 +1249,12 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
         // Anything that would act on the detached buffer behind the grid is
         // refused with a reason, rather than silently operating on an empty
         // buffer (`ga` used to ask the LSP about nothing at all).
-        _ => match refusal(cmd) {
+        // Anything not reinterpreted above is classified by the shared rule in
+        // `crate::view` — the set of commands that need a rope is a property of
+        // the commands, not of this view.  `None` falls through unchanged.
+        _ => match crate::view::refusal(cmd) {
             Some(why) => {
-                app.messages.show(why.message(cmd));
+                app.messages.show(why.message(cmd, ESCAPE_HATCH));
                 return true;
             }
             None => return false,
@@ -1255,97 +1263,6 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
 
     update_scroll(app);
     true
-}
-
-/// Why a command doesn't run in the table view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Refusal {
-    /// Would edit or save — the view is a read-only window on the file.
-    ReadOnly,
-    /// Operates on text structure (words, symbols, folds, the LSP's idea of the
-    /// document). The buffer behind the grid is empty and path-less, so these
-    /// answer nothing at best and lie at worst.
-    NeedsText,
-    /// Meaningful in a grid, just not built yet.
-    NotImplemented,
-}
-
-impl Refusal {
-    fn message(self, cmd: &Command) -> String {
-        match self {
-            Refusal::ReadOnly => {
-                "The table view is read-only (:table-close to edit as text)".to_string()
-            }
-            Refusal::NeedsText => format!(
-                "`{}` needs a text buffer (:table-close to edit as text)",
-                cmd.name()
-            ),
-            Refusal::NotImplemented => format!(
-                "`{}` isn't implemented for the table view yet",
-                cmd.name()
-            ),
-        }
-    }
-}
-
-/// Classify a command the grid does not implement.  `None` means "not ours" —
-/// it falls through to the ordinary path and behaves as it does everywhere else
-/// (`:q`, the palette, `:theme`, buffer switching, the toggles, …).
-pub(super) fn refusal(cmd: &Command) -> Option<Refusal> {
-    Some(match cmd {
-        Command::EnterInsert
-        | Command::EnterInsertAfter
-        | Command::EnterInsertAtLineStart
-        | Command::EnterInsertAtLineEnd
-        | Command::DeleteSelection
-        | Command::ChangeSelection
-        | Command::PasteAfter
-        | Command::PasteBefore
-        | Command::OpenLineBelow
-        | Command::OpenLineAbove
-        | Command::Redo
-        | Command::CommentRegion
-        | Command::IndentRegion
-        | Command::DedentRegion
-        | Command::KillToEndOfLine
-        | Command::Write
-        | Command::WriteForce
-        | Command::WriteQuit
-        | Command::WriteAs(_)
-        | Command::FormatDocument => Refusal::ReadOnly,
-
-        // LSP: there is no document under the cursor to ask about.
-        Command::LspCodeActions
-        | Command::LspGotoDefinition
-        | Command::LspGotoReferences
-        | Command::LspGotoTypeDefinition
-        | Command::LspGotoImplementation
-        | Command::LspRequestCompletion
-        // Text structure: characters, words, symbols, folds.
-        | Command::FindCharForward
-        | Command::FindCharBackward
-        | Command::TillCharForward
-        | Command::TillCharBackward
-        | Command::EnterJumpMode
-        | Command::EnterSelect
-        | Command::SelectLine
-        | Command::SelectAll
-        | Command::OpenSymbolPicker
-        | Command::OpenDiagnosticPicker
-        | Command::GrepBuffer
-        | Command::EnterFoldMode
-        | Command::FoldToggle
-        | Command::FoldToggleAll
-        | Command::ScrollCursorCenter => Refusal::NeedsText,
-
-        // Searching a grid is a real feature, it just doesn't exist yet.
-        Command::SearchForward
-        | Command::SearchBackward
-        | Command::SearchNext
-        | Command::SearchPrev => Refusal::NotImplemented,
-
-        _ => return None,
-    })
 }
 
 /// Data rows that fit on screen (the header takes one or two rows of the grid
@@ -2259,7 +2176,7 @@ mod tests {
             Command::ToggleLineNumbers,
             Command::SwitchToMessages,
         ] {
-            assert!(refusal(&cmd).is_none(), "{} should fall through", cmd.name());
+            assert!(crate::view::refusal(&cmd).is_none(), "{} should fall through", cmd.name());
         }
     }
 

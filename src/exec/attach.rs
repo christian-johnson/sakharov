@@ -331,7 +331,7 @@ mod tests {
     #[cfg(feature = "dataframe")]
     #[test]
     fn a_local_database_attaches_read_only_and_its_tables_are_browsable() {
-        use crate::app::View;
+        use crate::view::View;
         use crate::command::Command;
         use crate::config::Config;
 
