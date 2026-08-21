@@ -139,9 +139,29 @@ checked out.
 
 ## Roadmap
 
-- **V1 (this work)** — the DAG view, arrow-dragging, derive + apply + undo,
-  and the everyday non-topological actions: checkout, stage/unstage, fetch,
-  pull, push, set-upstream.
+- **V1 — shipped.** The DAG view, arrow-dragging, derive + apply + undo, and
+  the everyday non-topological actions: checkout, stage/unstage, commit, fetch,
+  pull, push, set-upstream. See CLAUDE.md ("Phase V1") for what the code
+  actually looks like and `docs/commands.md` for the keys.
+
+  Two things changed shape during the build, both worth recording:
+
+  - **A merge is a new commit, not another parent on an existing one.** The
+    first cut modelled it as `AddParent { child, parent }`, which is a thing
+    git cannot do — it never adds a parent to a commit, it makes a new one
+    whose parents are the two tips. So the projection grew `Pending` nodes:
+    commits the plan would create, with no object behind them, drawn as blocks
+    like any other so the user can see the merge before agreeing to it.
+  - **A drag preview must be validated like a committed edit.** Setting the
+    provisional edit directly bypassed `Plan::push`'s cycle check, so dragging
+    an arrow over its own child drew a cyclic graph — lanes and all — and only
+    objected on release. `state::VcsState::validated` runs the same check
+    before previewing, so the picture is always one that could exist.
+
 - **V2** — a merge-conflict resolver view (its own `View` variant: ours/theirs/
-  merged panes over a conflicted file).
+  merged panes over a conflicted file). Until then a conflict stops the apply,
+  names the files, and is resolved in the ordinary editor followed by
+  `:vc-continue`.
+- **Also open** — search within the graph, and replaying a merge (which needs
+  the equivalent of `rebase --rebase-merges`; today it is refused by name).
 - **Not planned** — bisect, submodules, worktrees, interactive add by hunk.
