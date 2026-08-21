@@ -8,6 +8,30 @@ use crate::{
     source::SourceId,
 };
 
+/// The geometry every notebook height question is measured against, taken from
+/// the terminal the frame will be drawn into.
+///
+/// The one place `exec` derives it.  Five call sites used to build the same
+/// `(cell_pixel_size, viewport_width - 2, word_wrap)` triple by hand, and the
+/// renderer built a sixth from `area.width` — six chances for the scroll math
+/// and the renderer to disagree about how tall a cell is.
+pub(crate) fn geometry(app: &App) -> crate::notebook_ui::Geometry {
+    crate::notebook_ui::Geometry::new(
+        app.viewport_width as u16,
+        app.graphics.cell_pixel_size,
+        app.config.editor.word_wrap,
+    )
+}
+
+/// The output caps for cell `idx`, honouring whether the user expanded it.
+pub(crate) fn output_limits(app: &App, idx: usize) -> crate::notebook_ui::OutputLimits {
+    let expanded = app
+        .notebook
+        .as_ref()
+        .is_some_and(|(_, state)| state.is_output_expanded(idx));
+    crate::notebook_ui::OutputLimits::new(&app.config.notebook, expanded)
+}
+
 /// The fix-up ritual every structural cell change (add / delete / convert /
 /// structural undo-redo) must run: reload the focused cell into `app.buffer`,
 /// resync the notebook with the LSP (cell URIs shift on add/delete), and

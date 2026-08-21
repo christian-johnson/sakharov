@@ -175,17 +175,14 @@ fn nb_layout(app: &App) -> Option<NbLayout> {
     if nb.cells.is_empty() {
         return None;
     }
-    let cell_px = app.graphics.cell_pixel_size;
-    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
-    let word_wrap = app.config.editor.word_wrap;
+    let geo = super::notebook::geometry(app);
     let focused = state.focused_cell.min(nb.cells.len() - 1);
 
-    let heights = crate::notebook_ui::nb_cell_heights(
-        nb, state, &app.buffer.rope, &app.config.notebook, cell_px, avail_cols, word_wrap,
-    );
+    let heights =
+        crate::notebook_ui::nb_cell_heights(nb, state, &app.buffer.rope, &app.config.notebook, geo);
 
-    let wrap_width = crate::notebook_ui::cell_wraps(&nb.cells[focused], word_wrap)
-        .then(|| crate::notebook_ui::cell_text_width(avail_cols));
+    let wrap_width = crate::notebook_ui::cell_wraps(&nb.cells[focused], geo.word_wrap)
+        .then(|| crate::notebook_ui::cell_text_width(geo.inner_cols));
 
     Some(NbLayout { heights, focused, wrap_width })
 }
@@ -255,8 +252,7 @@ fn notebook_update_scroll(app: &mut App, viewport: usize, scroll_off: usize) {
     }
     let Some(layout) = nb_layout(app) else { return };
     let cursor = app.selection.head;
-    let cell_px = app.graphics.cell_pixel_size;
-    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
+    let geo = super::notebook::geometry(app);
 
     let Some((nb, state)) = app.notebook.as_mut() else { return };
     if nb.cells.is_empty() {
@@ -279,9 +275,8 @@ fn notebook_update_scroll(app: &mut App, viewport: usize, scroll_off: usize) {
                 let limits = crate::notebook_ui::OutputLimits::new(
                     &app.config.notebook, state.is_output_expanded(focused),
                 );
-                let out_rows = crate::notebook_ui::cell_output_rows(
-                    focused_cell, limits, cell_px, avail_cols,
-                );
+                let out_rows =
+                    crate::notebook_ui::cell_output_rows(focused_cell, limits, geo);
                 if out_rows == 0 {
                     // Outputs vanished (e.g. cleared) — fall back to the source.
                     state.output_row = None;

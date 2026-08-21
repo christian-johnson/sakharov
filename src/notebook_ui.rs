@@ -146,6 +146,46 @@ impl OutputLimits {
     }
 }
 
+/// Columns a cell's left and right borders cost.
+const BORDER_COLS: u16 = 2;
+/// Narrowest inner width a cell is ever measured against, so a very narrow
+/// terminal degrades rather than producing zero-width arithmetic.
+const MIN_INNER_COLS: u16 = 4;
+
+/// The measurements every notebook height question depends on.
+///
+/// The scroll math and the renderer MUST agree row-for-row (see the invariant
+/// in CLAUDE.md), and they can only do that if they measure against the same
+/// numbers.  These used to be re-derived by hand at six places — five in
+/// `exec`, from `app.viewport_width`, and one in the renderer, from
+/// `area.width` — two independent derivations of one quantity that agreed only
+/// by coincidence, and disagreed outright below four columns, where only the
+/// renderer clamped.
+///
+/// Build it once per frame from the content area the notebook is drawn into,
+/// and pass it down.
+#[derive(Debug, Clone, Copy)]
+pub struct Geometry {
+    /// Terminal cell size in pixels, for sizing images (`None` = assume).
+    pub cell_px: Option<(u16, u16)>,
+    /// Columns available inside a cell's borders.
+    pub inner_cols: u16,
+    /// Whether code cells soft-wrap (`editor.word_wrap`).  Markdown cells wrap
+    /// regardless — see [`cell_wraps`].
+    pub word_wrap: bool,
+}
+
+impl Geometry {
+    /// Derive from the width of the area the notebook is drawn into.
+    pub fn new(content_width: u16, cell_px: Option<(u16, u16)>, word_wrap: bool) -> Self {
+        Self {
+            cell_px,
+            inner_cols: content_width.saturating_sub(BORDER_COLS).max(MIN_INNER_COLS),
+            word_wrap,
+        }
+    }
+}
+
 /// True when a cell's content word-wraps to the cell width.
 ///
 /// Markdown cells always wrap — prose, in both the rendered view and the
@@ -249,13 +289,16 @@ pub fn render(
     active: &ActiveCellView<'_>,
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     nb_config: &crate::config::NotebookConfig,
-    cell_pixel_size: Option<(u16, u16)>,
+    cell_px: Option<(u16, u16)>,
     cache: &mut CellHighlightCache,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     if area.height == 0 {
         return (vec![], None);
     }
-    render_cells(frame, state, nb, active, lsp_diagnostics, area, nb_config, cell_pixel_size, cache)
+    // Built once, from the area we were actually given to draw into, and
+    // passed down.  Everything that measures a cell measures against this.
+    let geo = Geometry::new(area.width, cell_px, active.word_wrap);
+    render_cells(frame, state, nb, active, lsp_diagnostics, area, nb_config, geo, cache)
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +314,7 @@ fn render_cells(
     lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     area: Rect,
     nb_config: &crate::config::NotebookConfig,
-    cell_pixel_size: Option<(u16, u16)>,
+    geo: Geometry,
     cache: &mut CellHighlightCache,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
     let mut image_requests = Vec::new();
@@ -284,10 +327,7 @@ fn render_cells(
     let mut skip = state.scroll_offset as u16;
 
     // Inner column width available for cell content (subtract left+right borders).
-    let inner_cols = area.width.saturating_sub(2).max(4);
-    let heights = nb_cell_heights(
-        nb, state, active.rope, nb_config, cell_pixel_size, inner_cols, active.word_wrap,
-    );
+    let heights = nb_cell_heights(nb, state, active.rope, nb_config, geo);
 
     for (cell_idx, cell) in nb.cells.iter().enumerate() {
         if cell_idx < state.scroll_cell {
@@ -318,7 +358,7 @@ fn render_cells(
             let cursor_screen = render_cell(
                 frame, state, nb, cell, cell_idx, is_focused, is_folded, clip_top,
                 full_height, cell_rect, active, lsp_diagnostics, &mut image_requests,
-                cache, limits, cell_pixel_size,
+                cache, limits, geo,
             );
             if is_focused {
                 focused_cell_screen_pos = cursor_screen;
@@ -359,7 +399,7 @@ fn render_cell(
     image_requests: &mut Vec<ImageRequest>,
     cache: &mut CellHighlightCache,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
+    geo: Geometry,
 ) -> Option<(u16, u16)> {
     let th = crate::theme::active();
     // Border colour encodes cell execution state
@@ -417,7 +457,7 @@ fn render_cell(
 
     render_cell_content(
         frame, nb, cell, cell_idx, is_focused, inner, active, lsp_diagnostics,
-        image_requests, cache, limits, cell_pixel_size, content_skip,
+        image_requests, cache, limits, geo, content_skip,
     )
 }
 
@@ -438,7 +478,7 @@ fn render_cell_content(
     image_requests: &mut Vec<ImageRequest>,
     cache: &mut CellHighlightCache,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
+    geo: Geometry,
     skip_rows: usize,
 ) -> Option<(u16, u16)> {
     // For the focused cell, use the live buffer rope; otherwise use stored source.
@@ -611,7 +651,7 @@ fn render_cell_content(
         // it's drawn.
         let (out_cursor_char, out_sel) = if is_focused {
             active.output_row.map(|row| {
-                let vrope = output_virtual_rope(cell, limits, cell_pixel_size, area.width);
+                let vrope = output_virtual_rope(cell, limits, geo);
                 let to_char = |r: usize, c: usize| {
                     let r = r.min(vrope.len_lines().saturating_sub(1));
                     let line_start = vrope.line_to_char(r);
@@ -654,7 +694,7 @@ fn render_cell_content(
             }
             render_output(
                 frame, output, area, &mut current_row, image_requests,
-                cell_pixel_size, &mut out_ctx,
+                geo, &mut out_ctx,
             );
         }
         if out_ctx.cursor_pos.is_some() {
@@ -822,10 +862,10 @@ pub fn compute_image_rows(
     png_w: u32,
     png_h: u32,
     available_cols: u16,
-    cell_pixel_size: Option<(u16, u16)>,
+    cell_px: Option<(u16, u16)>,
     max_image_rows: u16,
 ) -> u16 {
-    let (cell_h, cell_w) = cell_pixel_size.unwrap_or((18, 9));
+    let (cell_h, cell_w) = cell_px.unwrap_or((18, 9));
 
     // Natural terminal dimensions at 1:1 PNG-pixel-to-terminal-pixel mapping.
     let natural_cols = png_w / cell_w as u32;
@@ -855,16 +895,14 @@ pub fn cell_display_height(
     source: &ropey::Rope,
     cell: &Cell,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
-    word_wrap: bool,
+    geo: Geometry,
 ) -> u16 {
-    let source_lines = if cell_wraps(cell, word_wrap) {
-        wrapped_source_rows(source, cell_text_width(available_cols)).max(1)
+    let source_lines = if cell_wraps(cell, geo.word_wrap) {
+        wrapped_source_rows(source, cell_text_width(geo.inner_cols)).max(1)
     } else {
         source.len_lines().max(1) as u16
     };
-    let out_rows = cell_output_rows(cell, limits, cell_pixel_size, available_cols);
+    let out_rows = cell_output_rows(cell, limits, geo);
     let output_h = if out_rows > 0 { 1 + out_rows as u16 } else { 0 }; // 1 = divider row
     2 + source_lines + output_h // 2 = top border + bottom border
 }
@@ -879,14 +917,12 @@ pub(crate) fn nb_cell_height(
     folded: bool,
     source: &ropey::Rope,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
-    word_wrap: bool,
+    geo: Geometry,
 ) -> usize {
     if folded {
         3 // top border + 1 summary line + bottom border
     } else {
-        cell_display_height(source, cell, limits, cell_pixel_size, available_cols, word_wrap)
+        cell_display_height(source, cell, limits, geo)
             as usize
     }
 }
@@ -902,9 +938,7 @@ pub(crate) fn nb_cell_heights(
     state: &NotebookState,
     active_rope: &ropey::Rope,
     nb_config: &crate::config::NotebookConfig,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
-    word_wrap: bool,
+    geo: Geometry,
 ) -> Vec<usize> {
     nb.cells
         .iter()
@@ -914,7 +948,7 @@ pub(crate) fn nb_cell_heights(
             let folded = state.is_cell_folded(idx);
             let source = if is_focused { active_rope } else { &cell.source };
             let limits = OutputLimits::new(nb_config, state.is_output_expanded(idx));
-            nb_cell_height(cell, folded, source, limits, cell_pixel_size, available_cols, word_wrap)
+            nb_cell_height(cell, folded, source, limits, geo)
         })
         .collect()
 }
@@ -926,15 +960,14 @@ pub(crate) fn nb_cell_heights(
 pub(crate) fn cell_output_rows(
     cell: &Cell,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
+    geo: Geometry,
 ) -> usize {
     if cell.cell_type != CellType::Code {
         return 0;
     }
     cell.outputs
         .iter()
-        .map(|o| single_output_height_count(o, limits, cell_pixel_size, available_cols) as usize)
+        .map(|o| single_output_height_count(o, limits, geo) as usize)
         .sum()
 }
 
@@ -983,13 +1016,12 @@ fn image_available_cols(available_cols: u16) -> u16 {
 fn mime_image_rows(
     data: &MimeData,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
+    geo: Geometry,
 ) -> Option<u16> {
     let png = data.image_png.as_ref()?;
-    let avail = image_available_cols(available_cols);
+    let avail = image_available_cols(geo.inner_cols);
     Some(match png_pixel_size(png) {
-        Some((pw, ph)) => compute_image_rows(pw, ph, avail, cell_pixel_size, limits.image_rows),
+        Some((pw, ph)) => compute_image_rows(pw, ph, avail, geo.cell_px, limits.image_rows),
         None => limits.image_rows,
     })
 }
@@ -997,17 +1029,16 @@ fn mime_image_rows(
 fn single_output_height_count(
     output: &Output,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
+    geo: Geometry,
 ) -> u16 {
-    let width = output_text_width(available_cols);
+    let width = output_text_width(geo.inner_cols);
     match output {
         Output::Stream { text, .. } => {
             let lines: Vec<&str> = text.lines().collect();
             truncated_rows(&lines, limits.max_lines, width) as u16
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-            mime_image_rows(data, limits, cell_pixel_size, available_cols).unwrap_or_else(|| {
+            mime_image_rows(data, limits, geo).unwrap_or_else(|| {
                 data.text_plain
                     .as_deref()
                     .map(|t| {
@@ -1042,8 +1073,7 @@ fn single_output_height_count(
 pub(crate) fn output_rows_content(
     cell: &Cell,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
+    geo: Geometry,
 ) -> Vec<String> {
     if cell.cell_type != CellType::Code {
         return Vec::new();
@@ -1068,7 +1098,7 @@ pub(crate) fn output_rows_content(
         }
     }
 
-    let width = output_text_width(available_cols);
+    let width = output_text_width(geo.inner_cols);
     let mut rows = Vec::new();
     for output in &cell.outputs {
         match output {
@@ -1077,7 +1107,7 @@ pub(crate) fn output_rows_content(
                 push_truncated_lines(&mut rows, &lines, limits.max_lines, width);
             }
             Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-                if let Some(n) = mime_image_rows(data, limits, cell_pixel_size, available_cols) {
+                if let Some(n) = mime_image_rows(data, limits, geo) {
                     for i in 0..n {
                         rows.push(if i == 0 { "[image]".to_string() } else { String::new() });
                     }
@@ -1104,10 +1134,9 @@ pub(crate) fn output_rows_content(
 pub(crate) fn output_virtual_rope(
     cell: &Cell,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
+    geo: Geometry,
 ) -> ropey::Rope {
-    let rows = output_rows_content(cell, limits, cell_pixel_size, available_cols);
+    let rows = output_rows_content(cell, limits, geo);
     ropey::Rope::from_str(&rows.join("\n"))
 }
 
@@ -1123,21 +1152,20 @@ pub(crate) fn error_frame_at_output_row(
     cell: &Cell,
     output_row: usize,
     limits: OutputLimits,
-    cell_pixel_size: Option<(u16, u16)>,
-    available_cols: u16,
+    geo: Geometry,
 ) -> Option<&crate::notebook::ErrorFrame> {
     if cell.cell_type != CellType::Code {
         return None;
     }
     let mut base = 0usize;
     for output in &cell.outputs {
-        let h = single_output_height_count(output, limits, cell_pixel_size, available_cols) as usize;
+        let h = single_output_height_count(output, limits, geo) as usize;
         if output_row < base + h {
             if let Output::Error { ename, evalue, traceback, frames } = output {
                 // Walk the block's wrapped rows: the headline first, then each
                 // traceback line's own (possibly multi-row) span. A frame's link
                 // covers every row its line wrapped onto.
-                let width = output_text_width(available_cols);
+                let width = output_text_width(geo.inner_cols);
                 let headline = format!("{ename}: {evalue}");
                 let mut row = base + wrap_segments(&headline, width).len();
                 for (i, tb_line) in traceback.iter().take(limits.max_traceback).enumerate() {
@@ -1441,7 +1469,7 @@ fn render_output(
     area: Rect,
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
-    cell_pixel_size: Option<(u16, u16)>,
+    geo: Geometry,
     octx: &mut OutputCtx,
 ) {
     let th = crate::theme::active();
@@ -1467,7 +1495,7 @@ fn render_output(
         }
 
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
-            render_mime_data(frame, data, area, current_row, image_requests, cell_pixel_size, octx);
+            render_mime_data(frame, data, area, current_row, image_requests, geo, octx);
         }
 
         Output::Error { ename, evalue, traceback, frames } => {
@@ -1536,8 +1564,8 @@ fn png_pixel_size(data: &[u8]) -> Option<(u32, u32)> {
 /// Formula: cols = rows × cell_h_px × png_w / (png_h × cell_w_px)
 ///
 /// Falls back to a 2:1 cell ratio when actual pixel dimensions are unavailable.
-fn estimated_image_cols(png_w: u32, png_h: u32, rows: u16, cell_pixel_size: Option<(u16, u16)>) -> u16 {
-    let (cell_h, cell_w) = cell_pixel_size.unwrap_or((18, 9));
+fn estimated_image_cols(png_w: u32, png_h: u32, rows: u16, cell_px: Option<(u16, u16)>) -> u16 {
+    let (cell_h, cell_w) = cell_px.unwrap_or((18, 9));
     let cols = (rows as u64) * (cell_h as u64) * (png_w as u64)
         / ((png_h as u64) * (cell_w as u64));
     cols.clamp(4, 512) as u16
@@ -1550,7 +1578,7 @@ fn render_mime_data(
     area: Rect,
     current_row: &mut u16,
     image_requests: &mut Vec<ImageRequest>,
-    cell_pixel_size: Option<(u16, u16)>,
+    geo: Geometry,
     octx: &mut OutputCtx,
 ) {
     if let Some(png) = &data.image_png {
@@ -1558,7 +1586,7 @@ fn render_mime_data(
         // figsize.  image_rows acts as a cap, not a fixed height. Uses the same
         // `mime_image_rows` the height model calls, so the two never disagree on
         // row count.
-        let natural_rows = mime_image_rows(data, octx.limits, cell_pixel_size, area.width)
+        let natural_rows = mime_image_rows(data, octx.limits, geo)
             .expect("data.image_png just matched Some above");
 
         // Walk every image row through the same skip/cursor/selection
@@ -1587,7 +1615,7 @@ fn render_mime_data(
             // Placeholder width = the same column count Kitty will use so the
             // dark background matches the rendered image footprint exactly.
             let placeholder_cols = if let Some((pw, ph)) = png_pixel_size(png) {
-                estimated_image_cols(pw, ph, natural_rows, cell_pixel_size).min(image_width)
+                estimated_image_cols(pw, ph, natural_rows, geo.cell_px).min(image_width)
             } else {
                 image_width
             };
@@ -1672,6 +1700,27 @@ fn single_row(area: Rect, row: u16) -> Rect {
 mod tests {
     use super::*;
 
+    /// Geometry for a test measured against `inner_cols` columns inside the
+    /// cell borders, with no known terminal pixel size.
+    fn geo_of(inner_cols: u16, word_wrap: bool) -> Geometry {
+        Geometry { cell_px: None, inner_cols, word_wrap }
+    }
+
+    /// The scroll math and the renderer must measure a cell against the same
+    /// width or their row counts drift.  They used to derive it separately —
+    /// `app.viewport_width - 2` in `exec`, `area.width - 2` in the renderer —
+    /// and only the renderer clamped, so below four columns they disagreed
+    /// outright.  One constructor, one answer.
+    #[test]
+    fn geometry_subtracts_the_borders_and_never_goes_below_the_floor() {
+        assert_eq!(Geometry::new(80, None, false).inner_cols, 80 - BORDER_COLS);
+        // Narrow terminals clamp rather than producing zero-width arithmetic.
+        for w in 0..=BORDER_COLS + MIN_INNER_COLS {
+            let inner = Geometry::new(w, None, false).inner_cols;
+            assert!(inner >= MIN_INNER_COLS, "width {w} gave inner_cols {inner}");
+        }
+    }
+
     /// The area `app::draw_frame` hands the notebook renderer: the frame minus
     /// the two chrome rows.  Tests draw into a full frame, so they have to make
     /// the same split the real caller does.
@@ -1704,14 +1753,14 @@ mod tests {
         // Markdown wraps in both the rendered view and the source view —
         // word_wrap toggle irrelevant.
         let md = make(CellType::Markdown, true);
-        assert_eq!(cell_display_height(&md.source, &md, limits, None, inner_cols, false), 2 + expected_rows);
+        assert_eq!(cell_display_height(&md.source, &md, limits, geo_of(inner_cols, false)), 2 + expected_rows);
         let md_src = make(CellType::Markdown, false);
-        assert_eq!(cell_display_height(&md_src.source, &md_src, limits, None, inner_cols, false), 2 + expected_rows);
+        assert_eq!(cell_display_height(&md_src.source, &md_src, limits, geo_of(inner_cols, false)), 2 + expected_rows);
 
         // Code cells follow the word_wrap toggle.
         let code = make(CellType::Code, false);
-        assert_eq!(cell_display_height(&code.source, &code, limits, None, inner_cols, false), 2 + 1);
-        assert_eq!(cell_display_height(&code.source, &code, limits, None, inner_cols, true), 2 + expected_rows);
+        assert_eq!(cell_display_height(&code.source, &code, limits, geo_of(inner_cols, false)), 2 + 1);
+        assert_eq!(cell_display_height(&code.source, &code, limits, geo_of(inner_cols, true)), 2 + expected_rows);
     }
 
     /// Navigating through a *rendered* markdown cell must keep the cursor
@@ -1807,7 +1856,7 @@ mod tests {
 
         let active_rope = nb.cells[0].source.clone();
         let heights = nb_cell_heights(
-            &nb, &state, &active_rope, &crate::config::NotebookConfig::default(), None, 40, false,
+            &nb, &state, &active_rope, &crate::config::NotebookConfig::default(), geo_of(40, false),
         );
         assert_eq!(heights[0], 3, "folded focused cell must collapse to the 3-row summary");
     }
@@ -1878,7 +1927,7 @@ mod tests {
             // Terminal tall enough for the whole cell plus the 2 status rows.
             let width = 80u16;
             let expected =
-                cell_display_height(&rope, &nb.cells[0], limits, None, width - 2, false);
+                cell_display_height(&rope, &nb.cells[0], limits, geo_of(width - 2, false));
             let backend = ratatui::backend::TestBackend::new(width, expected + 4);
             let mut terminal = ratatui::Terminal::new(backend).unwrap();
             terminal
@@ -1934,10 +1983,10 @@ mod tests {
         let avail = width - 2;
         let limits = OutputLimits::new(&cfg, false);
 
-        let rows = output_rows_content(&cell, limits, None, avail);
+        let rows = output_rows_content(&cell, limits, geo_of(avail, false));
         assert!(rows.len() > 1, "a 171-char line must wrap at width {avail}");
         assert_eq!(
-            cell_output_rows(&cell, limits, None, avail),
+            cell_output_rows(&cell, limits, geo_of(avail, false)),
             rows.len(),
             "height model and row content disagree on the wrapped row count",
         );
@@ -1969,7 +2018,7 @@ mod tests {
             // `editor.word_wrap` is off: output wraps regardless of the toggle.
             word_wrap: false,
         };
-        let height = cell_display_height(&rope, &nb.cells[0], limits, None, avail, false) + 4;
+        let height = cell_display_height(&rope, &nb.cells[0], limits, Geometry { cell_px: None, inner_cols: avail, word_wrap: false }) + 4;
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
@@ -2248,14 +2297,14 @@ mod tests {
         let limits = OutputLimits::new(&cfg, false);
         // The frame's File line is the 2nd traceback row → base 2 (stream) +
         // 1 (headline) + 1 (tb_index) = output row 4.
-        let hit = error_frame_at_output_row(&cell, 4, limits, None, 80);
+        let hit = error_frame_at_output_row(&cell, 4, limits, geo_of(80, false));
         assert!(hit.is_some(), "output row 4 must resolve to the frame");
         assert_eq!(hit.unwrap().line, 1);
         // The headline row (2) and non-frame traceback rows are not links.
-        assert!(error_frame_at_output_row(&cell, 2, limits, None, 80).is_none());
-        assert!(error_frame_at_output_row(&cell, 3, limits, None, 80).is_none());
+        assert!(error_frame_at_output_row(&cell, 2, limits, geo_of(80, false)).is_none());
+        assert!(error_frame_at_output_row(&cell, 3, limits, geo_of(80, false)).is_none());
         // A row inside the leading stream isn't a link either.
-        assert!(error_frame_at_output_row(&cell, 0, limits, None, 80).is_none());
+        assert!(error_frame_at_output_row(&cell, 0, limits, geo_of(80, false)).is_none());
     }
 
     #[test]

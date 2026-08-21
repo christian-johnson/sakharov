@@ -1509,15 +1509,12 @@ fn notebook_vertical(app: &App) -> bool {
 /// `j`/`k` reach every row of an expanded block.  Used by the output-block
 /// navigation below.
 fn nb_output_rows(app: &App, cell_idx: usize) -> usize {
-    let cell_px = app.graphics.cell_pixel_size;
-    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
-    let Some((nb, state)) = app.notebook.as_ref() else { return 0 };
-    let limits = crate::notebook_ui::OutputLimits::new(
-        &app.config.notebook, state.is_output_expanded(cell_idx),
-    );
+    let geo = notebook::geometry(app);
+    let limits = notebook::output_limits(app, cell_idx);
+    let Some((nb, _)) = app.notebook.as_ref() else { return 0 };
     nb.cells
         .get(cell_idx)
-        .map(|cell| crate::notebook_ui::cell_output_rows(cell, limits, cell_px, avail_cols))
+        .map(|cell| crate::notebook_ui::cell_output_rows(cell, limits, geo))
         .unwrap_or(0)
 }
 
@@ -1721,14 +1718,11 @@ fn rope_line_content_len(rope: &ropey::Rope, line_idx: usize) -> usize {
 /// renderer used to lay it out, so char addresses agree with what's on
 /// screen. `None` when no notebook is open or there's no focused cell.
 fn focused_output_rope(app: &App) -> Option<ropey::Rope> {
+    let geo = notebook::geometry(app);
     let (nb, state) = app.notebook.as_ref()?;
+    let limits = notebook::output_limits(app, state.focused_cell);
     let cell = nb.cells.get(state.focused_cell)?;
-    let limits = crate::notebook_ui::OutputLimits::new(
-        &app.config.notebook, state.is_output_expanded(state.focused_cell),
-    );
-    let cell_px = app.graphics.cell_pixel_size;
-    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
-    Some(crate::notebook_ui::output_virtual_rope(cell, limits, cell_px, avail_cols))
+    Some(crate::notebook_ui::output_virtual_rope(cell, limits, geo))
 }
 
 /// Apply a `motion::*` function to the read-only output-text cursor exactly
@@ -1857,8 +1851,7 @@ fn goto_focused_cell_error(app: &mut App) {
 /// — jump to the exact source line that frame names. A no-op when the output
 /// cursor isn't on a navigable frame.
 fn follow_output_error_link(app: &mut App) {
-    let cell_px = app.graphics.cell_pixel_size;
-    let avail_cols = app.viewport_width.saturating_sub(2) as u16;
+    let geo = notebook::geometry(app);
     let target = app.notebook.as_ref().and_then(|(nb, state)| {
         let orow = state.output_row?;
         let idx = state.focused_cell;
@@ -1867,7 +1860,7 @@ fn follow_output_error_link(app: &mut App) {
             &app.config.notebook, state.is_output_expanded(idx),
         );
         let frame = crate::notebook_ui::error_frame_at_output_row(
-            cell, orow, limits, cell_px, avail_cols,
+            cell, orow, limits, geo,
         )?;
         resolve_error_frame(nb, frame)
     });
