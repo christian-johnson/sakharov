@@ -176,7 +176,10 @@ fn border_style(block: &Block, cursor: &Cursor) -> (Style, bool) {
     let base = match block.kind {
         BlockKind::Head => th.vcs_head,
         BlockKind::Pending => th.vcs_pending,
-        BlockKind::Commit => th.vcs_block,
+        // By lane, which is what a branch looks like here: a first-parent
+        // chain in its own column.  Colouring every block the same made two
+        // branches side by side tellable apart only by reading their labels.
+        BlockKind::Commit => th.vcs_lane(block.lane),
     };
     (Style::default().fg(base), false)
 }
@@ -343,9 +346,17 @@ fn draw_commit_contents(
 fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     let th = theme::active();
     let this = Focus::Edge { child: edge.child.clone(), slot: edge.slot };
+    // An arrow belongs to the commit it leaves, so it takes that lane's
+    // colour and the chain stays one colour from tip to root.  HEAD's arrow is
+    // not a parent link and keeps the neutral edge colour.
+    let base = if edge.child.as_str() == "HEAD" {
+        th.vcs_edge
+    } else {
+        th.vcs_lane(edge.from_lane)
+    };
     let style = cursor
         .style_for(&this)
-        .unwrap_or_else(|| Style::default().fg(th.vcs_edge));
+        .unwrap_or_else(|| Style::default().fg(base));
 
     let from_col = layout.lane_col(edge.from_lane) + 2;
     let to_col = layout.lane_col(edge.to_lane) + 2;

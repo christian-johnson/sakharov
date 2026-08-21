@@ -1005,6 +1005,27 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   impossible to construct as fixtures otherwise.  `vcs/apply.rs`'s tests do drive a
   **real repository** in a temp dir — that layer's whole job is driving git, and a
   mock would test the mock.
+- **Navigation during a drag walks the *un-previewed* graph**
+  (`VcsState::stable_layout`).  The preview reshapes the very graph the cursor
+  is moving through, so stepping through the previewed layout meant each `j`
+  changed where everything was and the next `j` went somewhere unrelated — the
+  preview blinked on and off and the cursor stalled after two or three presses.
+  What the user is choosing between is *things*, and the set of things is the
+  same either way; the renderer still highlights whatever the cursor landed on,
+  wherever the preview has since put it.
+- **A block is as wide as what is written in it** (`layout::natural_width`,
+  computed before anything is drawn and then clamped to `[MIN_LANE, MAX_LANE]`
+  and to the per-lane share).  Sizing lanes by dividing up the viewport drew a
+  72-column banner around a 30-column commit message on any wide terminal.
+- **Commits are coloured by lane** (`Theme::vcs_lane`, cycled through
+  `theme.vcs_lanes`; `[vcs] lanes` in a theme file).  A lane *is* a branch here
+  — a first-parent chain in its own column — so this is what makes two branches
+  tellable apart without reading a label.  Arrows take their child's lane
+  colour, so a chain is one colour tip to root.
+- **The view detaches HEAD only when there is no branch to name instead**
+  (`exec::vcs::checkout_plan`): `c` on a commit a local branch points at checks
+  out that branch.  Detached HEAD should be somewhere you arrive deliberately,
+  from the middle of history.
 - **`vcs::layout` is the single geometry model** (the graph's `table::layout`): block
   positions, lane assignment, arrow routing and the focusable list all come from it,
   so the renderer and the navigation cannot disagree about what is under the cursor.

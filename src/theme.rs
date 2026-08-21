@@ -240,9 +240,6 @@ pub struct NotebookSpec {
 /// own palette rather than in hard-coded ANSI.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VcsSpec {
-    /// Border of a commit block. Falls back to `ui.line_numbers`.
-    #[serde(default)]
-    pub block: Option<String>,
     /// Border of the block the cursor is on. Falls back to `ui.accent`.
     #[serde(default)]
     pub focus: Option<String>,
@@ -259,6 +256,11 @@ pub struct VcsSpec {
     /// Remote-tracking branch labels. Falls back to `ui.dim`.
     #[serde(default)]
     pub remote: Option<String>,
+    /// Per-lane commit colours, cycled by lane index so a chain of commits
+    /// reads as one branch at a glance. Falls back to a palette built from
+    /// `ui.accent`, `ui.success`, `ui.warning`, `ui.info` and `ui.error`.
+    #[serde(default)]
+    pub lanes: Option<Vec<String>>,
     /// Tag labels. Falls back to `ui.warning`.
     #[serde(default)]
     pub tag: Option<String>,
@@ -373,7 +375,6 @@ pub struct Theme {
     pub table_sparkline: Color,
 
     // --- Version-control view ---
-    pub vcs_block: Color,
     pub vcs_focus: Color,
     pub vcs_grabbed: Color,
     pub vcs_hash: Color,
@@ -383,12 +384,23 @@ pub struct Theme {
     pub vcs_head: Color,
     pub vcs_edge: Color,
     pub vcs_pending: Color,
+    /// One colour per lane, cycled — see [`Theme::vcs_lane`].
+    pub vcs_lanes: Vec<Color>,
     pub modes: ModeColors,
     /// Style per highlight index (see `highlight::HIGHLIGHT_NAMES` + `MD_*`).
     syntax: Vec<Style>,
 }
 
 impl Theme {
+
+    /// The colour for `lane`, cycled through the palette.
+    ///
+    /// Cycled rather than clamped: a repository with more branches than
+    /// colours must still tell adjacent lanes apart, and repeating the fifth
+    /// colour for every lane beyond it would not.
+    pub fn vcs_lane(&self, lane: usize) -> Color {
+        self.vcs_lanes[lane % self.vcs_lanes.len()]
+    }
     /// The classic terminal-inherited look (theme name "default").
     pub fn terminal_default() -> Self {
         resolve(&ThemeSpec::default(), "default")
@@ -656,7 +668,6 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     // Every one derives from a color the theme already defines: a commit graph
     // introduces no new *kind* of meaning, only new places to put branch-green,
     // hash-blue and warning-amber.
-    let vcs_block = pick(&[c(&spec.vcs.block)], line_numbers);
     let vcs_focus = pick(&[c(&spec.vcs.focus)], accent);
     let vcs_grabbed = pick(&[c(&spec.vcs.grabbed)], warning);
     let vcs_hash = pick(&[c(&spec.vcs.hash)], info);
@@ -666,6 +677,17 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     let vcs_head = pick(&[c(&spec.vcs.head)], accent);
     let vcs_edge = pick(&[c(&spec.vcs.edge)], line_numbers);
     let vcs_pending = pick(&[c(&spec.vcs.pending)], warning);
+    // Lanes are what a branch *is* on screen — a first-parent chain in its own
+    // column — so colouring by lane is what makes two branches tellable apart
+    // without reading a single label.  Five hues, cycled: enough that
+    // neighbouring lanes always differ, few enough that they stay distinct.
+    let vcs_lanes: Vec<Color> = spec
+        .vcs
+        .lanes
+        .as_ref()
+        .map(|names| names.iter().filter_map(|n| parse_color(n, pal)).collect::<Vec<_>>())
+        .filter(|colors: &Vec<Color>| !colors.is_empty())
+        .unwrap_or_else(|| vec![accent, success, warning, info, error]);
 
     // --- Syntax palette ---
     let keyword = c(&spec.syntax.keyword);
@@ -780,7 +802,6 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         nb_border_running,
         nb_border_ok,
         nb_border_error,
-        vcs_block,
         vcs_focus,
         vcs_grabbed,
         vcs_hash,
@@ -790,6 +811,7 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         vcs_head,
         vcs_edge,
         vcs_pending,
+        vcs_lanes,
         table_header,
         table_header_bg,
         table_grid,

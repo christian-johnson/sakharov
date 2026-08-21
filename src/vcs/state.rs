@@ -77,6 +77,19 @@ impl VcsState {
         layout::compute(&self.dag, &self.plan.project(&self.dag), width)
     }
 
+    /// The graph as it stands, ignoring any drag in progress.
+    ///
+    /// This is what navigation walks while something is held, and the reason
+    /// is that the preview reshapes the very graph the cursor is moving
+    /// through.  Stepping through the previewed layout meant each `j` changed
+    /// where everything was, so the next `j` went somewhere unrelated, the
+    /// preview blinked on and off, and the cursor stalled after two or three
+    /// presses.  What the user is choosing between is *things* — this commit
+    /// or that one — and those are the same set either way.
+    fn stable_layout(&self, width: u16) -> Layout {
+        layout::compute(&self.dag, &self.plan.project_committed(&self.dag), width)
+    }
+
     /// Replace the snapshot after a refresh, keeping the cursor where it can
     /// be kept.  The plan is dropped: it described a graph that no longer
     /// exists.
@@ -124,7 +137,12 @@ impl VcsState {
     /// Returns false when there was nowhere to go, so the caller can leave the
     /// screen alone rather than redraw an identical frame.
     pub fn step(&mut self, dir: Dir, width: u16) -> bool {
-        let layout = self.layout(width);
+        // While dragging, walk the un-previewed graph: see `stable_layout`.
+        let layout = if self.grabbed.is_some() {
+            self.stable_layout(width)
+        } else {
+            self.layout(width)
+        };
         let Some(current) = self.focus.clone() else {
             self.focus = layout.initial_focus();
             return self.focus.is_some();

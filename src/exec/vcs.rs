@@ -673,33 +673,66 @@ fn push(app: &mut App) {
 
 fn checkout(app: &mut App) {
     let Some(state) = app.vcs.as_ref() else { return };
-    // A branch under the cursor is what you meant; a bare commit is a detached
-    // checkout, which is legitimate but worth naming as such.
+    match checkout_plan(state) {
+        Some((args, report)) => {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            run_now(app, &args, &report);
+        }
+        None => app.messages.show("Nothing selected"),
+    }
+}
+
+/// Which checkout the cursor's position asks for, and how to report it.
+///
+/// Pulled out of [`checkout`] because the rule — and specifically *when this
+/// view is willing to detach HEAD* — is the interesting part, and the rest is
+/// shelling out.
+fn checkout_plan(state: &VcsState) -> Option<(Vec<String>, String)> {
+    let owned = |parts: [&str; 2]| parts.iter().map(|s| (*s).to_string()).collect();
+
+    // A branch under the cursor is what you meant.
     if let Some(branch) = state.focused_branch() {
         let local = state
             .dag
             .find_ref(&branch)
             .is_some_and(|r| r.kind == RefKind::Local);
         if local {
-            let args = ["checkout", branch.as_str()];
-            return run_now(app, &args, &format!("On {branch}"));
+            return Some((owned(["checkout", &branch]), format!("On {branch}")));
         }
         // Checking out a remote-tracking branch detaches HEAD, which is almost
-        // never what someone clicking `origin/main` wants.
+        // never what someone selecting `origin/main` wants.
         let local_name = branch.split_once('/').map_or(branch.as_str(), |(_, n)| n);
-        let args = ["checkout", "-B", local_name, branch.as_str()];
-        return run_now(app, &args, &format!("On {local_name}, tracking {branch}"));
+        return Some((
+            vec!["checkout".into(), "-B".into(), local_name.into(), branch.clone()],
+            format!("On {local_name}, tracking {branch}"),
+        ));
     }
-    let Some(commit) = state.focused_commit() else {
-        app.messages.show("Nothing selected");
-        return;
-    };
-    let args = ["checkout", "--detach", commit.as_str()];
-    run_now(
-        app,
-        &args,
-        &format!("HEAD detached at {} — make a branch here with :vc-branch <name>", commit.short()),
-    );
+
+    let commit = state.focused_commit()?;
+
+    // A commit that a local branch already points at *is* that branch, as far
+    // as anyone using this view is concerned.  Detaching there is technically
+    // what was asked for and almost never what was meant: you end up off every
+    // branch, and the next commit you make is unreachable the moment you leave
+    // it.  Detached HEAD should be somewhere you arrive deliberately — from a
+    // commit in the middle of history — not somewhere pressing `c` on the tip
+    // of `main` puts you.
+    if let Some(branch) = state
+        .dag
+        .local_branches()
+        .find(|r| r.target == commit)
+        .map(|r| r.name.clone())
+    {
+        return Some((owned(["checkout", &branch]), format!("On {branch}")));
+    }
+
+    Some((
+        owned(["checkout", "--detach"])
+            .into_iter()
+            .chain(std::iter::once(commit.to_string()))
+            .collect(),
+        format!("HEAD detached at {} — make a branch here with :vc-branch <name>", commit.short()),
+    ))
 }
 
 fn new_branch(app: &mut App, name: &str) {
@@ -1076,4 +1109,74 @@ mod tests {
         assert_eq!(state.focused_branch(), None);
         assert_eq!(state.focused_commit(), Some(Oid::new("c")));
     }
+    /// The cursor must walk the same path whether or not something is held.
+    ///
+    /// It did not: navigation stepped through the *previewed* layout, so each
+    /// press reshaped the graph it was about to step through again.  The
+    /// preview blinked on and off, the cursor stalled after two or three
+    /// presses, and the whole thing read as "the live preview doesn't work".
+    #[test]
+    fn navigating_while_holding_something_walks_the_same_path_as_navigating_free() {
+        let walk = |grab: bool| {
+            let mut app = app_in_graph();
+            app.vcs.as_mut().unwrap().focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+            if grab {
+                super::handle(&mut app, &Command::VcsGrab);
+                assert!(app.vcs.as_ref().unwrap().grabbed.is_some());
+            }
+            let mut seen = Vec::new();
+            for _ in 0..8 {
+                super::handle(&mut app, &Command::MoveUp);
+                seen.push(app.vcs.as_ref().unwrap().focus.clone());
+            }
+            seen
+        };
+        assert_eq!(walk(true), walk(false));
+    }
+
+    /// …and the preview really does follow the cursor, press by press, rather
+    /// than only appearing once the drag is released.
+    #[test]
+    fn the_preview_follows_the_cursor_during_a_drag() {
+        let mut app = app_in_graph();
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+        super::handle(&mut app, &Command::VcsGrab);
+
+        let mut previewed = Vec::new();
+        for _ in 0..8 {
+            super::handle(&mut app, &Command::MoveUp);
+            let state = app.vcs.as_ref().unwrap();
+            let projection = state.plan.project(&state.dag);
+            previewed.push(projection.parents(&state.dag, &Oid::new("c")).to_vec());
+        }
+        assert!(
+            previewed.iter().any(|p| p == &[Oid::new("f")]),
+            "walking up to `f` never previewed `c` following it: {previewed:?}"
+        );
+        // And none of it was decided: the stack is still empty.
+        assert!(app.vcs.as_ref().unwrap().plan.edits().is_empty());
+    }
+
+    /// Pressing `c` on the tip of a branch must check that branch out, not
+    /// detach at the commit it happens to point to.  A detached HEAD is
+    /// somewhere you should arrive deliberately, from the middle of history.
+    #[test]
+    fn checking_out_a_commit_a_branch_points_at_checks_out_the_branch() {
+        let mut app = app_in_graph();
+        let state = app.vcs.as_mut().unwrap();
+
+        // `f` is `main`'s tip, selected as a *commit* rather than as the label.
+        state.focus = Some(Focus::Commit(Oid::new("f")));
+        let (args, report) = super::checkout_plan(state).expect("a checkout");
+        assert_eq!(args, ["checkout", "main"]);
+        assert_eq!(report, "On main");
+
+        // A commit in the middle of history still detaches — that is a real
+        // thing to want, and there is no branch to name instead.
+        state.focus = Some(Focus::Commit(Oid::new("e")));
+        let (args, report) = super::checkout_plan(state).expect("a checkout");
+        assert_eq!(args, ["checkout", "--detach", "e"]);
+        assert!(report.contains("detached"), "{report}");
+    }
+
 }

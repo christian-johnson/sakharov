@@ -32,6 +32,14 @@ pub const HEAD_H: u16 = 3;
 pub const GAP: u16 = 2;
 /// Narrowest a lane may be before lanes start scrolling off instead.
 pub const MIN_LANE: u16 = 24;
+/// Columns budgeted for the relative age on a commit's metadata row.
+///
+/// An estimate rather than the rendered string: the width has to be settled
+/// before anything is drawn, and "11 months ago" is the longest this gets.
+const AGE_COLS: u16 = 14;
+/// Columns budgeted for the `+123 -45` change counts, right-aligned on the
+/// same row as the metadata.
+const COUNTS_COLS: u16 = 12;
 /// Widest a lane grows, so a single-branch repository does not draw one block
 /// stretched across a 200-column terminal.
 pub const MAX_LANE: u16 = 72;
@@ -223,7 +231,7 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
     let order = draw_order(dag, projection);
     let lanes = assign_lanes(&order, dag, projection);
     let lane_count = lanes.values().copied().max().map_or(1, |m| m + 1);
-    let lane_width = lane_width(width, lane_count);
+    let lane_width = lane_width(width, lane_count, natural_width(dag, projection, &order));
 
     let mut blocks = Vec::new();
     let mut row = 0u16;
@@ -370,10 +378,55 @@ fn free_lane(lanes: &mut Vec<Option<Oid>>) -> usize {
 /// repository would otherwise draw one block across the whole terminal, and a
 /// repository with nine branches would draw nine unreadable slivers (those
 /// scroll horizontally instead).
-fn lane_width(width: u16, lane_count: usize) -> u16 {
+fn lane_width(width: u16, lane_count: usize, natural: u16) -> u16 {
     let count = lane_count.max(1) as u16;
-    let each = (width + LANE_GAP) / count;
-    each.saturating_sub(LANE_GAP).clamp(MIN_LANE, MAX_LANE)
+    let each = ((width + LANE_GAP) / count).saturating_sub(LANE_GAP);
+    // A block is as wide as what is written in it, never as wide as the
+    // space that happens to be free.  Dividing the viewport up made every
+    // block on a wide terminal a 72-column banner around a 30-column commit
+    // message, which reads as a layout bug rather than as a graph.
+    natural.min(each).clamp(MIN_LANE, MAX_LANE)
+}
+
+/// The widest a block needs to be to hold its own contents, borders included.
+///
+/// Computed before anything is drawn, from the untruncated text: the drawing
+/// then truncates to whatever this settled on ([`labels_for`] does it for the
+/// ref labels), so a block is never wider than its longest line and never
+/// narrower than the clamps allow.
+fn natural_width(dag: &Dag, projection: &Projection, order: &[Oid]) -> u16 {
+    let mut inner = 0u16;
+    for id in order {
+        // The top border: hash, then every ref label that sits here.
+        let mut border = HASH_COLS;
+        for r in &dag.refs {
+            if projection.ref_target(dag, &r.name) == Some(id) {
+                border += r.name.chars().count() as u16 + 3;
+            }
+        }
+        inner = inner.max(border);
+
+        let summary = projection
+            .pending()
+            .iter()
+            .find(|p| p.id == *id)
+            .map(|p| p.summary.chars().count())
+            .or_else(|| dag.get(id).map(|c| c.summary.chars().count()))
+            .unwrap_or(0) as u16;
+        // Drawn at `left + 2`, so two columns of lead-in plus one of trailing
+        // room inside the right border.
+        inner = inner.max(summary + 3);
+
+        if let Some(commit) = dag.get(id) {
+            let meta = commit.author.chars().count() as u16 + 3 + AGE_COLS;
+            inner = inner.max(meta + 2 + COUNTS_COLS);
+        }
+    }
+    // The HEAD block's one line: `● ` plus the branch name.
+    if let Some(branch) = dag.head.branch.as_ref() {
+        inner = inner.max(branch.chars().count() as u16 + 4);
+    }
+    inner + 2
 }
 
 /// The ref labels on `id`'s block, with the column each starts at.
@@ -789,11 +842,50 @@ mod tests {
     /// branches must not become nine unreadable slivers.
     #[test]
     fn lane_width_is_clamped_at_both_ends() {
-        assert_eq!(lane_width(300, 1), MAX_LANE);
-        assert_eq!(lane_width(40, 9), MIN_LANE);
+        assert_eq!(lane_width(300, 1, 500), MAX_LANE);
+        assert_eq!(lane_width(40, 9, 500), MIN_LANE);
         // In between it divides the space up.
-        let mid = lane_width(120, 2);
+        let mid = lane_width(120, 2, 500);
         assert!((MIN_LANE..=MAX_LANE).contains(&mid), "{mid}");
+    }
+
+    /// A block is as wide as what is written in it.  Dividing the viewport up
+    /// instead drew a 72-column banner around a 30-column commit message on
+    /// any reasonably wide terminal.
+    #[test]
+    fn a_block_is_no_wider_than_its_contents() {
+        let (dag, projection, layout) = laid_out(300);
+        let natural = natural_width(&dag, &projection, &draw_order(&dag, &projection));
+        assert!(natural < MAX_LANE, "the fixture is short: {natural}");
+        assert_eq!(layout.lane_width, natural.max(MIN_LANE));
+        assert!(
+            layout.lane_width < MAX_LANE,
+            "a wide terminal stretched a short commit to {}",
+            layout.lane_width
+        );
+    }
+
+    /// …and long contents still get the room, up to the clamp.
+    #[test]
+    fn a_long_summary_widens_the_block() {
+        let long = "a commit message long enough that it needs the whole lane to itself";
+        let mut wide = commit("d", &["c"]);
+        wide.summary = long.into();
+        let dag = Dag::new(
+            vec![wide, commit("c", &[])],
+            vec![branch("feature", "d")],
+            Head::default(),
+            WorkTree::default(),
+            false,
+        );
+        let projection = Plan::default().project(&dag);
+        let layout = compute(&dag, &projection, 300);
+        assert!(
+            layout.lane_width >= long.chars().count() as u16,
+            "a {}-column summary got {} columns",
+            long.chars().count(),
+            layout.lane_width
+        );
     }
 
     /// A block full of tags must not draw past its own edge into the lane

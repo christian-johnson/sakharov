@@ -162,7 +162,9 @@ sparkline         = "#89ddff"  # header distribution glyphs (← table.numeric)
 # introduces no new *kind* of meaning, only new places to put branch-green,
 # hash-blue and warning-amber.
 [vcs]
-block   = "#3b4261"  # commit block border            (← ui.line_numbers)
+lanes   = ["#7aa2f7", "#9ece6a", "#e0af68", "#7dcfff", "#f7768e"]
+                     # one colour per lane, cycled: a branch is a lane, so
+                     # this is what makes two branches tellable apart
 focus   = "#7aa2f7"  # border of the block under the cursor (← ui.accent)
 grabbed = "#e0af68"  # border of whatever is being dragged  (← ui.warning)
 hash    = "#89ddff"  # abbreviated commit hashes      (← ui.info)
