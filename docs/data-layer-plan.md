@@ -4,7 +4,10 @@ Turning the notebook and the CSV grid into one dataset-exploration tool: a
 shared compute session, a source-agnostic dataframe layer over DuckDB and the
 Python kernel, and terminal-native plots.
 
-Line references are against `f905f0a`.
+Line references are against `f905f0a`, and so are the symbol names: this is
+a design record, not a description of current code. Some have since been
+renamed (`is_text_mutation` is now `view::refusal`; the three per-view stash
+maps are one `stash::Stashes`). See CLAUDE.md for the current shape.
 
 ## Shape of the work
 

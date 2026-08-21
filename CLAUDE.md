@@ -549,16 +549,16 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
 
 ### Data safety (Phase B hardening)
 - **Buffer switching never loses edits**: plain-file buffers are stashed in memory
-  (`app.file_buffers`, keyed by canonical path — rope, modified flag, *and* undo history) when
+  (`app.stashes`, keyed by `SourceId` — rope, modified flag, *and* undo history) when
   navigated away from, and restored on return; notebooks were already stashed in
-  `app.notebook_buffers`. `:bd` removes the stash entry.
+  the same map. `:bd` removes the stash entry (one `Stashes::discard`, not one per view).
 - **Buffer switching returns you to where you were**: `app.cursor_positions` records
   `(line, column)` per `SourceId` when a text buffer is left (`buffers::remember_cursor`, called
   from `teardown_current_buffer` *and* at the top of `open_path`, since the buffer being left may
   be the one being opened), and `open_path` reopens a plain file at that position instead of
   passing `0, 0` to `lsp::open_file_at` — whose explicit position is for callers that mean one
   (a jump, a diagnostic). Special buffers get the same treatment in `switch_to_special_buffer`.
-  Kept separate from `file_buffers` because it outlives it: a buffer that was never stashed
+  Kept separate from `stashes` because it outlives it: a buffer that was never stashed
   (`*scratch*`) still deserves to reopen where it was left. The intra-cell cursor of a notebook
   is *not* covered — `load_focused_cell` resets it on every cell move, in-session too.
 - **`:bd` reads the identity from `table::current_source_id`, not `app.buffer`**: in the table
@@ -607,7 +607,7 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   taught to one function rather than five
 - **The view is read-only.** While it is open `app.buffer` is a *detached empty
   buffer with no path*, so no save path in the editor can write over the data file;
-  `exec::table::is_text_mutation` refuses the edit/write commands on top of that
+  `crate::view::refusal` classifies the edit/write commands as `ReadOnly` on top of that
   (a `:wq` that fell through to the text path would have truncated the CSV)
 - **Modularity**: a new backend implements `table::TableSource`
   (`columns`/`row_count`/`loaded_rows`/`cell`/`ensure_rows`/`describe`) and nothing
@@ -715,8 +715,8 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   recovery and the unsaved-changes sweep. `switch_to_special_buffer` reads any
   other `*…*` name's rope from `special_buffer_ropes` (`*Messages*` stays the one
   special buffer rebuilt from a live source)
-- **Table sessions are stashed, not dropped** (`app.table_buffers`, keyed by
-  canonical path, mirroring `file_buffers`/`notebook_buffers`):
+- **Table sessions are stashed, not dropped** (`app.stashes`, the one map every
+  view stashes into, keyed by `SourceId`):
   `teardown_current_buffer` stashes and `open_as_table` restores, so `Enter` into
   a cell buffer and `:bd` back is a round trip to the *same cursor cell* rather
   than a re-parse. `:table-close` and `:bd` drop the stash (an explicit exit
@@ -728,7 +728,9 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   visidata muscle memory, and `q` is otherwise unbound in Normal mode. `H`/`L`
   also treat a cell buffer as sitting at its origin table's position in the
   buffer list
-- **`exec::table::refusal(cmd) -> Option<Refusal>`** classifies everything the
+- **`crate::view::refusal(cmd) -> Option<Refusal>`** classifies everything a
+  bufferless view doesn't implement — shared, since which commands need a rope
+  is a property of the commands. It classifies everything the
   grid doesn't implement — `ReadOnly` (edits/writes), `NeedsText` (LSP requests,
   `f`/`t`, `v`, jump/symbol/fold — all of which would read the empty buffer
   behind the grid and answer about nothing), `NotImplemented` (search, until
@@ -1030,8 +1032,10 @@ src/
                         buffer/symbol/diagnostic pickers, grep buffer/project)
     notebook.rs       — cell load/save/stash, notebook LSP open/close/reopen,
                         kernel exec/restart/interrupt, structural-edit helpers
-                        (ensure_focused_visible / after_structural_edit bundle the
-                        focus-fixup ritual; insert_new_cell / delete_cell / convert_cell)
+                        (after_structural_edit bundles the focus-fixup ritual;
+                        insert_new_cell / delete_cell / convert_cell), plus the
+                        cell-stack motion, output-text cursor, error-frame
+                        resolution and kernel event pump
   keymap.rs           — KeyBinding type + Keymap (HashMap-based, overrideable)
                         Separate notebook_navigate / notebook_edit maps
   input.rs            — Thin key dispatch; notebook mode + popups take priority
@@ -1105,7 +1109,13 @@ src/
   popup.rs            — Popup data model (list/completion/docs/code-actions)
   popup_input.rs      — key handling for popups (filter, navigate, confirm)
   popup_ui.rs         — ratatui rendering for popups + floats
-  ui.rs               — ratatui rendering for plain text editor + status bar
+  ui.rs               — ratatui rendering for plain text editor; render_chrome draws
+                        the status + command lines for EVERY view
+  view.rs             — View enum + Chrome (the one definition of the bottom two
+                        rows) + Refusal (why a bufferless view declines a text
+                        command). THE place a cross-cutting view concern lives
+  stash.rs            — Stashes/Stash: what each view left behind when navigated
+                        away from, one map keyed by SourceId
   compute/            — the Python engines, owned by App (not by any view)
     mod.rs            — KernelSession: persistent subprocess, request framing + background
                         reader thread streaming KernelMessages (async, non-blocking);
@@ -1127,6 +1137,51 @@ src/
 docs/
   commands.md    — full command reference (keep this up to date with command.rs)
 ```
+
+### Adding a view
+
+A view is whatever owns the screen and the keyboard. There is **no `dyn View`
+trait**: nearly every operation a view performs needs `&mut App`, so a trait
+object would have to be moved out of `App`, called, and put back every frame —
+fighting the borrow checker for no safety gain. What such a trait would have
+bought is enforcement, and that comes instead from every per-view decision
+being an **exhaustive `match` on `View`**. Never write `if view == X { … }`
+with an implicit `else`; a new variant must be a compile error, not a silent
+fall-through into the text path.
+
+Add the variant to `view::View` and the compiler will point at each site.
+What each owes the new view:
+
+| Site | Owes |
+|------|------|
+| `View::has_text_buffer` | is `app.buffer` real, or detached and path-less? |
+| `App::view` | how the variant is derived from `App`'s fields |
+| `App::current_source_id` | its identity — a `SourceId::Virtual` when it has no file |
+| `app::draw_frame` | a render arm; geometry comes from `view::Chrome::split` |
+| `exec::scroll::update_scroll` | its own scroll anchor |
+| `input::keymap_layer` + `keymap::Layer` | the few Normal bindings it shadows |
+| `exec::execute` | a `handle` interception, before the text path |
+| `exec::goto_hints` + `input::goto_command` | what `g` means there |
+| `ui::status_ctx` | how the status line names what is open |
+| `config::StatuslineConfig::layout_for` | its `[statusline.*]` module layout |
+| `stash::Stash` | what it leaves behind when navigated away from |
+| `exec::buffers::teardown_current_buffer` | stashing that state |
+| `exec::buffers::open_path` | routing back to it |
+
+Two things are shared rather than reimplemented:
+
+- **`view::Chrome::split(area)`** is the only definition of the status +
+  command rows. Draw into `chrome.content` and call `ui::render_chrome`;
+  never re-derive `height - 2`.
+- **`view::refusal(cmd)`** classifies every command that needs a rope. A view
+  whose `has_text_buffer()` is false intercepts what it implements, then asks
+  `refusal` about the rest and reports `Refusal::message(cmd, escape)` — where
+  `escape` is what the user types to get somewhere the command *would* work.
+  Do not write a second copy of that classification; which commands need text
+  is a property of the commands.
+
+A `debug_assert` at the top of `execute()` pins the second rule: a command
+`refusal` classifies must never reach the text path in a bufferless view.
 
 ### Key invariants
 - The `exec/` module is the only place that mutates `App` state in response to commands
@@ -1210,14 +1265,14 @@ docs/
 - **The table view never holds a writable handle on the data file** — `app.buffer`
   is detached (`Buffer::new_empty()`, `path = None`) while a table is open. Adding a
   code path that saves `app.buffer` must not assume it has a path, and any new
-  command that writes must be listed in `exec::table::is_text_mutation`.
+  command that writes must be classified `Refusal::ReadOnly` in `crate::view::refusal`.
 - **Opening a file by path goes through `exec::open_path`**, which picks the view
   from the extension. Don't call `lsp::open_file_at` directly from a "user picked a
   file" site — that bypasses the notebook and table views.
 - **Buffer/source identity is `source::SourceId`, never a bare `PathBuf`** — `File` holds
   the *canonicalised* path (so two spellings of one file are one buffer) and `Virtual` holds
   a `*…*` name for a source with no file (scratch, a `*cell …*` buffer, later a query
-  result). `open_buffers`, `file_buffers`, `notebook_buffers`, `table_buffers` and
+  result). `open_buffers`, `stashes` (one map, `stash::Stash` variant per view) and
   `exec::table::Session` are all keyed by it. Canonicalisation happens **only** inside
   `source.rs`: a comparison that re-derives it risks disagreeing. Anything that wants to
   *write* must go through `as_path()` and handle the `None`.
