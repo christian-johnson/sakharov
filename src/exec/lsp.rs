@@ -622,7 +622,7 @@ pub fn jump_to_location(app: &mut App, loc: &LspLocation) {
     if let Some((idx, line)) = cell_target {
         let current = app.notebook.as_ref().map(|(_, s)| s.focused_cell);
         if Some(idx) != current {
-            super::switch_focused_cell(app, idx);
+            super::notebook::switch_focused_cell(app, idx);
         }
         let char_idx = lsp_pos_to_char(&app.buffer.rope, line, loc.character);
         app.selection = Selection::point(char_idx);

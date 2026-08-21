@@ -471,3 +471,186 @@ pub(super) fn register_buffer(open_buffers: &mut Vec<SourceId>, path: &std::path
         open_buffers.push(id);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Saving and closing
+// ---------------------------------------------------------------------------
+
+/// `:w` / `:w!` — save whatever is open.
+///
+/// Format-on-save runs first when configured: a shell formatter saves the file
+/// itself, and the LSP path defers the save until the `FormattingResult`
+/// arrives, so both return early rather than saving twice.
+pub(super) fn write_buffer(app: &mut App, force: bool) {
+        if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
+            app.messages.show("Special buffer — nothing to save");
+            return;
+        }
+        // format_on_save: try shell formatter first, then LSP.
+        if app.notebook.is_none() && app.config.editor.format_on_save {
+            if super::run_shell_formatter(app) {
+                // Shell formatter saved+formatted the file; show result and return.
+                if app.messages.current().is_none() {
+                    app.messages.show(format!("Saved {}", app.buffer.display_name()));
+                }
+                return;
+            }
+            // No shell formatter; try LSP-based format-then-save.
+            let lang = app.current_language().map(|l| l.to_owned());
+            let path = app.buffer.path.clone();
+            if let (Some(lang), Some(path)) = (lang, path) {
+                if !is_special_path(&path) && app.lsp.is_ready(&lang) {
+                    let tab_size = app.config.editor.tab_width;
+                    app.pending_format_save = true;
+                    if app.lsp.format_document(&lang, &path, tab_size, true) {
+                        return; // save happens when FormattingResult arrives
+                    }
+                    app.pending_format_save = false; // server doesn't support formatting
+                }
+            }
+        }
+        if app.notebook.is_some() {
+            // Flushes any in-progress cell edits into nb.cells before serialising.
+            let result = super::notebook::save_notebook(app);
+            super::report_save(app, result, |app| {
+                let name = app.notebook.as_ref()
+                    .and_then(|(nb, _)| nb.path.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("notebook.ipynb")
+                    .to_string();
+                app.messages.show(format!("Saved {name}"));
+            });
+        } else {
+            let result = app.buffer.save(None, force);
+            super::report_save(app, result, |app| {
+                app.messages.show(format!("Saved {}", app.buffer.display_name()));
+                super::refresh_git(app);
+            });
+        }
+}
+
+
+/// `:wq` — save the active buffer, then quit only if nothing else in the
+/// session still holds unsaved changes (stashed notebooks and files).
+pub(super) fn write_and_quit(app: &mut App) {
+        // Save the active buffer, then quit only if nothing else in the
+        // session still holds unsaved changes (stashed notebooks/files).
+        let saved = if app.buffer.path.as_deref().map(is_special_path).unwrap_or(false) {
+            true
+        } else if app.notebook.is_some() {
+            let result = super::notebook::save_notebook(app);
+            super::report_save(app, result, |_| {})
+        } else {
+            let result = app.buffer.save(None, false);
+            super::report_save(app, result, |_| {})
+        };
+        if saved {
+            let unsaved = super::unsaved_buffer_names(app);
+            if unsaved.is_empty() {
+                app.should_quit = true;
+            } else {
+                app.messages.show(format!(
+                    "Saved — but unsaved changes remain in {} (:q! to discard)",
+                    unsaved.join(", ")
+                ));
+            }
+        }
+}
+
+
+/// `:bd` / `:bd!` — close what is open and land somewhere sensible.
+///
+/// "Somewhere sensible" is view-specific: a `*cell …*` buffer and a computed
+/// table back out to where they came from, the SQL buffer to wherever `:sql`
+/// was invoked, and a file to its neighbour in the buffer list.
+pub(super) fn close_buffer(app: &mut App, force: bool) {
+
+        // A `*cell …*` buffer, a computed table and the `*sql*` query buffer
+        // are *backed out of* rather than closed: each was opened from
+        // somewhere, and that somewhere is the only place it makes sense to
+        // return to.  Without this they hit the refusal below and there is
+        // no way out of them at all.
+        if super::table::close_cell_buffer(app)
+            || super::table::close_derived_table(app)
+            || super::sql::close_buffer(app)
+        {
+            return;
+        }
+
+        // What is being closed.  In the table view `app.buffer` is a
+        // detached, path-less buffer — the identity lives in the session,
+        // and reading it from the buffer closed nothing at all.
+        let key = app.current_source_id();
+
+        // Special buffers cannot be closed.  A table over a real file is
+        // not one of them, however virtual its detached buffer looks.
+        if key.as_ref().is_some_and(crate::source::SourceId::is_virtual) {
+            let name = key.as_ref().map_or("this buffer", |k| k.label());
+            app.messages.show(format!("Cannot close special buffer {name}"));
+            return;
+        }
+
+        // Check for unsaved changes.
+        let is_modified = if let Some((ref nb, _)) = app.notebook {
+            nb.modified
+        } else {
+            app.buffer.modified
+        };
+        if is_modified && !force {
+            app.messages.show(
+                "Buffer modified — save with :w or use :bd! to force close",
+            );
+            return;
+        }
+
+        // Tear down notebook/LSP for the current buffer.
+        if app.notebook.is_some() {
+            super::notebook::save_focused_cell(app);
+            super::notebook::notebook_lsp_close(app);
+            app.notebook = None;
+            app.cell_focused_edit = false;
+        } else if let (Some(ref lang), Some(ref old_path)) =
+            (app.lsp_language.clone(), app.buffer.path.clone())
+        {
+            app.lsp.did_close(lang, old_path);
+        }
+
+        // Remove the closed buffer from the buffer list and every stash.
+        let mut closed_idx = 0;
+        if let Some(ref key) = key {
+            closed_idx = app.open_buffers.iter().position(|s| s == key).unwrap_or(0);
+            app.open_buffers.retain(|stored| stored != key);
+            app.notebook_buffers.remove(key);
+            app.file_buffers.remove(key);
+            app.table_buffers.remove(key);
+            app.cursor_positions.remove(key);
+            // Closing a notebook shuts its kernel down — otherwise the
+            // Python process outlives the buffer for the rest of the
+            // session, holding whatever it had loaded.
+            if app.compute.shutdown(key) {
+                app.messages.show(format!("Kernel shut down ({})", key.label()));
+            }
+        }
+
+        // Drop the closed buffer's contents now: the buffer-switch below
+        // stashes whatever is in `app.buffer` (and in `app.table`), and the
+        // buffer we just closed must not be resurrected into the stash.
+        app.buffer = crate::buffer::Buffer::new_empty();
+        app.table = None;
+
+        // Land on the closed buffer's neighbour — the entry that slid into
+        // its place, else the one before it — rather than restarting from
+        // the head of the list.  *Messages* is skipped as a destination;
+        // *scratch* is the fallback when nothing real is left.
+        let next = app.open_buffers.iter()
+            .cycle()
+            .skip(closed_idx.min(app.open_buffers.len().saturating_sub(1)))
+            .take(app.open_buffers.len())
+            .find(|id| id.label() != crate::app::MESSAGES_BUFFER)
+            .map(|id| id.to_path())
+            .unwrap_or_else(|| std::path::PathBuf::from(crate::app::SCRATCH_BUFFER));
+
+        open_path(app, &next);
+
+        app.messages.show("Buffer closed");
+}

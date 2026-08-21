@@ -907,7 +907,7 @@ fn run_loop(
 
         // Background work: anything applied means the screen is stale.
         needs_redraw |= crate::exec::process_lsp_events(app);
-        needs_redraw |= crate::exec::process_kernel_events(app);
+        needs_redraw |= crate::exec::notebook::process_kernel_events(app);
         needs_redraw |= crate::exec::poll_git(app);
         needs_redraw |= crate::exec::poll_export(app);
         needs_redraw |= crate::exec::poll_table_load(app);
