@@ -2052,7 +2052,10 @@ mod tests {
         execute(&mut app, &Command::BufferForceClose);
 
         // The closed buffer must be gone from every stash; quit is clean.
-        assert!(app.file_buffers.is_empty(), "closed buffer must not linger in stash");
+        assert!(
+            app.stashes.files().next().is_none(),
+            "closed buffer must not linger in stash"
+        );
         execute(&mut app, &Command::Quit);
         assert!(app.should_quit, "no unsaved buffers should remain after :bd!");
 

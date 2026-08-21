@@ -206,7 +206,7 @@ pub fn stash_current_notebook(app: &mut App) {
     app.graphics.image_ids.clear();
     if let Some((nb, state)) = app.notebook.take() {
         let key = crate::source::SourceId::of(&nb.path);
-        app.notebook_buffers.insert(key, (nb, state));
+        app.stashes.put(key, crate::stash::Stash::Notebook(Box::new((nb, state))));
     }
     app.cell_focused_edit = false;
 }
@@ -216,9 +216,15 @@ pub fn stash_current_notebook(app: &mut App) {
 /// (caller should load from disk instead).
 pub fn restore_stashed_notebook(app: &mut App, path: &std::path::Path) -> bool {
     let key = crate::source::SourceId::of(path);
-    let Some((nb, state)) = app.notebook_buffers.remove(&key) else {
+    // Check the kind before taking: `take` removes, so a stash belonging to
+    // another view would be silently discarded on the way out of the `else`.
+    if app.stashes.view_of(&key) != Some(crate::view::View::Notebook) {
+        return false;
+    }
+    let Some(crate::stash::Stash::Notebook(stashed)) = app.stashes.take(&key) else {
         return false;
     };
+    let (nb, state) = *stashed;
     let lang = nb.metadata.kernel_language.clone();
     app.lsp_language = Some(lang);
     app.notebook = Some((nb, state));
@@ -1190,7 +1196,7 @@ pub(super) fn notebook_for_key<'a>(
     if is_active {
         return app.notebook.as_mut();
     }
-    app.notebook_buffers.get_mut(key)
+    app.stashes.notebook_mut(key)
 }
 
 /// Human-readable duration for the cell-completion log message.

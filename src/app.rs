@@ -285,10 +285,6 @@ pub struct App {
     pub table: Option<crate::exec::table::Session>,
     /// In-flight background table load, polled once per frame by the run loop.
     pub table_pending: Option<crate::exec::table::TableLoad>,
-    /// Table sessions stashed by path when navigating away, so coming back
-    /// restores the exact cursor cell instead of re-parsing the file from disk.
-    /// (The counterpart of `file_buffers` / `notebook_buffers`.)
-    pub table_buffers: std::collections::HashMap<crate::source::SourceId, crate::exec::table::Session>,
     /// Directory a bare filename in a `:sql` query resolves against.
     ///
     /// Captured when the SQL buffer is opened, because switching into it makes
@@ -375,19 +371,13 @@ pub struct App {
     /// deferred; `exec::pump_signature_help` fires it once the window elapses
     /// (trailing edge), so the hint still settles on the final cursor state.
     pub sig_help_deferred: bool,
-    /// In-memory stash of notebooks that have been navigated away from.
-    /// Keyed by the canonicalized `.ipynb` path.  When the user navigates back
-    /// to a notebook, its state is restored from here rather than reloading from
-    /// disk, so unsaved edits are preserved across buffer switches.
-    pub notebook_buffers: std::collections::HashMap<crate::source::SourceId, (Notebook, NotebookState)>,
-    /// In-memory stash of plain-file buffers navigated away from, keyed by
-    /// canonicalized path.  Preserves unsaved edits and undo history across
-    /// buffer switches (the file is otherwise reloaded from disk).  Entries
-    /// are removed when restored or when the buffer is closed with `:bd`.
-    pub file_buffers: std::collections::HashMap<crate::source::SourceId, Buffer>,
+    /// What every view left behind when it was navigated away from, keyed by
+    /// the source it is a stash of — unsaved cells, unsaved edits and undo
+    /// history, a grid's parse and cursor cell.  See [`crate::stash`].
+    pub stashes: crate::stash::Stashes,
     /// Where the cursor was when a text buffer was last left, as `(line, column)`
     /// — the position a later switch back to it restores.  Kept apart from
-    /// `file_buffers` because it outlives it: a buffer whose stash was dropped
+    /// the stash because it outlives it: a buffer whose stash was dropped
     /// (or that was never stashed, like `*scratch*`) still deserves to reopen
     /// where it was left.  Lines/columns rather than a char index so the
     /// restore can go through `lsp::open_file_at`, which speaks positions.
@@ -612,7 +602,6 @@ impl App {
             notebook,
             table: None,
             table_pending: None,
-            table_buffers: std::collections::HashMap::new(),
             sql_dir: None,
             sql_origin: None,
             attachments: Vec::new(),
@@ -646,8 +635,7 @@ impl App {
             signature_help: None,
             sig_help_last: None,
             sig_help_deferred: false,
-            notebook_buffers: std::collections::HashMap::new(),
-            file_buffers: std::collections::HashMap::new(),
+            stashes: crate::stash::Stashes::default(),
             cursor_positions: std::collections::HashMap::new(),
             recovery,
             pending_recoveries: std::collections::VecDeque::new(),

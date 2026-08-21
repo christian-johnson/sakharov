@@ -8,6 +8,7 @@ use std::path::Path;
 
 use crate::{
     app::{App, MESSAGES_BUFFER, SCRATCH_BUFFER},
+    stash::Stash,
     mode::Mode,
     selection::Selection,
     source::SourceId,
@@ -66,7 +67,7 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
         // lands on the same cell without re-parsing.
         crate::view::View::Table => {
             if let Some(session) = app.table.take() {
-                app.table_buffers.insert(session.id.clone(), session);
+                app.stashes.put(session.id.clone(), Stash::Table(Box::new(session)));
             }
         }
 
@@ -173,7 +174,7 @@ pub fn open_path(app: &mut App, path: &std::path::Path) {
     // buffer being left should reopen at (and `path` may be that buffer).
     remember_cursor(app);
 
-    if app.table_buffers.contains_key(&SourceId::of(path)) {
+    if app.stashes.view_of(&SourceId::of(path)) == Some(crate::view::View::Table) {
         // A derived table (a frequency table, later a query result) is virtual,
         // so it would otherwise fall into the special-buffer branch below and
         // open as an empty text buffer named after itself.
@@ -420,7 +421,7 @@ pub(crate) fn stash_current_file_buffer(app: &mut App) {
         return;
     }
     let buf = std::mem::replace(&mut app.buffer, crate::buffer::Buffer::new_empty());
-    app.file_buffers.insert(SourceId::of(&path), buf);
+    app.stashes.put(SourceId::of(&path), Stash::File(Box::new(buf)));
 }
 
 /// Remove and return the stashed buffer for `path`, if one exists.
@@ -428,7 +429,16 @@ pub(crate) fn take_stashed_file_buffer(
     app: &mut App,
     path: &std::path::Path,
 ) -> Option<crate::buffer::Buffer> {
-    app.file_buffers.remove(&SourceId::of(path))
+    let id = SourceId::of(path);
+    // Check the kind before taking: `take` removes, so a stash belonging to
+    // another view would be discarded rather than left for that view.
+    if app.stashes.view_of(&id) != Some(crate::view::View::Text) {
+        return None;
+    }
+    match app.stashes.take(&id) {
+        Some(Stash::File(buf)) => Some(*buf),
+        _ => None,
+    }
 }
 
 /// Names of every buffer holding unsaved changes, anywhere in the session:
@@ -451,12 +461,12 @@ pub(crate) fn unsaved_buffer_names(app: &App) -> Vec<String> {
             names.push(short(p));
         }
     }
-    for (id, (nb, _)) in &app.notebook_buffers {
+    for (id, nb) in app.stashes.notebooks() {
         if nb.modified {
             names.push(id.label().to_string());
         }
     }
-    for (id, buf) in &app.file_buffers {
+    for (id, buf) in app.stashes.files() {
         if buf.modified {
             names.push(id.label().to_string());
         }
@@ -620,9 +630,7 @@ pub(super) fn close_buffer(app: &mut App, force: bool) {
         if let Some(ref key) = key {
             closed_idx = app.open_buffers.iter().position(|s| s == key).unwrap_or(0);
             app.open_buffers.retain(|stored| stored != key);
-            app.notebook_buffers.remove(key);
-            app.file_buffers.remove(key);
-            app.table_buffers.remove(key);
+            app.stashes.discard(key);
             app.cursor_positions.remove(key);
             // Closing a notebook shuts its kernel down — otherwise the
             // Python process outlives the buffer for the rest of the

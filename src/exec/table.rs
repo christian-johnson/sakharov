@@ -683,7 +683,11 @@ pub fn open_as_table(app: &mut App, path: &Path) {
     // A session stashed on the way out comes back whole — same parse, same
     // cursor cell.  This is what makes `Enter` into a cell buffer and back a
     // round trip rather than a reload.
-    if let Some(session) = app.table_buffers.remove(&SourceId::of(path)) {
+    let stashed = (app.stashes.view_of(&SourceId::of(path)) == Some(View::Table))
+        .then(|| app.stashes.take(&SourceId::of(path)))
+        .flatten();
+    if let Some(crate::stash::Stash::Table(session)) = stashed {
+        let session = *session;
         app.table = Some(session);
         return;
     }
@@ -738,7 +742,7 @@ pub(super) fn close_derived_table(app: &mut App) -> bool {
     super::open_path(app, &origin.to_path());
     if let Some(id) = derived {
         // `open_as_table` stashed it on the way past; drop it for good.
-        app.table_buffers.remove(&id);
+        app.stashes.discard(&id);
         app.open_buffers.retain(|stored| *stored != id);
     }
     true
@@ -797,7 +801,7 @@ pub(super) fn close_table(app: &mut App) {
     // Deliberate exit from the grid: drop the stash too, so a later `:csv`
     // re-reads the file (which the user may have just edited as text) rather
     // than resurrecting the parse from before.
-    app.table_buffers.remove(&id);
+    app.stashes.discard(&id);
     match path {
         Some(path) => super::lsp::open_file_at(app, &path, 0, 0),
         // A virtual source has no text to fall back to.
@@ -1453,7 +1457,7 @@ mod tests {
         let id = session.id.clone();
         assert!(app.open_buffers.contains(&id));
         super::super::buffers::open_path(&mut app, Path::new("t.csv"));
-        assert!(app.table_buffers.contains_key(&id), "the derived table is stashed");
+        assert!(app.stashes.contains(&id), "the derived table is stashed");
         super::super::buffers::open_path(&mut app, &id.to_path());
         assert_eq!(app.view(), View::Table);
         assert_eq!(app.table.as_ref().unwrap().id, id, "came back to the same table");
@@ -1674,7 +1678,7 @@ mod tests {
         let id = SourceId::of(&path);
         assert!(app.table.is_none(), "the grid must be gone");
         assert!(!app.open_buffers.contains(&id), "closed table must leave the buffer list");
-        assert!(!app.table_buffers.contains_key(&id), "and must not be stashed on the way out");
+        assert!(!app.stashes.contains(&id), "and must not be stashed on the way out");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1991,7 +1995,7 @@ mod tests {
         let (mut app, _) = app_with_long_cell();
         handle(&mut app, &Command::TableOpenCell);
         // The parsed table is stashed, not dropped.
-        assert_eq!(app.table_buffers.len(), 1);
+        assert_eq!(app.stashes.len(), 1);
 
         assert!(close_cell_buffer(&mut app));
         assert_eq!(app.view(), View::Table, "back in the grid");
@@ -2252,7 +2256,7 @@ mod tests {
         // The frequency table is gone rather than stashed: `F` rebuilds it in a
         // keystroke, and a buffer list that accumulates `*freq …*` entries is
         // worse than one that doesn't.
-        assert!(!app.table_buffers.contains_key(&derived));
+        assert!(!app.stashes.contains(&derived));
         assert!(!app.open_buffers.contains(&derived));
     }
 
