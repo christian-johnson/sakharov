@@ -240,9 +240,6 @@ pub struct NotebookSpec {
 /// own palette rather than in hard-coded ANSI.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VcsSpec {
-    /// Border of the block the cursor is on. Falls back to `ui.accent`.
-    #[serde(default)]
-    pub focus: Option<String>,
     /// Border of whatever is currently being dragged. Falls back to
     /// `ui.warning` — it is a held object, not a selected one.
     #[serde(default)]
@@ -375,7 +372,6 @@ pub struct Theme {
     pub table_sparkline: Color,
 
     // --- Version-control view ---
-    pub vcs_focus: Color,
     pub vcs_grabbed: Color,
     pub vcs_hash: Color,
     pub vcs_branch: Color,
@@ -452,6 +448,9 @@ pub fn set_active(theme: Theme) {
 /// Parse a color value: `#rrggbb` hex, an ANSI color name (`"blue"`,
 /// `"light-magenta"`, …, which tracks the terminal's palette), a `[palette]`
 /// reference, or `"none"`/`""` for unset.
+/// HEAD's colour: lavender, reserved for it alone.
+const LAVENDER: Color = Color::Rgb(0xb4, 0xa0, 0xe8);
+
 fn parse_color(s: &str, palette: &HashMap<String, String>) -> Option<Color> {
     let s = s.trim();
     if s.is_empty() || s.eq_ignore_ascii_case("none") {
@@ -668,26 +667,33 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     // Every one derives from a color the theme already defines: a commit graph
     // introduces no new *kind* of meaning, only new places to put branch-green,
     // hash-blue and warning-amber.
-    let vcs_focus = pick(&[c(&spec.vcs.focus)], accent);
     let vcs_grabbed = pick(&[c(&spec.vcs.grabbed)], warning);
     let vcs_hash = pick(&[c(&spec.vcs.hash)], info);
     let vcs_branch = pick(&[c(&spec.vcs.branch)], success);
     let vcs_remote = pick(&[c(&spec.vcs.remote)], dim);
     let vcs_tag = pick(&[c(&spec.vcs.tag)], warning);
-    let vcs_head = pick(&[c(&spec.vcs.head)], accent);
+    // HEAD gets a colour of its own rather than borrowing the accent, and
+    // nothing else uses it: "where you are" is the one pointer that has to be
+    // findable at a glance, and it cannot be if it is also the colour of a
+    // lane, a focused block or a label.
+    let vcs_head = pick(&[c(&spec.vcs.head)], LAVENDER);
     let vcs_edge = pick(&[c(&spec.vcs.edge)], line_numbers);
     let vcs_pending = pick(&[c(&spec.vcs.pending)], warning);
     // Lanes are what a branch *is* on screen — a first-parent chain in its own
     // column — so colouring by lane is what makes two branches tellable apart
-    // without reading a single label.  Five hues, cycled: enough that
-    // neighbouring lanes always differ, few enough that they stay distinct.
+    // without reading a single label.  Cycled, so a repository with more
+    // branches than colours still tells adjacent lanes apart.
+    //
+    // Deliberately excludes `warning` and the HEAD lavender: those two mean
+    // *held* and *where you are*, and a lane that happened to share one would
+    // make grabbing a commit look like it had merely changed branch.
     let vcs_lanes: Vec<Color> = spec
         .vcs
         .lanes
         .as_ref()
         .map(|names| names.iter().filter_map(|n| parse_color(n, pal)).collect::<Vec<_>>())
         .filter(|colors: &Vec<Color>| !colors.is_empty())
-        .unwrap_or_else(|| vec![accent, success, warning, info, error]);
+        .unwrap_or_else(|| vec![accent, success, info, error]);
 
     // --- Syntax palette ---
     let keyword = c(&spec.syntax.keyword);
@@ -802,7 +808,6 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         nb_border_running,
         nb_border_ok,
         nb_border_error,
-        vcs_focus,
         vcs_grabbed,
         vcs_hash,
         vcs_branch,

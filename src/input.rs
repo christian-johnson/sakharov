@@ -38,7 +38,7 @@ fn is_splash_preserving(cmd: &Command) -> bool {
 /// rather than views — a `*cell …*` or `*sql*` buffer is an ordinary text view
 /// with a single key overridden — which is why this is a function of the whole
 /// `App` and not of the view alone.
-fn keymap_layer(app: &App) -> crate::keymap::Layer {
+pub(crate) fn keymap_layer(app: &App) -> crate::keymap::Layer {
     use crate::{keymap::Layer, view::View};
     match app.view() {
         View::Notebook => Layer::Notebook,
@@ -46,6 +46,7 @@ fn keymap_layer(app: &App) -> crate::keymap::Layer {
         View::Vcs => Layer::Vcs,
         View::Text if app.in_cell_buffer() => Layer::Cell,
         View::Text if app.in_sql_buffer() => Layer::Sql,
+        View::Text if app.in_commit_buffer() => Layer::Commit,
         View::Text => Layer::Normal,
     }
 }

@@ -155,6 +155,8 @@ pub const VCS_BUFFER: &str = "*git*";
 /// reading (`*cell 3:price*`).  A family rather than one name, so it is matched
 /// by prefix through `SourceId::is_virtual_kind`.
 pub const CELL_BUFFER_PREFIX: &str = "*cell ";
+/// Prefix of the buffer a commit's diff is read in (`*commit 7e5120c*`).
+pub const COMMIT_BUFFER_PREFIX: &str = "*commit ";
 
 /// Terminal-graphics (Kitty/WezTerm) image state.
 pub struct GraphicsState {
@@ -478,6 +480,14 @@ impl App {
             && self
                 .current_source_id()
                 .is_some_and(|id| id.is_virtual_kind(CELL_BUFFER_PREFIX))
+    }
+
+    /// True while a `*commit …*` buffer — one commit's diff, opened for
+    /// reading from the graph — is the current buffer.  The view is
+    /// [`View::Text`]; this only selects the `q`-goes-back keymap override.
+    pub fn in_commit_buffer(&self) -> bool {
+        self.current_source_id()
+            .is_some_and(|id| id.is_virtual_kind(COMMIT_BUFFER_PREFIX))
     }
 
     /// True while the `*sql*` query buffer is the active buffer.

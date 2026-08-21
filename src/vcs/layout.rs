@@ -186,13 +186,24 @@ impl Layout {
     /// to the right is very often ten rows up (a branch label on some other
     /// block's border), and travelling to it is not what `l` means.  What `l`
     /// means is "the next lane, beside where I am".
-    pub fn step(&self, current: &Focus, dir: Dir) -> Option<Focus> {
+    /// Restricted to the focusables `allow` accepts.
+    ///
+    /// Used while something is being dragged: the walk is over *destinations*
+    /// then, and stepping onto something you cannot drop on is a press that
+    /// does nothing except take the cursor further from somewhere useful.
+    pub fn step_where(
+        &self,
+        current: &Focus,
+        dir: Dir,
+        allow: impl Fn(&Focus) -> bool,
+    ) -> Option<Focus> {
         let from = self.locate(current)?;
         let (row, col) = (from.row as i32, from.col as i32);
 
         self.focusables
             .iter()
             .filter(|f| f.focus != *current)
+            .filter(|f| allow(&f.focus))
             .filter_map(|f| {
                 let (dr, dc) = (f.row as i32 - row, f.col as i32 - col);
                 let along = match dir {
@@ -728,7 +739,7 @@ mod tests {
         let (_, _, layout) = laid_out(120);
         let from = Focus::Commit(Oid::new("d"));
         assert_eq!(
-            layout.step(&from, Dir::Down),
+            layout.step_where(&from, Dir::Down, |_| true),
             Some(Focus::Edge { child: Oid::new("d"), slot: 0 })
         );
     }
@@ -737,16 +748,16 @@ mod tests {
     fn moving_is_reversible_and_stops_at_the_edges() {
         let (_, _, layout) = laid_out(120);
         let start = Focus::Commit(Oid::new("d"));
-        let down = layout.step(&start, Dir::Down).unwrap();
-        assert_eq!(layout.step(&down, Dir::Up), Some(start));
+        let down = layout.step_where(&start, Dir::Down, |_| true).unwrap();
+        assert_eq!(layout.step_where(&down, Dir::Up, |_| true), Some(start));
 
         // The graph has ends: nothing above the first focusable, nothing
         // below the last.  (HEAD is no longer either — it sits beside its own
         // commit, wherever in the graph that is.)
         let first = layout.focusables.first().unwrap().focus.clone();
         let last = layout.focusables.last().unwrap().focus.clone();
-        assert_eq!(layout.step(&first, Dir::Up), None);
-        assert_eq!(layout.step(&last, Dir::Down), None);
+        assert_eq!(layout.step_where(&first, Dir::Up, |_| true), None);
+        assert_eq!(layout.step_where(&last, Dir::Down, |_| true), None);
     }
 
     /// `h`/`l` cross lanes at a comparable height rather than jumping to the
@@ -759,7 +770,7 @@ mod tests {
         let (_, _, layout) = laid_out(120);
         let from = Focus::Commit(Oid::new("d"));
         let row_of = |f: &Focus| layout.locate(f).unwrap().row as i32;
-        let target = layout.step(&from, Dir::Right).expect("a lane to the right");
+        let target = layout.step_where(&from, Dir::Right, |_| true).expect("a lane to the right");
         assert!(
             (row_of(&target) - row_of(&from)).abs() <= BLOCK_H as i32,
             "sideways travelled {} rows",
@@ -779,7 +790,7 @@ mod tests {
         let block = layout.block(&Oid::new("f")).unwrap();
         assert_eq!(label.row, block.row);
         assert_eq!(
-            layout.step(&Focus::Ref("main".into()), Dir::Down),
+            layout.step_where(&Focus::Ref("main".into()), Dir::Down, |_| true),
             Some(Focus::Commit(Oid::new("f")))
         );
     }

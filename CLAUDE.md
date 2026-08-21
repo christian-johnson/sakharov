@@ -1017,11 +1017,31 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   computed before anything is drawn and then clamped to `[MIN_LANE, MAX_LANE]`
   and to the per-lane share).  Sizing lanes by dividing up the viewport drew a
   72-column banner around a 30-column commit message on any wide terminal.
+- **`Enter` acts on what the cursor is on** (`exec::vcs::enter_action`): a local
+  branch label is checked out — the graph is a map, and Enter on a place on a map
+  means go there — and anything else opens its commit's diff.  That diff is a
+  `*commit …*` buffer, backed out of with `q` (`Keymap::commit`,
+  `close_commit_buffer`) like every other temporary buffer in the editor.
+- **While something is held, the walk is over *destinations* only**
+  (`Layout::step_where`, the predicate in `VcsState::step`): commit blocks whose
+  drop is not `Invalid`.  Branch labels and arrows are other names for a commit
+  already on the walk, so stopping on them offered a choice that was never a
+  choice and doubled the presses to cross the graph.
+- **The cursor marks by weight, not by hue** (`vcs_ui::Cursor::style`): the
+  focused thing keeps its own colour and gains **bold** plus a heavy border (or
+  a heavy arrow).  Recolouring it erased the one fact the colours carry —
+  which branch this is — and vanished on whichever lane already had that hue.
+  Being *held* does recolour (`theme.vcs_grabbed`): that is a state the object
+  is in, not a place the cursor happens to be.
 - **Commits are coloured by lane** (`Theme::vcs_lane`, cycled through
   `theme.vcs_lanes`; `[vcs] lanes` in a theme file).  A lane *is* a branch here
   — a first-parent chain in its own column — so this is what makes two branches
   tellable apart without reading a label.  Arrows take their child's lane
-  colour, so a chain is one colour tip to root.
+  colour, so a chain is one colour tip to root.  The default palette excludes
+  `warning` and HEAD's lavender: those mean *held* and *where you are*.
+- **HEAD has a colour of its own** (`theme.vcs_head`, lavender by default) and
+  nothing else uses it — "where you are" is the one pointer that has to be
+  findable at a glance, which it cannot be if it is also a lane or a label.
 - **The view detaches HEAD only when there is no branch to name instead**
   (`exec::vcs::checkout_plan`): `c` on a commit a local branch points at checks
   out that branch.  Detached HEAD should be somewhere you arrive deliberately,

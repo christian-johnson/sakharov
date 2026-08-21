@@ -255,7 +255,8 @@ commands! {
         VcsContinue => "version-control-continue", aliases: ["vc-continue"], palette: "Resume after resolving a conflict";
         // Everyday actions, which happen immediately — they add rather than rewrite.
         VcsCheckout => "version-control-checkout", aliases: ["vc-checkout", "checkout"], palette: "Check out the branch or commit under the cursor  [c]";
-        VcsShow => "version-control-show", aliases: ["vc-show"], palette: "Show the selected commit's diff  [Enter]";
+        VcsShow => "version-control-show", aliases: ["vc-show"], palette: "Show the selected commit's diff";
+        VcsEnter => "version-control-enter", aliases: ["vc-enter"], palette: "Act on what the cursor is on  [Enter]";
         VcsStage => "version-control-stage", aliases: ["vc-stage", "stage"], palette: "Stage every change in the work tree  [s]";
         VcsUnstage => "version-control-unstage", aliases: ["vc-unstage", "unstage"], palette: "Unstage everything  [S]";
         VcsFetch => "version-control-fetch", aliases: ["vc-fetch", "fetch"], palette: "Fetch from the remote";

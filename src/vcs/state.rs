@@ -138,16 +138,27 @@ impl VcsState {
     /// screen alone rather than redraw an identical frame.
     pub fn step(&mut self, dir: Dir, width: u16) -> bool {
         // While dragging, walk the un-previewed graph: see `stable_layout`.
-        let layout = if self.grabbed.is_some() {
-            self.stable_layout(width)
-        } else {
-            self.layout(width)
-        };
+        let dragging = self.grabbed.is_some();
+        let layout = if dragging { self.stable_layout(width) } else { self.layout(width) };
         let Some(current) = self.focus.clone() else {
             self.focus = layout.initial_focus();
             return self.focus.is_some();
         };
-        let Some(next) = layout.step(&current, dir) else {
+        // While something is held the walk is over *destinations*, and the
+        // only destination is a commit: everything being dragged is a pointer,
+        // and a pointer points at a commit.  Letting the cursor stop on a
+        // branch label or an arrow on the way offered a choice that was never
+        // a choice — both are just other names for a commit already on the
+        // walk — and doubled the number of presses to cross the graph.
+        let held = self.grabbed.clone();
+        let allow = |focus: &Focus| match (&held, focus) {
+            (None, _) => true,
+            (Some(held), Focus::Commit(id)) => {
+                !matches!(self.drop_onto(held, id), Drop::Invalid(_))
+            }
+            (Some(_), _) => false,
+        };
+        let Some(next) = layout.step_where(&current, dir, allow) else {
             return false;
         };
         self.focus = Some(next);

@@ -644,7 +644,8 @@ exactly what the backup refs exist to cover.
 | `version-control-refresh` | `r` | `:vc-refresh` | Re-read the repository (discards the plan) |
 | — | `h` `j` `k` `l` | — | Move between blocks, arrows and branch labels. `j`/`k` alternate block → arrow → block, which is how an arrow gets selected at all |
 | — | `J` / `K`, `gg` / `ge` | — | Page down/up; first / last commit |
-| `version-control-show` | `Enter` | `:vc-show` | Open the selected commit's diff in an ordinary buffer |
+| `version-control-enter` | `Enter` | `:vc-enter` | Act on what the cursor is on: check out a branch label, else read the commit |
+| `version-control-show` | — | `:vc-show` | Open the selected commit's diff in an ordinary buffer (`q` returns to the graph) |
 | `yank-selection` | `y` | — | Copy the selected commit's full hash |
 
 ### Rearranging history

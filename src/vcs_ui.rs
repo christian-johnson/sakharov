@@ -11,7 +11,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     Frame,
 };
 
@@ -55,16 +55,43 @@ impl Cursor {
     /// Grab wins over focus: while something is held, the held thing is the
     /// more important fact on screen, and the cursor has moved on to hover
     /// somewhere else.
-    fn style_for(&self, this: &Focus) -> Option<Style> {
-        let th = theme::active();
+    fn mark(&self, this: &Focus) -> Option<Mark> {
         if self.grabbed.as_ref() == Some(this) {
-            return Some(Style::default().fg(th.vcs_grabbed).add_modifier(Modifier::BOLD));
+            return Some(Mark::Grabbed);
         }
         if self.focus.as_ref() == Some(this) {
-            return Some(Style::default().fg(th.vcs_focus).add_modifier(Modifier::BOLD));
+            return Some(Mark::Focused);
         }
         None
     }
+
+    /// `base`, marked up for wherever the cursor is.
+    ///
+    /// The focused thing keeps its own colour and is drawn **bold**, with a
+    /// heavy border or a heavy arrow.  It used to be recoloured, which meant
+    /// moving the cursor over a green branch turned it the accent colour —
+    /// erasing the one fact the colours are there to carry (which branch this
+    /// is), and vanishing entirely on whichever lane already had that hue.
+    ///
+    /// Being *held* is different: that is a state the object is in, not a
+    /// place the cursor happens to be, and it has to be unmistakable from
+    /// across the screen.  So it does recolour.
+    fn style(&self, this: &Focus, base: Color) -> Style {
+        match self.mark(this) {
+            Some(Mark::Grabbed) => Style::default()
+                .fg(theme::active().vcs_grabbed)
+                .add_modifier(Modifier::BOLD),
+            Some(Mark::Focused) => Style::default().fg(base).add_modifier(Modifier::BOLD),
+            None => Style::default().fg(base),
+        }
+    }
+}
+
+/// What the cursor is doing to a thing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    Focused,
+    Grabbed,
 }
 
 /// Writes cells in *stack* coordinates, clipped to the viewport.
@@ -170,9 +197,6 @@ fn border_style(block: &Block, cursor: &Cursor) -> (Style, bool) {
         BlockKind::Head => Focus::Head,
         _ => Focus::Commit(block.id.clone()),
     };
-    if let Some(style) = cursor.style_for(&this) {
-        return (style, true);
-    }
     let base = match block.kind {
         BlockKind::Head => th.vcs_head,
         BlockKind::Pending => th.vcs_pending,
@@ -181,7 +205,7 @@ fn border_style(block: &Block, cursor: &Cursor) -> (Style, bool) {
         // branches side by side tellable apart only by reading their labels.
         BlockKind::Commit => th.vcs_lane(block.lane),
     };
-    (Style::default().fg(base), false)
+    (cursor.style(&this, base), cursor.mark(&this).is_some())
 }
 
 fn draw_block(p: &mut Painter, state: &VcsState, layout: &Layout, block: &Block, cursor: &Cursor) {
@@ -290,13 +314,14 @@ fn draw_commit_contents(
             Some(RefKind::Tag) => th.vcs_tag,
             _ => th.vcs_branch,
         };
-        // A label is small and sits on a border, so the cursor is shown by
-        // reversing it rather than by a colour that would be lost against the
-        // border it is drawn on.
-        let style = match cursor.style_for(&Focus::Ref(name.clone())) {
-            Some(style) => style.add_modifier(Modifier::REVERSED),
-            None => Style::default().fg(colour).add_modifier(Modifier::BOLD),
-        };
+        // A label is small and sits on a border, so the cursor reverses it —
+        // bold alone would be lost against a border that is already bold.
+        // Reversing keeps the label's own colour, which is the point.
+        let this = Focus::Ref(name.clone());
+        let mut style = cursor.style(&this, colour).add_modifier(Modifier::BOLD);
+        if cursor.mark(&this).is_some() {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
         p.text(block.row, left + col, &format!(" {name} "), style, inner);
     }
 
@@ -354,9 +379,12 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     } else {
         th.vcs_lane(edge.from_lane)
     };
-    let style = cursor
-        .style_for(&this)
-        .unwrap_or_else(|| Style::default().fg(base));
+    let style = cursor.style(&this, base);
+    // A focused arrow is drawn heavy rather than in another colour, the same
+    // way a focused block gets a heavy border: an arrow is a thin line, and
+    // bold alone is not enough to find it.
+    let heavy = cursor.mark(&this).is_some();
+    let (v, h) = if heavy { ('┃', '━') } else { ('│', '─') };
 
     let from_col = layout.lane_col(edge.from_lane) + 2;
     let to_col = layout.lane_col(edge.to_lane) + 2;
@@ -378,7 +406,7 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
 
     if from_col == to_col {
         for row in start..head_row {
-            p.cell(row, from_col, '│', style);
+            p.cell(row, from_col, v, style);
         }
         p.cell(head_row, from_col, '▼', style);
         return;
@@ -390,13 +418,13 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     let turn = start;
     let (lo, hi) = (from_col.min(to_col), from_col.max(to_col));
     for col in lo..=hi {
-        p.cell(turn, col, '─', style);
+        p.cell(turn, col, h, style);
     }
     // Corners, so the run reads as one line rather than three.
     p.cell(turn, from_col, if to_col > from_col { '╰' } else { '╯' }, style);
     p.cell(turn, to_col, if to_col > from_col { '╮' } else { '╭' }, style);
     for row in turn + 1..head_row {
-        p.cell(row, to_col, '│', style);
+        p.cell(row, to_col, v, style);
     }
     p.cell(head_row, to_col, '▼', style);
 }

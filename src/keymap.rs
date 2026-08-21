@@ -120,6 +120,8 @@ pub enum Layer {
     Cell,
     /// In the `*sql*` buffer: `q` leaves for wherever `:sql` was invoked from.
     Sql,
+    /// In a `*commit …*` buffer: `q` returns to the graph it was read from.
+    Commit,
     /// While the version-control graph is open: `Space` grabs and drops, and
     /// the everyday git actions sit on single letters.
     Vcs,
@@ -130,6 +132,7 @@ pub struct Keymap {
     select: HashMap<KeyBinding, Vec<Command>>,
     notebook: HashMap<KeyBinding, Vec<Command>>,
     table: HashMap<KeyBinding, Vec<Command>>,
+    commit: HashMap<KeyBinding, Vec<Command>>,
     cell: HashMap<KeyBinding, Vec<Command>>,
     sql: HashMap<KeyBinding, Vec<Command>>,
     vcs: HashMap<KeyBinding, Vec<Command>>,
@@ -145,6 +148,7 @@ impl Keymap {
         let mut table: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut cell: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut sql: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        let mut commit: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut vcs: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
 
         // Helper macro to insert into both maps
@@ -379,6 +383,12 @@ impl Keymap {
         // something.
         sql.insert(KeyBinding::char('q'), vec![Command::BufferClose]);
 
+        // --- commit-diff buffer override ---
+        //
+        // `q` backs out of a commit's diff to the graph, the same gesture as
+        // `q` in a `*cell …*` buffer or a derived table.
+        commit.insert(KeyBinding::char('q'), vec![Command::BufferClose]);
+
         // --- version-control graph overrides ---
         //
         // Space is the grab: it is the one gesture the whole view is built
@@ -386,8 +396,9 @@ impl Keymap {
         // which is still reachable here as `:`), and it is the key a user
         // reaches for to mean "pick this up".
         vcs.insert(KeyBinding::char(' '), vec![Command::VcsGrab]);
-        // Enter reads: the selected commit's diff, in an ordinary buffer.
-        vcs.insert(KeyBinding::key(KeyCode::Enter), vec![Command::VcsShow]);
+        // Enter acts on whatever is under the cursor: a branch is checked out,
+        // anything else shows its commit's diff.
+        vcs.insert(KeyBinding::key(KeyCode::Enter), vec![Command::VcsEnter]);
         // The everyday actions, on the letters they name.  `c`/`d`/`s`/`S`/`m`
         // are all edit commands in Normal mode, which is meaningless here.
         vcs.insert(KeyBinding::char('c'), vec![Command::VcsCheckout]);
@@ -402,7 +413,7 @@ impl Keymap {
         vcs.insert(KeyBinding::char('J'), vec![Command::PageDown]);
         vcs.insert(KeyBinding::char('K'), vec![Command::PageUp]);
 
-        Self { normal, select, notebook, table, cell, sql, vcs }
+        Self { normal, select, notebook, table, cell, sql, commit, vcs }
     }
 
     /// Look `kb` up in exactly one layer.
@@ -414,6 +425,7 @@ impl Keymap {
             Layer::Table => &self.table,
             Layer::Cell => &self.cell,
             Layer::Sql => &self.sql,
+            Layer::Commit => &self.commit,
             Layer::Vcs => &self.vcs,
         };
         map.get(kb).map(Vec::as_slice)

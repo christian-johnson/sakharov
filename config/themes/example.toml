@@ -162,15 +162,17 @@ sparkline         = "#89ddff"  # header distribution glyphs (← table.numeric)
 # introduces no new *kind* of meaning, only new places to put branch-green,
 # hash-blue and warning-amber.
 [vcs]
-lanes   = ["#7aa2f7", "#9ece6a", "#e0af68", "#7dcfff", "#f7768e"]
+lanes   = ["#7aa2f7", "#9ece6a", "#89ddff", "#f7768e"]
                      # one colour per lane, cycled: a branch is a lane, so
-                     # this is what makes two branches tellable apart
-focus   = "#7aa2f7"  # border of the block under the cursor (← ui.accent)
+                     # this is what makes two branches tellable apart.  Keep
+                     # `grabbed` and `head` out of this list — they mean
+                     # "held" and "where you are", not "which branch"
 grabbed = "#e0af68"  # border of whatever is being dragged  (← ui.warning)
 hash    = "#89ddff"  # abbreviated commit hashes      (← ui.info)
 branch  = "#9ece6a"  # local branch labels            (← ui.success)
 remote  = "#565f89"  # remote-tracking branch labels  (← ui.dim)
 tag     = "#e0af68"  # tag labels                     (← ui.warning)
-head    = "#7aa2f7"  # the HEAD block                 (← ui.accent)
+head    = "#b4a0e8"  # the HEAD block — lavender, and used nowhere else,
+                     # so "where you are" is findable at a glance
 edge    = "#3b4261"  # the arrows between blocks      (← ui.line_numbers)
 pending = "#e0af68"  # a commit the plan would create (← ui.warning)

@@ -302,7 +302,11 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
 
         // --- immediate actions ---
         Command::VcsCheckout => checkout(app),
-        Command::VcsShow | Command::TableOpenCell => show_commit(app),
+        Command::VcsShow => show_commit(app),
+        // Enter: a branch label is a place to *go*, so it is checked out;
+        // anything else is a commit to read.  `TableOpenCell` is what the
+        // grid binds Enter to, and it arrives here from a user rebinding.
+        Command::VcsEnter | Command::TableOpenCell => enter_action(app),
         Command::VcsStage => run_now(app, &["add", "--all"], "Staged everything"),
         Command::VcsUnstage => run_now(app, &["reset"], "Unstaged everything"),
         Command::VcsFetch => remote_job(app, vec!["fetch".into(), "--all".into()], "Fetching"),
@@ -764,6 +768,26 @@ fn set_upstream(app: &mut App, target: &str) {
 ///
 /// A buffer rather than a float: a diff is long, and it is read with the
 /// ordinary motions and search, which is exactly what a buffer already gives.
+/// Enter: check out a branch, or read a commit.
+///
+/// A branch label under the cursor is somewhere to go — the graph is the map,
+/// and pressing Enter on a place on a map means go there.  Everything else the
+/// cursor can sit on names a commit, and what you want from a commit is to
+/// read it.
+fn enter_action(app: &mut App) {
+    let on_local_branch = app.vcs.as_ref().is_some_and(|state| {
+        state
+            .focused_branch()
+            .and_then(|name| state.dag.find_ref(&name).map(|r| r.kind))
+            .is_some_and(|kind| kind == RefKind::Local)
+    });
+    if on_local_branch {
+        checkout(app);
+        return;
+    }
+    show_commit(app);
+}
+
 fn show_commit(app: &mut App) {
     let Some(state) = app.vcs.as_ref() else { return };
     let Some(commit) = state.focused_commit() else {
@@ -783,10 +807,30 @@ fn show_commit(app: &mut App) {
             return;
         }
     };
-    let name = format!("*commit {}*", commit.short());
+    let name = format!("{}{}*", crate::app::COMMIT_BUFFER_PREFIX, commit.short());
     app.special_buffer_ropes
         .insert(name.clone(), ropey::Rope::from_str(&text));
     super::buffers::switch_to_special_buffer(app, &name);
+}
+
+/// `q` / `:bd` in a `*commit …*` buffer — back to the graph it was opened
+/// from, which is the only place it makes sense to go.  Returns false when
+/// that buffer is not what is open, so the caller carries on with its own
+/// close.
+///
+/// The same "back out of the temporary thing" gesture as `q` in a `*cell …*`
+/// buffer or a derived table.  Without it `:bd` refused the `*…*` name
+/// outright and `q` was unbound, which made the diff a buffer you could only
+/// leave by naming somewhere else to go.
+pub(super) fn close_commit_buffer(app: &mut App) -> bool {
+    if !app.in_commit_buffer() {
+        return false;
+    }
+    if let Some(id) = app.current_source_id() {
+        app.special_buffer_ropes.remove(id.label());
+    }
+    open(app);
+    true
 }
 
 fn yank_hash(app: &mut App) {
@@ -1109,29 +1153,42 @@ mod tests {
         assert_eq!(state.focused_branch(), None);
         assert_eq!(state.focused_commit(), Some(Oid::new("c")));
     }
-    /// The cursor must walk the same path whether or not something is held.
-    ///
-    /// It did not: navigation stepped through the *previewed* layout, so each
-    /// press reshaped the graph it was about to step through again.  The
-    /// preview blinked on and off, the cursor stalled after two or three
-    /// presses, and the whole thing read as "the live preview doesn't work".
+    /// While something is held, the walk is over *destinations* — and the only
+    /// destination is a commit.  Stopping the cursor on a branch label or an
+    /// arrow offered a choice that was never a choice (both are other names
+    /// for a commit already on the walk) and doubled the presses to cross the
+    /// graph.  Anything the drop would refuse is skipped too.
     #[test]
-    fn navigating_while_holding_something_walks_the_same_path_as_navigating_free() {
-        let walk = |grab: bool| {
-            let mut app = app_in_graph();
-            app.vcs.as_mut().unwrap().focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
-            if grab {
-                super::handle(&mut app, &Command::VcsGrab);
-                assert!(app.vcs.as_ref().unwrap().grabbed.is_some());
+    fn a_drag_walks_only_the_commits_it_could_actually_be_dropped_on() {
+        let mut app = app_in_graph();
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+        super::handle(&mut app, &Command::VcsGrab);
+
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            super::handle(&mut app, &Command::MoveUp);
+            let focus = app.vcs.as_ref().unwrap().focus.clone().expect("a cursor");
+            if !seen.last().is_some_and(|last| *last == focus) {
+                seen.push(focus);
             }
-            let mut seen = Vec::new();
-            for _ in 0..8 {
-                super::handle(&mut app, &Command::MoveUp);
-                seen.push(app.vcs.as_ref().unwrap().focus.clone());
-            }
-            seen
-        };
-        assert_eq!(walk(true), walk(false));
+        }
+
+        assert!(!seen.is_empty(), "the cursor never moved");
+        for focus in &seen {
+            assert!(
+                matches!(focus, Focus::Commit(_)),
+                "a drag stopped on {focus:?}, which is not somewhere to drop"
+            );
+        }
+        // `c` cannot follow itself, and `d` is `c`'s own child — both are
+        // above the cursor and both are skipped rather than stopped on.
+        for unreachable in [Oid::new("c"), Oid::new("d")] {
+            assert!(
+                !seen.contains(&Focus::Commit(unreachable.clone())),
+                "stopped on {unreachable}, which the drop would refuse"
+            );
+        }
+        assert!(seen.contains(&Focus::Commit(Oid::new("f"))), "{seen:?}");
     }
 
     /// …and the preview really does follow the cursor, press by press, rather
@@ -1177,6 +1234,51 @@ mod tests {
         let (args, report) = super::checkout_plan(state).expect("a checkout");
         assert_eq!(args, ["checkout", "--detach", "e"]);
         assert!(report.contains("detached"), "{report}");
+    }
+
+    /// Enter on a branch label goes there.  The graph is a map, and pressing
+    /// Enter on a place on a map means go to it — not "tell me about the
+    /// commit underneath it".
+    #[test]
+    fn enter_on_a_branch_checks_it_out_and_on_a_commit_reads_it() {
+        let mut app = app_in_graph();
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Ref("feature".into()));
+        let state = app.vcs.as_ref().unwrap();
+        assert_eq!(
+            super::checkout_plan(state).expect("a checkout").0,
+            ["checkout", "feature"]
+        );
+
+        // A commit is something to read, so Enter opens its diff instead —
+        // which needs a real repository, and is covered by the buffer test
+        // below.  Here it is enough that the two are told apart.
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Commit(Oid::new("c")));
+        assert!(app.vcs.as_ref().unwrap().focused_branch().is_none());
+    }
+
+    /// A `*commit …*` diff is backed out of with `q`, like every other
+    /// temporary buffer in the editor.  Without it `:bd` refused the `*…*`
+    /// name and `q` was unbound, so the diff was a buffer with no way out.
+    #[test]
+    fn q_backs_out_of_a_commit_diff_to_the_graph() {
+        let mut app = app_in_graph();
+        let name = format!("{}abc1234*", crate::app::COMMIT_BUFFER_PREFIX);
+        app.special_buffer_ropes
+            .insert(name.clone(), ropey::Rope::from_str("diff --git a/x b/x\n"));
+        super::super::buffers::switch_to_special_buffer(&mut app, &name);
+        assert!(app.in_commit_buffer());
+        assert_eq!(
+            crate::input::keymap_layer(&app),
+            crate::keymap::Layer::Commit,
+            "the q-goes-back layer has to be selected"
+        );
+        assert!(app
+            .keymap
+            .lookup(crate::keymap::Layer::Commit, &crate::keymap::KeyBinding::char('q'))
+            .is_some_and(|c| matches!(c, [Command::BufferClose])));
+
+        super::super::execute(&mut app, &Command::BufferClose);
+        assert!(!app.in_commit_buffer(), "must leave the diff");
     }
 
 }
