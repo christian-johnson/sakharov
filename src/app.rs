@@ -1091,11 +1091,13 @@ fn draw_frame(
                                 chrome.content,
                                 state,
                                 nb,
-                                &active,
-                                &app.lsp.diagnostics,
-                                &app.config.notebook,
-                                app.graphics.cell_pixel_size,
-                                &mut app.nb_highlight,
+                                crate::notebook_ui::RenderInputs {
+                                    active: &active,
+                                    diagnostics: &app.lsp.diagnostics,
+                                    nb_config: &app.config.notebook,
+                                    cell_px: app.graphics.cell_pixel_size,
+                                    cache: &mut app.nb_highlight,
+                                },
                             );
                             app.graphics.pending = images;
                             nb_cursor = cursor_pos;

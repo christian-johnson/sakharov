@@ -280,44 +280,94 @@ pub(crate) fn cell_visual_rows(rope: &ropey::Rope, width: Option<usize>) -> usiz
 /// Returns `(image_requests, cursor_screen_pos)`.  The cursor position is the
 /// terminal (col, row) of the insertion point inside the focused cell — pass
 /// it to `popup_ui::render` so completion popups anchor to the right spot.
-#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &NotebookState,
     nb: &Notebook,
-    active: &ActiveCellView<'_>,
-    lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
-    nb_config: &crate::config::NotebookConfig,
-    cell_px: Option<(u16, u16)>,
-    cache: &mut CellHighlightCache,
+    inputs: RenderInputs<'_>,
 ) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
+    let RenderInputs { active, diagnostics, nb_config, cell_px, cache } = inputs;
     if area.height == 0 {
         return (vec![], None);
     }
     // Built once, from the area we were actually given to draw into, and
     // passed down.  Everything that measures a cell measures against this.
-    let geo = Geometry::new(area.width, cell_px, active.word_wrap);
-    render_cells(frame, state, nb, active, lsp_diagnostics, area, nb_config, geo, cache)
+    let mut ctx = RenderCtx {
+        active,
+        diagnostics,
+        nb_config,
+        geo: Geometry::new(area.width, cell_px, active.word_wrap),
+        cache,
+        images: Vec::new(),
+    };
+    let cursor = render_cells(frame, &mut ctx, state, nb, area);
+    (ctx.images, cursor)
 }
 
 // ---------------------------------------------------------------------------
 // Cell rendering
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
+/// What `app::draw_frame` hands the notebook renderer.
+///
+/// The caller's half of [`RenderCtx`] — the same shared state, minus the
+/// geometry (derived from the area we are given) and the image accumulator
+/// (an internal detail of the draw).
+pub struct RenderInputs<'a> {
+    pub active: &'a ActiveCellView<'a>,
+    pub diagnostics: &'a std::collections::HashMap<String, Vec<Diagnostic>>,
+    pub nb_config: &'a crate::config::NotebookConfig,
+    /// Terminal cell size in pixels, for sizing images.
+    pub cell_px: Option<(u16, u16)>,
+    pub cache: &'a mut CellHighlightCache,
+}
+
+/// Everything the cell-render chain needs that is the same for every cell.
+///
+/// `render_cells` → `render_cell` → `render_cell_content` → `render_output`
+/// each used to re-declare the same five parameters and pass them straight
+/// down, which is what the `too_many_arguments` allows on all four were for.
+/// Bundling them means a new piece of shared render state is a field, not a
+/// parameter threaded through four signatures.
+struct RenderCtx<'a> {
+    /// The focused cell's live text, cursor and selection.
+    active: &'a ActiveCellView<'a>,
+    diagnostics: &'a std::collections::HashMap<String, Vec<Diagnostic>>,
+    nb_config: &'a crate::config::NotebookConfig,
+    /// Measurements every height question is answered against.
+    geo: Geometry,
+    cache: &'a mut CellHighlightCache,
+    /// Images this frame asked for, accumulated as cells are drawn and flushed
+    /// by `app::flush_images` once ratatui has released the screen.
+    images: Vec<ImageRequest>,
+}
+
+/// One cell's placement in the frame: which cell, and where it landed after
+/// the viewport clipped it.
+struct CellDraw<'a> {
+    cell: &'a Cell,
+    idx: usize,
+    focused: bool,
+    folded: bool,
+    /// Rows of this cell scrolled off above the viewport top.
+    clip_top: u16,
+    /// Rows the cell would occupy unclipped.
+    full_height: u16,
+    /// The clipped rectangle actually drawn into.
+    rect: Rect,
+    /// Output caps, which depend on whether this cell's output is expanded.
+    limits: OutputLimits,
+}
+
+
 fn render_cells(
     frame: &mut Frame,
+    ctx: &mut RenderCtx<'_>,
     state: &NotebookState,
     nb: &Notebook,
-    active: &ActiveCellView<'_>,
-    lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
     area: Rect,
-    nb_config: &crate::config::NotebookConfig,
-    geo: Geometry,
-    cache: &mut CellHighlightCache,
-) -> (Vec<ImageRequest>, Option<(u16, u16)>) {
-    let mut image_requests = Vec::new();
+) -> Option<(u16, u16)> {
     let mut current_row = area.top();
     let mut focused_cell_screen_pos: Option<(u16, u16)> = None;
 
@@ -327,7 +377,7 @@ fn render_cells(
     let mut skip = state.scroll_offset as u16;
 
     // Inner column width available for cell content (subtract left+right borders).
-    let heights = nb_cell_heights(nb, state, active.rope, nb_config, geo);
+    let heights = nb_cell_heights(nb, state, ctx.active.rope, ctx.nb_config, ctx.geo);
 
     for (cell_idx, cell) in nb.cells.iter().enumerate() {
         if cell_idx < state.scroll_cell {
@@ -337,9 +387,6 @@ fn render_cells(
             break;
         }
 
-        let is_focused = cell_idx == state.focused_cell;
-        let is_folded = state.is_cell_folded(cell_idx);
-        let limits = OutputLimits::new(nb_config, state.is_output_expanded(cell_idx));
         let full_height = heights[cell_idx] as u16;
 
         // Clip: `clip_top` rows are scrolled off above the viewport; the
@@ -349,18 +396,18 @@ fn render_cells(
         let visible = (full_height - clip_top).min(area.bottom() - current_row);
 
         if visible > 0 {
-            let cell_rect = Rect {
-                x: area.x,
-                y: current_row,
-                width: area.width,
-                height: visible,
+            let draw = CellDraw {
+                cell,
+                idx: cell_idx,
+                focused: cell_idx == state.focused_cell,
+                folded: state.is_cell_folded(cell_idx),
+                clip_top,
+                full_height,
+                rect: Rect { x: area.x, y: current_row, width: area.width, height: visible },
+                limits: OutputLimits::new(ctx.nb_config, state.is_output_expanded(cell_idx)),
             };
-            let cursor_screen = render_cell(
-                frame, state, nb, cell, cell_idx, is_focused, is_folded, clip_top,
-                full_height, cell_rect, active, lsp_diagnostics, &mut image_requests,
-                cache, limits, geo,
-            );
-            if is_focused {
+            let cursor_screen = render_cell(frame, ctx, state, nb, &draw);
+            if draw.focused {
                 focused_cell_screen_pos = cursor_screen;
             }
             current_row += visible;
@@ -374,7 +421,7 @@ fn render_cells(
         frame.set_cursor_position((cx, cy));
     }
 
-    (image_requests, focused_cell_screen_pos)
+    focused_cell_screen_pos
 }
 
 /// Render one cell, possibly clipped at the viewport edges: `clip_top` rows of
@@ -382,25 +429,23 @@ fn render_cells(
 /// short of `full_height` when the cell runs past the bottom.  Clipped edges
 /// lose their border line — the cell visibly continues past the screen edge.
 /// Returns the cursor screen position when it falls inside the visible slice.
-#[allow(clippy::too_many_arguments)]
 fn render_cell(
     frame: &mut Frame,
+    ctx: &mut RenderCtx<'_>,
     state: &NotebookState,
     nb: &Notebook,
-    cell: &Cell,
-    cell_idx: usize,
-    is_focused: bool,
-    is_folded: bool,
-    clip_top: u16,
-    full_height: u16,
-    cell_rect: Rect,
-    active: &ActiveCellView<'_>,
-    lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
-    image_requests: &mut Vec<ImageRequest>,
-    cache: &mut CellHighlightCache,
-    limits: OutputLimits,
-    geo: Geometry,
+    draw: &CellDraw<'_>,
 ) -> Option<(u16, u16)> {
+    let CellDraw {
+        cell,
+        idx: cell_idx,
+        focused: is_focused,
+        folded: is_folded,
+        clip_top,
+        full_height,
+        rect: cell_rect,
+        ..
+    } = *draw;
     let th = crate::theme::active();
     // Border colour encodes cell execution state
     let border_color = cell_border_color(cell, state.executing_cell, cell_idx);
@@ -449,59 +494,49 @@ fn render_cell(
     if is_folded {
         if content_skip == 0 {
             // For the focused cell, use the live rope so unsaved edits are shown.
-            let rope_for_summary = if is_focused { active.rope } else { &cell.source };
+            let rope_for_summary = if is_focused { ctx.active.rope } else { &cell.source };
             render_folded_cell_summary_rope(frame, rope_for_summary, &cell.outputs, inner);
         }
         return None;
     }
 
-    render_cell_content(
-        frame, nb, cell, cell_idx, is_focused, inner, active, lsp_diagnostics,
-        image_requests, cache, limits, geo, content_skip,
-    )
+    render_cell_content(frame, ctx, nb, draw, inner, content_skip)
 }
 
 /// Render source lines and outputs inside a cell's bordered inner area.
 /// `skip_rows` content rows (source + divider + output, in visual rows) are
 /// scrolled off above the viewport and consumed without drawing.
 /// Returns the screen (col, row) of the cursor when `is_focused` is true.
-#[allow(clippy::too_many_arguments)]
 fn render_cell_content(
     frame: &mut Frame,
+    ctx: &mut RenderCtx<'_>,
     nb: &Notebook,
-    cell: &Cell,
-    cell_idx: usize,
-    is_focused: bool,
+    draw: &CellDraw<'_>,
     area: Rect,
-    active: &ActiveCellView<'_>,
-    lsp_diagnostics: &std::collections::HashMap<String, Vec<Diagnostic>>,
-    image_requests: &mut Vec<ImageRequest>,
-    cache: &mut CellHighlightCache,
-    limits: OutputLimits,
-    geo: Geometry,
     skip_rows: usize,
 ) -> Option<(u16, u16)> {
+    let CellDraw { cell, idx: cell_idx, focused: is_focused, limits, .. } = *draw;
     // For the focused cell, use the live buffer rope; otherwise use stored source.
-    let rope: &ropey::Rope = if is_focused { active.rope } else { &cell.source };
+    let rope: &ropey::Rope = if is_focused { ctx.active.rope } else { &cell.source };
 
     // A Markdown cell shows its formatted (highlighted) view when `rendered`,
     // except while it's the focused cell being actively edited (Insert/Select) —
     // then we show the raw source so the markup is editable. (Entering Insert
     // also flips `rendered` off, so navigating over it in Normal keeps it
     // rendered until you start editing or convert/re-render it.)
-    let editing_this = is_focused && matches!(active.mode, Mode::Insert | Mode::Select);
+    let editing_this = is_focused && matches!(ctx.active.mode, Mode::Insert | Mode::Select);
     let show_markdown = cell.cell_type == CellType::Markdown && cell.rendered && !editing_this;
 
     // The cursor stays visible in the rendered markdown view too: rendering
     // only restyles the source text (header colours, bold, …) — it never
     // transforms it — so char indices map 1:1 to displayed characters and
     // `j`/`k` passing through the cell keeps a visible cursor.  While the
-    // cursor traverses the output block (`active.output_row`) the source
+    // cursor traverses the output block (`ctx.active.output_row`) the source
     // cursor is hidden — the block cursor is drawn on the output row instead.
-    let (cursor_char_idx, sel_range) = if is_focused && active.output_row.is_none() {
-        let lo = active.cursor.min(active.sel_anchor);
-        let hi = active.cursor.max(active.sel_anchor);
-        (Some(active.cursor), (lo, hi))
+    let (cursor_char_idx, sel_range) = if is_focused && ctx.active.output_row.is_none() {
+        let lo = ctx.active.cursor.min(ctx.active.sel_anchor);
+        let hi = ctx.active.cursor.max(ctx.active.sel_anchor);
+        (Some(ctx.active.cursor), (lo, hi))
     } else {
         (None, (0usize, 0usize))
     };
@@ -521,7 +556,7 @@ fn render_cell_content(
         CellKind::Plain
     };
     let highlight_spans =
-        cache.spans_for(&nb.metadata.kernel_language, cell_idx, rope, kind);
+        ctx.cache.spans_for(&nb.metadata.kernel_language, cell_idx, rope, kind);
 
     // Collect diagnostics for this cell's virtual path (e.g. notebook__cell0.py).
     // Format: (line_within_cell, col_start, col_end, severity).
@@ -530,7 +565,7 @@ fn render_cell_content(
             &nb.path, &nb.metadata.kernel_language, cell_idx,
         );
         let key = crate::lsp::diagnostic_key(&vpath);
-        lsp_diagnostics
+        ctx.diagnostics
             .get(&key)
             .map(|diags| {
                 diags.iter()
@@ -543,13 +578,13 @@ fn render_cell_content(
     let line_ctx = SourceLineCtx {
         cursor_pos: cursor_char_idx,
         sel_range,
-        mode: active.mode,
+        mode: ctx.active.mode,
         highlight_spans,
         use_highlight: kind != CellKind::Plain,
         diag_ranges: &cell_diag_ranges,
         // Only overlay jump labels on the focused cell.
-        jump_labels: if is_focused { active.jump_labels } else { &[] },
-        jump_typed: if is_focused { active.jump_typed } else { "" },
+        jump_labels: if is_focused { ctx.active.jump_labels } else { &[] },
+        jump_typed: if is_focused { ctx.active.jump_typed } else { "" },
     };
 
     let mut current_row = area.top();
@@ -560,7 +595,7 @@ fn render_cell_content(
     // cells per the word_wrap toggle). The wrap width must match
     // `cell_display_height` (via `cell_text_width`) or the cell border won't
     // enclose the wrapped content.
-    let wrap_width = cell_wraps(cell, active.word_wrap).then(|| cell_text_width(area.width));
+    let wrap_width = cell_wraps(cell, ctx.active.word_wrap).then(|| cell_text_width(area.width));
 
     // Visual rows still to consume before drawing (the clip handed down by
     // `render_cell` — rows scrolled off above the viewport).
@@ -614,15 +649,18 @@ fn render_cell_content(
             render_source_line(
                 frame,
                 single_row(area, current_row),
-                seg,
-                line_no,
-                line_start_char + seg_off,
-                seg_off,
-                // The end-of-row cursor cell: on the final row it marks the
-                // end-of-line position; on a word-break row it marks the
-                // consumed space. After a hard break that position belongs to
-                // the next row's first char instead — don't double-draw.
-                is_last_seg || owned_end > seg_off + seg_len,
+                SourceRow {
+                    line: seg,
+                    line_no,
+                    line_start_char: line_start_char + seg_off,
+                    col_offset: seg_off,
+                    // The end-of-row cursor cell: on the final row it marks
+                    // the end-of-line position; on a word-break row it marks
+                    // the consumed space.  After a hard break that position
+                    // belongs to the next row's first char instead — don't
+                    // double-draw.
+                    cursor_eol_cell: is_last_seg || owned_end > seg_off + seg_len,
+                },
                 &line_ctx,
             );
             current_row += 1;
@@ -650,8 +688,8 @@ fn render_cell_content(
         // `OutputCtx::advance`, which intersects these against each row as
         // it's drawn.
         let (out_cursor_char, out_sel) = if is_focused {
-            active.output_row.map(|row| {
-                let vrope = output_virtual_rope(cell, limits, geo);
+            ctx.active.output_row.map(|row| {
+                let vrope = output_virtual_rope(cell, limits, ctx.geo);
                 let to_char = |r: usize, c: usize| {
                     let r = r.min(vrope.len_lines().saturating_sub(1));
                     let line_start = vrope.line_to_char(r);
@@ -660,8 +698,9 @@ fn render_cell_content(
                     let content_len = if n > 0 && line.char(n - 1) == '\n' { n - 1 } else { n };
                     line_start + c.min(content_len)
                 };
-                let cursor_char = to_char(row, active.output_col);
-                let sel = active
+                let cursor_char = to_char(row, ctx.active.output_col);
+                let sel = ctx
+                    .active
                     .output_anchor
                     .map(|(ar, ac)| {
                         let a = to_char(ar, ac);
@@ -681,7 +720,7 @@ fn render_cell_content(
             char_pos: 0,
             cursor_char: out_cursor_char,
             sel: out_sel,
-            cursor_style: crate::theme::cursor_style(active.mode),
+            cursor_style: crate::theme::cursor_style(ctx.active.mode),
             selection_style: Style::default()
                 .bg(th.cell_selection_bg)
                 .fg(th.selection_fg.unwrap_or_else(|| th.fg())),
@@ -693,8 +732,8 @@ fn render_cell_content(
                 break;
             }
             render_output(
-                frame, output, area, &mut current_row, image_requests,
-                geo, &mut out_ctx,
+                frame, output, area, &mut current_row, &mut ctx.images,
+                ctx.geo, &mut out_ctx,
             );
         }
         if out_ctx.cursor_pos.is_some() {
@@ -911,7 +950,6 @@ pub fn cell_display_height(
 /// folded cells collapse to 3 rows, everything else via [`cell_display_height`].
 /// The single height model shared by the renderer and the seamless-scroll math
 /// in `exec::update_scroll`; they must agree row-for-row.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn nb_cell_height(
     cell: &Cell,
     folded: bool,
@@ -1224,6 +1262,24 @@ struct SourceLineCtx<'a> {
     jump_typed: &'a str,
 }
 
+/// One visual row of cell source, as `render_source_line` addresses it.
+#[derive(Clone, Copy)]
+struct SourceRow<'a> {
+    /// The row's text: a whole logical line, or one word-wrapped segment.
+    line: &'a str,
+    /// Which logical line of the cell this row belongs to.
+    line_no: usize,
+    /// The segment's absolute char index within the cell.
+    line_start_char: usize,
+    /// The segment's char offset within its logical line, for matching
+    /// diagnostic columns.
+    col_offset: usize,
+    /// Whether to draw the styled cursor cell one past the last char (end of
+    /// line, or a break-consumed space).  False after a hard break, where that
+    /// position is the next row's first char.
+    cursor_eol_cell: bool,
+}
+
 /// Render one visual row of cell source: a whole logical line, or one
 /// word-wrapped segment of it. `line_start_char` is the segment's absolute
 /// char index in the cell; `col_offset` its char offset within the logical
@@ -1231,17 +1287,8 @@ struct SourceLineCtx<'a> {
 /// styled cursor cell one past the segment's last char (end of line, or a
 /// break-consumed space) — false after a hard break, where that position is
 /// the next row's first char.
-#[allow(clippy::too_many_arguments)]
-fn render_source_line(
-    frame: &mut Frame,
-    area: Rect,
-    line: &str,
-    line_no: usize,
-    line_start_char: usize,
-    col_offset: usize,
-    cursor_eol_cell: bool,
-    ctx: &SourceLineCtx<'_>,
-) {
+fn render_source_line(frame: &mut Frame, area: Rect, row: SourceRow<'_>, ctx: &SourceLineCtx<'_>) {
+    let SourceRow { line, line_no, line_start_char, col_offset, cursor_eol_cell } = row;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -1341,7 +1388,6 @@ fn render_source_line(
 /// selected position past the last real char (the row's virtual "end of
 /// line") also gets one highlighted blank cell, mirroring a source line's
 /// EOL cursor cell.
-#[allow(clippy::too_many_arguments)]
 fn draw_output_content_row(
     frame: &mut Frame,
     row: Rect,
@@ -1462,7 +1508,6 @@ fn draw_traceback_row(
     true
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_output(
     frame: &mut Frame,
     output: &Output,
@@ -1571,7 +1616,6 @@ fn estimated_image_cols(png_w: u32, png_h: u32, rows: u16, cell_px: Option<(u16,
     cols.clamp(4, 512) as u16
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_mime_data(
     frame: &mut Frame,
     data: &MimeData,
@@ -1809,11 +1853,13 @@ mod tests {
                     content_area(f),
                     &state,
                     &nb,
-                    &active,
-                    &std::collections::HashMap::new(),
-                    &crate::config::NotebookConfig::default(),
-                    None,
-                    &mut CellHighlightCache::default(),
+                    RenderInputs {
+                        active: &active,
+                        diagnostics: &std::collections::HashMap::new(),
+                        nb_config: &crate::config::NotebookConfig::default(),
+                        cell_px: None,
+                        cache: &mut CellHighlightCache::default(),
+                    },
                 );
                 cursor_pos = cursor;
             })
@@ -1933,9 +1979,13 @@ mod tests {
             terminal
                 .draw(|f| {
                     render(
-                        f, content_area(f), &state, &nb, &active,
-                        &std::collections::HashMap::new(),
-                        &cfg, None, &mut CellHighlightCache::default(),
+                        f, content_area(f), &state, &nb, RenderInputs {
+                            active: &active,
+                            diagnostics: &std::collections::HashMap::new(),
+                            nb_config: &cfg,
+                            cell_px: None,
+                            cache: &mut CellHighlightCache::default(),
+                        },
                     );
                 })
                 .unwrap();
@@ -2024,9 +2074,13 @@ mod tests {
         terminal
             .draw(|f| {
                 render(
-                    f, content_area(f), &state, &nb, &active,
-                    &std::collections::HashMap::new(),
-                    &cfg, None, &mut CellHighlightCache::default(),
+                    f, content_area(f), &state, &nb, RenderInputs {
+                        active: &active,
+                        diagnostics: &std::collections::HashMap::new(),
+                        nb_config: &cfg,
+                        cell_px: None,
+                        cache: &mut CellHighlightCache::default(),
+                    },
                 );
             })
             .unwrap();
@@ -2097,11 +2151,13 @@ mod tests {
         terminal
             .draw(|f| {
                 let (images, _cursor) = render(
-                    f, content_area(f), &state, &nb, &active,
-                    &std::collections::HashMap::new(),
-                    &crate::config::NotebookConfig::default(),
-                    Some((18, 9)),
-                    &mut CellHighlightCache::default(),
+                    f, content_area(f), &state, &nb, RenderInputs {
+                        active: &active,
+                        diagnostics: &std::collections::HashMap::new(),
+                        nb_config: &crate::config::NotebookConfig::default(),
+                        cell_px: Some((18, 9)),
+                        cache: &mut CellHighlightCache::default(),
+                    },
                 );
                 imgs = images;
             })
@@ -2163,11 +2219,13 @@ mod tests {
         terminal
             .draw(|f| {
                 let (images, cursor) = render(
-                    f, content_area(f), &state, &nb, &active,
-                    &std::collections::HashMap::new(),
-                    &crate::config::NotebookConfig::default(),
-                    Some((18, 9)),
-                    &mut CellHighlightCache::default(),
+                    f, content_area(f), &state, &nb, RenderInputs {
+                        active: &active,
+                        diagnostics: &std::collections::HashMap::new(),
+                        nb_config: &crate::config::NotebookConfig::default(),
+                        cell_px: Some((18, 9)),
+                        cache: &mut CellHighlightCache::default(),
+                    },
                 );
                 cursor_pos = cursor;
                 imgs = images;
@@ -2237,10 +2295,13 @@ mod tests {
         terminal
             .draw(|f| {
                 render(
-                    f, content_area(f), &state, &nb, &active,
-                    &std::collections::HashMap::new(),
-                    &crate::config::NotebookConfig::default(),
-                    None, &mut CellHighlightCache::default(),
+                    f, content_area(f), &state, &nb, RenderInputs {
+                        active: &active,
+                        diagnostics: &std::collections::HashMap::new(),
+                        nb_config: &crate::config::NotebookConfig::default(),
+                        cell_px: None,
+                        cache: &mut CellHighlightCache::default(),
+                    },
                 );
             })
             .unwrap();
