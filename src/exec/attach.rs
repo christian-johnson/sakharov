@@ -33,7 +33,7 @@ pub(super) fn anchor_dir(app: &App) -> Option<PathBuf> {
     // result — there is no file to take a directory from, and asking for one
     // would answer with whatever directory the editor was launched in.  The
     // captured anchor is the only honest answer there.
-    let virtual_source = super::table::current_source_id(app).map_or(true, |id| id.is_virtual());
+    let virtual_source = app.current_source_id().map_or(true, |id| id.is_virtual());
     if virtual_source {
         if let Some(dir) = app.sql_dir.clone() {
             return Some(dir);
@@ -224,7 +224,7 @@ mod with_engine {
             Err(e) => return app.messages.show(format!("Schema: {e:#}")),
         };
         let n = source.row_count().unwrap_or(0);
-        let origin = super::super::table::current_source_id(app);
+        let origin = app.current_source_id();
         super::super::table::open_derived(
             app,
             SourceId::virtual_named(CATALOG),

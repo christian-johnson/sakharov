@@ -126,7 +126,7 @@ pub(super) fn open_exported(app: &mut App, name: &str, path: &std::path::Path, r
         let _ = std::fs::remove_file(path);
         match opened {
             Ok((shape, source)) => {
-                let origin = super::table::current_source_id(app);
+                let origin = app.current_source_id();
                 super::table::open_derived(
                     app,
                     SourceId::virtual_named(name),

@@ -697,19 +697,6 @@ pub fn open_as_table(app: &mut App, path: &Path) {
     start_load(app, path);
 }
 
-/// What is on screen right now, as a source identity: the open table, else the
-/// open file.  What a newly computed table records as the place `q` goes back
-/// to.
-pub(super) fn current_source_id(app: &App) -> Option<SourceId> {
-    if let Some(session) = app.table.as_ref() {
-        return Some(session.id.clone());
-    }
-    if let Some((nb, _)) = app.notebook.as_ref() {
-        return Some(SourceId::of(&nb.path));
-    }
-    app.buffer.path.as_deref().map(SourceId::of)
-}
-
 /// Show `source` in the grid under the virtual identity `id` — a table that was
 /// *computed* rather than read from a file (a frequency table today; a query
 /// result or a groupby later).
@@ -842,7 +829,7 @@ pub(super) fn leave_cell_buffer(app: &mut App) {
 /// it special (see [`super::is_special_path`]) so nothing tries to save it.
 fn cell_buffer_name(session: &Session) -> String {
     let col = session.cursor_column_name().unwrap_or("?");
-    format!("*cell {}:{}*", session.state.cursor_row + 1, col)
+    format!("{}{}:{}*", crate::app::CELL_BUFFER_PREFIX, session.state.cursor_row + 1, col)
 }
 
 /// `Enter` — open the cursor cell's full text in its own buffer.
@@ -875,7 +862,8 @@ pub(super) fn open_cell_buffer(app: &mut App) {
 
     // One cell buffer at a time: without this every cell ever read would keep
     // its rope alive for the rest of the session.
-    app.special_buffer_ropes.retain(|k, _| !k.starts_with("*cell "));
+    app.special_buffer_ropes
+        .retain(|k, _| !k.starts_with(crate::app::CELL_BUFFER_PREFIX));
     app.special_buffer_ropes
         .insert(name.clone(), ropey::Rope::from_str(&text));
 
@@ -1098,7 +1086,7 @@ pub fn poll_table_load(app: &mut App) -> bool {
             if is_delimited_text(&path) {
                 super::lsp::open_file_at(app, &path, 0, 0);
             } else {
-                super::switch_to_special_buffer(app, "*scratch*");
+                super::switch_to_special_buffer(app, crate::app::SCRATCH_BUFFER);
             }
         }
     }

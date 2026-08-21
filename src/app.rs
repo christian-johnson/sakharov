@@ -137,8 +137,20 @@ pub struct SearchState {
 // Grouped sub-state
 // ---------------------------------------------------------------------------
 
-/// Name of the SQL query buffer.  A `*…*` name, so nothing tries to save it.
+/// The scratch buffer: notes that outlive a buffer switch but are never saved.
+pub const SCRATCH_BUFFER: &str = "*scratch*";
+
+/// The message log.  The one special buffer rebuilt from a live source on every
+/// open, which is why it is never stashed.
+pub const MESSAGES_BUFFER: &str = "*Messages*";
+
+/// The SQL query buffer.  A `*…*` name, so nothing tries to save it.
 pub const SQL_BUFFER: &str = "*sql*";
+
+/// Name prefix of the `*cell …*` buffers — a grid cell's full text opened for
+/// reading (`*cell 3:price*`).  A family rather than one name, so it is matched
+/// by prefix through `SourceId::is_virtual_kind`.
+pub const CELL_BUFFER_PREFIX: &str = "*cell ";
 
 /// Terminal-graphics (Kitty/WezTerm) image state.
 pub struct GraphicsState {
@@ -415,6 +427,23 @@ impl App {
         }
     }
 
+    /// What is on screen right now, as a source identity.
+    ///
+    /// The one answer to "which thing is open" — used to record where a
+    /// computed table should send `q` back to, to decide whether the current
+    /// source has a file behind it, and to find our place in the buffer list.
+    /// Exhaustive on purpose: a view that has no file must still be able to say
+    /// what it is (a `SourceId::Virtual`), or it drops out of the buffer list
+    /// and out of every "go back to where I was" path.
+    pub fn current_source_id(&self) -> Option<crate::source::SourceId> {
+        use crate::source::SourceId;
+        match self.view() {
+            View::Table => self.table.as_ref().map(|s| s.id.clone()),
+            View::Notebook => self.notebook.as_ref().map(|(nb, _)| SourceId::of(&nb.path)),
+            View::Text => self.buffer.path.as_deref().map(SourceId::of),
+        }
+    }
+
     /// Name of the table file currently loading in the background, if any.
     pub fn table_load_name(&self) -> Option<&str> {
         self.table_pending.as_ref().map(|l| l.display_name())
@@ -438,11 +467,8 @@ impl App {
     pub fn in_cell_buffer(&self) -> bool {
         self.table_cell_origin.is_some()
             && self
-                .buffer
-                .path
-                .as_ref()
-                .and_then(|p| p.to_str())
-                .is_some_and(|n| n.starts_with("*cell "))
+                .current_source_id()
+                .is_some_and(|id| id.is_virtual_kind(CELL_BUFFER_PREFIX))
     }
 
     /// True while the `*sql*` query buffer is the active buffer.
@@ -450,7 +476,7 @@ impl App {
     /// An ordinary text buffer with one addition: the execute keys run its
     /// contents as a query (see `input::handle_key`), the way they run a cell.
     pub fn in_sql_buffer(&self) -> bool {
-        self.buffer.path.as_ref().and_then(|p| p.to_str()) == Some(SQL_BUFFER)
+        self.current_source_id() == Some(crate::source::SourceId::virtual_named(SQL_BUFFER))
     }
 
     /// The kernel language of the open notebook (e.g. `"python"`), if any.
@@ -633,7 +659,7 @@ impl App {
             special_buffer_ropes: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
-                    "*scratch*".to_string(),
+                    SCRATCH_BUFFER.to_string(),
                     ropey::Rope::from_str(crate::exec::SCRATCH_INTRO),
                 );
                 m

@@ -80,6 +80,17 @@ impl SourceId {
     pub fn is_virtual(&self) -> bool {
         matches!(self, Self::Virtual(_))
     }
+
+    /// True when this is a virtual source whose name starts with `prefix`.
+    ///
+    /// Some virtual sources come in families rather than as one fixed name —
+    /// `*cell 3:price*`, `*cell 7:notes*` are all "a grid cell opened for
+    /// reading".  A name prefix is how such a family is recognised, and doing
+    /// it here keeps callers from prodding a `PathBuf` with `starts_with`,
+    /// which is the identity rule this type exists to replace.
+    pub fn is_virtual_kind(&self, prefix: &str) -> bool {
+        matches!(self, Self::Virtual(name) if name.starts_with(prefix))
+    }
 }
 
 /// The `*…*` shape that marks a name as belonging to no file.
@@ -119,6 +130,15 @@ mod tests {
         assert_eq!(SourceId::of(&id.to_path()), id);
         // Already-wrapped names are not double-wrapped.
         assert_eq!(SourceId::virtual_named("*df*"), SourceId::virtual_named("df"));
+    }
+
+    #[test]
+    fn a_family_of_virtual_sources_is_recognised_by_its_name_prefix() {
+        let cell = SourceId::of(Path::new("*cell 3:price*"));
+        assert!(cell.is_virtual_kind("*cell "));
+        assert!(!SourceId::of(Path::new("*scratch*")).is_virtual_kind("*cell "));
+        // A real file whose name happens to start the same way is not one.
+        assert!(!SourceId::of(Path::new("*cell notes")).is_virtual_kind("*cell "));
     }
 
     #[test]

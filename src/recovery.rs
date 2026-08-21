@@ -228,7 +228,7 @@ fn collect_entries(app: &App) -> Vec<Entry> {
             }
         }
     } else if let Some(path) = app.buffer.path.as_ref() {
-        if path.to_str() == Some("*scratch*") {
+        if path.to_str() == Some(crate::app::SCRATCH_BUFFER) {
             push_scratch(&mut entries, &app.buffer.rope, now);
         } else if !crate::exec::is_special_path(path) && app.buffer.modified {
             entries.push(Entry {
@@ -288,9 +288,9 @@ fn collect_entries(app: &App) -> Vec<Entry> {
 
     // Stashed scratch (when scratch isn't the active buffer).
     let scratch_active =
-        app.buffer.path.as_deref().and_then(|p| p.to_str()) == Some("*scratch*");
+        app.buffer.path.as_deref().and_then(|p| p.to_str()) == Some(crate::app::SCRATCH_BUFFER);
     if !scratch_active {
-        if let Some(rope) = app.special_buffer_ropes.get("*scratch*") {
+        if let Some(rope) = app.special_buffer_ropes.get(crate::app::SCRATCH_BUFFER) {
             push_scratch(&mut entries, rope, now);
         }
     }
@@ -553,8 +553,8 @@ fn apply_restore(app: &mut App, item: &PendingRecovery) {
         RecoveryKind::Scratch => {
             let rope = ropey::Rope::from_str(&item.content);
             app.special_buffer_ropes
-                .insert("*scratch*".to_string(), rope.clone());
-            if app.buffer.path.as_deref().and_then(|p| p.to_str()) == Some("*scratch*") {
+                .insert(crate::app::SCRATCH_BUFFER.to_string(), rope.clone());
+            if app.buffer.path.as_deref().and_then(|p| p.to_str()) == Some(crate::app::SCRATCH_BUFFER) {
                 app.buffer.rope = rope;
                 app.buffer.modified = true;
                 crate::exec::recompute_highlights(app);

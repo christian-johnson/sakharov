@@ -6,7 +6,12 @@ use ropey::Rope;
 
 use std::path::Path;
 
-use crate::{app::App, mode::Mode, selection::Selection, source::SourceId};
+use crate::{
+    app::{App, MESSAGES_BUFFER, SCRATCH_BUFFER},
+    mode::Mode,
+    selection::Selection,
+    source::SourceId,
+};
 
 use super::{lsp, notebook, rebuild_diag_cache, recompute_highlights};
 
@@ -33,13 +38,11 @@ pub fn is_special_path(path: &std::path::Path) -> bool {
 /// every time it is opened, and a `*cell …*` buffer is re-read from the grid by
 /// whoever opens it (`table::open_cell_buffer` seeds and evicts that rope).
 pub(super) fn save_current_special_buffer(app: &mut App) {
-    let Some(name) = app.buffer.path.as_deref().and_then(|p| p.to_str()) else { return };
-    if !is_special_path(std::path::Path::new(name)) || name == "*Messages*" || app.in_cell_buffer()
-    {
+    let Some(SourceId::Virtual(name)) = app.current_source_id() else { return };
+    if name == MESSAGES_BUFFER || app.in_cell_buffer() {
         return;
     }
-    app.special_buffer_ropes
-        .insert(name.to_string(), app.buffer.rope.clone());
+    app.special_buffer_ropes.insert(name, app.buffer.rope.clone());
 }
 
 /// Stash or close whatever is currently open (notebook or plain file) so it
@@ -86,14 +89,14 @@ pub fn switch_to_special_buffer(app: &mut App, name: &str) {
     teardown_current_buffer(app);
 
     let rope = match name {
-        "*scratch*" => app
+        SCRATCH_BUFFER => app
             .special_buffer_ropes
-            .get("*scratch*")
+            .get(SCRATCH_BUFFER)
             .cloned()
             .unwrap_or_else(|| Rope::from_str(SCRATCH_INTRO)),
         // *Messages* is the one special buffer with a live source: rebuild it
         // from the accumulated log rather than from the stash.
-        "*Messages*" => {
+        MESSAGES_BUFFER => {
             let content = if app.messages.log.is_empty() {
                 String::new()
             } else {
@@ -157,7 +160,7 @@ pub fn open_path(app: &mut App, path: &std::path::Path) {
         // open as an empty text buffer named after itself.
         super::table::open_as_table(app, path);
     } else if is_special_path(path) {
-        switch_to_special_buffer(app, path.to_str().unwrap_or("*scratch*"));
+        switch_to_special_buffer(app, path.to_str().unwrap_or(SCRATCH_BUFFER));
     } else if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
         open_as_notebook(app, path);
     } else if app.config.table.auto_open && super::table::is_table_path(path) {
@@ -178,19 +181,18 @@ pub(super) fn navigate_buffer(app: &mut App, delta: i32) {
         return;
     }
 
-    let current = if let Some(ref session) = app.table {
-        // The table view's buffer is detached, so the session holds the identity.
-        session.id.clone()
-    } else if let Some(ref origin) = app.table_cell_origin {
-        // A cell buffer sits "at" the table it was read out of, so H/L step
-        // away from that table rather than restarting from the list head.
-        origin.id.clone()
-    } else if let Some((ref nb, _)) = app.notebook {
-        SourceId::of(&nb.path)
-    } else if let Some(ref p) = app.buffer.path {
-        SourceId::of(p)
-    } else {
-        return;
+    // A `*cell …*` buffer is a temporary read-out of a grid cell rather than an
+    // entry of its own, so it sits "at" the table it came from: H/L step away
+    // from that table instead of restarting at the head of the list.  Otherwise
+    // it is simply whatever is on screen.
+    let current = match app
+        .table_cell_origin
+        .as_ref()
+        .map(|origin| origin.id.clone())
+        .or_else(|| app.current_source_id())
+    {
+        Some(id) => id,
+        None => return,
     };
 
     let current_idx = app.open_buffers.iter().position(|id| *id == current);

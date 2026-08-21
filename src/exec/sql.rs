@@ -50,7 +50,7 @@ pub(super) fn open_buffer(app: &mut App) {
     app.sql_dir = super::buffers::sql_working_dir(app);
     // …and where `q` goes back to, for the same reason: once the switch has
     // happened there is nothing left on screen to infer it from.
-    app.sql_origin = super::table::current_source_id(app);
+    app.sql_origin = app.current_source_id();
     // Seed the template only the first time; after that the buffer holds
     // whatever the user last typed, which is the point of a scratch buffer.
     app.special_buffer_ropes
@@ -75,7 +75,7 @@ pub(super) fn close_buffer(app: &mut App) -> bool {
         .take()
         .filter(|id| id != &SourceId::virtual_named(SQL_BUFFER))
         .map(|id| id.to_path())
-        .unwrap_or_else(|| std::path::PathBuf::from("*scratch*"));
+        .unwrap_or_else(|| std::path::PathBuf::from(crate::app::SCRATCH_BUFFER));
     super::open_path(app, &origin);
     true
 }

@@ -673,7 +673,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             // What is being closed.  In the table view `app.buffer` is a
             // detached, path-less buffer — the identity lives in the session,
             // and reading it from the buffer closed nothing at all.
-            let key = table::current_source_id(app);
+            let key = app.current_source_id();
 
             // Special buffers cannot be closed.  A table over a real file is
             // not one of them, however virtual its detached buffer looks.
@@ -739,9 +739,9 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 .cycle()
                 .skip(closed_idx.min(app.open_buffers.len().saturating_sub(1)))
                 .take(app.open_buffers.len())
-                .find(|id| id.label() != "*Messages*")
+                .find(|id| id.label() != crate::app::MESSAGES_BUFFER)
                 .map(|id| id.to_path())
-                .unwrap_or_else(|| std::path::PathBuf::from("*scratch*"));
+                .unwrap_or_else(|| std::path::PathBuf::from(crate::app::SCRATCH_BUFFER));
 
             buffers::open_path(app, &next);
 
@@ -758,11 +758,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::SwitchToScratch => {
-            switch_to_special_buffer(app, "*scratch*");
+            switch_to_special_buffer(app, crate::app::SCRATCH_BUFFER);
             return;
         }
         Command::SwitchToMessages => {
-            switch_to_special_buffer(app, "*Messages*");
+            switch_to_special_buffer(app, crate::app::MESSAGES_BUFFER);
             return;
         }
 
@@ -2642,11 +2642,11 @@ mod tests {
         );
 
         // And the same for a special buffer, which is not stashed at all.
-        switch_to_special_buffer(&mut app, "*scratch*");
+        switch_to_special_buffer(&mut app, crate::app::SCRATCH_BUFFER);
         let scratch_head = app.buffer.rope.line_to_char(1);
         app.selection = Selection::point(scratch_head);
         open_path(&mut app, &b);
-        switch_to_special_buffer(&mut app, "*scratch*");
+        switch_to_special_buffer(&mut app, crate::app::SCRATCH_BUFFER);
         assert_eq!(app.selection.head, scratch_head);
 
         let _ = std::fs::remove_file(&a);
