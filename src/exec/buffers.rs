@@ -45,43 +45,62 @@ pub(super) fn save_current_special_buffer(app: &mut App) {
     app.special_buffer_ropes.insert(name, app.buffer.rope.clone());
 }
 
-/// Stash or close whatever is currently open (notebook or plain file) so it
-/// can be safely replaced. A notebook is stashed whole; a plain buffer is
-/// closed with the LSP (skipping virtual/special paths, which were never
-/// opened with it) and its unsaved edits are kept in memory.
+/// Stash or close whatever is currently open so it can be safely replaced.
+///
+/// Every "show something else" path goes through here.
 pub(super) fn teardown_current_buffer(app: &mut App) {
     remember_cursor(app);
-    // Every "show something else" path goes through here, so this is the one
-    // place a special buffer's text has to be kept — including the way into the
-    // table view, which is how `q` leaves `*sql*` for a grid.
+    // The one place a special buffer's text is kept — `*scratch*`'s notes, and
+    // equally the query typed into `*sql*`, including on the way into the table
+    // view, which is how `q` leaves `*sql*` for a grid.
     save_current_special_buffer(app);
-    // A table session holds no unsaved state (the view is read-only), but it
-    // does hold a parsed copy of the file and the cursor cell — stash both, so
-    // reading a cell in its own buffer and coming straight back lands on the
-    // same cell without re-parsing.  An in-flight load has nothing worth
-    // keeping and is simply dropped.
-    if let Some(session) = app.table.take() {
-        app.table_buffers.insert(session.id.clone(), session);
+
+    // One arm per view: whatever is on screen has to be put somewhere it can be
+    // brought back from.  Exhaustive on purpose (see `crate::view`) — a view
+    // that fell through to the text arm would have its state dropped on the
+    // next buffer switch, silently losing whatever the user had done in it.
+    match app.view() {
+        // A table session holds no unsaved state (the view is read-only), but
+        // it does hold a parsed copy of the file and the cursor cell.  Stash
+        // both, so reading a cell in its own buffer and coming straight back
+        // lands on the same cell without re-parsing.
+        crate::view::View::Table => {
+            if let Some(session) = app.table.take() {
+                app.table_buffers.insert(session.id.clone(), session);
+            }
+        }
+
+        // Stash the open notebook so edits are preserved if the user comes
+        // back.  After this `app.buffer` holds stale cell text — do NOT stash
+        // it, and do NOT `did_close` it: it was never opened with the LSP under
+        // that virtual path.
+        //
+        // The second arm is the full-screen focused-cell overlay: it *draws*
+        // as text and is edited like a file, so `view()` calls it `Text`, but
+        // what is open is still a notebook and it must be stashed as one.
+        // Treating it as a plain buffer would close a virtual cell path with
+        // the LSP and drop every other cell's unsaved edits.
+        crate::view::View::Notebook => notebook::stash_current_notebook(app),
+        crate::view::View::Text if app.notebook.is_some() => {
+            notebook::stash_current_notebook(app)
+        }
+
+        crate::view::View::Text => {
+            if let (Some(ref lang), Some(ref old_path)) =
+                (app.lsp_language.clone(), app.buffer.path.clone())
+            {
+                if !is_special_path(old_path) {
+                    app.lsp.did_close(lang, old_path);
+                }
+            }
+            stash_current_file_buffer(app);
+        }
     }
+
+    // An in-flight load has nothing worth keeping, whichever view it was for.
     app.table_pending = None;
     // Leaving a `*cell …*` buffer, whichever way: undo the settings it forced.
     super::table::leave_cell_buffer(app);
-    if app.notebook.is_some() {
-        // Stash the open notebook so edits are preserved if the user comes back.
-        // (After this, `app.buffer` holds stale cell text — do NOT stash it,
-        // and do NOT did_close it: it was never opened with the LSP under
-        // that virtual path.)
-        notebook::stash_current_notebook(app);
-    } else {
-        if let (Some(ref lang), Some(ref old_path)) =
-            (app.lsp_language.clone(), app.buffer.path.clone())
-        {
-            if !is_special_path(old_path) {
-                app.lsp.did_close(lang, old_path);
-            }
-        }
-        stash_current_file_buffer(app);
-    }
 }
 
 /// Switch the editor to a named special buffer (`*scratch*` or `*Messages*`).

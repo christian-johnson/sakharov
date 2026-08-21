@@ -1368,8 +1368,11 @@ fn at_first_visual_row(app: &App) -> bool {
 fn goto_hints(app: &App) -> Vec<(String, String)> {
     let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
 
-    if app.view() == crate::view::View::Table {
-        return vec![
+    // Exhaustive on purpose: `g` is the editor's "go somewhere / show me more"
+    // prefix, and what that means is a property of the view.  A new view either
+    // lists its own meanings or explicitly shares the text ones.
+    match app.view() {
+        crate::view::View::Table => return vec![
             hint("g", "first row"),
             hint("e", "last row"),
             hint("h", "first column"),
@@ -1384,7 +1387,10 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
             hint("t", "browse attached tables"),
             hint("v", "kernel variables"),
             hint("b", "buffer picker"),
-        ];
+        ],
+        // The notebook edits a cell's text, so the text meanings are the right
+        // ones there.
+        crate::view::View::Notebook | crate::view::View::Text => {}
     }
 
     let mut hints = vec![

@@ -57,23 +57,28 @@ pub fn update_scroll(app: &mut App) {
     let visible_rows = app.viewport_height;
     let scroll_off = app.config.editor.scroll_off;
 
-    // Seamless, row-granular notebook scroll.  The whole notebook is one
-    // vertical stack of cells (each `height` rows, separated by a 1-row gap);
-    // the viewport is a window into it anchored by `(scroll_cell,
-    // scroll_offset)`.  We locate the cursor's absolute row in that stack —
-    // inside the source, or (when `output_row` is set) inside the cell's
-    // output block — and nudge the anchor just enough to keep it within the
-    // scroll-off margin.  Because the anchor is measured in rows, scrolling
-    // moves one line at a time instead of jumping a whole cell.  (The
-    // full-screen focused-cell overlay falls through to the plain path.)
-    if app.view() == crate::view::View::Table {
-        // Called every frame, so the grid re-normalizes after a resize too.
-        super::table::update_scroll(app);
-        return;
-    }
-    if app.view() == crate::view::View::Notebook {
-        notebook_update_scroll(app, visible_rows, scroll_off);
-        return;
+    // One arm per view: each keeps its own anchor, and each is re-run every
+    // frame so a resize re-normalizes it.  Exhaustive on purpose (see
+    // `crate::view`) — a view that fell through to the plain path would scroll
+    // `app.scroll_row` against a buffer it isn't showing.
+    match app.view() {
+        crate::view::View::Table => return super::table::update_scroll(app),
+
+        // Seamless, row-granular notebook scroll.  The whole notebook is one
+        // vertical stack of cells (each `height` rows, separated by a 1-row
+        // gap); the viewport is a window into it anchored by `(scroll_cell,
+        // scroll_offset)`.  We locate the cursor's absolute row in that stack —
+        // inside the source, or (when `output_row` is set) inside the cell's
+        // output block — and nudge the anchor just enough to keep it within the
+        // scroll-off margin.  Because the anchor is measured in rows, scrolling
+        // moves one line at a time instead of jumping a whole cell.
+        crate::view::View::Notebook => {
+            return notebook_update_scroll(app, visible_rows, scroll_off)
+        }
+
+        // The plain editor, and the notebook's full-screen focused-cell
+        // overlay, which scrolls exactly like a file.
+        crate::view::View::Text => {}
     }
 
     // The renderer owns this number (gutters, diagnostic column): asking it

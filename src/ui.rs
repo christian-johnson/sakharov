@@ -558,6 +558,53 @@ fn diagnostic_at_cursor(app: &App) -> Option<&crate::lsp_manager::Diagnostic> {
     diagnostic_at(diags, line, col)
 }
 
+/// The status line's view of an open notebook: the filename with cell context,
+/// the modified flag, the cell counter and the kernel chip — plus the
+/// diagnostics summed across every cell, which is why the counters are `&mut`.
+fn notebook_status(
+    app: &App,
+    diag_errors: &mut usize,
+    diag_warnings: &mut usize,
+) -> (String, bool, Option<(usize, usize)>, Option<crate::statusline::KernelView>) {
+    let Some((nb, state)) = app.notebook.as_ref() else {
+        return (app.buffer.display_name(), app.buffer.modified, None, None);
+    };
+    let nb_name = nb.path.file_stem().and_then(|s| s.to_str()).unwrap_or("notebook");
+    let ext = lang_to_ext(&nb.metadata.kernel_language);
+    let filename = format!("{nb_name}  ·  cell [{}].{ext}", state.focused_cell + 1);
+
+    // Diagnostics are reported per virtual cell path; sum across them all.
+    for idx in 0..nb.cells.len() {
+        let vpath =
+            crate::notebook::cell_virtual_path(&nb.path, &nb.metadata.kernel_language, idx);
+        count_diagnostics(app, &crate::lsp::diagnostic_key(&vpath), diag_errors, diag_warnings);
+    }
+
+    // The chip shows *this notebook's* kernel — one per notebook, so another
+    // notebook's busy kernel must not read as this one's.
+    let kernel = Some(match crate::exec::notebook::notebook_session(app).map(|c| c.status()) {
+        Some(crate::compute::KernelStatus::Starting) => crate::statusline::KernelView::Starting,
+        Some(crate::compute::KernelStatus::Idle) => crate::statusline::KernelView::Idle,
+        Some(crate::compute::KernelStatus::Busy) => crate::statusline::KernelView::Busy,
+        Some(crate::compute::KernelStatus::Dead) => crate::statusline::KernelView::Dead,
+        None => crate::statusline::KernelView::None,
+    });
+    (
+        filename,
+        nb.modified,
+        Some((state.focused_cell + 1, nb.cells.len().max(1))),
+        kernel,
+    )
+}
+
+/// Add the error/warning counts published for `key` to the running totals.
+fn count_diagnostics(app: &App, key: &str, errors: &mut usize, warnings: &mut usize) {
+    if let Some(diags) = app.lsp.diagnostics.get(key) {
+        *errors += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
+        *warnings += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Warning).count();
+    }
+}
+
 /// Build the status-line [`Ctx`](crate::statusline::Ctx) from the current app
 /// state. Shared by the plain editor / focused-cell overlay (this module) and
 /// the multi-cell notebook view (`app::run_loop`); only the chosen module
@@ -573,48 +620,42 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
     let total_lines = rope.len_lines().max(1);
     let scroll_pct = (line_idx * 100) / total_lines;
 
-    let count_diags = |key: &str, e: &mut usize, w: &mut usize| {
-        if let Some(diags) = app.lsp.diagnostics.get(key) {
-            *e += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
-            *w += diags.iter().filter(|d| d.severity == DiagnosticSeverity::Warning).count();
-        }
-    };
-
     let (mut diag_errors, mut diag_warnings) = (0usize, 0usize);
-    let (filename, modified, cell, kernel) = if let Some(session) = app.table.as_ref() {
-        // The table view's buffer is detached and has no path, so the name comes
-        // from the session.  Read-only, hence never modified.
-        (session.display_name(), false, None, None)
-    } else if let Some(name) = app.table_load_name() {
-        // A table is still parsing on the background thread.  The buffer is
-        // already detached, so without this the status line reads "[No Name]"
-        // over an empty screen — name the file being loaded instead (the
-        // `spinner` module is animating alongside it).
-        (format!("{name}  ·  loading"), false, None, None)
-    } else if let Some((nb, state)) = app.notebook.as_ref() {
-        let nb_name = nb.path.file_stem().and_then(|s| s.to_str()).unwrap_or("notebook");
-        let ext = lang_to_ext(&nb.metadata.kernel_language);
-        let filename = format!("{nb_name}  ·  cell [{}].{ext}", state.focused_cell + 1);
-        // Diagnostics are reported per virtual cell path; sum across them all.
-        for idx in 0..nb.cells.len() {
-            let vpath = crate::notebook::cell_virtual_path(&nb.path, &nb.metadata.kernel_language, idx);
-            count_diags(&crate::lsp::diagnostic_key(&vpath), &mut diag_errors, &mut diag_warnings);
+
+    // How the status line names what is open.  Exhaustive on the view (see
+    // `crate::view`): a view whose buffer is detached has no filename to fall
+    // back on, so one that skipped this would read "[No Name]" over a full
+    // screen of its own content.
+    let (filename, modified, cell, kernel) = match app.view() {
+        crate::view::View::Table => match app.table.as_ref() {
+            // The grid's buffer is detached and has no path, so the name comes
+            // from the session.  Read-only, hence never modified.
+            Some(session) => (session.display_name(), false, None, None),
+            None => (app.buffer.display_name(), false, None, None),
+        },
+
+        crate::view::View::Notebook => {
+            notebook_status(app, &mut diag_errors, &mut diag_warnings)
         }
-        // The status chip shows *this notebook's* kernel — one per notebook, so
-        // another notebook's busy kernel must not read as this one's.
-        let kernel = Some(match crate::exec::notebook::notebook_session(app).map(|c| c.status()) {
-            Some(crate::compute::KernelStatus::Starting) => crate::statusline::KernelView::Starting,
-            Some(crate::compute::KernelStatus::Idle) => crate::statusline::KernelView::Idle,
-            Some(crate::compute::KernelStatus::Busy) => crate::statusline::KernelView::Busy,
-            Some(crate::compute::KernelStatus::Dead) => crate::statusline::KernelView::Dead,
-            None => crate::statusline::KernelView::None,
-        });
-        (filename, nb.modified, Some((state.focused_cell + 1, nb.cells.len().max(1))), kernel)
-    } else {
-        if let Some(ref path) = app.buffer.path {
-            count_diags(&crate::lsp::diagnostic_key(path), &mut diag_errors, &mut diag_warnings);
-        }
-        (app.buffer.display_name(), app.buffer.modified, None, None)
+
+        // A table still parsing on the background thread has already detached
+        // the buffer, so name the file being loaded rather than showing
+        // "[No Name]" over an empty screen (the `spinner` module animates
+        // alongside it).
+        crate::view::View::Text => match app.table_load_name() {
+            Some(name) => (format!("{name}  ·  loading"), false, None, None),
+            None => {
+                if let Some(ref path) = app.buffer.path {
+                    count_diagnostics(
+                        app,
+                        &crate::lsp::diagnostic_key(path),
+                        &mut diag_errors,
+                        &mut diag_warnings,
+                    );
+                }
+                (app.buffer.display_name(), app.buffer.modified, None, None)
+            }
+        },
     };
 
     crate::statusline::Ctx {

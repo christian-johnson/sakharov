@@ -319,7 +319,7 @@ mod tests {
         // `q` is bound to BufferClose in the SQL buffer's override map.
         assert!(app
             .keymap
-            .lookup_sql(&crate::keymap::KeyBinding::char('q'))
+            .lookup(crate::keymap::Layer::Sql, &crate::keymap::KeyBinding::char('q'))
             .is_some_and(|c| matches!(c, [Command::BufferClose])));
 
         app.buffer.rope = ropey::Rope::from_str("SELECT 1\n");

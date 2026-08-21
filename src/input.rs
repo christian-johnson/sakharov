@@ -30,6 +30,25 @@ fn is_splash_preserving(cmd: &Command) -> bool {
     )
 }
 
+/// Which keymap layer Normal-mode keys are looked up in right now.
+///
+/// Exhaustive on [`View`](crate::view::View): a new view must say whether it
+/// shadows any Normal bindings, rather than inheriting them by falling off the
+/// end of a chain of `if`s.  Note that two of the layers belong to *buffers*
+/// rather than views — a `*cell …*` or `*sql*` buffer is an ordinary text view
+/// with a single key overridden — which is why this is a function of the whole
+/// `App` and not of the view alone.
+fn keymap_layer(app: &App) -> crate::keymap::Layer {
+    use crate::{keymap::Layer, view::View};
+    match app.view() {
+        View::Notebook => Layer::Notebook,
+        View::Table => Layer::Table,
+        View::Text if app.in_cell_buffer() => Layer::Cell,
+        View::Text if app.in_sql_buffer() => Layer::Sql,
+        View::Text => Layer::Normal,
+    }
+}
+
 /// Dispatch a key event to the appropriate handler based on the current mode.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     // Splash dismissal logic:
@@ -162,35 +181,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     match app.mode.clone() {
         Mode::Normal => {
             let kb = KeyBinding::from(key);
-            // While a notebook is open (outside the full-screen overlay), the
-            // notebook override map shadows the normal bindings — e.g. J/K move
-            // between cells, Shift+Enter executes — falling back to the normal
-            // bindings for everything else.
             let in_notebook = app.view() == crate::view::View::Notebook;
-            let cmds = match app.view() {
-                crate::view::View::Notebook => app
-                    .keymap
-                    .lookup_notebook(&kb)
-                    .or_else(|| app.keymap.lookup_normal(&kb)),
-                crate::view::View::Table => app
-                    .keymap
-                    .lookup_table(&kb)
-                    .or_else(|| app.keymap.lookup_normal(&kb)),
-                // A `*cell …*` buffer is a text view with one override: `q`
-                // returns to the grid it was read out of.
-                crate::view::View::Text if app.in_cell_buffer() => app
-                    .keymap
-                    .lookup_cell(&kb)
-                    .or_else(|| app.keymap.lookup_normal(&kb)),
-                // The `*sql*` buffer is a text view with the same one override:
-                // `q` leaves it for wherever `:sql` was invoked from.
-                crate::view::View::Text if app.in_sql_buffer() => app
-                    .keymap
-                    .lookup_sql(&kb)
-                    .or_else(|| app.keymap.lookup_normal(&kb)),
-                crate::view::View::Text => app.keymap.lookup_normal(&kb),
-            }
-            .map(|v| v.to_vec());
+            let cmds = app
+                .keymap
+                .lookup_layered(keymap_layer(app), &kb)
+                .map(|v| v.to_vec());
             if let Some(cmds) = cmds {
                 exec::run_many(app, &cmds);
             }
@@ -605,10 +600,14 @@ pub fn goto_command(view: crate::view::View, c: char) -> Option<Command> {
     // the analytic commands live here rather than scattered across bare letters,
     // and a key whose text meaning is meaningless in a grid (`gd` definition,
     // `gr` references) is free to carry the grid's.
-    if view == crate::view::View::Table {
-        if let Some(cmd) = table_goto_command(c) {
-            return Some(cmd);
+    match view {
+        crate::view::View::Table => {
+            if let Some(cmd) = table_goto_command(c) {
+                return Some(cmd);
+            }
         }
+        // A notebook cell is text, so the text meanings are the right ones.
+        crate::view::View::Notebook | crate::view::View::Text => {}
     }
     Some(match c {
         'g' => Command::GotoFileStart,

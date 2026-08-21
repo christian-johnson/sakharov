@@ -101,6 +101,27 @@ impl From<KeyEvent> for KeyBinding {
     }
 }
 
+/// Which set of bindings a key is looked up in.
+///
+/// `Normal` and `Select` are the modes; the rest are **override layers** that
+/// shadow `Normal` for as long as something particular is on screen, falling
+/// back to it for every key they don't claim (see [`Keymap::lookup_layered`]).
+/// A layer is deliberately small — the handful of keys whose meaning genuinely
+/// changes — because everything else should keep working as it does elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    Normal,
+    Select,
+    /// While a notebook is open: `N`/`M` move between cells, `J`/`K` page.
+    Notebook,
+    /// While the data grid is open: `J` pages, `K` peeks the cell.
+    Table,
+    /// In a `*cell …*` buffer: `q` returns to the grid it was read out of.
+    Cell,
+    /// In the `*sql*` buffer: `q` leaves for wherever `:sql` was invoked from.
+    Sql,
+}
+
 pub struct Keymap {
     normal: HashMap<KeyBinding, Vec<Command>>,
     select: HashMap<KeyBinding, Vec<Command>>,
@@ -356,28 +377,38 @@ impl Keymap {
         Self { normal, select, notebook, table, cell, sql }
     }
 
+    /// Look `kb` up in exactly one layer.
+    pub fn lookup(&self, layer: Layer, kb: &KeyBinding) -> Option<&[Command]> {
+        let map = match layer {
+            Layer::Normal => &self.normal,
+            Layer::Select => &self.select,
+            Layer::Notebook => &self.notebook,
+            Layer::Table => &self.table,
+            Layer::Cell => &self.cell,
+            Layer::Sql => &self.sql,
+        };
+        map.get(kb).map(Vec::as_slice)
+    }
+
+    /// Look `kb` up in an override layer, falling back to `Normal`.
+    ///
+    /// The fallback is the whole point of a layer: a view overrides the few
+    /// keys whose meaning changes there and inherits the rest, so `:w`, the
+    /// palette and buffer switching keep working without every layer having to
+    /// restate them.
+    pub fn lookup_layered(&self, layer: Layer, kb: &KeyBinding) -> Option<&[Command]> {
+        match layer {
+            Layer::Normal | Layer::Select => self.lookup(layer, kb),
+            _ => self.lookup(layer, kb).or_else(|| self.lookup(Layer::Normal, kb)),
+        }
+    }
+
     pub fn lookup_normal(&self, kb: &KeyBinding) -> Option<&[Command]> {
-        self.normal.get(kb).map(Vec::as_slice)
+        self.lookup(Layer::Normal, kb)
     }
 
     pub fn lookup_select(&self, kb: &KeyBinding) -> Option<&[Command]> {
-        self.select.get(kb).map(Vec::as_slice)
-    }
-
-    pub fn lookup_notebook(&self, kb: &KeyBinding) -> Option<&[Command]> {
-        self.notebook.get(kb).map(Vec::as_slice)
-    }
-
-    pub fn lookup_table(&self, kb: &KeyBinding) -> Option<&[Command]> {
-        self.table.get(kb).map(Vec::as_slice)
-    }
-
-    pub fn lookup_cell(&self, kb: &KeyBinding) -> Option<&[Command]> {
-        self.cell.get(kb).map(Vec::as_slice)
-    }
-
-    pub fn lookup_sql(&self, kb: &KeyBinding) -> Option<&[Command]> {
-        self.sql.get(kb).map(Vec::as_slice)
+        self.lookup(Layer::Select, kb)
     }
 
     pub fn set_normal(&mut self, kb: KeyBinding, cmds: Vec<Command>) {
