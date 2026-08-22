@@ -200,10 +200,10 @@ fn border_style(block: &Block, cursor: &Cursor) -> (Style, bool) {
     let base = match block.kind {
         BlockKind::Head => th.vcs_head,
         BlockKind::Pending => th.vcs_pending,
-        // By lane, which is what a branch looks like here: a first-parent
-        // chain in its own column.  Colouring every block the same made two
-        // branches side by side tellable apart only by reading their labels.
-        BlockKind::Commit => th.vcs_lane(block.lane),
+        // By branch, not by lane: a branch that is merely *ahead* of another
+        // shares its column, correctly, and colouring by column then painted
+        // the whole history one colour.
+        BlockKind::Commit => th.vcs_tint(block.tint),
     };
     (cursor.style(&this, base), cursor.mark(&this).is_some())
 }
@@ -312,7 +312,12 @@ fn draw_commit_contents(
         let colour = match kind {
             Some(RefKind::Remote) => th.vcs_remote,
             Some(RefKind::Tag) => th.vcs_tag,
-            _ => th.vcs_branch,
+            // A local branch label is drawn the colour of the commits that are
+            // on it, so the label and its run of history read as one thing.
+            _ => layout
+                .branch_tints
+                .get(name)
+                .map_or(th.vcs_branch, |&t| th.vcs_tint(t)),
         };
         // A label is small and sits on a border, so the cursor reverses it —
         // bold alone would be lost against a border that is already bold.
@@ -371,13 +376,12 @@ fn draw_commit_contents(
 fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     let th = theme::active();
     let this = Focus::Edge { child: edge.child.clone(), slot: edge.slot };
-    // An arrow belongs to the commit it leaves, so it takes that lane's
-    // colour and the chain stays one colour from tip to root.  HEAD's arrow is
-    // not a parent link and keeps the neutral edge colour.
-    let base = if edge.child.as_str() == "HEAD" {
-        th.vcs_edge
-    } else {
-        th.vcs_lane(edge.from_lane)
+    // An arrow belongs to the commit it leaves, so it takes that commit's
+    // colour and a branch reads as one colour from tip to base.  HEAD's arrow
+    // is not a parent link and keeps the neutral edge colour.
+    let base = match layout.block(&edge.child) {
+        Some(block) if block.kind != BlockKind::Head => th.vcs_tint(block.tint),
+        _ => th.vcs_edge,
     };
     let style = cursor.style(&this, base);
     // A focused arrow is drawn heavy rather than in another colour, the same

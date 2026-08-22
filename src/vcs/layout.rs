@@ -88,6 +88,9 @@ pub struct Block {
     /// starts at (relative to the block).  Computed here rather than in the
     /// renderer so the focusable positions and the drawn positions agree.
     pub labels: Vec<(String, u16)>,
+    /// Which colour group this commit belongs to — an index the theme cycles
+    /// its palette over.  See [`assign_tints`].
+    pub tint: usize,
 }
 
 /// One parent link.
@@ -173,6 +176,9 @@ pub struct Layout {
     pub focusables: Vec<Focusable>,
     pub lane_count: usize,
     pub lane_width: u16,
+    /// The colour group each local branch label belongs to, so a label is
+    /// drawn the same colour as the commits that are on it.
+    pub branch_tints: HashMap<String, usize>,
     /// Total height of the stack, for the scroll anchor to clamp against.
     pub total_rows: u16,
     index: HashMap<Oid, usize>,
@@ -309,36 +315,26 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
     // draw order, and the lane assignment needs those rows to know which
     // chains overlap and therefore cannot share a column.
     let (rows, head_row, total_rows) = assign_rows(dag, &order);
-    let lanes = assign_lanes(&order, &rows, dag, projection);
-    let lane_count = lanes.values().copied().max().map_or(1, |m| m + 1);
-    let lane_width = lane_width(width, lane_count, natural_width(dag, projection, &order));
+    let placed = place(&order, &rows, head_row, dag, projection);
+    let lane_width = lane_width(width, placed.lane_count, natural_width(dag, projection, &order));
     let inner = lane_width.saturating_sub(2);
 
     let mut blocks = Vec::new();
 
     // HEAD is drawn as a block rather than as one more label because it is a
     // different kind of thing from a branch — it is where *you* are — and it
-    // is the one pointer always worth finding at a glance.
-    //
-    // It sits **directly above the commit it names**, in that commit's lane,
-    // rather than at the top of the graph.  At the top its arrow has to span
-    // however far down the graph HEAD happens to be, and a screenful of `│`
-    // between a block and its target says nothing.
+    // is the one pointer always worth finding at a glance.  It sits directly
+    // above the commit it names; see `place_head` for the one case where it
+    // cannot also sit in that commit's lane.
     if let Some(row) = head_row {
-        let lane = dag
-            .head
-            .target
-            .as_ref()
-            .and_then(|id| lanes.get(id))
-            .copied()
-            .unwrap_or(0);
         blocks.push(Block {
             id: Oid::new("HEAD"),
             kind: BlockKind::Head,
-            lane,
+            lane: placed.head_lane,
             row,
             height: HEAD_H,
             labels: Vec::new(),
+            tint: 0,
         });
     }
 
@@ -347,10 +343,11 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
         blocks.push(Block {
             id: id.clone(),
             kind,
-            lane: lanes.get(id).copied().unwrap_or(0),
+            lane: placed.lane.get(id).copied().unwrap_or(0),
             row: rows[id],
             height: BLOCK_H,
             labels: labels_for(dag, projection, id, inner),
+            tint: placed.tint.get(id).copied().unwrap_or(0),
         });
     }
     blocks.sort_by_key(|b| b.row);
@@ -366,8 +363,9 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
         focusables: Vec::new(),
         blocks,
         edges,
-        lane_count,
+        lane_count: placed.lane_count,
         lane_width,
+        branch_tints: placed.branch_tints,
         total_rows,
         index,
     };
@@ -422,10 +420,20 @@ fn assign_rows(dag: &Dag, order: &[Oid]) -> (HashMap<Oid, u16>, Option<u16>, u16
     (rows, head_row, row.saturating_sub(GAP))
 }
 
-/// Give each commit a lane.
+/// Where every chain and the HEAD block sit horizontally, and what colour
+/// each commit is.
+struct Placement {
+    lane: HashMap<Oid, usize>,
+    head_lane: usize,
+    lane_count: usize,
+    tint: HashMap<Oid, usize>,
+    branch_tints: HashMap<String, usize>,
+}
+
+/// Give each commit a lane, and each a colour group.
 ///
-/// Three steps, and the whole point is that a **chain owns its column
-/// outright** for as long as it is on screen:
+/// Three steps, and the whole point of the first three is that a **chain owns
+/// its column outright** for as long as it is on screen:
 ///
 /// 1. **Chains.**  A chain is a maximal run of first-parent links — which is
 ///    what a branch looks like to a reader.  Where several commits share a
@@ -443,12 +451,15 @@ fn assign_rows(dag: &Dag, order: &[Oid]) -> (HashMap<Oid, u16>, Option<u16>, u16
 ///
 /// The invariant this buys: a lane holds one chain at a time, so a vertical
 /// arrow segment drawn in a lane can never pass behind another chain's block.
-fn assign_lanes(
+/// The HEAD block is placed last, against the same reservations, because it
+/// is a block in the stack like any other — see [`place_head`].
+fn place(
     order: &[Oid],
     rows: &HashMap<Oid, u16>,
+    head_row: Option<u16>,
     dag: &Dag,
     projection: &Projection,
-) -> HashMap<Oid, usize> {
+) -> Placement {
     // --- 1. chains ---
     let mut chain: HashMap<Oid, usize> = HashMap::new();
     let mut members: Vec<Vec<Oid>> = Vec::new();
@@ -515,24 +526,123 @@ fn assign_lanes(
     by_top.sort_by_key(|&c| (spans[c].0, c));
 
     for c in by_top {
-        let (lo, hi) = spans[c];
-        let free = |taken: &Vec<(u16, u16)>| taken.iter().all(|&(a, b)| hi <= a || lo >= b);
-        let lane = match used.iter().position(free) {
-            Some(lane) => lane,
-            None => {
-                used.push(Vec::new());
-                used.len() - 1
-            }
-        };
-        used[lane].push((lo, hi));
+        let lane = claim_lane(&mut used, spans[c], None);
         lane_of[c] = lane;
     }
 
-    chain.into_iter().map(|(id, c)| (id, lane_of[c])).collect()
+    let lane: HashMap<Oid, usize> = chain.iter().map(|(id, &c)| (id.clone(), lane_of[c])).collect();
+    let head_lane = place_head(&mut used, &lane, rows, head_row, dag);
+    let (branch_tints, tint) = assign_tints(&members, dag, projection);
+
+    Placement {
+        lane_count: used.len().max(1),
+        lane,
+        head_lane,
+        tint,
+        branch_tints,
+    }
 }
 
+/// The leftmost lane free over `span`, preferring `want` when it is free.
+fn claim_lane(used: &mut Vec<Vec<(u16, u16)>>, span: (u16, u16), want: Option<usize>) -> usize {
+    let (lo, hi) = span;
+    let free = |taken: &Vec<(u16, u16)>| taken.iter().all(|&(a, b)| hi <= a || lo >= b);
+    let lane = want
+        .filter(|&w| used.get(w).map_or(true, free))
+        .or_else(|| used.iter().position(free))
+        .unwrap_or(used.len());
+    while used.len() <= lane {
+        used.push(Vec::new());
+    }
+    used[lane].push((lo, hi));
+    lane
+}
 
-/// How wide one lane is.
+/// Which lane the HEAD block goes in.
+///
+/// Its own commit's lane, when that is free over HEAD's rows — the block sits
+/// directly above the commit it names, so the arrow is one row long and reads
+/// as "you are here".  When HEAD names a commit part-way down a chain, though,
+/// that lane is carrying the arrow from the commit above, and putting a block
+/// in it hides the arrow completely: blocks are painted after arrows, so what
+/// you get is a line that stops dead at HEAD and a commit whose parent is
+/// anybody's guess.  A checkout of anything but a branch tip did exactly that.
+/// So HEAD then takes a lane of its own and points across instead.
+fn place_head(
+    used: &mut Vec<Vec<(u16, u16)>>,
+    lane: &HashMap<Oid, usize>,
+    rows: &HashMap<Oid, u16>,
+    head_row: Option<u16>,
+    dag: &Dag,
+) -> usize {
+    let Some(head_row) = head_row else { return 0 };
+    let target = dag.head.target.as_ref();
+    let want = target.and_then(|id| lane.get(id)).copied();
+    // Down to the gap above its commit: that is where HEAD's own arrow runs.
+    let bottom = target
+        .and_then(|id| rows.get(id))
+        .copied()
+        .unwrap_or(head_row + HEAD_H);
+    claim_lane(used, (head_row, bottom.max(head_row + HEAD_H)), want)
+}
+
+/// Which colour group each commit and each local branch belongs to.
+///
+/// Walking *down* a chain, a commit takes the colour of the nearest branch
+/// label at or above it.  That is exactly how the graph reads: above `main`'s
+/// label the commits are only on `test-branch`, and at `main`'s label and
+/// below they are on `main` — even though every one of them is also on
+/// `test-branch`.
+///
+/// Colour is deliberately **not** the lane.  A branch that is merely ahead of
+/// another is not a fork, so both sit in one column, correctly — and colouring
+/// by column then painted the whole history one colour and lost the very
+/// distinction the colours exist to draw.
+fn assign_tints(
+    members: &[Vec<Oid>],
+    dag: &Dag,
+    projection: &Projection,
+) -> (HashMap<String, usize>, HashMap<Oid, usize>) {
+    // Branches numbered by where their tip is drawn, so the numbering is
+    // stable and neighbouring branches get neighbouring colours.
+    let mut branches: Vec<(usize, String, Oid)> = Vec::new();
+    for (c, m) in members.iter().enumerate() {
+        for (i, id) in m.iter().enumerate() {
+            for r in dag.local_branches() {
+                if projection.ref_target(dag, &r.name) == Some(id) {
+                    branches.push((c * 10_000 + i, r.name.clone(), id.clone()));
+                }
+            }
+        }
+    }
+    branches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let branch_tints: HashMap<String, usize> = branches
+        .iter()
+        .enumerate()
+        .map(|(t, (_, name, _))| (name.clone(), t))
+        .collect();
+
+    let mut tint = HashMap::new();
+    for (c, m) in members.iter().enumerate() {
+        // A chain with no branch on it at all still needs a colour of its own;
+        // numbering it past the branches keeps it from borrowing one.
+        let mut current = branch_tints.len() + c;
+        for id in m {
+            if let Some(t) = branches
+                .iter()
+                .filter(|(_, _, target)| target == id)
+                .filter_map(|(_, name, _)| branch_tints.get(name))
+                .min()
+            {
+                current = *t;
+            }
+            tint.insert(id.clone(), current);
+        }
+    }
+    (branch_tints, tint)
+}
+
+/// How wide one lane is./// How wide one lane is.
 ///
 /// Divided between the lanes in play and then clamped: a single-branch
 /// repository would otherwise draw one block across the whole terminal, and a
@@ -791,6 +901,26 @@ mod tests {
                 branch("topic-c", "c2"),
             ],
             Head { branch: Some("main".into()), target: Some(Oid::new("four")) },
+            WorkTree::default(),
+            false,
+        )
+    }
+
+    /// One branch simply ahead of another — not a fork, so both belong in one
+    /// column, and HEAD names a commit part-way down it.  The shape a
+    /// `git checkout -b` and one commit produces, and the one that had both an
+    /// arrow drawn behind the HEAD block and a whole history in one colour.
+    ///
+    /// ```text
+    ///   test-branch: top
+    ///   main:        mid   <- HEAD
+    ///                base
+    /// ```
+    fn ahead() -> Dag {
+        Dag::new(
+            vec![commit("top", &["mid"]), commit("mid", &["base"]), commit("base", &[])],
+            vec![branch("main", "mid"), branch("test-branch", "top")],
+            Head { branch: Some("main".into()), target: Some(Oid::new("mid")) },
             WorkTree::default(),
             false,
         )
@@ -1150,7 +1280,14 @@ mod tests {
     /// used to get recycled underneath an arrow still using them.
     #[test]
     fn no_arrow_is_drawn_through_a_block() {
-        for (name, dag) in [("two branches", dag()), ("many branches", tangled()), ("a merge", merged())] {
+        for (name, dag) in [
+            ("two branches", dag()),
+            ("many branches", tangled()),
+            ("a merge", merged()),
+            // HEAD part-way down a chain: the block lands in the middle of a
+            // lane an arrow is already using.
+            ("a branch ahead", ahead()),
+        ] {
             let projection = Plan::default().project(&dag);
             for width in [80, 120, 200, 400] {
                 let layout = compute(&dag, &projection, width);
@@ -1223,6 +1360,53 @@ mod tests {
         // Both topics hang off the trunk at different heights and neither
         // outlives the other, so two lanes are enough for four chains.
         assert!(layout.lane_count <= 2, "{} lanes for two side commits", layout.lane_count);
+    }
+
+    /// A branch that is merely *ahead* of another is not a fork, so both sit
+    /// in one column — and colouring by column then painted the whole history
+    /// one colour and lost the distinction entirely.  Colour is the branch a
+    /// commit is on: walking down, each takes the nearest label at or above it.
+    #[test]
+    fn commits_take_the_colour_of_the_branch_they_are_on() {
+        let dag = ahead();
+        let projection = Plan::default().project(&dag);
+        let layout = compute(&dag, &projection, 200);
+        let tint = |id: &str| layout.block(&Oid::new(id)).expect(id).tint;
+
+        // One column, because that is the truth of this repository…
+        assert_eq!(
+            layout.block(&Oid::new("top")).unwrap().lane,
+            layout.block(&Oid::new("base")).unwrap().lane
+        );
+        // …and two colours, because there are two branches.
+        assert_ne!(tint("top"), tint("mid"), "the branches are one colour");
+        assert_eq!(tint("mid"), tint("base"), "everything at and below `main`");
+
+        // The labels match the commits they name, so a label and its run of
+        // history read as one thing.
+        assert_eq!(layout.branch_tints.get("test-branch"), Some(&tint("top")));
+        assert_eq!(layout.branch_tints.get("main"), Some(&tint("mid")));
+    }
+
+    /// HEAD sits directly above the commit it names, in that commit's lane —
+    /// unless that lane is carrying an arrow past it, in which case a block
+    /// there would hide the arrow completely.
+    #[test]
+    fn head_steps_aside_rather_than_landing_on_an_arrow() {
+        // At a branch tip there is nothing passing, so it stays put.
+        let dag = dag();
+        let layout = compute(&dag, &Plan::default().project(&dag), 200);
+        let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
+        assert_eq!(head.lane, layout.block(&Oid::new("f")).unwrap().lane);
+
+        // Part-way down a chain, the arrow from the commit above owns that
+        // lane, so HEAD takes one of its own and points across.
+        let dag = ahead();
+        let layout = compute(&dag, &Plan::default().project(&dag), 200);
+        let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
+        let target = layout.block(&Oid::new("mid")).unwrap();
+        assert_ne!(head.lane, target.lane, "HEAD is sitting on the arrow");
+        assert!(head.row < target.row, "and still directly above its commit");
     }
 
 }

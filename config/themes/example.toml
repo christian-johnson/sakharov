@@ -162,9 +162,9 @@ sparkline         = "#89ddff"  # header distribution glyphs (← table.numeric)
 # introduces no new *kind* of meaning, only new places to put branch-green,
 # hash-blue and warning-amber.
 [vcs]
-lanes   = ["#7aa2f7", "#9ece6a", "#89ddff", "#f7768e"]
-                     # one colour per lane, cycled: a branch is a lane, so
-                     # this is what makes two branches tellable apart.  Keep
+palette = ["#7aa2f7", "#9ece6a", "#89ddff", "#f7768e"]
+                     # one colour per branch, cycled — commits take the
+                     # colour of the branch they are on.  Keep
                      # `grabbed` and `head` out of this list — they mean
                      # "held" and "where you are", not "which branch"
 grabbed = "#e0af68"  # border of whatever is being dragged  (← ui.warning)

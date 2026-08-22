@@ -1033,12 +1033,17 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   which branch this is — and vanished on whichever lane already had that hue.
   Being *held* does recolour (`theme.vcs_grabbed`): that is a state the object
   is in, not a place the cursor happens to be.
-- **Commits are coloured by lane** (`Theme::vcs_lane`, cycled through
-  `theme.vcs_lanes`; `[vcs] lanes` in a theme file).  A lane *is* a branch here
-  — a first-parent chain in its own column — so this is what makes two branches
-  tellable apart without reading a label.  Arrows take their child's lane
-  colour, so a chain is one colour tip to root.  The default palette excludes
-  `warning` and HEAD's lavender: those mean *held* and *where you are*.
+- **Colour is the branch a commit is on, not its lane** (`layout::assign_tints`
+  → `Block.tint`; `Theme::vcs_tint` cycles `theme.vcs_palette`, `[vcs] palette`
+  in a theme file).  Walking *down* a chain, a commit takes the colour of the
+  nearest branch label at or above it — above `main`'s label the commits are
+  only on `test-branch`; at it and below they are `main`'s, even though
+  `test-branch` contains them too.  Colouring by *lane* was wrong because a
+  branch merely **ahead** of another is not a fork: both correctly share one
+  column, and the whole history then came out one colour.  Arrows take their
+  child's colour, and a local branch label takes its own, so a label and its
+  run of history read as one thing.  The default palette excludes `warning` and
+  HEAD's lavender: those mean *held* and *where you are*.
 - **HEAD has a colour of its own** (`theme.vcs_head`, lavender by default) and
   nothing else uses it — "where you are" is the one pointer that has to be
   findable at a glance, which it cannot be if it is also a lane or a label.
@@ -1074,7 +1079,10 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   leaving an arrow that stops dead and a commit whose parent is anybody's guess.
 - **The HEAD block sits directly above the commit it names**, in that commit's lane.
   At the top of the graph its arrow has to span however deep HEAD happens to be, and
-  a screenful of `│` between a block and its target says nothing.
+  a screenful of `│` between a block and its target says nothing.  It takes a lane
+  of its own (`layout::place_head`) when that lane is carrying an arrow past it —
+  which is any checkout of something other than a branch tip.  A block there hides
+  the arrow completely, since blocks are painted after arrows.
 - **Planned vs immediate is a deliberate line**: rewriting history (arrows, branch
   labels, drop, merge) is planned; checkout / stage / unstage / commit / fetch /
   pull / push happen now.  The line is *could this make a commit unreachable* —

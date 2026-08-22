@@ -253,11 +253,11 @@ pub struct VcsSpec {
     /// Remote-tracking branch labels. Falls back to `ui.dim`.
     #[serde(default)]
     pub remote: Option<String>,
-    /// Per-lane commit colours, cycled by lane index so a chain of commits
-    /// reads as one branch at a glance. Falls back to a palette built from
+    /// Per-branch commit colours, cycled so neighbouring branches differ.
+    /// Falls back to a palette built from
     /// `ui.accent`, `ui.success`, `ui.warning`, `ui.info` and `ui.error`.
     #[serde(default)]
-    pub lanes: Option<Vec<String>>,
+    pub palette: Option<Vec<String>>,
     /// Tag labels. Falls back to `ui.warning`.
     #[serde(default)]
     pub tag: Option<String>,
@@ -380,8 +380,8 @@ pub struct Theme {
     pub vcs_head: Color,
     pub vcs_edge: Color,
     pub vcs_pending: Color,
-    /// One colour per lane, cycled — see [`Theme::vcs_lane`].
-    pub vcs_lanes: Vec<Color>,
+    /// One colour per branch, cycled — see [`Theme::vcs_tint`].
+    pub vcs_palette: Vec<Color>,
     pub modes: ModeColors,
     /// Style per highlight index (see `highlight::HIGHLIGHT_NAMES` + `MD_*`).
     syntax: Vec<Style>,
@@ -389,13 +389,13 @@ pub struct Theme {
 
 impl Theme {
 
-    /// The colour for `lane`, cycled through the palette.
+    /// The colour for group `tint`, cycled through the palette.
     ///
     /// Cycled rather than clamped: a repository with more branches than
-    /// colours must still tell adjacent lanes apart, and repeating the fifth
-    /// colour for every lane beyond it would not.
-    pub fn vcs_lane(&self, lane: usize) -> Color {
-        self.vcs_lanes[lane % self.vcs_lanes.len()]
+    /// colours must still tell neighbouring ones apart, and repeating the last
+    /// colour for every branch beyond it would not.
+    pub fn vcs_tint(&self, tint: usize) -> Color {
+        self.vcs_palette[tint % self.vcs_palette.len()]
     }
     /// The classic terminal-inherited look (theme name "default").
     pub fn terminal_default() -> Self {
@@ -679,17 +679,16 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     let vcs_head = pick(&[c(&spec.vcs.head)], LAVENDER);
     let vcs_edge = pick(&[c(&spec.vcs.edge)], line_numbers);
     let vcs_pending = pick(&[c(&spec.vcs.pending)], warning);
-    // Lanes are what a branch *is* on screen — a first-parent chain in its own
-    // column — so colouring by lane is what makes two branches tellable apart
-    // without reading a single label.  Cycled, so a repository with more
-    // branches than colours still tells adjacent lanes apart.
+    // One colour per branch: what makes two branches tellable apart without
+    // reading a single label.  Cycled, so a repository with more branches than
+    // colours still tells neighbouring ones apart.
     //
     // Deliberately excludes `warning` and the HEAD lavender: those two mean
     // *held* and *where you are*, and a lane that happened to share one would
     // make grabbing a commit look like it had merely changed branch.
-    let vcs_lanes: Vec<Color> = spec
+    let vcs_palette: Vec<Color> = spec
         .vcs
-        .lanes
+        .palette
         .as_ref()
         .map(|names| names.iter().filter_map(|n| parse_color(n, pal)).collect::<Vec<_>>())
         .filter(|colors: &Vec<Color>| !colors.is_empty())
@@ -816,7 +815,7 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         vcs_head,
         vcs_edge,
         vcs_pending,
-        vcs_lanes,
+        vcs_palette,
         table_header,
         table_header_bg,
         table_grid,
