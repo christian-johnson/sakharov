@@ -386,47 +386,44 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     let heavy = cursor.mark(&this).is_some();
     let (v, h) = if heavy { ('┃', '━') } else { ('│', '─') };
 
-    let from_col = layout.lane_col(edge.from_lane) + 2;
-    let to_col = layout.lane_col(edge.to_lane) + 2;
-    let (start, end) = (edge.row, edge.end_row);
+    let r = layout.route(edge);
 
-    if edge.parent.is_none() {
+    if r.stub {
         // Past the horizon: a short stub that visibly goes nowhere, rather
         // than an arrow into empty space.
-        for row in start..(start + 2).min(end.max(start)) {
-            p.cell(row, from_col, '╎', style);
+        for (row, col) in r.cells() {
+            p.cell(row, col, '╎', style);
         }
         return;
     }
 
-    // The arrowhead goes in the gap, one row above the parent's top border.
-    // Blocks are drawn after arrows so a line entering a box reads as passing
-    // behind it — which means anything drawn *on* the border is overwritten.
-    let head_row = end.saturating_sub(1).max(start);
-
-    if from_col == to_col {
-        for row in start..head_row {
-            p.cell(row, from_col, v, style);
-        }
-        p.cell(head_row, from_col, '▼', style);
-        return;
+    // Down the child's lane to the crossing row…
+    for row in r.start..r.cross {
+        p.cell(row, r.from_col, v, style);
     }
-
-    // Cross lanes on the first gap row, leaving the row below it for the
-    // arrowhead, so several arrows landing on one block fan in rather than
-    // overlapping along their whole length.
-    let turn = start;
-    let (lo, hi) = (from_col.min(to_col), from_col.max(to_col));
+    // …across…
+    let (lo, hi) = (r.from_col.min(r.to_col), r.from_col.max(r.to_col));
     for col in lo..=hi {
-        p.cell(turn, col, h, style);
+        p.cell(r.cross, col, h, style);
     }
-    // Corners, so the run reads as one line rather than three.
-    p.cell(turn, from_col, if to_col > from_col { '╰' } else { '╯' }, style);
-    p.cell(turn, to_col, if to_col > from_col { '╮' } else { '╭' }, style);
-    for row in turn + 1..head_row {
-        p.cell(row, to_col, v, style);
+    // …and down the parent's lane to the arrowhead.  Where the two lanes are
+    // the same all three reduce to one straight drop.
+    for row in r.cross + 1..r.head_row {
+        p.cell(row, r.to_col, v, style);
     }
-    p.cell(head_row, to_col, '▼', style);
+
+    if r.from_col != r.to_col {
+        // Corners, so the run reads as one line rather than three.
+        let right = r.to_col > r.from_col;
+        // The turn always gets a corner, even when the arrow crosses on its
+        // very first row: the stroke it turns out of is the block sitting
+        // directly above, and a bare `─` there reads as a line from nowhere.
+        p.cell(r.cross, r.from_col, if right { '╰' } else { '╯' }, style);
+        if r.cross < r.head_row {
+            p.cell(r.cross, r.to_col, if right { '╮' } else { '╭' }, style);
+        }
+    }
+    p.cell(r.head_row, r.to_col, '▼', style);
 }
 
 /// A one-line description of what the cursor is on, for the message line.

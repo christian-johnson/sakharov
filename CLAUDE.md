@@ -1047,13 +1047,31 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   out that branch.  Detached HEAD should be somewhere you arrive deliberately,
   from the middle of history.
 - **`vcs::layout` is the single geometry model** (the graph's `table::layout`): block
-  positions, lane assignment, arrow routing and the focusable list all come from it,
-  so the renderer and the navigation cannot disagree about what is under the cursor.
-  One commit per row band, newest at the top; a commit's lane is inherited by its
-  first parent so a chain keeps a column.  Commits are deliberately **not** packed
-  several to a row — a generation-packed layout can draw a commit visually above one
-  of its own ancestors, which in a view whose premise is "the picture is the truth"
-  is not cosmetic.
+  positions, lane assignment, arrow routing (`Layout::route` → `EdgeRoute::cells`)
+  and the focusable list all come from it, so the renderer and the navigation cannot
+  disagree about what is under the cursor.
+  One commit per row band, newest at the top — so a gap row is a gap in *every*
+  lane.  Commits are deliberately **not** packed several to a row: a
+  generation-packed layout can draw a commit visually above one of its own
+  ancestors, which in a view whose premise is "the picture is the truth" is not
+  cosmetic.
+- **A chain owns its column outright**, and that is what keeps arrows off blocks.
+  `assign_lanes` runs in three steps: **chains** (maximal first-parent runs — where
+  several commits share a parent it joins the chain that *started highest*, so the
+  trunk keeps its column instead of being annexed by whichever topic branch git
+  listed first), **spans** (the rows a chain's blocks occupy, extended down to the
+  commit it points into and up to any merge that points at it — the rows its arrows
+  need too), and greedy **interval colouring** of those spans.  Chains that never
+  coexist vertically share a lane, so a long history does not grow one lane per
+  branch that ever existed.
+- **An arrow crosses lanes at one row, and which row depends on the slot**
+  (`Edge::cross_row`).  A first parent crosses **late**, in the gap immediately
+  above the commit it points at, so the long drop stays in the child's own lane;
+  a merge's other parents cross **early**, immediately below the child, because
+  the child's lane carries on down past them.  Together with the span rule this
+  gives the invariant `no_arrow_is_drawn_through_a_block` pins: blocks are painted
+  after arrows, so a line crossing one does not merely look wrong — it vanishes,
+  leaving an arrow that stops dead and a commit whose parent is anybody's guess.
 - **The HEAD block sits directly above the commit it names**, in that commit's lane.
   At the top of the graph its arrow has to span however deep HEAD happens to be, and
   a screenful of `│` between a block and its target says nothing.
