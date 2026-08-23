@@ -1095,19 +1095,24 @@ fn read_all_stdin(timeout_ms: i32) -> Vec<u8> {
     // Wait for the first byte to arrive
     if wait_for_stdin(timeout_ms) {
         let mut stdin = std::io::stdin();
-        if let Ok(n) = stdin.read(&mut buf) {
-            response.extend_from_slice(&buf[..n]);
+        // A zero-length read is EOF, not "nothing yet".  On a pty whose master
+        // has closed, `poll` reports POLLIN forever and every read returns
+        // zero bytes — so a loop that only stops on an error or on filling its
+        // buffer never stops at all, and spins at 100% CPU before the editor
+        // has even drawn its first frame.
+        match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => return response,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+        }
 
-            // Read any subsequent bytes that are immediately available
-            while wait_for_stdin(5) {
-                if let Ok(n) = stdin.read(&mut buf) {
-                    response.extend_from_slice(&buf[..n]);
-                } else {
-                    break;
-                }
-                if response.len() > 1024 {
-                    break;
-                }
+        // Read any subsequent bytes that are immediately available
+        while wait_for_stdin(5) {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+            }
+            if response.len() > 1024 {
+                break;
             }
         }
     }

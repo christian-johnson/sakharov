@@ -57,7 +57,13 @@ fn install_signal_handlers() {
         action.sa_sigaction =
             handle_term_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
         libc::sigemptyset(&mut action.sa_mask);
-        action.sa_flags = 0;
+        // SA_RESETHAND: the handler fires once, then the signal reverts to its
+        // default disposition.  Catching a termination signal only defers it —
+        // the run loop still has to reach the point where it looks.  When the
+        // loop is wedged that point never comes and `kill` appears to do
+        // nothing, which is how two runaway processes survived a SIGTERM and
+        // needed SIGKILL.  With this flag a second `kill` always lands.
+        action.sa_flags = libc::SA_RESETHAND;
         for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
             libc::sigaction(sig, &action, std::ptr::null_mut());
         }
@@ -66,6 +72,123 @@ fn install_signal_handlers() {
 
 #[cfg(not(unix))]
 fn install_signal_handlers() {}
+
+/// Turns of the run loop, bumped once per iteration.  Lets the watchdog tell a
+/// loop that is idle (turning over every 16 ms with nothing to do) from one
+/// that is not running at all.
+static LOOP_HEARTBEAT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Tear down and leave, from a thread that owns none of the editor's state.
+///
+/// Nothing is saved here beyond what `recovery::tick` has already flushed on
+/// its debounce.  That is the deliberate trade: this path only runs when the
+/// editor is unreachable — either its terminal is gone or its loop is wedged —
+/// and a few seconds of unsaved edits is a far smaller loss than a process
+/// that burns a core until the battery is flat.
+#[cfg(unix)]
+fn watchdog_exit(reason: &str) -> ! {
+    // Best-effort.  If the terminal really is gone these writes go nowhere,
+    // which costs nothing; if the loop merely wedged, they hand back a usable
+    // terminal instead of a raw-mode one.
+    let _ = restore_terminal();
+    let msg = format!("sv: {reason} — exiting\n");
+    unsafe {
+        libc::write(libc::STDERR_FILENO, msg.as_ptr().cast(), msg.len());
+        libc::_exit(128 + libc::SIGHUP);
+    }
+}
+
+/// Watch the run loop from outside it.
+///
+/// The editor already checks for a hung-up terminal at the top of its loop,
+/// and that check cannot save it: when `crossterm::event::poll` wedges, it
+/// wedges *inside a single call*, so the top of the loop is never reached
+/// again.  Every guard the loop performs on its own behalf shares that flaw.
+/// So this runs on its own thread, where being stuck is observable rather
+/// than fatal, and it watches for two things:
+///
+///   1. **The terminal is gone.**  Checked directly, not inferred from the
+///      loop's progress — which is what makes it work while the loop is
+///      wedged.  The loop is asked to shut down gracefully first (it flushes
+///      recovery and restores the terminal properly); if it does not, this
+///      thread leaves without it.
+///   2. **A termination signal is pending and the loop is not turning over
+///      to notice it.**  A deferred signal whose deferral point is
+///      unreachable is an ignored signal.
+///
+/// Deliberately *not* watched: a fast-advancing heartbeat.  Spinning inside a
+/// call freezes the heartbeat rather than racing it, so that signal would
+/// have missed this bug entirely.
+#[cfg(unix)]
+fn spawn_watchdog() {
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::Duration;
+
+    const TICK: Duration = Duration::from_millis(100);
+    /// Consecutive ticks a hang-up must persist before it is believed.  Cheap
+    /// insurance against a transient reading; the terminal is not coming back.
+    const CONFIRM: u32 = 2;
+    /// Ticks a loop that is still turning over gets to shut itself down.  It
+    /// exits through `run()`, which flushes recovery and restores the terminal
+    /// properly, so it is worth waiting for.
+    const GRACE_RESPONSIVE: u32 = 10;
+    /// Ticks a loop that is *not* turning over gets.  It is wedged inside a
+    /// read and will never reach the point where it looks at the pending
+    /// signal, so every one of these ticks is a core burning for nothing.
+    const GRACE_WEDGED: u32 = 2;
+
+    // Only a terminal can hang up in the way this guards against.  With stdin
+    // redirected (`sv file < /dev/null`, a script, a harness) the same probe
+    // reads as a permanent hang-up and would shut the editor down at once.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("sv-watchdog".into())
+        .spawn(|| {
+            let mut hung = 0u32;
+            let mut stalled = 0u32;
+            let mut last_beat = LOOP_HEARTBEAT.load(SeqCst);
+            // The heartbeat as of the tick we asked the editor to stop, so we
+            // can tell whether it has run at all since being asked.
+            let mut beat_when_asked = 0u64;
+            loop {
+                std::thread::sleep(TICK);
+                let beat = LOOP_HEARTBEAT.load(SeqCst);
+
+                if stdin_hung_up() {
+                    hung += 1;
+                    if hung == CONFIRM {
+                        // Ask nicely first: a loop that is still running takes
+                        // this and leaves through the ordinary exit path.
+                        PENDING_SIGNAL.store(libc::SIGHUP, SeqCst);
+                        beat_when_asked = beat;
+                    } else if hung > CONFIRM {
+                        let responsive = beat != beat_when_asked;
+                        let grace = if responsive { GRACE_RESPONSIVE } else { GRACE_WEDGED };
+                        if hung >= CONFIRM + grace {
+                            watchdog_exit("terminal hung up and the run loop did not stop");
+                        }
+                    }
+                } else {
+                    hung = 0;
+                }
+
+                // Independently: a termination signal was delivered and the
+                // loop is not turning over to notice it.  A deferred signal
+                // whose deferral point is unreachable is an ignored signal.
+                stalled = if beat == last_beat { stalled + 1 } else { 0 };
+                last_beat = beat;
+                if PENDING_SIGNAL.load(SeqCst) != 0 && stalled >= GRACE_RESPONSIVE {
+                    watchdog_exit("termination signal went unhandled by a stalled run loop");
+                }
+            }
+        });
+}
+
+#[cfg(not(unix))]
+fn spawn_watchdog() {}
 
 /// Path of the key-event debug log (used only when `SV_DEBUG_KEYS` is set).
 fn key_debug_log_path() -> std::path::PathBuf {
@@ -109,7 +232,26 @@ fn stdin_hung_up() -> bool {
         revents: 0,
     };
     let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
-    ready > 0 && pfd.revents & libc::POLLHUP != 0
+    if ready <= 0 {
+        return false;
+    }
+    // Unambiguous: hung up, errored, or no longer a valid descriptor.
+    if pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return true;
+    }
+    // `POLLHUP` alone is not enough — which of these bits a hung-up pty sets
+    // varies by platform, and testing only for it is why the previous version
+    // of this function watched a terminal die for 34 hours without noticing.
+    // Readable-with-nothing-to-read is EOF, and on a pty that means the master
+    // has closed.  Asked with FIONREAD rather than an actual read, which on a
+    // healthy terminal would swallow a keystroke.
+    if pfd.revents & libc::POLLIN != 0 {
+        let mut avail: libc::c_int = 0;
+        if unsafe { libc::ioctl(libc::STDIN_FILENO, libc::FIONREAD, &mut avail) } == 0 {
+            return avail == 0;
+        }
+    }
+    false
 }
 
 #[cfg(not(unix))]
@@ -700,6 +842,14 @@ pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str>
 
 /// Set up terminal, run the event loop, then restore terminal.
 pub fn run(path: Option<&str>) -> Result<()> {
+    // Before anything else, and in particular before the terminal queries that
+    // run during startup.  Losing the terminal is not a run-loop problem that
+    // happens to occur elsewhere too: any read of the terminal can wedge, and
+    // the startup colour query (`theme::initialize_color_cache`) has its own
+    // spin, reached long before the run loop exists.  A watchdog that only
+    // covers the loop leaves that whole window unguarded.
+    spawn_watchdog();
+
     let config = Config::load();
 
     crate::theme::init_from_config(&config);
@@ -861,6 +1011,7 @@ fn run_loop(
     // zero tree-sitter work, instead of a full redraw 60× per second.
     let mut needs_redraw = true;
     'outer: loop {
+        LOOP_HEARTBEAT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if needs_redraw {
             needs_redraw = false;
             draw_frame(terminal, app)?;
