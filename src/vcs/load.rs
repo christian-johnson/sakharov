@@ -36,10 +36,39 @@ const LOG_FORMAT: &str = "--format=%x1e%H%x1f%P%x1f%an%x1f%ct%x1f%s";
 /// Run `git` in `root` and return its stdout, or its stderr as the error.
 ///
 /// Blocking.  Every caller in this module runs on the loader thread.
+/// A `git` invocation anchored at `root` and insulated from an inherited git
+/// environment.
+///
+/// `-C` sets the working directory, which is *not* enough: `GIT_DIR`,
+/// `GIT_INDEX_FILE` and their relatives override repository discovery
+/// outright, so with them set `git -C <somewhere>` operates on whatever they
+/// name and ignores `<somewhere>` entirely.  Git exports exactly those
+/// variables to hooks, and this repository runs its whole test suite from
+/// `.githooks/pre-commit` — so under that hook the `apply.rs` fixtures stopped
+/// creating branches and commits in their temp directories and started
+/// creating them in the developer's own repository, alongside re-initialising
+/// it and overwriting its `user.email`.  Clearing them makes `-C` mean what it
+/// reads as.
+fn git_command(root: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    for var in [
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd.arg("-C").arg(root);
+    cmd
+}
+
 pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let out = git_command(root)
         .args(args)
         .output()
         .map_err(|e| format!("could not run git: {e}"))?;
@@ -62,9 +91,7 @@ pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 /// always the one the editor was launched in.
 pub fn discover_root(from: &Path) -> Option<PathBuf> {
     let dir = if from.is_dir() { from } else { from.parent()? };
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = git_command(dir)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()?;
