@@ -27,9 +27,13 @@ pub struct VcsState {
     /// move rewrites the plan's provisional edit, so the graph rearranges
     /// under the cursor instead of the cursor merely travelling over it.
     pub grabbed: Option<Focus>,
-    /// Scroll anchor, in stack rows and lanes.
-    pub scroll_row: u16,
-    pub scroll_lane: usize,
+    /// Scroll anchor: the leftmost column drawn, and the topmost track.
+    ///
+    /// Columns are fine-grained (the time axis is the one you travel along, so
+    /// it has to move smoothly) while tracks move a whole branch row at a
+    /// time — half a block above the top edge is unreadable.
+    pub scroll_col: u16,
+    pub scroll_track: usize,
     /// The moment the snapshot was taken, so every "3d ago" on screen is
     /// relative to one instant rather than to whenever each was rendered.
     pub now: i64,
@@ -59,8 +63,8 @@ impl VcsState {
             plan: Plan::default(),
             focus: None,
             grabbed: None,
-            scroll_row: 0,
-            scroll_lane: 0,
+            scroll_col: 0,
+            scroll_track: 0,
             now,
         };
         state.focus = state.layout(80).initial_focus();

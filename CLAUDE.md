@@ -948,8 +948,9 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   staleness chip is not implemented.
 
 ### Phase V1 (version-control view) — complete
-- **`gV` / `:vc`** opens the commit graph: commits are blocks, parent links are
-  arrows, and history is rearranged by **direct manipulation** — grab an arrow with
+- **`gV` / `:vc`** opens the commit graph: commits are blocks laid out left to
+  right (oldest first), parent links are arrows pointing back, and history is
+  rearranged by **direct manipulation** — grab an arrow with
   `Space`, move to another commit, `Space` again.  See `docs/version-control-plan.md`
   for the design record and `docs/commands.md` for the full key/command reference.
 - **The premise is that no git verb appears in the interaction.** The user states a
@@ -1033,14 +1034,14 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   which branch this is — and vanished on whichever lane already had that hue.
   Being *held* does recolour (`theme.vcs_grabbed`): that is a state the object
   is in, not a place the cursor happens to be.
-- **Colour is the branch a commit is on, not its lane** (`layout::assign_tints`
+- **Colour is the branch a commit is on, not its track** (`layout::assign_tints`
   → `Block.tint`; `Theme::vcs_tint` cycles `theme.vcs_palette`, `[vcs] palette`
-  in a theme file).  Walking *down* a chain, a commit takes the colour of the
-  nearest branch label at or above it — above `main`'s label the commits are
-  only on `test-branch`; at it and below they are `main`'s, even though
-  `test-branch` contains them too.  Colouring by *lane* was wrong because a
+  in a theme file).  Walking *back* along a chain, a commit takes the colour of the
+  nearest branch label at or after it — after `main`'s label the commits are
+  only on `test-branch`; at it and before it they are `main`'s, even though
+  `test-branch` contains them too.  Colouring by *track* was wrong because a
   branch merely **ahead** of another is not a fork: both correctly share one
-  column, and the whole history then came out one colour.  Arrows take their
+  row, and the whole history then came out one colour.  Arrows take their
   child's colour, and a local branch label takes its own, so a label and its
   run of history read as one thing.  The default palette excludes `warning` and
   HEAD's lavender: those mean *held* and *where you are*.
@@ -1051,36 +1052,45 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   (`exec::vcs::checkout_plan`): `c` on a commit a local branch points at checks
   out that branch.  Detached HEAD should be somewhere you arrive deliberately,
   from the middle of history.
+- **The graph runs left to right: oldest at the left edge, newest at the right,**
+  and every arrow points *backwards*, from a commit to the parent it follows.
+  A branch is a horizontal **track**; `h`/`l` travel through history and `j`/`k`
+  step between branches.  `MIN_BLOCK`/`MAX_BLOCK` clamp how wide a block grows
+  (a block is as wide as what is written in it) and `BLOCK_H` is fixed at five
+  rows — two borders, the summary wrapped over two, and the metadata row — so a
+  track is a row band of one size and two blocks in one track are joined by a
+  straight line.
 - **`vcs::layout` is the single geometry model** (the graph's `table::layout`): block
-  positions, lane assignment, arrow routing (`Layout::route` → `EdgeRoute::cells`)
+  positions, track assignment, arrow routing (`Layout::route` → `EdgeRoute::cells`)
   and the focusable list all come from it, so the renderer and the navigation cannot
   disagree about what is under the cursor.
-  One commit per row band, newest at the top — so a gap row is a gap in *every*
-  lane.  Commits are deliberately **not** packed several to a row: a
-  generation-packed layout can draw a commit visually above one of its own
-  ancestors, which in a view whose premise is "the picture is the truth" is not
+  One commit per column band — so a gap column is a gap in *every*
+  track.  Commits are deliberately **not** packed several to a column: a
+  generation-packed layout can draw a commit visually to the left of one of its own
+  descendants, which in a view whose premise is "the picture is the truth" is not
   cosmetic.
-- **A chain owns its column outright**, and that is what keeps arrows off blocks.
-  `assign_lanes` runs in three steps: **chains** (maximal first-parent runs — where
-  several commits share a parent it joins the chain that *started highest*, so the
-  trunk keeps its column instead of being annexed by whichever topic branch git
-  listed first), **spans** (the rows a chain's blocks occupy, extended down to the
-  commit it points into and up to any merge that points at it — the rows its arrows
-  need too), and greedy **interval colouring** of those spans.  Chains that never
-  coexist vertically share a lane, so a long history does not grow one lane per
-  branch that ever existed.
-- **An arrow crosses lanes at one row, and which row depends on the slot**
-  (`Edge::cross_row`).  A first parent crosses **late**, in the gap immediately
-  above the commit it points at, so the long drop stays in the child's own lane;
-  a merge's other parents cross **early**, immediately below the child, because
-  the child's lane carries on down past them.  Together with the span rule this
+- **A chain owns its row outright**, and that is what keeps arrows off blocks.
+  `place` runs in three steps: **chains** (maximal first-parent runs — where
+  several commits share a parent it joins the chain that *started newest*, so the
+  trunk keeps its row instead of being annexed by whichever topic branch git
+  listed first), **spans** (the columns a chain's blocks occupy, extended left to the
+  commit it points into and right to any merge that points at it — the columns its
+  arrows need too), and greedy **interval colouring** of those spans.  Chains that
+  never coexist horizontally share a track, so a long history does not grow one
+  track per branch that ever existed.
+- **An arrow crosses tracks at one column, and which column depends on the slot**
+  (`Edge::cross_col`).  A first parent crosses **late**, in the gap immediately
+  right of the commit it points at, so the long run stays in the child's own track;
+  a merge's other parents cross **early**, immediately left of the child, because
+  the child's track carries on past them.  Together with the span rule this
   gives the invariant `no_arrow_is_drawn_through_a_block` pins: blocks are painted
   after arrows, so a line crossing one does not merely look wrong — it vanishes,
   leaving an arrow that stops dead and a commit whose parent is anybody's guess.
-- **The HEAD block sits directly above the commit it names**, in that commit's lane.
-  At the top of the graph its arrow has to span however deep HEAD happens to be, and
-  a screenful of `│` between a block and its target says nothing.  It takes a lane
-  of its own (`layout::place_head`) when that lane is carrying an arrow past it —
+- **The HEAD block sits directly to the right of the commit it names**, in that
+  commit's track — the slot the next commit would take.  At the end of the graph its
+  arrow has to span however far back HEAD happens to be, and a screenful of `─`
+  between a block and its target says nothing.  It takes a track
+  of its own (`layout::place_head`) when that track is carrying an arrow past it —
   which is any checkout of something other than a branch tip.  A block there hides
   the arrow completely, since blocks are painted after arrows.
 - **Planned vs immediate is a deliberate line**: rewriting history (arrows, branch
@@ -1285,7 +1295,7 @@ src/
                         algorithm (see "Phase V1" above)
     apply.rs          — the only module here that writes: preflight, backup
                         refs, run, undo, abort/resume
-    layout.rs         — THE geometry model: blocks, lanes, arrow routing,
+    layout.rs         — THE geometry model: blocks, tracks, arrow routing,
                         Focus + the focusable list that navigation walks
     state.rs          — VcsState: snapshot + plan + cursor + the drag state
                         machine (what dropping one thing on another *means*)

@@ -8,14 +8,20 @@
 //!
 //! ## The shape
 //!
-//! One commit per row band, newest at the top, time flowing down.  Lanes give
-//! the horizontal position: a commit's lane is inherited by its first parent,
-//! so a chain stays in a column and a branch point opens a new one.
+//! Time runs **left to right**: the oldest commit loaded is at the left edge,
+//! the newest at the right, and an arrow points *backwards* — from a commit to
+//! the parent it follows.  That is the direction people already read a
+//! timeline in, and it is the direction the branch metaphor is drawn in
+//! everywhere else (a branch comes *off* a line and rejoins it further along).
 //!
-//! Commits are *not* packed several to a row even when they would fit.  A
+//! One commit per column band, and **tracks** give the vertical position: a
+//! commit's track is inherited by its first parent, so a chain stays in a row
+//! and a branch point opens another.
+//!
+//! Commits are *not* packed several to a column even when they would fit.  A
 //! generation-packed layout looks tidier, but it can place a commit visually
-//! above one of its own ancestors, and in a view whose entire purpose is that
-//! the picture is the truth, that is not a cosmetic problem.
+//! to the left of one of its own descendants, and in a view whose entire
+//! purpose is that the picture is the truth, that is not a cosmetic problem.
 
 use std::collections::HashMap;
 
@@ -24,27 +30,32 @@ use super::{
     Dag, Head, Oid,
 };
 
-/// Rows in a commit block: border, summary, metadata, border.
-pub const BLOCK_H: u16 = 4;
-/// Rows in the HEAD block: border, content, border.
-pub const HEAD_H: u16 = 3;
-/// Rows between one block and the next, where the arrows are drawn.
-pub const GAP: u16 = 2;
-/// Narrowest a lane may be before lanes start scrolling off instead.
-pub const MIN_LANE: u16 = 24;
+/// Rows in a block: border, two summary rows, metadata, border.
+///
+/// Every block is the same height, HEAD included, so a track is a row band of
+/// one fixed size and the arrows between two blocks in one track are a
+/// straight line.
+pub const BLOCK_H: u16 = 5;
+/// Columns between one block and the next, where the arrows are drawn.
+pub const GAP: u16 = 3;
+/// Rows between one track and the next.
+pub const TRACK_GAP: u16 = 1;
+/// Narrowest a block may be.
+pub const MIN_BLOCK: u16 = 22;
+/// Widest a block grows, so one long commit message does not eat the whole
+/// terminal and leave two commits on screen.
+pub const MAX_BLOCK: u16 = 38;
 /// Columns budgeted for the relative age on a commit's metadata row.
 ///
 /// An estimate rather than the rendered string: the width has to be settled
-/// before anything is drawn, and "11 months ago" is the longest this gets.
-const AGE_COLS: u16 = 14;
-/// Columns budgeted for the `+123 -45` change counts, right-aligned on the
-/// same row as the metadata.
+/// before anything is drawn, and `11mo ago` is the longest [`relative_time`]
+/// produces.
+///
+/// [`relative_time`]: super::relative_time
+const AGE_COLS: u16 = 8;
+/// Columns budgeted for the `+123 -45` change counts, which are written along
+/// the block's bottom border.
 const COUNTS_COLS: u16 = 12;
-/// Widest a lane grows, so a single-branch repository does not draw one block
-/// stretched across a 200-column terminal.
-pub const MAX_LANE: u16 = 72;
-/// Blank columns between one lane and the next.
-const LANE_GAP: u16 = 2;
 /// Columns the abbreviated hash takes on a block's top border, with its
 /// surrounding spaces — where the ref labels start.
 pub const HASH_COLS: u16 = super::SHORT_LEN as u16 + 3;
@@ -80,10 +91,11 @@ pub enum BlockKind {
 pub struct Block {
     pub id: Oid,
     pub kind: BlockKind,
-    pub lane: usize,
-    /// Top row, measured in the whole stack rather than the viewport.
-    pub row: u16,
-    pub height: u16,
+    /// Which row band the block sits in.
+    pub track: usize,
+    /// Leftmost column, measured across the whole graph rather than the
+    /// viewport.
+    pub col: u16,
     /// Ref labels drawn along this block's top border, with the column each
     /// starts at (relative to the block).  Computed here rather than in the
     /// renderer so the focusable positions and the drawn positions agree.
@@ -99,42 +111,44 @@ pub struct Edge {
     pub child: Oid,
     pub slot: usize,
     /// `None` when the parent is past the loaded horizon — the arrow is drawn
-    /// as a stub trailing off the bottom, which is the honest picture.
+    /// as a stub trailing off the left edge, which is the honest picture.
     pub parent: Option<Oid>,
-    pub from_lane: usize,
-    pub to_lane: usize,
-    /// Row the arrow starts on (immediately below the child block).
-    pub row: u16,
-    /// Row the arrow ends on (the parent block's top), or the stack bottom.
-    pub end_row: u16,
-    /// The row the arrow changes lane on.
+    pub from_track: usize,
+    pub to_track: usize,
+    /// Column the arrow starts in (immediately left of the child block).
+    pub col: u16,
+    /// Column the arrowhead sits in (immediately right of the parent block),
+    /// or 0 when the parent was never loaded.
+    pub end_col: u16,
+    /// The column the arrow changes track on.
     ///
-    /// A first-parent link crosses **late**, in the gap immediately above the
-    /// commit it points at, so the long part of the drop stays in the child's
-    /// own lane — which that chain owns outright.  A merge's second parent
-    /// crosses **early**, immediately below the child, because the child's
-    /// lane continues on down to its own first parent and the drop would run
-    /// straight through it.  Either way the vertical never enters a lane
-    /// somebody else's blocks are sitting in.
-    pub cross_row: u16,
+    /// A first-parent link crosses **late**, in the gap immediately right of
+    /// the commit it points at, so the long part of the run stays in the
+    /// child's own track — which that chain owns outright.  A merge's second
+    /// parent crosses **early**, immediately left of the child, because the
+    /// child's track continues on to its own first parent and the run would
+    /// go straight through it.  Either way the horizontal never enters a
+    /// track somebody else's blocks are sitting in.
+    pub cross_col: u16,
 }
 
 /// Where one arrow's cells actually go.
 ///
 /// The route lives here rather than in the renderer because it is geometry,
 /// and this module is the one place geometry is decided — the same reason
-/// block positions and lane widths are here.  It is also what makes
+/// block positions and track assignment are here.  It is also what makes
 /// [`no_arrow_is_drawn_through_a_block`] able to check the invariant the whole
-/// lane assignment exists to provide.
+/// track assignment exists to provide.
 pub struct EdgeRoute {
-    /// Column the arrow leaves in, and the column it arrives in.
-    pub from_col: u16,
-    pub to_col: u16,
-    /// First row of the arrow, the row it changes lane on, and the row the
-    /// arrowhead sits on.
+    /// Row the arrow leaves along, and the row it arrives along.
+    pub from_row: u16,
+    pub to_row: u16,
+    /// First column of the arrow, the column it changes track on, and the
+    /// column the arrowhead sits in.  Columns *decrease* along the arrow:
+    /// it points back in time.
     pub start: u16,
     pub cross: u16,
-    pub head_row: u16,
+    pub head_col: u16,
     /// A parent past the loaded horizon: a stub that visibly goes nowhere.
     pub stub: bool,
 }
@@ -143,25 +157,24 @@ impl EdgeRoute {
     /// Every cell the arrow paints.
     pub fn cells(&self) -> Vec<(u16, u16)> {
         if self.stub {
-            return (self.start..(self.start + 2).min(self.head_row.max(self.start)))
-                .map(|row| (row, self.from_col))
+            return (self.start.saturating_sub(1)..=self.start)
+                .map(|col| (self.from_row, col))
                 .collect();
         }
-        let (lo, hi) = (self.from_col.min(self.to_col), self.from_col.max(self.to_col));
-        (self.start..self.cross)
-            .map(|row| (row, self.from_col))
-            .chain((lo..=hi).map(|col| (self.cross, col)))
-            .chain((self.cross + 1..self.head_row).map(|row| (row, self.to_col)))
-            .chain(std::iter::once((self.head_row, self.to_col)))
+        let (lo, hi) = (self.from_row.min(self.to_row), self.from_row.max(self.to_row));
+        (self.cross + 1..=self.start)
+            .map(|col| (self.from_row, col))
+            .chain((lo..=hi).map(|row| (row, self.cross)))
+            .chain((self.head_col..self.cross).map(|col| (self.to_row, col)))
             .collect()
     }
 }
 
 /// Something the cursor can sit on, and where it is.
 ///
-/// Positions are `(row, col)` in the full stack rather than lane indices, so
-/// several labels on one block's border are distinguishable and `h`/`l` walks
-/// them in the order they are drawn.
+/// Positions are `(row, col)` across the whole graph rather than track
+/// indices, so several labels on one block's border are distinguishable and
+/// `h`/`l` walks them in the order they are drawn.
 #[derive(Debug, Clone)]
 pub struct Focusable {
     pub focus: Focus,
@@ -174,13 +187,13 @@ pub struct Layout {
     pub blocks: Vec<Block>,
     pub edges: Vec<Edge>,
     pub focusables: Vec<Focusable>,
-    pub lane_count: usize,
-    pub lane_width: u16,
+    pub track_count: usize,
+    pub block_width: u16,
     /// The colour group each local branch label belongs to, so a label is
     /// drawn the same colour as the commits that are on it.
     pub branch_tints: HashMap<String, usize>,
-    /// Total height of the stack, for the scroll anchor to clamp against.
-    pub total_rows: u16,
+    /// Total width of the graph, for the scroll anchor to clamp against.
+    pub total_cols: u16,
     index: HashMap<Oid, usize>,
 }
 
@@ -210,58 +223,70 @@ impl Layout {
 
     /// Where `edge` is drawn.
     ///
-    /// The arrowhead sits one row *above* the parent's top border: blocks are
-    /// drawn after arrows so a line entering a box reads as passing behind it,
-    /// which means anything drawn on the border itself is overwritten.
+    /// The arrowhead sits one column *right* of the parent's border: blocks
+    /// are drawn after arrows so a line entering a box reads as passing behind
+    /// it, which means anything drawn on the border itself is overwritten.
     pub fn route(&self, edge: &Edge) -> EdgeRoute {
-        let head_row = edge.end_row.saturating_sub(1).max(edge.row);
+        let head_col = edge.end_col.min(edge.col);
         EdgeRoute {
-            from_col: self.lane_col(edge.from_lane) + 2,
-            to_col: self.lane_col(edge.to_lane) + 2,
-            start: edge.row,
-            cross: edge.cross_row.clamp(edge.row, head_row),
-            head_row,
+            from_row: self.arrow_row(edge.from_track),
+            to_row: self.arrow_row(edge.to_track),
+            start: edge.col,
+            cross: edge.cross_col.clamp(head_col, edge.col),
+            head_col,
             stub: edge.parent.is_none(),
         }
     }
 
-    /// The screen column a lane starts at.
-    pub fn lane_col(&self, lane: usize) -> u16 {
-        lane as u16 * (self.lane_width + LANE_GAP)
+    /// The screen row a track starts at.
+    pub fn track_row(&self, track: usize) -> u16 {
+        track as u16 * (BLOCK_H + TRACK_GAP)
     }
 
-    /// How many whole lanes fit in `width`.
+    /// The row arrows run along within a track: the middle of a block, so a
+    /// link between two blocks in one track is a straight line through the
+    /// gap between them.
+    pub fn arrow_row(&self, track: usize) -> u16 {
+        self.track_row(track) + BLOCK_H / 2
+    }
+
+    /// Columns from one block's left edge to the next one's.
+    pub fn col_stride(&self) -> u16 {
+        self.block_width + GAP
+    }
+
+    /// How many whole tracks fit in `height`.
     ///
-    /// The `+ LANE_GAP` is not a fudge: lanes are laid out with a gap
-    /// *between* them, so N lanes occupy `N * (w + gap) - gap`.  Dividing the
-    /// bare width instead reports one lane too few whenever they fit exactly,
-    /// which scrolled a two-branch graph sideways until half of it was off
-    /// screen on a terminal wide enough for all of it.
-    pub fn visible_lanes(&self, width: u16) -> usize {
-        ((width + LANE_GAP) / (self.lane_width + LANE_GAP)).max(1) as usize
+    /// The `+ TRACK_GAP` is not a fudge: tracks are laid out with a gap
+    /// *between* them, so N tracks occupy `N * (h + gap) - gap`.  Dividing the
+    /// bare height instead reports one track too few whenever they fit
+    /// exactly, which scrolled a two-branch graph on a screen tall enough for
+    /// all of it.
+    pub fn visible_tracks(&self, height: u16) -> usize {
+        ((height + TRACK_GAP) / (BLOCK_H + TRACK_GAP)).max(1) as usize
     }
 
     /// Width available inside a block's borders.
     pub fn block_inner(&self) -> u16 {
-        self.lane_width.saturating_sub(2)
+        self.block_width.saturating_sub(2)
     }
 
     /// The nearest focusable in `dir` from `current`.
     ///
-    /// Vertical motion sorts by distance travelled first, so `j` from a block
-    /// lands on the arrow directly beneath it rather than on whatever happens
-    /// to be lowest.
+    /// Motion **along time** (`h`/`l`) sorts by distance travelled first, so
+    /// `h` from a block lands on the arrow immediately to its left rather than
+    /// on whatever happens to be furthest back.
     ///
-    /// Horizontal motion sorts the *other* way round — nearest row first, then
-    /// nearest column.  A lane is tall and narrow, so the thing eight columns
-    /// to the right is very often ten rows up (a branch label on some other
-    /// block's border), and travelling to it is not what `l` means.  What `l`
-    /// means is "the next lane, beside where I am".
-    /// Restricted to the focusables `allow` accepts.
+    /// Motion **across tracks** (`j`/`k`) sorts the other way round — nearest
+    /// column first, then nearest row.  A track is wide and short, so the
+    /// thing two rows down is very often forty columns away (a label on some
+    /// other branch's block), and travelling to it is not what `j` means.
+    /// What `j` means is "the next branch, beside where I am".
     ///
-    /// Used while something is being dragged: the walk is over *destinations*
-    /// then, and stepping onto something you cannot drop on is a press that
-    /// does nothing except take the cursor further from somewhere useful.
+    /// Restricted to the focusables `allow` accepts.  Used while something is
+    /// being dragged: the walk is over *destinations* then, and stepping onto
+    /// something you cannot drop on is a press that does nothing except take
+    /// the cursor further from somewhere useful.
     pub fn step_where(
         &self,
         current: &Focus,
@@ -287,8 +312,8 @@ impl Layout {
                 // axis are what the second sort key resolves.
                 (along > 0).then(|| {
                     let key = match dir {
-                        Dir::Up | Dir::Down => (along, dc.abs()),
-                        Dir::Left | Dir::Right => (dr.abs(), along),
+                        Dir::Left | Dir::Right => (along, dr.abs()),
+                        Dir::Up | Dir::Down => (dc.abs(), along),
                     };
                     (key, f.focus.clone())
                 })
@@ -298,12 +323,12 @@ impl Layout {
     }
 
     /// The first thing worth putting the cursor on: HEAD if it is drawn, else
-    /// the topmost focusable.
+    /// the newest thing in the graph, which is the right-hand end.
     pub fn initial_focus(&self) -> Option<Focus> {
         self.focusables
             .iter()
             .find(|f| f.focus == Focus::Head)
-            .or_else(|| self.focusables.first())
+            .or_else(|| self.focusables.last())
             .map(|f| f.focus.clone())
     }
 }
@@ -311,28 +336,28 @@ impl Layout {
 /// Lay out `dag` as `projection` leaves it, for a content area `width` wide.
 pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
     let order = draw_order(dag, projection);
-    // Rows before lanes: where a block sits vertically depends only on the
-    // draw order, and the lane assignment needs those rows to know which
-    // chains overlap and therefore cannot share a column.
-    let (rows, head_row, total_rows) = assign_rows(dag, &order);
-    let placed = place(&order, &rows, head_row, dag, projection);
-    let lane_width = lane_width(width, placed.lane_count, natural_width(dag, projection, &order));
-    let inner = lane_width.saturating_sub(2);
+    // The block width settles first: where a block sits along the time axis is
+    // a multiple of it, and the track assignment then needs those columns to
+    // know which chains overlap and therefore cannot share a row.
+    let block_width = block_width(width, natural_width(dag, projection, &order));
+    let (cols, head_col, total_cols) = assign_cols(dag, &order, block_width);
+    let placed = place(&order, &cols, head_col, block_width, dag, projection);
+    let inner = block_width.saturating_sub(2);
 
     let mut blocks = Vec::new();
 
     // HEAD is drawn as a block rather than as one more label because it is a
     // different kind of thing from a branch — it is where *you* are — and it
     // is the one pointer always worth finding at a glance.  It sits directly
-    // above the commit it names; see `place_head` for the one case where it
-    // cannot also sit in that commit's lane.
-    if let Some(row) = head_row {
+    // to the right of the commit it names, on the newer side, where the next
+    // commit would go; see `place_head` for the one case where it cannot also
+    // sit in that commit's track.
+    if let Some(col) = head_col {
         blocks.push(Block {
             id: Oid::new("HEAD"),
             kind: BlockKind::Head,
-            lane: placed.head_lane,
-            row,
-            height: HEAD_H,
+            track: placed.head_track,
+            col,
             labels: Vec::new(),
             tint: 0,
         });
@@ -343,14 +368,13 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
         blocks.push(Block {
             id: id.clone(),
             kind,
-            lane: placed.lane.get(id).copied().unwrap_or(0),
-            row: rows[id],
-            height: BLOCK_H,
+            track: placed.track.get(id).copied().unwrap_or(0),
+            col: cols[id],
             labels: labels_for(dag, projection, id, inner),
             tint: placed.tint.get(id).copied().unwrap_or(0),
         });
     }
-    blocks.sort_by_key(|b| b.row);
+    blocks.sort_by_key(|b| b.col);
 
     let index: HashMap<Oid, usize> = blocks
         .iter()
@@ -358,15 +382,15 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
         .map(|(i, b)| (b.id.clone(), i))
         .collect();
 
-    let edges = build_edges(&blocks, &index, dag, projection, total_rows);
+    let edges = build_edges(&blocks, &index, dag, projection, block_width);
     let mut layout = Layout {
         focusables: Vec::new(),
         blocks,
         edges,
-        lane_count: placed.lane_count,
-        lane_width,
+        track_count: placed.track_count,
+        block_width,
         branch_tints: placed.branch_tints,
-        total_rows,
+        total_cols,
         index,
     };
     layout.focusables = build_focusables(&layout, &dag.head);
@@ -375,6 +399,11 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
 
 /// Commits to draw, newest first: the pending ones the plan would create,
 /// then the snapshot's own topological order minus anything dropped.
+///
+/// Still newest-first, even though the drawing is oldest-leftmost: the chain
+/// assignment depends on every child being visited before its parents, which
+/// is what git's topological order gives.  [`assign_cols`] walks this list
+/// backwards to put the oldest commit at column zero.
 fn draw_order(dag: &Dag, projection: &Projection) -> Vec<Oid> {
     projection
         .pending()
@@ -389,74 +418,81 @@ fn draw_order(dag: &Dag, projection: &Projection) -> Vec<Oid> {
         .collect()
 }
 
-/// Where every block sits vertically: one per row band, in draw order.
+/// Where every block sits along the time axis: one per column band, oldest
+/// first.
 ///
-/// Returns the commits' rows, HEAD's row if it is drawn, and the height of the
-/// whole stack.  Every block occupies the same row bands whatever lane it ends
-/// up in, which is what makes the gap rows between them gaps in *every* lane —
-/// and that is what lets an arrow cross lanes without ever running through a
-/// block.
-fn assign_rows(dag: &Dag, order: &[Oid]) -> (HashMap<Oid, u16>, Option<u16>, u16) {
-    let mut rows = HashMap::new();
-    let mut row = 0u16;
-    let mut head_row = None;
+/// Returns the commits' columns, HEAD's column if it is drawn, and the total
+/// width of the graph.  Every block occupies the same column bands whatever
+/// track it ends up in, which is what makes the gap columns between them gaps
+/// in *every* track — and that is what lets an arrow change track without ever
+/// running through a block.
+fn assign_cols(dag: &Dag, order: &[Oid], block_width: u16) -> (HashMap<Oid, u16>, Option<u16>, u16) {
+    let mut cols = HashMap::new();
+    let stride = block_width + GAP;
+    // Room at the left for the stub that says older history was not loaded.
+    let mut col = if dag.truncated { GAP } else { 0 };
+    let mut head_col = None;
 
-    let head_before = dag.head.target.clone().filter(|id| order.contains(id));
+    let head_at = dag.head.target.clone().filter(|id| order.contains(id));
     // A repository with no commits yet still has a HEAD worth showing: it says
     // which branch the first commit will be on.
-    if head_before.is_none() && (dag.head.target.is_some() || dag.head.branch.is_some()) {
-        head_row = Some(row);
-        row += HEAD_H + GAP;
+    if head_at.is_none() && (dag.head.target.is_some() || dag.head.branch.is_some()) {
+        head_col = Some(col);
+        col += stride;
     }
 
-    for id in order {
-        if head_row.is_none() && head_before.as_ref() == Some(id) {
-            head_row = Some(row);
-            row += HEAD_H + GAP;
+    // Backwards: `order` is newest-first, and the oldest commit belongs at the
+    // left edge.
+    for id in order.iter().rev() {
+        cols.insert(id.clone(), col);
+        col += stride;
+        // HEAD sits immediately to the right of the commit it names — the slot
+        // the next commit would take.
+        if head_col.is_none() && head_at.as_ref() == Some(id) {
+            head_col = Some(col);
+            col += stride;
         }
-        rows.insert(id.clone(), row);
-        row += BLOCK_H + GAP;
     }
-    (rows, head_row, row.saturating_sub(GAP))
+    (cols, head_col, col.saturating_sub(GAP))
 }
 
-/// Where every chain and the HEAD block sit horizontally, and what colour
-/// each commit is.
+/// Where every chain and the HEAD block sit vertically, and what colour each
+/// commit is.
 struct Placement {
-    lane: HashMap<Oid, usize>,
-    head_lane: usize,
-    lane_count: usize,
+    track: HashMap<Oid, usize>,
+    head_track: usize,
+    track_count: usize,
     tint: HashMap<Oid, usize>,
     branch_tints: HashMap<String, usize>,
 }
 
-/// Give each commit a lane, and each a colour group.
+/// Give each commit a track, and each a colour group.
 ///
-/// Three steps, and the whole point of the first three is that a **chain owns
-/// its column outright** for as long as it is on screen:
+/// Three steps, and the whole point of the first two is that a **chain owns
+/// its row outright** for as long as it is on screen:
 ///
 /// 1. **Chains.**  A chain is a maximal run of first-parent links — which is
 ///    what a branch looks like to a reader.  Where several commits share a
-///    parent, the parent joins the chain that *started highest*, so the trunk
-///    keeps going down one column instead of being annexed by whichever
-///    side branch git happened to list first.  (It was: a four-commit `main`
-///    handed its last commit to a topic branch, and the main line stepped
-///    sideways at the bottom for no reason a reader could see.)
-/// 2. **Spans.**  Each chain claims the rows from its first block to its last,
-///    extended down to the commit it points into and up to any merge that
-///    points at it — the rows its arrows need as well as its blocks.
-/// 3. **Colouring.**  Chains whose spans overlap must get different lanes;
-///    greedy leftmost-free assignment does that, and lets two branches that
-///    never coexist vertically share a column.
+///    parent, the parent joins the chain that *started newest*, so the trunk
+///    keeps going along one row instead of being annexed by whichever side
+///    branch git happened to list first.
+/// 2. **Spans.**  Each chain claims the columns from its oldest block to its
+///    newest, extended left to the commit it points into and right to any
+///    merge that points at it — the columns its arrows need as well as its
+///    blocks.
+/// 3. **Colouring.**  Chains whose spans overlap must get different tracks;
+///    greedy topmost-free assignment does that, and lets two branches that
+///    never coexist horizontally share a row.
 ///
-/// The invariant this buys: a lane holds one chain at a time, so a vertical
-/// arrow segment drawn in a lane can never pass behind another chain's block.
-/// The HEAD block is placed last, against the same reservations, because it
-/// is a block in the stack like any other — see [`place_head`].
+/// The invariant this buys: a track holds one chain at a time, so a horizontal
+/// arrow segment drawn in a track can never pass behind another chain's block.
+/// The HEAD block is placed last, against the same reservations, because it is
+/// a block in the graph like any other — see [`place_head`].
 fn place(
     order: &[Oid],
-    rows: &HashMap<Oid, u16>,
-    head_row: Option<u16>,
+    cols: &HashMap<Oid, u16>,
+    head_col: Option<u16>,
+    block_width: u16,
     dag: &Dag,
     projection: &Projection,
 ) -> Placement {
@@ -466,7 +502,7 @@ fn place(
     // Which chain has claimed each commit, and with what id.  Every child of a
     // commit precedes it in the draw order, so by the time a commit is reached
     // every claim on it has been made and the smallest wins — and chain ids
-    // are handed out top to bottom, so the smallest id is the highest chain.
+    // are handed out newest to oldest, so the smallest id is the newest chain.
     let mut claims: HashMap<Oid, usize> = HashMap::new();
 
     for id in order {
@@ -480,8 +516,8 @@ fn place(
         chain.insert(id.clone(), c);
         members[c].push(id.clone());
         // Only the *first* parent continues a chain.  A merge's other parents
-        // are the tops of their own chains, which is what makes a merge read
-        // as two columns coming together rather than one column forking.
+        // are the heads of their own chains, which is what makes a merge read
+        // as two rows coming together rather than one row forking.
         if let Some(parent) = projection.parents(dag, id).first() {
             claims
                 .entry(parent.clone())
@@ -491,113 +527,114 @@ fn place(
     }
 
     // --- 2. spans ---
-    let row_of = |id: &Oid| rows.get(id).copied();
+    let col_of = |id: &Oid| cols.get(id).copied();
     let mut spans: Vec<(u16, u16)> = members
         .iter()
         .map(|m| {
-            let top = m.iter().filter_map(row_of).min().unwrap_or(0);
-            let bottom = m.iter().filter_map(row_of).max().unwrap_or(0) + BLOCK_H;
-            (top, bottom)
+            let left = m.iter().filter_map(col_of).min().unwrap_or(0);
+            let right = m.iter().filter_map(col_of).max().unwrap_or(0) + block_width;
+            (left, right)
         })
         .collect();
 
     for (c, m) in members.iter().enumerate() {
-        // The exit arrow drops through this lane down to the gap above the
-        // commit it points at, so those rows belong to this chain too.
+        // The exit arrow runs back through this track to the gap right of the
+        // commit it points at, so those columns belong to this chain too.
         if let Some(target) = m.last().and_then(|last| projection.parents(dag, last).first()) {
-            if let Some(row) = row_of(target) {
-                spans[c].1 = spans[c].1.max(row);
+            if let Some(col) = col_of(target) {
+                spans[c].0 = spans[c].0.min(col + block_width);
             }
         }
     }
     for id in order {
-        // A merge's second arrow crosses immediately below the merge and then
-        // drops through the *target's* lane, so those rows belong to it.
+        // A merge's second arrow crosses immediately left of the merge and
+        // then runs back through the *target's* track, so those columns belong
+        // to it.
         for parent in projection.parents(dag, id).iter().skip(1) {
-            let (Some(&c), Some(row)) = (chain.get(parent), row_of(id)) else { continue };
-            spans[c].0 = spans[c].0.min(row + BLOCK_H);
+            let (Some(&c), Some(col)) = (chain.get(parent), col_of(id)) else { continue };
+            spans[c].1 = spans[c].1.max(col);
         }
     }
 
     // --- 3. colouring ---
     let mut used: Vec<Vec<(u16, u16)>> = Vec::new();
-    let mut lane_of = vec![0usize; members.len()];
-    let mut by_top: Vec<usize> = (0..members.len()).collect();
-    by_top.sort_by_key(|&c| (spans[c].0, c));
+    let mut track_of = vec![0usize; members.len()];
+    let mut by_left: Vec<usize> = (0..members.len()).collect();
+    by_left.sort_by_key(|&c| (spans[c].0, c));
 
-    for c in by_top {
-        let lane = claim_lane(&mut used, spans[c], None);
-        lane_of[c] = lane;
+    for c in by_left {
+        track_of[c] = claim_track(&mut used, spans[c], None);
     }
 
-    let lane: HashMap<Oid, usize> = chain.iter().map(|(id, &c)| (id.clone(), lane_of[c])).collect();
-    let head_lane = place_head(&mut used, &lane, rows, head_row, dag);
+    let track: HashMap<Oid, usize> =
+        chain.iter().map(|(id, &c)| (id.clone(), track_of[c])).collect();
+    let head_track = place_head(&mut used, &track, cols, head_col, block_width, dag);
     let (branch_tints, tint) = assign_tints(&members, dag, projection);
 
     Placement {
-        lane_count: used.len().max(1),
-        lane,
-        head_lane,
+        track_count: used.len().max(1),
+        track,
+        head_track,
         tint,
         branch_tints,
     }
 }
 
-/// The leftmost lane free over `span`, preferring `want` when it is free.
-fn claim_lane(used: &mut Vec<Vec<(u16, u16)>>, span: (u16, u16), want: Option<usize>) -> usize {
+/// The topmost track free over `span`, preferring `want` when it is free.
+fn claim_track(used: &mut Vec<Vec<(u16, u16)>>, span: (u16, u16), want: Option<usize>) -> usize {
     let (lo, hi) = span;
     let free = |taken: &Vec<(u16, u16)>| taken.iter().all(|&(a, b)| hi <= a || lo >= b);
-    let lane = want
+    let track = want
         .filter(|&w| used.get(w).map_or(true, free))
         .or_else(|| used.iter().position(free))
         .unwrap_or(used.len());
-    while used.len() <= lane {
+    while used.len() <= track {
         used.push(Vec::new());
     }
-    used[lane].push((lo, hi));
-    lane
+    used[track].push((lo, hi));
+    track
 }
 
-/// Which lane the HEAD block goes in.
+/// Which track the HEAD block goes in.
 ///
-/// Its own commit's lane, when that is free over HEAD's rows — the block sits
-/// directly above the commit it names, so the arrow is one row long and reads
-/// as "you are here".  When HEAD names a commit part-way down a chain, though,
-/// that lane is carrying the arrow from the commit above, and putting a block
-/// in it hides the arrow completely: blocks are painted after arrows, so what
-/// you get is a line that stops dead at HEAD and a commit whose parent is
-/// anybody's guess.  A checkout of anything but a branch tip did exactly that.
-/// So HEAD then takes a lane of its own and points across instead.
+/// Its own commit's track, when that is free over HEAD's columns — the block
+/// sits directly to the right of the commit it names, so the arrow is short
+/// and reads as "you are here".  When HEAD names a commit part-way along a
+/// chain, though, that track is carrying the arrow from the commit after it,
+/// and putting a block in it hides the arrow completely: blocks are painted
+/// after arrows, so what you get is a line that stops dead at HEAD and a
+/// commit whose child is anybody's guess.  So HEAD then takes a track of its
+/// own and points across instead.
 fn place_head(
     used: &mut Vec<Vec<(u16, u16)>>,
-    lane: &HashMap<Oid, usize>,
-    rows: &HashMap<Oid, u16>,
-    head_row: Option<u16>,
+    track: &HashMap<Oid, usize>,
+    cols: &HashMap<Oid, u16>,
+    head_col: Option<u16>,
+    block_width: u16,
     dag: &Dag,
 ) -> usize {
-    let Some(head_row) = head_row else { return 0 };
+    let Some(head_col) = head_col else { return 0 };
     let target = dag.head.target.as_ref();
-    let want = target.and_then(|id| lane.get(id)).copied();
-    // Down to the gap above its commit: that is where HEAD's own arrow runs.
-    let bottom = target
-        .and_then(|id| rows.get(id))
-        .copied()
-        .unwrap_or(head_row + HEAD_H);
-    claim_lane(used, (head_row, bottom.max(head_row + HEAD_H)), want)
+    let want = target.and_then(|id| track.get(id)).copied();
+    // Back to the gap right of its commit: that is where HEAD's own arrow runs.
+    let left = target
+        .and_then(|id| cols.get(id))
+        .map_or(head_col, |col| col + block_width);
+    claim_track(used, (left.min(head_col), head_col + block_width), want)
 }
 
 /// Which colour group each commit and each local branch belongs to.
 ///
-/// Walking *down* a chain, a commit takes the colour of the nearest branch
-/// label at or above it.  That is exactly how the graph reads: above `main`'s
-/// label the commits are only on `test-branch`, and at `main`'s label and
-/// below they are on `main` — even though every one of them is also on
-/// `test-branch`.
+/// Walking *back* along a chain — newest to oldest, right to left — a commit
+/// takes the colour of the nearest branch label at or after it.  That is
+/// exactly how the graph reads: to the right of `main`'s label the commits are
+/// only on `test-branch`, and at `main`'s label and before it they are on
+/// `main` — even though every one of them is also on `test-branch`.
 ///
-/// Colour is deliberately **not** the lane.  A branch that is merely ahead of
-/// another is not a fork, so both sit in one column, correctly — and colouring
-/// by column then painted the whole history one colour and lost the very
-/// distinction the colours exist to draw.
+/// Colour is deliberately **not** the track.  A branch that is merely ahead of
+/// another is not a fork, so both sit in one row, correctly — and colouring by
+/// row then painted the whole history one colour and lost the very distinction
+/// the colours exist to draw.
 fn assign_tints(
     members: &[Vec<Oid>],
     dag: &Dag,
@@ -642,20 +679,16 @@ fn assign_tints(
     (branch_tints, tint)
 }
 
-/// How wide one lane is./// How wide one lane is.
+/// How wide one block is.
 ///
-/// Divided between the lanes in play and then clamped: a single-branch
-/// repository would otherwise draw one block across the whole terminal, and a
-/// repository with nine branches would draw nine unreadable slivers (those
-/// scroll horizontally instead).
-fn lane_width(width: u16, lane_count: usize, natural: u16) -> u16 {
-    let count = lane_count.max(1) as u16;
-    let each = ((width + LANE_GAP) / count).saturating_sub(LANE_GAP);
-    // A block is as wide as what is written in it, never as wide as the
-    // space that happens to be free.  Dividing the viewport up made every
-    // block on a wide terminal a 72-column banner around a 30-column commit
-    // message, which reads as a layout bug rather than as a graph.
-    natural.min(each).clamp(MIN_LANE, MAX_LANE)
+/// A block is as wide as what is written in it, never as wide as the space
+/// that happens to be free: dividing the viewport up made every block on a
+/// wide terminal a banner around a 30-column commit message, which reads as a
+/// layout bug rather than as a graph.  Clamped at both ends — narrow enough
+/// that several commits fit on screen at once, wide enough to say something.
+fn block_width(width: u16, natural: u16) -> u16 {
+    let cap = width.clamp(8, MAX_BLOCK);
+    natural.clamp(MIN_BLOCK.min(cap), cap)
 }
 
 /// The widest a block needs to be to hold its own contents, borders included.
@@ -683,18 +716,26 @@ fn natural_width(dag: &Dag, projection: &Projection, order: &[Oid]) -> u16 {
             .map(|p| p.summary.chars().count())
             .or_else(|| dag.get(id).map(|c| c.summary.chars().count()))
             .unwrap_or(0) as u16;
-        // Drawn at `left + 2`, so two columns of lead-in plus one of trailing
-        // room inside the right border.
-        inner = inner.max(summary + 3);
+        // The summary wraps over two rows, so half of it is what has to fit,
+        // plus two columns of lead-in and one of trailing room.
+        inner = inner.max(summary.div_ceil(2) + 3);
 
         if let Some(commit) = dag.get(id) {
-            let meta = commit.author.chars().count() as u16 + 3 + AGE_COLS;
-            inner = inner.max(meta + 2 + COUNTS_COLS);
+            // `author · age` on the metadata row…
+            inner = inner.max(commit.author.chars().count() as u16 + 3 + AGE_COLS + 1);
+            // …and the change counts along the bottom border.
+            inner = inner.max(COUNTS_COLS + 4);
         }
     }
-    // The HEAD block's one line: `● ` plus the branch name.
+    // The HEAD block's widest line: `● ` plus the branch name, or one of the
+    // work-tree lines it carries underneath.  Sized from the same strings the
+    // renderer draws (`WorkTree::summary_lines`), so a tree with something in
+    // it does not end up with its state clipped mid-word.
     if let Some(branch) = dag.head.branch.as_ref() {
         inner = inner.max(branch.chars().count() as u16 + 4);
+    }
+    for line in dag.work.summary_lines() {
+        inner = inner.max(line.chars().count() as u16 + 3);
     }
     inner + 2
 }
@@ -702,7 +743,7 @@ fn natural_width(dag: &Dag, projection: &Projection, order: &[Oid]) -> u16 {
 /// The ref labels on `id`'s block, with the column each starts at.
 ///
 /// Truncated to what the border can hold: a block with six tags on it must
-/// not draw past its own edge and into the lane beside it.
+/// not draw past its own edge and into the block beside it.
 fn labels_for(dag: &Dag, projection: &Projection, id: &Oid, inner: u16) -> Vec<(String, u16)> {
     // Projected positions, not the snapshot's: a moved branch has to be drawn
     // where the plan puts it or the preview shows nothing.
@@ -731,7 +772,7 @@ fn build_edges(
     index: &HashMap<Oid, usize>,
     dag: &Dag,
     projection: &Projection,
-    total_rows: u16,
+    block_width: u16,
 ) -> Vec<Edge> {
     let mut edges = Vec::new();
     for block in blocks {
@@ -742,37 +783,38 @@ fn build_edges(
                 continue;
             };
             let target = &blocks[*target];
+            let end_col = target.col + block_width;
             edges.push(Edge {
                 child: block.id.clone(),
                 slot: 0,
                 parent: Some(target.id.clone()),
-                from_lane: block.lane,
-                to_lane: target.lane,
-                row: block.row + block.height,
-                end_row: target.row,
-                cross_row: target.row.saturating_sub(1),
+                from_track: block.track,
+                to_track: target.track,
+                col: block.col.saturating_sub(1),
+                end_col,
+                cross_col: end_col,
             });
             continue;
         }
         for (slot, parent) in projection.parents(dag, &block.id).iter().enumerate() {
             let target = index.get(parent).map(|&i| &blocks[i]);
-            let row = block.row + block.height;
-            let end_row = target.map_or(total_rows, |b| b.row);
+            let col = block.col.saturating_sub(1);
+            let end_col = target.map_or(0, |b| b.col + block_width);
             edges.push(Edge {
                 child: block.id.clone(),
                 slot,
                 // A parent outside the drawn set is left as `None` so the
                 // renderer draws a stub rather than an arrow to nowhere.
                 parent: target.map(|b| b.id.clone()),
-                from_lane: block.lane,
-                to_lane: target.map_or(block.lane, |b| b.lane),
-                row,
-                end_row,
-                // See `Edge::cross_row`: the first parent crosses late, in the
-                // gap above the commit it points at, so the drop stays in the
-                // child's own lane; a merge's other parents cross early,
-                // because the child's lane carries on down past them.
-                cross_row: if slot == 0 { end_row.saturating_sub(1).max(row) } else { row },
+                from_track: block.track,
+                to_track: target.map_or(block.track, |b| b.track),
+                col,
+                end_col,
+                // See `Edge::cross_col`: the first parent crosses late, in the
+                // gap right of the commit it points at, so the run stays in
+                // the child's own track; a merge's other parents cross early,
+                // because the child's track carries on past them.
+                cross_col: if slot == 0 { end_col.min(col) } else { col },
             });
         }
     }
@@ -783,12 +825,12 @@ fn build_edges(
 fn build_focusables(layout: &Layout, head: &Head) -> Vec<Focusable> {
     let mut out = Vec::new();
     for block in &layout.blocks {
-        let base = layout.lane_col(block.lane);
+        let top = layout.track_row(block.track);
         match block.kind {
             BlockKind::Head => out.push(Focusable {
                 focus: Focus::Head,
-                row: block.row + 1,
-                col: base,
+                row: top + 1,
+                col: block.col,
             }),
             _ => {
                 // Labels sit on the block's top border, one row above the
@@ -797,14 +839,14 @@ fn build_focusables(layout: &Layout, head: &Head) -> Vec<Focusable> {
                 for (name, col) in &block.labels {
                     out.push(Focusable {
                         focus: Focus::Ref(name.clone()),
-                        row: block.row,
-                        col: base + col,
+                        row: top,
+                        col: block.col + col,
                     });
                 }
                 out.push(Focusable {
                     focus: Focus::Commit(block.id.clone()),
-                    row: block.row + 1,
-                    col: base,
+                    row: top + 1,
+                    col: block.col,
                 });
             }
         }
@@ -817,12 +859,12 @@ fn build_focusables(layout: &Layout, head: &Head) -> Vec<Focusable> {
         }
         out.push(Focusable {
             focus: Focus::Edge { child: edge.child.clone(), slot: edge.slot },
-            row: edge.row,
-            col: layout.lane_col(edge.from_lane) + 1,
+            row: layout.arrow_row(edge.from_track),
+            col: edge.col,
         });
     }
     let _ = head;
-    out.sort_by_key(|f| (f.row, f.col));
+    out.sort_by_key(|f| (f.col, f.row));
     out
 }
 
@@ -851,9 +893,8 @@ mod tests {
     }
 
     /// ```text
-    ///   feature: d ── c ─┐
-    ///                    ├── a
-    ///   main:    f ── e ─┘
+    ///   feature:  a ─┬─ c ── d
+    ///   main:        └─ e ── f
     /// ```
     fn dag() -> Dag {
         Dag::new(
@@ -872,14 +913,14 @@ mod tests {
     }
 
     /// A trunk with three topic branches cut from three different points —
-    /// the shape where lanes used to be recycled under an arrow still in
-    /// flight, and where the trunk lost its column at the bottom.
+    /// the shape where tracks used to be recycled under an arrow still in
+    /// flight, and where the trunk lost its row at the end.
     ///
     /// ```text
-    ///   main:    four ── three ── two ── one
-    ///   topic-a:            a2 ── a1 ──────┘   (from two)
-    ///   topic-b:                  b1 ─────┘    (from three)
-    ///   topic-c:            c2 ── c1 ──────┘   (from one)
+    ///   main:    one ── two ── three ── four
+    ///   topic-a:          └─ a1 ── a2
+    ///   topic-b:                └─ b1
+    ///   topic-c:    └─ c1 ── c2
     /// ```
     fn tangled() -> Dag {
         Dag::new(
@@ -907,14 +948,13 @@ mod tests {
     }
 
     /// One branch simply ahead of another — not a fork, so both belong in one
-    /// column, and HEAD names a commit part-way down it.  The shape a
+    /// row, and HEAD names a commit part-way along it.  The shape a
     /// `git checkout -b` and one commit produces, and the one that had both an
     /// arrow drawn behind the HEAD block and a whole history in one colour.
     ///
     /// ```text
-    ///   test-branch: top
-    ///   main:        mid   <- HEAD
-    ///                base
+    ///   base ── mid ── top
+    ///           ^ HEAD, main      ^ test-branch
     /// ```
     fn ahead() -> Dag {
         Dag::new(
@@ -950,54 +990,77 @@ mod tests {
     }
 
     #[test]
-    fn a_chain_keeps_one_lane_and_a_branch_opens_another() {
+    fn a_chain_keeps_one_track_and_a_branch_opens_another() {
         let (_, _, layout) = laid_out(120);
-        let lane = |id: &str| layout.block(&Oid::new(id)).unwrap().lane;
-        // `d → c → a` is one chain and stays in a column…
-        assert_eq!(lane("d"), lane("c"));
-        assert_eq!(lane("c"), lane("a"));
-        // …while `f → e` is a second, in its own.
-        assert_eq!(lane("f"), lane("e"));
-        assert_ne!(lane("d"), lane("f"));
-        assert_eq!(layout.lane_count, 2);
+        let track = |id: &str| layout.block(&Oid::new(id)).unwrap().track;
+        // `a → c → d` is one chain and stays in a row…
+        assert_eq!(track("d"), track("c"));
+        assert_eq!(track("c"), track("a"));
+        // …while `e → f` is a second, in its own.
+        assert_eq!(track("f"), track("e"));
+        assert_ne!(track("d"), track("f"));
+        assert_eq!(layout.track_count, 2);
     }
 
-    /// Blocks never overlap: one commit per row band, in topological order.
-    /// A packed layout can draw a commit above its own ancestor, which in a
-    /// view whose premise is "the picture is the truth" is not cosmetic.
+    /// Blocks never overlap: one commit per column band, oldest at the left.
+    /// A packed layout can draw a commit to the left of its own descendant,
+    /// which in a view whose premise is "the picture is the truth" is not
+    /// cosmetic.
     #[test]
-    fn every_block_sits_below_the_one_before_it_and_none_overlap() {
+    fn every_block_starts_after_the_one_before_it_and_none_overlap() {
         let (_, _, layout) = laid_out(120);
-        let mut last_bottom = 0;
+        let mut last_right = 0;
         for block in &layout.blocks {
             assert!(
-                block.row >= last_bottom,
-                "block {} starts at {} but the previous ended at {last_bottom}",
+                block.col >= last_right,
+                "block {} starts at {} but the previous ended at {last_right}",
                 block.id,
-                block.row
+                block.col
             );
-            last_bottom = block.row + block.height;
+            last_right = block.col + layout.block_width;
         }
-        assert!(layout.total_rows >= last_bottom - GAP);
+        assert!(layout.total_cols >= last_right - GAP);
     }
 
-    /// HEAD is a block of its own above the graph, pointing at the commit it
-    /// names — the one pointer that should be findable without reading.
-    /// HEAD sits *immediately* above its own commit, not at the top of the
-    /// graph: from the top its arrow spans however deep HEAD happens to be,
-    /// and a screenful of `│` between a block and its target says nothing.
+    /// The oldest commit is at the left edge and time runs to the right, so
+    /// every commit is drawn after the parent it follows.
     #[test]
-    fn head_sits_directly_above_the_commit_it_names() {
+    fn a_commit_is_drawn_to_the_right_of_its_parent() {
+        let (dag, projection, layout) = laid_out(120);
+        for c in dag.commits() {
+            for parent in projection.parents(&dag, &c.id) {
+                let (Some(child), Some(parent)) =
+                    (layout.block(&c.id), layout.block(parent))
+                else {
+                    continue;
+                };
+                assert!(
+                    parent.col + layout.block_width <= child.col,
+                    "{} is not drawn after its parent",
+                    child.id
+                );
+            }
+        }
+    }
+
+    /// HEAD is a block of its own beside the graph, pointing at the commit it
+    /// names — the one pointer that should be findable without reading.
+    /// It sits *immediately* to the right of its own commit, where the next
+    /// commit would go, not at the end of the graph: from there its arrow
+    /// spans however far back HEAD happens to be, and a screenful of `─`
+    /// between a block and its target says nothing.
+    #[test]
+    fn head_sits_directly_after_the_commit_it_names() {
         let (_, _, layout) = laid_out(120);
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
         let target = layout.block(&Oid::new("f")).expect("its commit is drawn");
         assert_eq!(head.kind, BlockKind::Head);
-        assert_eq!(head.lane, target.lane, "and in the same lane");
-        assert_eq!(head.row + head.height + GAP, target.row, "one gap apart");
+        assert_eq!(head.track, target.track, "and in the same track");
+        assert_eq!(target.col + layout.col_stride(), head.col, "one gap apart");
         assert!(layout.locate(&Focus::Head).is_some());
         // `f` is not the newest commit in this fixture, so this really is a
-        // placement decision and not the top of the list by accident.
-        assert!(head.row > 0);
+        // placement decision and not the end of the list by accident.
+        assert!(head.col + layout.block_width < layout.total_cols);
     }
 
     /// A repository with no commits still has a HEAD worth showing: it names
@@ -1016,18 +1079,17 @@ mod tests {
         assert_eq!(layout.blocks[0].kind, BlockKind::Head);
     }
 
-    /// Lanes that fit must not be scrolled off: N lanes occupy
-    /// `N * (w + gap) - gap`, and dividing the bare width reports one too few
+    /// Tracks that fit must not be scrolled off: N tracks occupy
+    /// `N * (h + gap) - gap`, and dividing the bare height reports one too few
     /// whenever they fit exactly.
     #[test]
-    fn lanes_that_exactly_fit_are_all_counted_as_visible() {
-        let (_, _, layout) = laid_out(104);
-        assert_eq!(layout.lane_count, 2);
-        let span = layout.lane_col(1) + layout.lane_width;
-        assert!(span <= 104, "two lanes really do fit in 104 columns: {span}");
-        assert_eq!(layout.visible_lanes(104), 2);
-        // And a viewport one column too narrow honestly reports one.
-        assert_eq!(layout.visible_lanes(span - 1), 1);
+    fn tracks_that_exactly_fit_are_all_counted_as_visible() {
+        let (_, _, layout) = laid_out(120);
+        assert_eq!(layout.track_count, 2);
+        let span = 2 * (BLOCK_H + TRACK_GAP) - TRACK_GAP;
+        assert_eq!(layout.visible_tracks(span), 2);
+        // And a viewport one row too short honestly reports one.
+        assert_eq!(layout.visible_tracks(span - 1), 1);
     }
 
     #[test]
@@ -1053,7 +1115,8 @@ mod tests {
     }
 
     /// A commit whose parent was never loaded gets a stub, not an arrow to
-    /// nowhere — the honest picture of a truncated walk.
+    /// nowhere — the honest picture of a truncated walk.  The graph leaves
+    /// room at the left edge for it.
     #[test]
     fn a_parent_past_the_horizon_leaves_a_stub() {
         let dag = Dag::new(
@@ -1065,19 +1128,27 @@ mod tests {
         );
         let projection = Plan::default().project(&dag);
         let layout = compute(&dag, &projection, 100);
-        let edge = &layout.edges[0];
+        let edge = layout
+            .edges
+            .iter()
+            .find(|e| e.child == Oid::new("x"))
+            .expect("an edge");
         assert_eq!(edge.parent, None);
-        assert_eq!(edge.end_row, layout.total_rows);
+        assert!(layout.route(edge).stub);
+        assert!(
+            layout.block(&Oid::new("x")).unwrap().col >= GAP,
+            "the stub needs room to the left of the oldest block"
+        );
     }
 
-    /// `j` from a block must land on the arrow directly beneath it, not on
-    /// whatever else happens to be one row down in another lane.
+    /// `h` from a block must land on the arrow immediately to its left, not on
+    /// whatever else happens to be one column back in another track.
     #[test]
-    fn moving_down_prefers_the_thing_directly_below() {
+    fn moving_back_in_time_prefers_the_arrow_beside_it() {
         let (_, _, layout) = laid_out(120);
         let from = Focus::Commit(Oid::new("d"));
         assert_eq!(
-            layout.step_where(&from, Dir::Down, |_| true),
+            layout.step_where(&from, Dir::Left, |_| true),
             Some(Focus::Edge { child: Oid::new("d"), slot: 0 })
         );
     }
@@ -1086,37 +1157,37 @@ mod tests {
     fn moving_is_reversible_and_stops_at_the_edges() {
         let (_, _, layout) = laid_out(120);
         let start = Focus::Commit(Oid::new("d"));
-        let down = layout.step_where(&start, Dir::Down, |_| true).unwrap();
-        assert_eq!(layout.step_where(&down, Dir::Up, |_| true), Some(start));
+        let back = layout.step_where(&start, Dir::Left, |_| true).unwrap();
+        assert_eq!(layout.step_where(&back, Dir::Right, |_| true), Some(start));
 
-        // The graph has ends: nothing above the first focusable, nothing
-        // below the last.  (HEAD is no longer either — it sits beside its own
-        // commit, wherever in the graph that is.)
+        // The graph has ends: nothing before the first focusable, nothing
+        // after the last.
         let first = layout.focusables.first().unwrap().focus.clone();
         let last = layout.focusables.last().unwrap().focus.clone();
-        assert_eq!(layout.step_where(&first, Dir::Up, |_| true), None);
-        assert_eq!(layout.step_where(&last, Dir::Down, |_| true), None);
+        assert_eq!(layout.step_where(&first, Dir::Left, |_| true), None);
+        assert_eq!(layout.step_where(&last, Dir::Right, |_| true), None);
     }
 
-    /// `h`/`l` cross lanes at a comparable height rather than jumping to the
-    /// top of the next branch.
-    /// `l` means "the next lane, beside where I am".  A lane is tall and
-    /// narrow, so the nearest thing *by column* is very often a label ten rows
-    /// up on some other block — which is not what the key means.
+    /// `j`/`k` cross tracks at a comparable point in history rather than
+    /// jumping to the far end of another branch.  A track is wide and short,
+    /// so the nearest thing *by row* is very often a label forty columns away
+    /// — which is not what the key means.
     #[test]
-    fn moving_sideways_stays_at_the_same_height() {
+    fn moving_across_tracks_stays_at_the_same_point_in_history() {
         let (_, _, layout) = laid_out(120);
         let from = Focus::Commit(Oid::new("d"));
-        let row_of = |f: &Focus| layout.locate(f).unwrap().row as i32;
-        let target = layout.step_where(&from, Dir::Right, |_| true).expect("a lane to the right");
+        let col_of = |f: &Focus| layout.locate(f).unwrap().col as i32;
+        let target = layout
+            .step_where(&from, Dir::Down, |_| true)
+            .expect("a track below");
         assert!(
-            (row_of(&target) - row_of(&from)).abs() <= BLOCK_H as i32,
-            "sideways travelled {} rows",
-            (row_of(&target) - row_of(&from)).abs()
+            (col_of(&target) - col_of(&from)).abs() <= layout.col_stride() as i32,
+            "crossing tracks travelled {} columns",
+            (col_of(&target) - col_of(&from)).abs()
         );
-        // And it really did change lane.
-        let col_of = |f: &Focus| layout.locate(f).unwrap().col;
-        assert!(col_of(&target) > col_of(&from));
+        // And it really did change track.
+        let row_of = |f: &Focus| layout.locate(f).unwrap().row;
+        assert!(row_of(&target) > row_of(&from));
     }
 
     /// A branch label sits on its block's top border, so `j` off the label
@@ -1126,7 +1197,7 @@ mod tests {
         let (_, _, layout) = laid_out(120);
         let label = layout.locate(&Focus::Ref("main".into())).expect("main is drawn");
         let block = layout.block(&Oid::new("f")).unwrap();
-        assert_eq!(label.row, block.row);
+        assert_eq!(label.row, layout.track_row(block.track));
         assert_eq!(
             layout.step_where(&Focus::Ref("main".into()), Dir::Down, |_| true),
             Some(Focus::Commit(Oid::new("f")))
@@ -1187,37 +1258,31 @@ mod tests {
         assert_eq!(arrows, vec![Oid::new("f"), Oid::new("d")]);
     }
 
-    /// One branch must not stretch across a 200-column terminal, and nine
-    /// branches must not become nine unreadable slivers.
+    /// One commit must not stretch across a 200-column terminal, and a long
+    /// message must not leave two commits on screen.
     #[test]
-    fn lane_width_is_clamped_at_both_ends() {
-        assert_eq!(lane_width(300, 1, 500), MAX_LANE);
-        assert_eq!(lane_width(40, 9, 500), MIN_LANE);
-        // In between it divides the space up.
-        let mid = lane_width(120, 2, 500);
-        assert!((MIN_LANE..=MAX_LANE).contains(&mid), "{mid}");
+    fn block_width_is_clamped_at_both_ends() {
+        assert_eq!(block_width(300, 500), MAX_BLOCK);
+        assert_eq!(block_width(300, 4), MIN_BLOCK);
+        // A terminal narrower than a block gets what there is.
+        assert!(block_width(12, 500) <= 12);
     }
 
     /// A block is as wide as what is written in it.  Dividing the viewport up
-    /// instead drew a 72-column banner around a 30-column commit message on
-    /// any reasonably wide terminal.
+    /// instead drew a banner around a 30-column commit message on any
+    /// reasonably wide terminal.
     #[test]
     fn a_block_is_no_wider_than_its_contents() {
         let (dag, projection, layout) = laid_out(300);
         let natural = natural_width(&dag, &projection, &draw_order(&dag, &projection));
-        assert!(natural < MAX_LANE, "the fixture is short: {natural}");
-        assert_eq!(layout.lane_width, natural.max(MIN_LANE));
-        assert!(
-            layout.lane_width < MAX_LANE,
-            "a wide terminal stretched a short commit to {}",
-            layout.lane_width
-        );
+        assert!(natural < MAX_BLOCK, "the fixture is short: {natural}");
+        assert_eq!(layout.block_width, natural.max(MIN_BLOCK));
     }
 
     /// …and long contents still get the room, up to the clamp.
     #[test]
     fn a_long_summary_widens_the_block() {
-        let long = "a commit message long enough that it needs the whole lane to itself";
+        let long = "a commit message long enough that it needs the whole block to itself";
         let mut wide = commit("d", &["c"]);
         wide.summary = long.into();
         let dag = Dag::new(
@@ -1229,15 +1294,10 @@ mod tests {
         );
         let projection = Plan::default().project(&dag);
         let layout = compute(&dag, &projection, 300);
-        assert!(
-            layout.lane_width >= long.chars().count() as u16,
-            "a {}-column summary got {} columns",
-            long.chars().count(),
-            layout.lane_width
-        );
+        assert_eq!(layout.block_width, MAX_BLOCK, "a long summary fills the clamp");
     }
 
-    /// A block full of tags must not draw past its own edge into the lane
+    /// A block full of tags must not draw past its own edge into the block
     /// beside it.
     #[test]
     fn labels_stop_at_the_block_edge() {
@@ -1259,7 +1319,7 @@ mod tests {
     }
 
     /// An empty repository must lay out without panicking — there is no HEAD
-    /// commit, no lane and no block.
+    /// commit, no track and no block.
     #[test]
     fn an_empty_repository_lays_out_to_nothing() {
         let dag = Dag::new(Vec::new(), Vec::new(), Head::default(), WorkTree::default(), false);
@@ -1269,14 +1329,15 @@ mod tests {
         assert!(layout.focusables.is_empty());
         assert_eq!(layout.initial_focus(), None);
     }
-    /// The invariant the whole lane assignment exists to provide: **no arrow
+
+    /// The invariant the whole track assignment exists to provide: **no arrow
     /// is ever drawn through a block**.  Blocks are painted after arrows, so a
     /// line that crosses one does not merely look wrong — it vanishes, and the
     /// reader is left with an arrow that stops dead and a commit whose parent
     /// is anybody's guess.
     ///
     /// Checked over the awkward shapes rather than the tidy one: several
-    /// topic branches cut from different points of a trunk is where lanes
+    /// topic branches cut from different points of a trunk is where tracks
     /// used to get recycled underneath an arrow still using them.
     #[test]
     fn no_arrow_is_drawn_through_a_block() {
@@ -1284,24 +1345,24 @@ mod tests {
             ("two branches", dag()),
             ("many branches", tangled()),
             ("a merge", merged()),
-            // HEAD part-way down a chain: the block lands in the middle of a
-            // lane an arrow is already using.
+            // HEAD part-way along a chain: the block lands in the middle of a
+            // track an arrow is already using.
             ("a branch ahead", ahead()),
         ] {
             let projection = Plan::default().project(&dag);
-            for width in [80, 120, 200, 400] {
+            for width in [40, 80, 120, 400] {
                 let layout = compute(&dag, &projection, width);
                 for edge in &layout.edges {
                     for (row, col) in layout.route(edge).cells() {
                         for block in &layout.blocks {
                             // The endpoints are meant to touch: an arrow
                             // leaves one border and its head sits in the gap
-                            // above the next.  Everything else is a crossing.
-                            let left = layout.lane_col(block.lane);
-                            let inside = row > block.row
-                                && row < block.row + block.height
-                                && col >= left
-                                && col < left + layout.lane_width;
+                            // beside the next.  Everything else is a crossing.
+                            let top = layout.track_row(block.track);
+                            let inside = col > block.col
+                                && col < block.col + layout.block_width
+                                && row >= top
+                                && row < top + BLOCK_H;
                             assert!(
                                 !inside,
                                 "{name} at width {width}: the arrow {} -> {:?} runs through \
@@ -1315,33 +1376,33 @@ mod tests {
         }
     }
 
-    /// A branch is a column.  The trunk used to hand its oldest commits to
+    /// A branch is a row.  The trunk used to hand its oldest commits to
     /// whichever topic branch git happened to list first, so `main` stepped
-    /// sideways near the bottom for no reason a reader could see.
+    /// sideways near the start for no reason a reader could see.
     #[test]
-    fn a_first_parent_chain_keeps_one_lane_all_the_way_down() {
+    fn a_first_parent_chain_keeps_one_track_all_the_way_along() {
         let dag = tangled();
         let projection = Plan::default().project(&dag);
         let layout = compute(&dag, &projection, 200);
-        let lane = |id: &str| layout.block(&Oid::new(id)).expect(id).lane;
+        let track = |id: &str| layout.block(&Oid::new(id)).expect(id).track;
 
-        // The trunk, top to bottom.
+        // The trunk, end to end.
         for id in ["four", "three", "two", "one"] {
-            assert_eq!(lane(id), lane("four"), "{id} left the trunk's lane");
+            assert_eq!(track(id), track("four"), "{id} left the trunk's track");
         }
-        // …and each topic branch is somewhere else, in one lane of its own.
+        // …and each topic branch is somewhere else, in one track of its own.
         for (tip, base) in [("a2", "a1"), ("c2", "c1")] {
-            assert_eq!(lane(tip), lane(base), "{tip} and {base} are one chain");
-            assert_ne!(lane(tip), lane("four"), "{tip} is not the trunk");
+            assert_eq!(track(tip), track(base), "{tip} and {base} are one chain");
+            assert_ne!(track(tip), track("four"), "{tip} is not the trunk");
         }
     }
 
-    /// Two branches that never coexist vertically may share a column: the
-    /// point of colouring spans rather than handing every chain its own lane
-    /// is that a graph with a long history does not grow a lane per branch
+    /// Two branches that never coexist horizontally may share a row: the
+    /// point of colouring spans rather than handing every chain its own track
+    /// is that a graph with a long history does not grow a track per branch
     /// that ever existed.
     #[test]
-    fn chains_that_do_not_overlap_share_a_lane() {
+    fn chains_that_do_not_overlap_share_a_track() {
         let dag = Dag::new(
             vec![
                 commit("tip", &["mid"]),
@@ -1357,15 +1418,15 @@ mod tests {
         );
         let projection = Plan::default().project(&dag);
         let layout = compute(&dag, &projection, 200);
-        // Both topics hang off the trunk at different heights and neither
-        // outlives the other, so two lanes are enough for four chains.
-        assert!(layout.lane_count <= 2, "{} lanes for two side commits", layout.lane_count);
+        // Both topics hang off the trunk at different points and neither
+        // outlives the other, so two tracks are enough for four chains.
+        assert!(layout.track_count <= 2, "{} tracks for two side commits", layout.track_count);
     }
 
     /// A branch that is merely *ahead* of another is not a fork, so both sit
-    /// in one column — and colouring by column then painted the whole history
-    /// one colour and lost the distinction entirely.  Colour is the branch a
-    /// commit is on: walking down, each takes the nearest label at or above it.
+    /// in one row — and colouring by row then painted the whole history one
+    /// colour and lost the distinction entirely.  Colour is the branch a
+    /// commit is on: walking back, each takes the nearest label at or after it.
     #[test]
     fn commits_take_the_colour_of_the_branch_they_are_on() {
         let dag = ahead();
@@ -1373,14 +1434,14 @@ mod tests {
         let layout = compute(&dag, &projection, 200);
         let tint = |id: &str| layout.block(&Oid::new(id)).expect(id).tint;
 
-        // One column, because that is the truth of this repository…
+        // One row, because that is the truth of this repository…
         assert_eq!(
-            layout.block(&Oid::new("top")).unwrap().lane,
-            layout.block(&Oid::new("base")).unwrap().lane
+            layout.block(&Oid::new("top")).unwrap().track,
+            layout.block(&Oid::new("base")).unwrap().track
         );
         // …and two colours, because there are two branches.
         assert_ne!(tint("top"), tint("mid"), "the branches are one colour");
-        assert_eq!(tint("mid"), tint("base"), "everything at and below `main`");
+        assert_eq!(tint("mid"), tint("base"), "everything at and before `main`");
 
         // The labels match the commits they name, so a label and its run of
         // history read as one thing.
@@ -1388,8 +1449,8 @@ mod tests {
         assert_eq!(layout.branch_tints.get("main"), Some(&tint("mid")));
     }
 
-    /// HEAD sits directly above the commit it names, in that commit's lane —
-    /// unless that lane is carrying an arrow past it, in which case a block
+    /// HEAD sits directly after the commit it names, in that commit's track —
+    /// unless that track is carrying an arrow past it, in which case a block
     /// there would hide the arrow completely.
     #[test]
     fn head_steps_aside_rather_than_landing_on_an_arrow() {
@@ -1397,16 +1458,15 @@ mod tests {
         let dag = dag();
         let layout = compute(&dag, &Plan::default().project(&dag), 200);
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
-        assert_eq!(head.lane, layout.block(&Oid::new("f")).unwrap().lane);
+        assert_eq!(head.track, layout.block(&Oid::new("f")).unwrap().track);
 
-        // Part-way down a chain, the arrow from the commit above owns that
-        // lane, so HEAD takes one of its own and points across.
+        // Part-way along a chain, the arrow from the commit after it owns that
+        // track, so HEAD takes one of its own and points across.
         let dag = ahead();
         let layout = compute(&dag, &Plan::default().project(&dag), 200);
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
         let target = layout.block(&Oid::new("mid")).unwrap();
-        assert_ne!(head.lane, target.lane, "HEAD is sitting on the arrow");
-        assert!(head.row < target.row, "and still directly above its commit");
+        assert_ne!(head.track, target.track, "HEAD is sitting on the arrow");
+        assert!(head.col > target.col, "and still directly after its commit");
     }
-
 }

@@ -140,16 +140,79 @@ impl Head {
     }
 }
 
-/// Counts from `git status`, for the staging area block.
+/// One path `git status` reported, and what has happened to it.
+///
+/// The two columns are git's own: the first is the index, the second the work
+/// tree, so one file can be both staged and unstaged (edited after `git add`)
+/// and an untracked file is `??`.  Kept verbatim rather than reduced to a
+/// category, because the pair *is* the state and any reduction loses a case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub path: String,
+    pub index: char,
+    pub work: char,
+}
+
+impl Change {
+    /// Never added to the repository at all — the scrap notebooks and stray
+    /// output files that accumulate in a working tree.
+    pub fn is_untracked(&self) -> bool {
+        self.index == '?'
+    }
+
+    /// The unmerged states, from `git status`'s own table.  Both columns
+    /// matter: `AA` and `DD` are conflicts despite looking like ordinary
+    /// staged changes.
+    pub fn is_conflicted(&self) -> bool {
+        matches!((self.index, self.work), ('D', 'D') | ('A', 'A') | ('U', _) | (_, 'U'))
+    }
+
+    pub fn is_staged(&self) -> bool {
+        !self.is_untracked() && !self.is_conflicted() && self.index != ' '
+    }
+
+    pub fn is_unstaged(&self) -> bool {
+        !self.is_untracked() && !self.is_conflicted() && self.work != ' '
+    }
+}
+
+/// What `git status` says about the working tree.
+///
+/// The paths, not just the counts: a repository quietly fills up with
+/// untracked scratch files, and "3 untracked" is the number you can see
+/// without being told, while *which three* is the thing you actually need.
+/// The counts are derived from the list rather than stored beside it, so the
+/// summary and the list can never disagree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkTree {
-    pub staged: usize,
-    pub unstaged: usize,
-    pub untracked: usize,
-    pub conflicted: usize,
+    pub entries: Vec<Change>,
 }
 
 impl WorkTree {
+    pub fn new(entries: Vec<Change>) -> Self {
+        WorkTree { entries }
+    }
+
+    fn count(&self, which: fn(&Change) -> bool) -> usize {
+        self.entries.iter().filter(|c| which(c)).count()
+    }
+
+    pub fn staged(&self) -> usize {
+        self.count(Change::is_staged)
+    }
+
+    pub fn unstaged(&self) -> usize {
+        self.count(Change::is_unstaged)
+    }
+
+    pub fn untracked(&self) -> usize {
+        self.count(Change::is_untracked)
+    }
+
+    pub fn conflicted(&self) -> usize {
+        self.count(Change::is_conflicted)
+    }
+
     /// True when there is anything at all uncommitted.
     ///
     /// This is the gate on applying a plan: replaying commits over uncommitted
@@ -157,7 +220,39 @@ impl WorkTree {
     /// git itself lets a checkout proceed past them, and refusing on a stray
     /// build artefact would make the feature unusable in a real tree.
     pub fn is_dirty(&self) -> bool {
-        self.staged > 0 || self.unstaged > 0 || self.conflicted > 0
+        self.entries
+            .iter()
+            .any(|c| c.is_staged() || c.is_unstaged() || c.is_conflicted())
+    }
+
+    /// The two lines the HEAD block shows: what would go into the next commit,
+    /// and what git is not tracking at all.
+    ///
+    /// Built here rather than in the renderer because the layout has to size a
+    /// block against them before anything is drawn, and a block sized from one
+    /// string and filled with another clips the half that matters.
+    pub fn summary_lines(&self) -> [String; 2] {
+        let mut tracked = Vec::new();
+        for (n, word) in [
+            (self.conflicted(), "conflicted"),
+            (self.staged(), "staged"),
+            (self.unstaged(), "unstaged"),
+        ] {
+            if n > 0 {
+                tracked.push(format!("{n} {word}"));
+            }
+        }
+        let first = if tracked.is_empty() {
+            "clean".to_string()
+        } else {
+            tracked.join(" · ")
+        };
+        let second = match self.untracked() {
+            0 if self.is_dirty() => "w to list them".to_string(),
+            0 => String::new(),
+            n => format!("{n} untracked  (w)"),
+        };
+        [first, second]
     }
 }
 
@@ -326,10 +421,13 @@ mod tests {
     #[test]
     fn only_tracked_changes_make_the_tree_dirty() {
         assert!(!WorkTree::default().is_dirty());
-        assert!(!WorkTree { untracked: 12, ..Default::default() }.is_dirty());
-        assert!(WorkTree { staged: 1, ..Default::default() }.is_dirty());
-        assert!(WorkTree { unstaged: 1, ..Default::default() }.is_dirty());
-        assert!(WorkTree { conflicted: 1, ..Default::default() }.is_dirty());
+        let tree = |index: char, work: char| {
+            WorkTree::new(vec![Change { path: "f.rs".into(), index, work }])
+        };
+        assert!(!tree('?', '?').is_dirty());
+        assert!(tree('M', ' ').is_dirty());
+        assert!(tree(' ', 'M').is_dirty());
+        assert!(tree('U', 'U').is_dirty());
     }
 
     #[test]

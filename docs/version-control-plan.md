@@ -154,7 +154,7 @@ checked out.
     like any other so the user can see the merge before agreeing to it.
   - **A drag preview must be validated like a committed edit.** Setting the
     provisional edit directly bypassed `Plan::push`'s cycle check, so dragging
-    an arrow over its own child drew a cyclic graph — lanes and all — and only
+    an arrow over its own child drew a cyclic graph — tracks and all — and only
     objected on release. `state::VcsState::validated` runs the same check
     before previewing, so the picture is always one that could exist.
 

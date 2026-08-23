@@ -202,44 +202,43 @@ fn refresh(app: &mut App) {
 // Scroll
 // ---------------------------------------------------------------------------
 
-/// Keep the cursor on screen, in rows and in lanes.
+/// Keep the cursor on screen, in columns and in tracks.
 pub fn update_scroll(app: &mut App) {
     let (height, width) = (app.viewport_height as u16, app.viewport_width as u16);
-    let scroll_off = app.config.editor.scroll_off as u16;
     let Some(state) = app.vcs.as_ref() else { return };
     let Some(focus) = state.focus.clone() else { return };
     let layout = state.layout(width);
     let Some(at) = layout.locate(&focus) else { return };
     let (row, col) = (at.row, at.col);
-    let (lane_count, lane_stride) = (layout.lane_count, layout.lane_width + 2);
-    let visible_lanes = layout.visible_lanes(width);
+    let (block_width, total_cols) = (layout.block_width, layout.total_cols);
+    let (track_count, visible_tracks) = (layout.track_count, layout.visible_tracks(height));
+    let track = (row / (vcs::layout::BLOCK_H + vcs::layout::TRACK_GAP)) as usize;
     let Some(state) = app.vcs.as_mut() else { return };
 
-    // Rows: the same margin rule the text buffer uses, shrunk so it can never
-    // exceed half the viewport on a short screen.
-    if height > 0 {
-        let margin = scroll_off.min(height.saturating_sub(1) / 2);
-        if row < state.scroll_row + margin {
-            state.scroll_row = row.saturating_sub(margin);
-        } else if row + margin >= state.scroll_row + height {
-            state.scroll_row = (row + margin + 1).saturating_sub(height);
+    // Columns move freely: the time axis is the one you travel along, so a
+    // block clipped at the edge is the price of the cursor tracking smoothly.
+    // What must never happen is the focused block being *partly* off screen,
+    // so the window is nudged by whole blocks' worth when it is.
+    if width > 0 {
+        if col < state.scroll_col {
+            state.scroll_col = col;
+        } else if col + block_width > state.scroll_col + width {
+            state.scroll_col = (col + block_width).saturating_sub(width);
         }
-        let max = state.layout(width).total_rows.saturating_sub(height / 2);
-        state.scroll_row = state.scroll_row.min(max);
+        state.scroll_col = state.scroll_col.min(total_cols.saturating_sub(width / 2));
     }
 
-    // Lanes scroll whole lanes at a time: a block half off the left edge is
-    // unreadable, so there is nothing to be gained by a finer granularity.
-    if lane_stride > 0 && width > 0 {
-        let lane = (col / lane_stride) as usize;
-        if lane < state.scroll_lane {
-            state.scroll_lane = lane;
-        } else if lane >= state.scroll_lane + visible_lanes {
-            state.scroll_lane = lane + 1 - visible_lanes;
+    // Tracks scroll a whole branch row at a time: half a block above the top
+    // edge is unreadable, so there is nothing to be gained by finer steps.
+    if height > 0 {
+        if track < state.scroll_track {
+            state.scroll_track = track;
+        } else if track >= state.scroll_track + visible_tracks {
+            state.scroll_track = track + 1 - visible_tracks;
         }
-        state.scroll_lane = state
-            .scroll_lane
-            .min(lane_count.saturating_sub(visible_lanes));
+        state.scroll_track = state
+            .scroll_track
+            .min(track_count.saturating_sub(visible_tracks));
     }
 }
 
@@ -270,14 +269,15 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
     }
 
     match cmd {
-        // Paging and the file-end motions walk the same focus list; there is
-        // no separate "line" to address in a graph.
+        // Paging and the file-end motions walk the same focus list along the
+        // time axis; there is no separate "line" to address in a graph, and
+        // "the start of the graph" is its oldest commit.
         Command::PageDown | Command::GotoFileEnd => {
-            repeat_step(app, Dir::Down, page(app, cmd));
+            repeat_step(app, Dir::Right, page(app, cmd));
             return true;
         }
         Command::PageUp | Command::GotoFileStart => {
-            repeat_step(app, Dir::Up, page(app, cmd));
+            repeat_step(app, Dir::Left, page(app, cmd));
             return true;
         }
 
@@ -343,11 +343,18 @@ fn page(app: &App, cmd: &Command) -> usize {
     match cmd {
         // The ends of the graph: further than it can possibly be.
         Command::GotoFileStart | Command::GotoFileEnd => usize::MAX,
-        // Half a screen, measured in blocks rather than rows, so paging lands
-        // on a block boundary instead of mid-border.
+        // Half a screen, measured in blocks rather than columns, so paging
+        // lands on a block rather than mid-border.  Each block costs two steps
+        // (the block, then the arrow beside it).
         _ => {
-            let rows = app.viewport_height as u16 / 2;
-            (rows / (vcs::layout::BLOCK_H + vcs::layout::GAP)).max(1) as usize
+            let stride = app
+                .vcs
+                .as_ref()
+                .map_or(vcs::layout::MIN_BLOCK + vcs::layout::GAP, |state| {
+                    state.layout(app.viewport_width as u16).col_stride()
+                });
+            let cols = app.viewport_width as u16 / 2;
+            (2 * (cols / stride)).max(1) as usize
         }
     }
 }
@@ -751,7 +758,7 @@ fn new_branch(app: &mut App, name: &str) {
 
 fn commit(app: &mut App, message: &str) {
     let Some(state) = app.vcs.as_ref() else { return };
-    if state.dag.work.staged == 0 {
+    if state.dag.work.staged() == 0 {
         app.messages
             .show("Nothing staged — `s` stages every change in the work tree");
         return;
@@ -939,25 +946,26 @@ mod tests {
         );
     }
 
-    /// `j` walks blocks and arrows alternately, which is what makes an arrow
-    /// selectable at all.
+    /// `h` walks back through blocks and arrows alternately, which is what
+    /// makes an arrow selectable at all.
     #[test]
-    fn j_and_k_walk_the_blocks_and_the_arrows_between_them() {
+    fn h_and_l_walk_the_blocks_and_the_arrows_between_them() {
         let mut app = app_in_graph();
         let start = focus(&app);
-        super::handle(&mut app, &Command::MoveDown);
+        super::handle(&mut app, &Command::MoveLeft);
         let next = focus(&app);
         assert_ne!(next, start);
-        super::handle(&mut app, &Command::MoveUp);
+        super::handle(&mut app, &Command::MoveRight);
         assert_eq!(focus(&app), start, "the walk is reversible");
 
-        // Somewhere below HEAD there is an arrow, or nothing can be dragged.
+        // Somewhere back through history there is an arrow, or nothing can be
+        // dragged.
         let mut seen_edge = false;
         for _ in 0..12 {
-            super::handle(&mut app, &Command::MoveDown);
+            super::handle(&mut app, &Command::MoveLeft);
             seen_edge |= matches!(focus(&app), Focus::Edge { .. });
         }
-        assert!(seen_edge, "arrows must be reachable with j");
+        assert!(seen_edge, "arrows must be reachable with h");
     }
 
     /// The headline gesture, through the command layer this time: grab, move,
@@ -1063,7 +1071,9 @@ mod tests {
     #[test]
     fn a_dirty_work_tree_is_refused_before_the_question_is_asked() {
         let mut app = app_in_graph();
-        app.vcs.as_mut().unwrap().dag.work.unstaged = 3;
+        app.vcs.as_mut().unwrap().dag.work = crate::vcs::WorkTree::new(vec![
+            crate::vcs::Change { path: "a.rs".into(), index: ' ', work: 'M' },
+        ]);
         app.vcs
             .as_mut()
             .unwrap()
@@ -1166,7 +1176,7 @@ mod tests {
 
         let mut seen = Vec::new();
         for _ in 0..8 {
-            super::handle(&mut app, &Command::MoveUp);
+            super::handle(&mut app, &Command::MoveRight);
             let focus = app.vcs.as_ref().unwrap().focus.clone().expect("a cursor");
             if !seen.last().is_some_and(|last| *last == focus) {
                 seen.push(focus);
@@ -1181,7 +1191,7 @@ mod tests {
             );
         }
         // `c` cannot follow itself, and `d` is `c`'s own child — both are
-        // above the cursor and both are skipped rather than stopped on.
+        // ahead of the cursor and both are skipped rather than stopped on.
         for unreachable in [Oid::new("c"), Oid::new("d")] {
             assert!(
                 !seen.contains(&Focus::Commit(unreachable.clone())),
@@ -1201,14 +1211,14 @@ mod tests {
 
         let mut previewed = Vec::new();
         for _ in 0..8 {
-            super::handle(&mut app, &Command::MoveUp);
+            super::handle(&mut app, &Command::MoveRight);
             let state = app.vcs.as_ref().unwrap();
             let projection = state.plan.project(&state.dag);
             previewed.push(projection.parents(&state.dag, &Oid::new("c")).to_vec());
         }
         assert!(
             previewed.iter().any(|p| p == &[Oid::new("f")]),
-            "walking up to `f` never previewed `c` following it: {previewed:?}"
+            "walking on to `f` never previewed `c` following it: {previewed:?}"
         );
         // And none of it was decided: the stack is still empty.
         assert!(app.vcs.as_ref().unwrap().plan.edits().is_empty());

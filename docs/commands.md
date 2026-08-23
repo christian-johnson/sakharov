@@ -620,6 +620,11 @@ plain buffer.
 A visual git client: commits are blocks, parent links are arrows, and you
 rearrange history by grabbing an arrow and dropping it somewhere else.
 
+**Time runs left to right** — the oldest commit loaded is at the left edge, the
+newest at the right, and every arrow points *backwards*, from a commit to the
+parent it follows. A branch is a row of its own (a "track"); `h`/`l` travel
+through history and `j`/`k` step between branches.
+
 The organising idea is that **nothing here is a git verb**. You state a shape —
 "this branch should sit on top of that one" — and the editor works out the
 commands that would produce it. Fast-forwarding is not a concept you are taught;
@@ -642,8 +647,9 @@ exactly what the backup refs exist to cover.
 | `version-control` | `gV` | `:vc`, `:git` | Open the graph for the repository containing the current file |
 | `version-control-close` | `q` | `:vc-close` | Leave the graph |
 | `version-control-refresh` | `r` | `:vc-refresh` | Re-read the repository (discards the plan) |
-| — | `h` `j` `k` `l` | — | Move between blocks, arrows and branch labels. `j`/`k` alternate block → arrow → block, which is how an arrow gets selected at all |
-| — | `J` / `K`, `gg` / `ge` | — | Page down/up; first / last commit |
+| — | `h` / `l` | — | Back / forward through history. They alternate block → arrow → block, which is how an arrow gets selected at all |
+| — | `j` / `k` | — | Between branches, staying at the same point in history |
+| — | `J` / `K`, `gg` / `ge` | — | Page back/forward; oldest / newest commit |
 | `version-control-enter` | `Enter` | `:vc-enter` | Act on what the cursor is on: check out a branch label, else read the commit |
 | `version-control-show` | — | `:vc-show` | Open the selected commit's diff in an ordinary buffer (`q` returns to the graph) |
 | `yank-selection` | `y` | — | Copy the selected commit's full hash |
@@ -711,10 +717,22 @@ credential.
 
 ### What the graph shows
 
-The **HEAD block** sits directly above the commit it names — not at the top of
-the graph, where its arrow would have to span however deep HEAD happens to be —
-and carries the work-tree summary. Each commit block shows its abbreviated hash,
-ref labels, subject, author, age and `+added -removed`.
+The **HEAD block** sits directly to the *right* of the commit it names — where
+the next commit would go, not at the end of the graph, where its arrow would
+have to span however far back HEAD happens to be. It carries the work-tree
+summary: how much is staged, unstaged or conflicted, and how many files git is
+not tracking at all.
+
+Each commit block shows its abbreviated hash and ref labels along its top
+border, the subject over two rows, the author and age, and `+added -removed`
+along the bottom border.
+
+**Colour is the branch a commit is on**, not the track it sits in: walking back
+from a branch label, each commit takes that label's colour until the next label,
+so a branch and its run of history read as one thing. HEAD has a colour nothing
+else uses. The cursor marks by **weight** — bold text and a heavy border — so
+the thing you are on keeps the colour that says which branch it is; something
+you have *picked up* does recolour, because that is a state it is in.
 
 History is walked back 400 commits from every local branch, HEAD, and the
 upstream of each local branch (without those, an "ahead by 3" is a label

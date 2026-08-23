@@ -57,17 +57,17 @@ pub struct Failure {
 /// Why a plan cannot be started.  Distinct from a [`Failure`], which happens
 /// once git is already halfway through.
 pub fn preflight(dag: &Dag) -> Result<(), String> {
-    if dag.work.conflicted > 0 {
+    if dag.work.conflicted() > 0 {
         return Err(format!(
             "{} file(s) are still conflicted — resolve them and commit first",
-            dag.work.conflicted
+            dag.work.conflicted()
         ));
     }
     if dag.work.is_dirty() {
         return Err(format!(
             "the work tree has uncommitted changes ({} staged, {} unstaged) — \
              commit or stash them first",
-            dag.work.staged, dag.work.unstaged
+            dag.work.staged(), dag.work.unstaged()
         ));
     }
     Ok(())

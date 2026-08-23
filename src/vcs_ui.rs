@@ -6,7 +6,7 @@
 //! `table::layout`, and for the same reason.
 //!
 //! Everything is drawn into a cell buffer directly rather than through
-//! ratatui widgets: blocks overlap arrows, arrows cross lanes, and the whole
+//! ratatui widgets: blocks overlap arrows, arrows cross tracks, and the whole
 //! picture is a coordinate grid rather than a stack of rectangles.
 
 use ratatui::{
@@ -17,8 +17,9 @@ use ratatui::{
 
 use crate::{
     theme,
+    render_util::wrap_segments,
     vcs::{
-        layout::{Block, BlockKind, Edge, Focus, Layout},
+        layout::{Block, BlockKind, Edge, Focus, Layout, BLOCK_H, GAP},
         relative_time,
         state::VcsState,
         Dag, Oid, RefKind,
@@ -38,6 +39,10 @@ struct BoxChars {
 
 const LIGHT: BoxChars = BoxChars { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
 const HEAVY: BoxChars = BoxChars { tl: '┏', tr: '┓', bl: '┗', br: '┛', h: '━', v: '┃' };
+
+/// Text rows a block gives the commit summary.  The block is five rows tall:
+/// two borders, these, and the metadata row.
+const SUMMARY_ROWS: usize = 2;
 
 /// Where the cursor is and what it is holding.
 ///
@@ -135,8 +140,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
     let mut p = Painter {
         frame,
         area,
-        scroll_row: state.scroll_row,
-        scroll_col: layout.lane_col(state.scroll_lane),
+        scroll_row: layout.track_row(state.scroll_track),
+        scroll_col: state.scroll_col,
     };
 
     if state.dag.is_empty() && state.dag.head.branch.is_none() {
@@ -170,7 +175,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
 ///
 /// Without it the oldest block on screen looks like the repository's first
 /// commit, and its missing parent arrow looks like a root — a picture that is
-/// simply false about older history.
+/// simply false about older history.  Written in the gap row under the oldest
+/// block, because the columns to its left are the few the stub arrow needs.
 fn draw_horizon(p: &mut Painter, state: &VcsState, layout: &Layout) {
     if !state.dag.truncated {
         return;
@@ -178,11 +184,11 @@ fn draw_horizon(p: &mut Painter, state: &VcsState, layout: &Layout) {
     let Some(oldest) = state.dag.commits().last() else { return };
     let Some(block) = layout.block(&oldest.id) else { return };
     p.text(
-        block.row + block.height + 1,
-        layout.lane_col(block.lane) + 2,
-        "⋮ older history not loaded",
+        layout.track_row(block.track) + BLOCK_H,
+        block.col,
+        "⋯ older history not loaded",
         Style::default().fg(theme::active().dim),
-        layout.lane_width,
+        layout.block_width + GAP,
     );
 }
 
@@ -200,9 +206,9 @@ fn border_style(block: &Block, cursor: &Cursor) -> (Style, bool) {
     let base = match block.kind {
         BlockKind::Head => th.vcs_head,
         BlockKind::Pending => th.vcs_pending,
-        // By branch, not by lane: a branch that is merely *ahead* of another
-        // shares its column, correctly, and colouring by column then painted
-        // the whole history one colour.
+        // By branch, not by track: a branch that is merely *ahead* of another
+        // shares its row, correctly, and colouring by row then painted the
+        // whole history one colour.
         BlockKind::Commit => th.vcs_tint(block.tint),
     };
     (cursor.style(&this, base), cursor.mark(&this).is_some())
@@ -211,22 +217,22 @@ fn border_style(block: &Block, cursor: &Cursor) -> (Style, bool) {
 fn draw_block(p: &mut Painter, state: &VcsState, layout: &Layout, block: &Block, cursor: &Cursor) {
     let (style, heavy) = border_style(block, cursor);
     let ch = if heavy { &HEAVY } else { &LIGHT };
-    let left = layout.lane_col(block.lane);
-    let width = layout.lane_width;
-    let right = left + width - 1;
-    let bottom = block.row + block.height - 1;
+    let left = block.col;
+    let top = layout.track_row(block.track);
+    let right = left + layout.block_width - 1;
+    let bottom = top + BLOCK_H - 1;
 
     // --- frame ---
     for col in left..=right {
-        p.cell(block.row, col, ch.h, style);
+        p.cell(top, col, ch.h, style);
         p.cell(bottom, col, ch.h, style);
     }
-    for row in block.row + 1..bottom {
+    for row in top + 1..bottom {
         p.cell(row, left, ch.v, style);
         p.cell(row, right, ch.v, style);
     }
-    p.cell(block.row, left, ch.tl, style);
-    p.cell(block.row, right, ch.tr, style);
+    p.cell(top, left, ch.tl, style);
+    p.cell(top, right, ch.tr, style);
     p.cell(bottom, left, ch.bl, style);
     p.cell(bottom, right, ch.br, style);
 
@@ -237,11 +243,15 @@ fn draw_block(p: &mut Painter, state: &VcsState, layout: &Layout, block: &Block,
 }
 
 /// HEAD: which branch you are on, and what is uncommitted.
+///
+/// The work tree lives here rather than on any commit because that is what it
+/// is — the changes sitting on top of wherever HEAD points, on their way to
+/// becoming the next block to the right.
 fn draw_head_contents(p: &mut Painter, state: &VcsState, layout: &Layout, block: &Block) {
     let th = theme::active();
-    let (left, inner) = (layout.lane_col(block.lane), layout.block_inner());
+    let (left, top, inner) = (block.col, layout.track_row(block.track), layout.block_inner());
     let bold = Style::default().fg(th.vcs_head).add_modifier(Modifier::BOLD);
-    p.text(block.row, left + 2, " HEAD ", bold, inner);
+    p.text(top, left + 2, " HEAD ", bold, inner);
 
     let head = &state.dag.head;
     let where_ = match (&head.branch, &head.target) {
@@ -249,37 +259,44 @@ fn draw_head_contents(p: &mut Painter, state: &VcsState, layout: &Layout, block:
         (None, Some(oid)) => format!("● detached at {}", oid.short()),
         (None, None) => "● no commits yet".to_string(),
     };
-    p.text(block.row + 1, left + 2, &where_, bold, inner);
+    p.text(top + 1, left + 2, &where_, bold, inner.saturating_sub(1));
 
-    // The work tree, right-aligned in the same row: it belongs to "where you
-    // are" rather than to any commit, and it is what blocks an apply.
+    // Two rows, because they answer two different questions: what would go
+    // into the next commit, and what is lying around the tree that git is not
+    // tracking at all.  The second is the one that quietly accumulates.
+    //
+    // The text comes from `WorkTree::summary_lines`, which is also what the
+    // layout sized this block against — built in one place so a block sized
+    // from one string and filled with another cannot clip the half that
+    // matters.
     let work = &state.dag.work;
-    let mut parts = Vec::new();
-    if work.staged > 0 {
-        parts.push((format!("{} staged", work.staged), th.git_added));
-    }
-    if work.unstaged > 0 {
-        parts.push((format!("{} unstaged", work.unstaged), th.git_modified));
-    }
-    if work.conflicted > 0 {
-        parts.push((format!("{} conflicted", work.conflicted), th.error));
-    }
-    if work.untracked > 0 {
-        parts.push((format!("{} untracked", work.untracked), th.dim));
-    }
-    if parts.is_empty() {
-        parts.push(("clean".to_string(), th.dim));
-    }
-    let total: u16 = parts.iter().map(|(t, _)| t.chars().count() as u16 + 2).sum::<u16>();
-    let mut col = left + 1 + inner.saturating_sub(total);
-    for (text, colour) in parts {
-        p.text(block.row + 1, col, &text, Style::default().fg(colour), inner);
-        col += text.chars().count() as u16 + 2;
-    }
+    let [tracked, stray] = work.summary_lines();
+    let colour = if work.conflicted() > 0 {
+        th.error
+    } else if work.staged() > 0 {
+        th.git_added
+    } else if work.unstaged() > 0 {
+        th.git_modified
+    } else {
+        th.dim
+    };
+    p.text(top + 2, left + 2, &tracked, Style::default().fg(colour), inner.saturating_sub(1));
+    p.text(
+        top + 3,
+        left + 2,
+        &stray,
+        Style::default().fg(th.dim),
+        inner.saturating_sub(1),
+    );
 }
 
-/// A commit: hash and refs on the top border, summary, then author, age and
-/// the line counts.
+/// A commit: hash and refs on the top border, the summary over two rows, then
+/// author and age, with the line counts along the bottom border.
+///
+/// The counts sit on the border rather than on a row of their own because a
+/// block is only five rows tall and the border is otherwise empty — and
+/// because `+293 -45` is a shape you read without reading, so it does not need
+/// to be in the text.
 fn draw_commit_contents(
     p: &mut Painter,
     state: &VcsState,
@@ -288,7 +305,7 @@ fn draw_commit_contents(
     cursor: &Cursor,
 ) {
     let th = theme::active();
-    let (left, inner) = (layout.lane_col(block.lane), layout.block_inner());
+    let (left, top, inner) = (block.col, layout.track_row(block.track), layout.block_inner());
     let pending = state
         .plan
         .project(&state.dag)
@@ -304,7 +321,7 @@ fn draw_commit_contents(
         BlockKind::Pending => Style::default().fg(th.vcs_pending).add_modifier(Modifier::BOLD),
         _ => Style::default().fg(th.vcs_hash).add_modifier(Modifier::BOLD),
     };
-    p.text(block.row, left + 1, &hash, hash_style, inner);
+    p.text(top, left + 1, &hash, hash_style, inner);
 
     // --- ref labels, further along the same border ---
     for (name, col) in &block.labels {
@@ -327,39 +344,69 @@ fn draw_commit_contents(
         if cursor.mark(&this).is_some() {
             style = style.add_modifier(Modifier::REVERSED);
         }
-        p.text(block.row, left + col, &format!(" {name} "), style, inner);
+        p.text(top, left + col, &format!(" {name} "), style, inner);
     }
 
-    // --- summary ---
+    // --- summary, wrapped over the two text rows ---
     let summary = pending
         .as_ref()
         .map(|p| p.summary.clone())
         .or_else(|| commit.map(|c| c.summary.clone()))
         .unwrap_or_else(|| "(not loaded)".to_string());
-    p.text(block.row + 1, left + 2, &summary, Style::default(), inner.saturating_sub(1));
+    let text_width = inner.saturating_sub(1) as usize;
+    let segments = wrap_segments(&summary, text_width);
+    for (row, (_, segment)) in segments.iter().take(SUMMARY_ROWS).enumerate() {
+        // The last row it fits on says so when there is more, rather than
+        // stopping mid-sentence and leaving the reader to wonder.
+        let last = row + 1 == SUMMARY_ROWS && segments.len() > SUMMARY_ROWS;
+        let mut line = (*segment).to_string();
+        if last {
+            line.truncate(
+                line.char_indices()
+                    .nth(text_width.saturating_sub(1))
+                    .map_or(line.len(), |(i, _)| i),
+            );
+            line.push('…');
+        }
+        p.text(
+            top + 1 + row as u16,
+            left + 2,
+            line.trim_end(),
+            Style::default(),
+            text_width as u16,
+        );
+    }
 
-    // --- author · age, and the line counts on the right ---
+    // --- author · age ---
     let Some(commit) = commit else {
         p.text(
-            block.row + 2,
+            top + 1 + SUMMARY_ROWS as u16,
             left + 2,
-            "will be created by :vc-apply",
+            "created by :vc-apply",
             Style::default().fg(th.vcs_pending),
             inner.saturating_sub(1),
         );
         return;
     };
     let meta = format!("{} · {}", commit.author, relative_time(commit.when, state.now));
-    p.text(block.row + 2, left + 2, &meta, Style::default().fg(th.dim), inner.saturating_sub(1));
-
-    let plus = format!("+{}", commit.insertions);
-    let minus = format!("-{}", commit.deletions);
-    let width = plus.chars().count() as u16 + minus.chars().count() as u16 + 1;
-    let col = left + 1 + inner.saturating_sub(width);
-    p.text(block.row + 2, col, &plus, Style::default().fg(th.git_added), width);
     p.text(
-        block.row + 2,
-        col + plus.chars().count() as u16 + 1,
+        top + 1 + SUMMARY_ROWS as u16,
+        left + 2,
+        &meta,
+        Style::default().fg(th.dim),
+        inner.saturating_sub(1),
+    );
+
+    // --- change counts, along the bottom border ---
+    let plus = format!(" +{} ", commit.insertions);
+    let minus = format!("-{} ", commit.deletions);
+    let width = plus.chars().count() as u16 + minus.chars().count() as u16;
+    let col = left + 1 + inner.saturating_sub(width);
+    let bottom = top + BLOCK_H - 1;
+    p.text(bottom, col, &plus, Style::default().fg(th.git_added), width);
+    p.text(
+        bottom,
+        col + plus.chars().count() as u16,
         &minus,
         Style::default().fg(th.error),
         width,
@@ -368,11 +415,12 @@ fn draw_commit_contents(
 
 /// Draw one parent link.
 ///
-/// Routed as a vertical drop in the child's lane, a horizontal run across to
-/// the parent's lane, and a vertical drop into the parent's top border, where
-/// the arrowhead goes.  The arrowhead is at the *parent* end because that is
-/// the direction the link points: a commit names its parent, never the
-/// reverse, and drawing it the other way would teach the graph backwards.
+/// Routed as a horizontal run back through the child's track, a vertical hop
+/// across to the parent's track, and a run into the parent's right-hand
+/// border, where the arrowhead goes.  The arrowhead is at the *parent* end
+/// because that is the direction the link points: a commit names its parent,
+/// never the reverse, and drawing it the other way would teach the graph
+/// backwards.
 fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     let th = theme::active();
     let this = Focus::Edge { child: edge.child.clone(), slot: edge.slot };
@@ -396,38 +444,39 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
         // Past the horizon: a short stub that visibly goes nowhere, rather
         // than an arrow into empty space.
         for (row, col) in r.cells() {
-            p.cell(row, col, '╎', style);
+            p.cell(row, col, '╌', style);
         }
         return;
     }
 
-    // Down the child's lane to the crossing row…
-    for row in r.start..r.cross {
-        p.cell(row, r.from_col, v, style);
+    // Back through the child's track to the crossing column…
+    for col in r.cross + 1..=r.start {
+        p.cell(r.from_row, col, h, style);
     }
     // …across…
-    let (lo, hi) = (r.from_col.min(r.to_col), r.from_col.max(r.to_col));
-    for col in lo..=hi {
-        p.cell(r.cross, col, h, style);
+    let (lo, hi) = (r.from_row.min(r.to_row), r.from_row.max(r.to_row));
+    for row in lo..=hi {
+        p.cell(row, r.cross, v, style);
     }
-    // …and down the parent's lane to the arrowhead.  Where the two lanes are
-    // the same all three reduce to one straight drop.
-    for row in r.cross + 1..r.head_row {
-        p.cell(row, r.to_col, v, style);
+    // …and on through the parent's track to the arrowhead.  Where the two
+    // tracks are the same all three reduce to one straight run.
+    for col in r.head_col..r.cross {
+        p.cell(r.to_row, col, h, style);
     }
 
-    if r.from_col != r.to_col {
+    if r.from_row != r.to_row {
         // Corners, so the run reads as one line rather than three.
-        let right = r.to_col > r.from_col;
-        // The turn always gets a corner, even when the arrow crosses on its
-        // very first row: the stroke it turns out of is the block sitting
-        // directly above, and a bare `─` there reads as a line from nowhere.
-        p.cell(r.cross, r.from_col, if right { '╰' } else { '╯' }, style);
-        if r.cross < r.head_row {
-            p.cell(r.cross, r.to_col, if right { '╮' } else { '╭' }, style);
+        let down = r.to_row > r.from_row;
+        // The turn always gets a corner, even when the arrow crosses in the
+        // very first column: the stroke it turns out of is the block sitting
+        // directly beside it, and a bare `│` there reads as a line from
+        // nowhere.
+        p.cell(r.from_row, r.cross, if down { '╮' } else { '╰' }, style);
+        if r.cross > r.head_col {
+            p.cell(r.to_row, r.cross, if down { '╯' } else { '╮' }, style);
         }
     }
-    p.cell(r.head_row, r.to_col, '▼', style);
+    p.cell(r.to_row, r.head_col, '◀', style);
 }
 
 /// A one-line description of what the cursor is on, for the message line.
@@ -456,7 +505,7 @@ fn describe_commit(dag: &Dag, id: &Oid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcs::{plan::Edit, Commit, Head, Ref, WorkTree};
+    use crate::vcs::{plan::Edit, Change, Commit, Head, Ref, WorkTree};
     use ratatui::{backend::TestBackend, Terminal};
 
     fn commit(id: &str, parents: &[&str], summary: &str) -> Commit {
@@ -484,7 +533,12 @@ mod tests {
                 upstream: None,
             }],
             Head { branch: Some("main".into()), target: Some(Oid::new("aaaaaaa1")) },
-            WorkTree { staged: 2, unstaged: 1, ..Default::default() },
+            WorkTree::new(vec![
+                Change { path: "src/app.rs".into(), index: 'M', work: ' ' },
+                Change { path: "src/ui.rs".into(), index: 'A', work: ' ' },
+                Change { path: "notes.md".into(), index: ' ', work: 'M' },
+                Change { path: "scratch.ipynb".into(), index: '?', work: '?' },
+            ]),
             false,
         );
         VcsState::new(std::path::PathBuf::from("/tmp/r"), dag, 86_400 * 3)
@@ -513,7 +567,9 @@ mod tests {
     fn a_commit_block_carries_its_hash_message_author_age_and_diffstat() {
         let screen = draw(&state(), 90, 30).join("\n");
         assert!(screen.contains("aaaaaa"), "the abbreviated hash\n{screen}");
-        assert!(screen.contains("Fix sigterm handling"), "the summary\n{screen}");
+        // The summary wraps over the block's two text rows.
+        assert!(screen.contains("Fix sigterm"), "the summary\n{screen}");
+        assert!(screen.contains("handling"), "…all of it\n{screen}");
         assert!(screen.contains("Christian"), "the author\n{screen}");
         assert!(screen.contains("3d ago"), "the age\n{screen}");
         assert!(screen.contains("+293"), "insertions\n{screen}");
@@ -527,6 +583,8 @@ mod tests {
         assert!(screen.contains("● main"), "{screen}");
         assert!(screen.contains("2 staged"), "{screen}");
         assert!(screen.contains("1 unstaged"), "{screen}");
+        // …and the untracked strays, which are the ones nobody remembers.
+        assert!(screen.contains("1 untracked"), "{screen}");
     }
 
     #[test]
@@ -535,13 +593,23 @@ mod tests {
         assert!(screen.contains(" main "), "{screen}");
     }
 
-    /// The arrowhead points at the *parent*: a commit names its parent and
-    /// never the reverse, and drawing it the other way teaches the graph
-    /// backwards.
+    /// The arrowhead points at the *parent*, which is to the **left**: a
+    /// commit names its parent and never the reverse, and drawing it the other
+    /// way teaches the graph backwards.
     #[test]
-    fn arrows_point_from_a_commit_down_to_its_parent() {
-        let screen = draw(&state(), 90, 30).join("\n");
-        assert!(screen.contains('▼'), "an arrowhead is drawn\n{screen}");
+    fn arrows_point_back_from_a_commit_to_its_parent() {
+        let lines = draw(&state(), 90, 30);
+        let screen = lines.join("\n");
+        assert!(screen.contains('◀'), "an arrowhead is drawn\n{screen}");
+        let col = lines
+            .iter()
+            .find_map(|line| line.find('◀'))
+            .expect("an arrowhead");
+        // The border row carries both hashes: the parent's has to be to the
+        // left of the arrowhead and the child's to its right.
+        let border = lines.iter().find(|l| l.contains("bbbbbbb")).expect("the border row");
+        assert!(border.find("bbbbbbb").unwrap() < col, "the parent is not to the left\n{screen}");
+        assert!(border.find("aaaaaaa").unwrap() > col, "the child is not to the right\n{screen}");
     }
 
     /// A view that paints cells directly has to be clipped by construction —
@@ -569,12 +637,18 @@ mod tests {
         // The label is drawn on its block's own top border, so "which block is
         // it on" is answered by which border row carries both the hash and the
         // name — not by proximity, which would also match HEAD's `● main`.
-        let on_older = lines
-            .iter()
-            .any(|l| l.contains("bbbbbbb") && l.contains(" main "));
-        let on_newer = lines
-            .iter()
-            .any(|l| l.contains("aaaaaaa") && l.contains(" main "));
+        // Both blocks sit on the same border row now that time runs sideways,
+        // so the hash and the label have to be checked against each other by
+        // column, which `lines` preserves.
+        // Both blocks share a border row now that time runs sideways, so
+        // "which block" is a question about columns: a label belongs to the
+        // hash immediately to its left.
+        let border = lines.iter().find(|l| l.contains(" main ")).expect("the border row");
+        let label = border.find(" main ").expect("the label");
+        let older = border.find("bbbbbbb").expect("the older commit");
+        let newer = border.find("aaaaaaa").expect("the newer commit");
+        let on_older = older < label && label < newer;
+        let on_newer = newer < label;
         assert!(on_older, "main should now sit on the older commit\n{screen}");
         assert!(!on_newer, "and no longer on the newer one\n{screen}");
     }
@@ -600,3 +674,4 @@ mod tests {
         );
     }
 }
+

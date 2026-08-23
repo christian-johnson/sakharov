@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 
-use super::{Commit, Dag, Head, Oid, Ref, RefKind, WorkTree};
+use super::{Change, Commit, Dag, Head, Oid, Ref, RefKind, WorkTree};
 
 /// ASCII record / field separators.  Used rather than a printable delimiter
 /// because a commit summary can contain anything a human can type — including
@@ -283,34 +283,31 @@ fn classify_ref(refname: &str) -> Option<(RefKind, &str)> {
     }
 }
 
-/// Parse `git status --porcelain` into counts.
+/// Parse `git status --porcelain` into the list of changed paths.
 ///
-/// The two status columns are the index and the work tree, so one file can be
-/// both staged and unstaged (edited after `git add`) and is counted in both.
+/// A rename reports `old -> new`; the new path is the one that exists, and is
+/// the one worth opening.  Paths git quoted (because they contain something
+/// unusual) keep their quotes stripped rather than being dropped — a file you
+/// cannot see is exactly the file that surprises you.
 pub(super) fn parse_status(out: &str) -> WorkTree {
-    let mut work = WorkTree::default();
+    let mut entries = Vec::new();
     for line in out.lines() {
         let mut chars = line.chars();
-        let (Some(x), Some(y)) = (chars.next(), chars.next()) else {
+        let (Some(index), Some(work)) = (chars.next(), chars.next()) else {
             continue;
         };
-        match (x, y) {
-            ('?', '?') => work.untracked += 1,
-            // The unmerged states, from `git status`'s own table.  Both
-            // columns matter: `AA` and `DD` are conflicts despite looking
-            // like ordinary staged changes.
-            ('D', 'D') | ('A', 'A') | ('U', _) | (_, 'U') => work.conflicted += 1,
-            (x, y) => {
-                if x != ' ' {
-                    work.staged += 1;
-                }
-                if y != ' ' {
-                    work.unstaged += 1;
-                }
-            }
+        let rest = line.get(3..).unwrap_or("").trim();
+        if rest.is_empty() {
+            continue;
         }
+        let path = rest.rsplit(" -> ").next().unwrap_or(rest);
+        entries.push(Change {
+            path: path.trim_matches('"').to_string(),
+            index,
+            work,
+        });
     }
-    work
+    WorkTree::new(entries)
 }
 
 #[cfg(test)]
@@ -437,10 +434,10 @@ mod tests {
              A  added.rs\n",
         );
         // `MM` is one file counted in both columns: staged, then edited again.
-        assert_eq!(work.staged, 3);
-        assert_eq!(work.unstaged, 2);
-        assert_eq!(work.untracked, 1);
-        assert_eq!(work.conflicted, 0);
+        assert_eq!(work.staged(), 3);
+        assert_eq!(work.unstaged(), 2);
+        assert_eq!(work.untracked(), 1);
+        assert_eq!(work.conflicted(), 0);
         assert!(work.is_dirty());
     }
 
@@ -451,8 +448,8 @@ mod tests {
     fn every_unmerged_state_counts_as_a_conflict() {
         for code in ["DD", "AU", "UD", "UA", "DU", "AA", "UU"] {
             let work = parse_status(&format!("{code} f.rs\n"));
-            assert_eq!(work.conflicted, 1, "{code} should be a conflict");
-            assert_eq!(work.staged, 0, "{code} must not read as merely staged");
+            assert_eq!(work.conflicted(), 1, "{code} should be a conflict");
+            assert_eq!(work.staged(), 0, "{code} must not read as merely staged");
         }
     }
 
