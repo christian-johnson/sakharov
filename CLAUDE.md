@@ -1093,6 +1093,17 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   of its own (`layout::place_head`) when that track is carrying an arrow past it —
   which is any checkout of something other than a branch tip.  A block there hides
   the arrow completely, since blocks are painted after arrows.
+- **The HEAD block carries the work tree, and `w` turns it into a list.**
+  `WorkTree` holds the `Change` entries `git status --porcelain` reported (path +
+  git's own two status columns, kept verbatim) and *derives* every count from
+  them, so the summary and the list cannot disagree.  `WorkTree::summary_lines`
+  is the one place the two HEAD rows are worded — the layout sizes the block
+  against those strings and the renderer draws them, or a block sized from one
+  string and filled with another clips the half that matters.  `w` /
+  `:vc-status` opens the entries as a navigate popup (conflicts, then what is on
+  its way into a commit, then the untracked strays), and `Enter` opens one in
+  the editor: "3 untracked" is the number you can see without being told, and
+  *which three* is the question a repository full of scratch notebooks raises.
 - **Planned vs immediate is a deliberate line**: rewriting history (arrows, branch
   labels, drop, merge) is planned; checkout / stage / unstage / commit / fetch /
   pull / push happen now.  The line is *could this make a commit unreachable* —
@@ -1123,8 +1134,10 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   the D2 gate rejects — supporting them editor-side would mean punching a hole in the safety
   layer to load native extensions at runtime. The cost, stated plainly: browsing a *remote*
   database needs a Python environment with a driver.
-- The version-control graph has **no search**, and no bisect, submodule, worktree
-  or interactive-add support (out of scope by decision). A **merge cannot be
+- The version-control graph has **no search**, and no bisect, submodule or
+  interactive-add support (out of scope by decision).  The working-tree list
+  (`w`) is read-only apart from `Enter`: there is no per-file stage, unstage,
+  discard or `.gitignore` gesture — `s`/`S` still stage and unstage everything. A **merge cannot be
   replayed** onto a new parent, so a plan whose replay list contains one is refused
   rather than flattened — the same limit `git rebase` has without `--rebase-merges`.
   Conflicts stop the run and are resolved in the ordinary editor; the dedicated
@@ -1176,7 +1189,8 @@ src/
                         new-file/new-notebook, unsaved_buffer_names quit sweep
     vcs.rs            — version-control view: open/close, the async load and
                         job polling, command routing, the grab gesture, the
-                        apply confirmation, and the immediate git actions
+                        apply confirmation, the working-tree file list, and
+                        the immediate git actions
     table.rs          — table view: Session (source + state + path), async load
                         + poll, open/close, command routing (motions → cells,
                         edits refused), cursor-follow scroll, session stash, and

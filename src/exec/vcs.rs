@@ -307,6 +307,7 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         // anything else is a commit to read.  `TableOpenCell` is what the
         // grid binds Enter to, and it arrives here from a user rebinding.
         Command::VcsEnter | Command::TableOpenCell => enter_action(app),
+        Command::VcsStatus => show_work_tree(app),
         Command::VcsStage => run_now(app, &["add", "--all"], "Staged everything"),
         Command::VcsUnstage => run_now(app, &["reset"], "Unstaged everything"),
         Command::VcsFetch => remote_job(app, vec!["fetch".into(), "--all".into()], "Fetching"),
@@ -795,6 +796,50 @@ fn enter_action(app: &mut App) {
     show_commit(app);
 }
 
+/// List everything in the working tree that is not in a commit.
+///
+/// The HEAD block says *how many*; this says *which*, and Enter opens one.
+/// The counts are the part you can see without being told — the list is the
+/// part that answers "what is all this?", which is the question a repository
+/// full of untracked scratch files actually raises.
+///
+/// Ordered by how much it wants attention rather than alphabetically:
+/// conflicts, then what is on its way into a commit, then the untracked
+/// strays — which is also the order in which the list gets less urgent and
+/// more interesting.
+fn show_work_tree(app: &mut App) {
+    let Some(state) = app.vcs.as_ref() else { return };
+    let root = state.root.clone();
+    let mut entries: Vec<&vcs::Change> = state.dag.work.entries.iter().collect();
+    if entries.is_empty() {
+        app.messages
+            .show("The working tree is clean — nothing uncommitted or untracked");
+        return;
+    }
+    entries.sort_by_key(|c| match () {
+        () if c.is_conflicted() => 0,
+        () if c.is_untracked() => 2,
+        () => 1,
+    });
+    let counts = state.dag.work.summary_lines();
+    let items = entries
+        .iter()
+        .map(|c| {
+            crate::popup::ListItem::navigate(
+                c.path.clone(),
+                c.describe(),
+                &root.join(&c.path),
+                0,
+                0,
+            )
+        })
+        .collect();
+    app.popup = Some(Popup::navigate(
+        &format!("working tree — {}", counts[0]),
+        items,
+    ));
+}
+
 fn show_commit(app: &mut App) {
     let Some(state) = app.vcs.as_ref() else { return };
     let Some(commit) = state.focused_commit() else {
@@ -1264,6 +1309,47 @@ mod tests {
         // below.  Here it is enough that the two are told apart.
         app.vcs.as_mut().unwrap().focus = Some(Focus::Commit(Oid::new("c")));
         assert!(app.vcs.as_ref().unwrap().focused_branch().is_none());
+    }
+
+    /// The working-tree list is the answer to "what is all this?" — the HEAD
+    /// block says how many, this says which, and an untracked scratch file has
+    /// to be in it or the feature misses its whole point.
+    #[test]
+    fn the_work_tree_list_names_every_uncommitted_and_untracked_file() {
+        let mut app = app_in_graph();
+        app.vcs.as_mut().unwrap().dag.work = crate::vcs::WorkTree::new(vec![
+            crate::vcs::Change { path: "src/app.rs".into(), index: 'M', work: ' ' },
+            crate::vcs::Change { path: "scratch.ipynb".into(), index: '?', work: '?' },
+            crate::vcs::Change { path: "merge.rs".into(), index: 'U', work: 'U' },
+        ]);
+        super::handle(&mut app, &Command::VcsStatus);
+
+        let popup = app.popup.as_ref().expect("the list opened");
+        let crate::popup::PopupContent::List(ref list) = popup.content else {
+            panic!("the working tree is a list of files");
+        };
+        let labels: Vec<&str> = list.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["merge.rs", "src/app.rs", "scratch.ipynb"],
+            "conflicts first, then what is on its way into a commit, then the strays"
+        );
+        let details: Vec<String> = list
+            .items
+            .iter()
+            .map(|i| i.detail.clone().unwrap_or_default())
+            .collect();
+        assert!(details.contains(&"untracked".to_string()), "{details:?}");
+        assert!(details.contains(&"conflicted".to_string()), "{details:?}");
+    }
+
+    /// A clean tree says so rather than opening an empty list.
+    #[test]
+    fn a_clean_work_tree_says_so_instead_of_listing_nothing() {
+        let mut app = app_in_graph();
+        super::handle(&mut app, &Command::VcsStatus);
+        assert!(app.popup.is_none());
+        assert!(app.messages.current().unwrap_or_default().contains("clean"));
     }
 
     /// A `*commit …*` diff is backed out of with `q`, like every other

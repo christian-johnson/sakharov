@@ -174,6 +174,33 @@ impl Change {
     pub fn is_unstaged(&self) -> bool {
         !self.is_untracked() && !self.is_conflicted() && self.work != ' '
     }
+
+    /// A word for what happened, for a list the user reads.
+    ///
+    /// Says both halves when both apply ("staged, edited since"), because a
+    /// file that was added and then edited again is exactly the case someone
+    /// is surprised by at commit time.
+    pub fn describe(&self) -> String {
+        if self.is_conflicted() {
+            return "conflicted".to_string();
+        }
+        if self.is_untracked() {
+            return "untracked".to_string();
+        }
+        let word = |c: char| match c {
+            'A' => "added",
+            'D' => "deleted",
+            'R' => "renamed",
+            'C' => "copied",
+            'T' => "type changed",
+            _ => "modified",
+        };
+        match (self.index, self.work) {
+            (' ', w) => word(w).to_string(),
+            (i, ' ') => format!("{}, staged", word(i)),
+            (i, _) => format!("{}, staged — edited since", word(i)),
+        }
+    }
 }
 
 /// What `git status` says about the working tree.

@@ -407,6 +407,10 @@ impl Keymap {
         vcs.insert(KeyBinding::char('s'), vec![Command::VcsStage]);
         vcs.insert(KeyBinding::char('S'), vec![Command::VcsUnstage]);
         vcs.insert(KeyBinding::char('r'), vec![Command::VcsRefresh]);
+        // `w` for the work tree: the files that are not in any commit yet.
+        // It shadows the word motion, which in a graph is only another name
+        // for `l`.
+        vcs.insert(KeyBinding::char('w'), vec![Command::VcsStatus]);
         // `q` backs out, as it does from a cell buffer and a derived table.
         vcs.insert(KeyBinding::char('q'), vec![Command::VcsClose]);
         // `J` pages, matching the notebook and the grid.

@@ -1103,6 +1103,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         | Command::VcsCheckout
         | Command::VcsShow
         | Command::VcsEnter
+        | Command::VcsStatus
         | Command::VcsStage
         | Command::VcsUnstage
         | Command::VcsFetch

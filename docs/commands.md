@@ -635,7 +635,7 @@ it is simply what comes out when a branch moves and nothing needed rewriting.
 | | What happens | Which commands |
 |---|---|---|
 | **Planned** | Only the picture changes. Reaches the repository once, at `:vc-apply`, behind a confirmation and a backup. | grab/drop, `d`, `m`, `u`, `gx` |
-| **Immediate** | Runs now. | `c`, `s`, `S`, `Enter`, commit, fetch, pull, push |
+| **Immediate** | Runs now. | `c`, `s`, `S`, `w`, `Enter`, commit, fetch, pull, push |
 
 The line between them is *could this make a commit unreachable* — which is
 exactly what the backup refs exist to cover.
@@ -704,6 +704,7 @@ out. (A dedicated merge-conflict resolver view is on the roadmap.)
 | `version-control-checkout` | `c`, `gc` | `:vc-checkout`, `:checkout` | Check out the branch under the cursor. On a remote-tracking branch it creates the matching local one; on a bare commit it detaches HEAD and says so |
 | `version-control-stage` | `s` | `:vc-stage`, `:stage` | Stage every change in the work tree |
 | `version-control-unstage` | `S` | `:vc-unstage`, `:unstage` | Unstage everything |
+| `version-control-status` | `w` | `:vc-status`, `:status` | List every uncommitted **and untracked** file in the working tree; `Enter` opens one in the editor |
 | `version-control-commit` | — | `:vc-commit <message>` | Commit what is staged |
 | `version-control-branch` | — | `:vc-branch <name>` | Create a branch at the selected commit and check it out |
 | `version-control-fetch` | — | `:vc-fetch`, `:fetch` | Fetch from every remote |
@@ -721,7 +722,9 @@ The **HEAD block** sits directly to the *right* of the commit it names — where
 the next commit would go, not at the end of the graph, where its arrow would
 have to span however far back HEAD happens to be. It carries the work-tree
 summary: how much is staged, unstaged or conflicted, and how many files git is
-not tracking at all.
+not tracking at all. `w` turns that summary into the list of files, so the
+scratch notebooks and stray outputs that accumulate in a repository are
+something you can actually see and open, rather than a number.
 
 Each commit block shows its abbreviated hash and ref labels along its top
 border, the subject over two rows, the author and age, and `+added -removed`
