@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use super::{
     plan::Projection,
-    Dag, Head, Oid,
+    Dag, Oid,
 };
 
 /// Rows in a block: border, two summary rows, metadata, border.
@@ -40,6 +40,13 @@ pub const BLOCK_H: u16 = 5;
 pub const GAP: u16 = 3;
 /// Rows between one track and the next.
 pub const TRACK_GAP: u16 = 1;
+/// The row above each track that carries the name of the branch owning it.
+///
+/// A track *is* a branch now (see [`place`]), so the row band needs somewhere
+/// to say which one — otherwise the only place a branch is named is the label
+/// on its tip, which on a long history is a screenful away from the commits
+/// that are on it.
+pub const LABEL_H: u16 = 1;
 /// Narrowest a block may be.
 pub const MIN_BLOCK: u16 = 22;
 /// Widest a block grows, so one long commit message does not eat the whole
@@ -62,15 +69,15 @@ pub const HASH_COLS: u16 = super::SHORT_LEN as u16 + 3;
 
 /// What the cursor can be on.
 ///
-/// Arrows are focusable because moving one *is* the feature: an edge is the
-/// only handle on "which commit does this one follow", which is the single
-/// fact every history rewrite changes.
+/// Arrows are deliberately **not** on the list.  An arrow is another name for
+/// the commit it leaves — dragging one and dragging its block made the same
+/// edit — so every arrow the cursor could stop on was a press that offered no
+/// choice and put the next real destination one key further away.  Grab the
+/// commit; the arrow follows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Focus {
     /// A commit block.
     Commit(Oid),
-    /// The arrow from `child`'s parent link `slot`.
-    Edge { child: Oid, slot: usize },
     /// A branch, tag or remote label sitting on a block.
     Ref(String),
     /// The HEAD block.
@@ -109,7 +116,6 @@ pub struct Block {
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub child: Oid,
-    pub slot: usize,
     /// `None` when the parent is past the loaded horizon — the arrow is drawn
     /// as a stub trailing off the left edge, which is the honest picture.
     pub parent: Option<Oid>,
@@ -192,9 +198,17 @@ pub struct Layout {
     /// The colour group each local branch label belongs to, so a label is
     /// drawn the same colour as the commits that are on it.
     pub branch_tints: HashMap<String, usize>,
+    /// The branch each track belongs to, for the name written above it.
+    /// Absent for a track holding history no branch points into.
+    pub lane_labels: HashMap<usize, String>,
     /// Total width of the graph, for the scroll anchor to clamp against.
     pub total_cols: u16,
     index: HashMap<Oid, usize>,
+}
+
+/// Rows from the top of one track's name to the top of the next one's.
+pub fn track_stride() -> u16 {
+    BLOCK_H + LABEL_H + TRACK_GAP
 }
 
 /// Which way a motion goes.
@@ -238,9 +252,25 @@ impl Layout {
         }
     }
 
-    /// The screen row a track starts at.
+    /// The screen row a track starts at — one row below its name.
     pub fn track_row(&self, track: usize) -> u16 {
-        track as u16 * (BLOCK_H + TRACK_GAP)
+        track as u16 * track_stride() + LABEL_H
+    }
+
+    /// The row a track's branch name is written on.
+    pub fn label_row(&self, track: usize) -> u16 {
+        self.track_row(track) - LABEL_H
+    }
+
+    /// Which track `row` falls in.  The inverse of [`Layout::track_row`], and
+    /// the only place anything outside this module is allowed to work it out.
+    pub fn track_at_row(&self, row: u16) -> usize {
+        (row / track_stride()) as usize
+    }
+
+    /// The branch whose row `track` is, if it is a branch's.
+    pub fn lane_label(&self, track: usize) -> Option<&str> {
+        self.lane_labels.get(&track).map(String::as_str)
     }
 
     /// The row arrows run along within a track: the middle of a block, so a
@@ -258,12 +288,12 @@ impl Layout {
     /// How many whole tracks fit in `height`.
     ///
     /// The `+ TRACK_GAP` is not a fudge: tracks are laid out with a gap
-    /// *between* them, so N tracks occupy `N * (h + gap) - gap`.  Dividing the
+    /// *between* them, so N tracks occupy `N * stride - gap`.  Dividing the
     /// bare height instead reports one track too few whenever they fit
     /// exactly, which scrolled a two-branch graph on a screen tall enough for
     /// all of it.
     pub fn visible_tracks(&self, height: u16) -> usize {
-        ((height + TRACK_GAP) / (BLOCK_H + TRACK_GAP)).max(1) as usize
+        ((height + TRACK_GAP) / track_stride()).max(1) as usize
     }
 
     /// Width available inside a block's borders.
@@ -390,10 +420,11 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
         track_count: placed.track_count,
         block_width,
         branch_tints: placed.branch_tints,
+        lane_labels: placed.lane_labels,
         total_cols,
         index,
     };
-    layout.focusables = build_focusables(&layout, &dag.head);
+    layout.focusables = build_focusables(&layout);
     layout
 }
 
@@ -456,7 +487,7 @@ fn assign_cols(dag: &Dag, order: &[Oid], block_width: u16) -> (HashMap<Oid, u16>
     (cols, head_col, col.saturating_sub(GAP))
 }
 
-/// Where every chain and the HEAD block sit vertically, and what colour each
+/// Where every branch and the HEAD block sit vertically, and what colour each
 /// commit is.
 struct Placement {
     track: HashMap<Oid, usize>,
@@ -464,30 +495,45 @@ struct Placement {
     track_count: usize,
     tint: HashMap<Oid, usize>,
     branch_tints: HashMap<String, usize>,
+    lane_labels: HashMap<usize, String>,
 }
 
 /// Give each commit a track, and each a colour group.
 ///
-/// Three steps, and the whole point of the first two is that a **chain owns
-/// its row outright** for as long as it is on screen:
+/// **A branch is a row.**  A track holds the commits of exactly one branch —
+/// the ones [`assign_tints`] says are *on* it — and the row carries that
+/// branch's name above it.  Sharing a row between two branches saves vertical
+/// space and costs the one question the view exists to answer: a branch merely
+/// *ahead* of another correctly shared a row, and the result was a history
+/// where nothing on screen said which of the two you were looking at.
 ///
-/// 1. **Chains.**  A chain is a maximal run of first-parent links — which is
-///    what a branch looks like to a reader.  Where several commits share a
-///    parent, the parent joins the chain that *started newest*, so the trunk
-///    keeps going along one row instead of being annexed by whichever side
-///    branch git happened to list first.
-/// 2. **Spans.**  Each chain claims the columns from its oldest block to its
-///    newest, extended left to the commit it points into and right to any
+/// Four steps:
+///
+/// 1. **Chains.**  A chain is a maximal run of first-parent links.  Where
+///    several commits share a parent, the parent joins the chain that *started
+///    newest*, so the trunk keeps going along one row instead of being annexed
+///    by whichever side branch git happened to list first.
+/// 2. **Colours.**  [`assign_tints`] walks each chain back from its newest
+///    commit, handing each one the nearest branch label at or after it.  A
+///    colour group is therefore a contiguous segment of one chain — which is
+///    what makes it safe to give it a row of its own.
+/// 3. **Spans.**  Each group claims the columns from its oldest block to its
+///    newest, extended left to whatever its arrows point into and right to any
 ///    merge that points at it — the columns its arrows need as well as its
 ///    blocks.
-/// 3. **Colouring.**  Chains whose spans overlap must get different tracks;
-///    greedy topmost-free assignment does that, and lets two branches that
-///    never coexist horizontally share a row.
+/// 4. **Rows.**  One per branch, in the order the branch tips are drawn.
+///    History no branch points into (a topic whose branch was deleted, a
+///    stretch reachable only through a merge) has no name to write, so those
+///    groups share what is left by greedy interval colouring — never moving
+///    into a named row, which would put commits under a branch name they are
+///    not on.
 ///
-/// The invariant this buys: a track holds one chain at a time, so a horizontal
-/// arrow segment drawn in a track can never pass behind another chain's block.
-/// The HEAD block is placed last, against the same reservations, because it is
-/// a block in the graph like any other — see [`place_head`].
+/// The invariant this buys is unchanged: a track holds one group at a time and
+/// a group is a contiguous chain segment, so a horizontal arrow segment drawn
+/// in a track runs between two *consecutive* blocks of that group and can
+/// never pass behind one.  The HEAD block is placed last, against the same
+/// reservations, because it is a block in the graph like any other — see
+/// [`place_head`].
 fn place(
     order: &[Oid],
     cols: &HashMap<Oid, u16>,
@@ -526,50 +572,72 @@ fn place(
         }
     }
 
-    // --- 2. spans ---
-    let col_of = |id: &Oid| cols.get(id).copied();
-    let mut spans: Vec<(u16, u16)> = members
-        .iter()
-        .map(|m| {
-            let left = m.iter().filter_map(col_of).min().unwrap_or(0);
-            let right = m.iter().filter_map(col_of).max().unwrap_or(0) + block_width;
-            (left, right)
-        })
-        .collect();
+    // --- 2. colours ---
+    //
+    // Before the spans, not after: the row a commit sits in *is* the branch it
+    // is on, and that is what this decides.
+    let (branch_tints, tint) = assign_tints(&members, dag, projection);
 
-    for (c, m) in members.iter().enumerate() {
-        // The exit arrow runs back through this track to the gap right of the
-        // commit it points at, so those columns belong to this chain too.
-        if let Some(target) = m.last().and_then(|last| projection.parents(dag, last).first()) {
-            if let Some(col) = col_of(target) {
-                spans[c].0 = spans[c].0.min(col + block_width);
-            }
-        }
+    // --- 3. spans ---
+    let col_of = |id: &Oid| cols.get(id).copied();
+    let mut spans: HashMap<usize, (u16, u16)> = HashMap::new();
+    for id in order {
+        let (Some(&t), Some(col)) = (tint.get(id), col_of(id)) else { continue };
+        let span = spans.entry(t).or_insert((col, col + block_width));
+        span.0 = span.0.min(col);
+        span.1 = span.1.max(col + block_width);
     }
     for id in order {
+        let Some(&t) = tint.get(id) else { continue };
+        // A first-parent arrow leaving the group runs back through *this*
+        // track to the gap right of the commit it points at, so those columns
+        // belong to the group too.
+        if let Some(parent) = projection.parents(dag, id).first() {
+            if tint.get(parent) != Some(&t) {
+                if let (Some(col), Some(span)) = (col_of(parent), spans.get_mut(&t)) {
+                    span.0 = span.0.min(col + block_width);
+                }
+            }
+        }
         // A merge's second arrow crosses immediately left of the merge and
         // then runs back through the *target's* track, so those columns belong
         // to it.
         for parent in projection.parents(dag, id).iter().skip(1) {
-            let (Some(&c), Some(col)) = (chain.get(parent), col_of(id)) else { continue };
-            spans[c].1 = spans[c].1.max(col);
+            let (Some(&t), Some(col)) = (tint.get(parent), col_of(id)) else { continue };
+            if let Some(span) = spans.get_mut(&t) {
+                span.1 = span.1.max(col);
+            }
         }
     }
 
-    // --- 3. colouring ---
+    // --- 4. rows ---
+    let named = branch_tints.len();
     let mut used: Vec<Vec<(u16, u16)>> = Vec::new();
-    let mut track_of = vec![0usize; members.len()];
-    let mut by_left: Vec<usize> = (0..members.len()).collect();
-    by_left.sort_by_key(|&c| (spans[c].0, c));
-
-    for c in by_left {
-        track_of[c] = claim_track(&mut used, spans[c], None);
+    let mut track_of_tint: HashMap<usize, usize> = HashMap::new();
+    // Branches first, one row each, in the order their tips are drawn.
+    for t in 0..named {
+        let Some(&span) = spans.get(&t) else { continue };
+        track_of_tint.insert(t, used.len());
+        used.push(vec![span]);
+    }
+    // Then the unnamed history, greedily, below every named row.
+    let first_free = used.len();
+    let mut unnamed: Vec<usize> = spans.keys().copied().filter(|&t| t >= named).collect();
+    unnamed.sort_by_key(|t| (spans[t].0, *t));
+    for t in unnamed {
+        let track = claim_track(&mut used, spans[&t], first_free);
+        track_of_tint.insert(t, track);
     }
 
-    let track: HashMap<Oid, usize> =
-        chain.iter().map(|(id, &c)| (id.clone(), track_of[c])).collect();
+    let track: HashMap<Oid, usize> = tint
+        .iter()
+        .filter_map(|(id, t)| track_of_tint.get(t).map(|&row| (id.clone(), row)))
+        .collect();
+    let lane_labels: HashMap<usize, String> = branch_tints
+        .iter()
+        .filter_map(|(name, t)| track_of_tint.get(t).map(|&row| (row, name.clone())))
+        .collect();
     let head_track = place_head(&mut used, &track, cols, head_col, block_width, dag);
-    let (branch_tints, tint) = assign_tints(&members, dag, projection);
 
     Placement {
         track_count: used.len().max(1),
@@ -577,17 +645,23 @@ fn place(
         head_track,
         tint,
         branch_tints,
+        lane_labels,
     }
 }
 
-/// The topmost track free over `span`, preferring `want` when it is free.
-fn claim_track(used: &mut Vec<Vec<(u16, u16)>>, span: (u16, u16), want: Option<usize>) -> usize {
+/// The topmost track at or below `from` that is free over `span`.
+///
+/// `from` is what keeps unnamed history out of a branch's row: a row with a
+/// name written above it must hold that branch's commits and nothing else.
+fn claim_track(used: &mut Vec<Vec<(u16, u16)>>, span: (u16, u16), from: usize) -> usize {
     let (lo, hi) = span;
     let free = |taken: &Vec<(u16, u16)>| taken.iter().all(|&(a, b)| hi <= a || lo >= b);
-    let track = want
-        .filter(|&w| used.get(w).map_or(true, free))
-        .or_else(|| used.iter().position(free))
-        .unwrap_or(used.len());
+    let track = used
+        .iter()
+        .enumerate()
+        .skip(from)
+        .find(|(_, taken)| free(taken))
+        .map_or(used.len(), |(i, _)| i);
     while used.len() <= track {
         used.push(Vec::new());
     }
@@ -600,11 +674,12 @@ fn claim_track(used: &mut Vec<Vec<(u16, u16)>>, span: (u16, u16), want: Option<u
 /// Its own commit's track, when that is free over HEAD's columns — the block
 /// sits directly to the right of the commit it names, so the arrow is short
 /// and reads as "you are here".  When HEAD names a commit part-way along a
-/// chain, though, that track is carrying the arrow from the commit after it,
+/// branch, though, that row is carrying the arrow from the commit after it,
 /// and putting a block in it hides the arrow completely: blocks are painted
 /// after arrows, so what you get is a line that stops dead at HEAD and a
-/// commit whose child is anybody's guess.  So HEAD then takes a track of its
-/// own and points across instead.
+/// commit whose child is anybody's guess.  So HEAD then takes a row of its
+/// own — a new one rather than some other branch's, which would file it under
+/// a name it has nothing to do with.
 fn place_head(
     used: &mut Vec<Vec<(u16, u16)>>,
     track: &HashMap<Oid, usize>,
@@ -615,12 +690,24 @@ fn place_head(
 ) -> usize {
     let Some(head_col) = head_col else { return 0 };
     let target = dag.head.target.as_ref();
-    let want = target.and_then(|id| track.get(id)).copied();
     // Back to the gap right of its commit: that is where HEAD's own arrow runs.
     let left = target
         .and_then(|id| cols.get(id))
         .map_or(head_col, |col| col + block_width);
-    claim_track(used, (left.min(head_col), head_col + block_width), want)
+    let span = (left.min(head_col), head_col + block_width);
+    let (lo, hi) = span;
+    let free = |taken: &Vec<(u16, u16)>| taken.iter().all(|&(a, b)| hi <= a || lo >= b);
+
+    let want = target
+        .and_then(|id| track.get(id))
+        .copied()
+        .filter(|&w| used.get(w).is_some_and(free));
+    let row = want.unwrap_or(used.len());
+    while used.len() <= row {
+        used.push(Vec::new());
+    }
+    used[row].push(span);
+    row
 }
 
 /// Which colour group each commit and each local branch belongs to.
@@ -740,10 +827,18 @@ fn natural_width(dag: &Dag, projection: &Projection, order: &[Oid]) -> u16 {
     inner + 2
 }
 
+/// The shortest a truncated label is worth drawing: a space, two characters
+/// and the ellipsis that says there is more.
+const MIN_LABEL: u16 = 5;
+
 /// The ref labels on `id`'s block, with the column each starts at.
 ///
-/// Truncated to what the border can hold: a block with six tags on it must
-/// not draw past its own edge and into the block beside it.
+/// Fitted to what the border can hold: a block with six tags on it must not
+/// draw past its own edge and into the block beside it.  A name too long for
+/// the room left is **shortened, never dropped** — a block width is clamped at
+/// [`MAX_BLOCK`], so dropping meant a branch with a perfectly ordinary name
+/// (`feat/vcs-graph-horizontal` is 25 characters) had no label anywhere on its
+/// own tip, which reads as the editor not knowing the branch exists.
 fn labels_for(dag: &Dag, projection: &Projection, id: &Oid, inner: u16) -> Vec<(String, u16)> {
     // Projected positions, not the snapshot's: a moved branch has to be drawn
     // where the plan puts it or the preview shows nothing.
@@ -756,11 +851,19 @@ fn labels_for(dag: &Dag, projection: &Projection, id: &Oid, inner: u16) -> Vec<(
         if projection.ref_target(dag, &r.name) != Some(id) {
             continue;
         }
-        let width = r.name.chars().count() as u16 + 2;
-        if col + width > inner {
+        let room = inner.saturating_sub(col);
+        if room < MIN_LABEL {
             break;
         }
-        labels.push((r.name.clone(), col));
+        let width = r.name.chars().count() as u16 + 2;
+        let name = if width <= room {
+            r.name.clone()
+        } else {
+            let keep = (room - 3) as usize;
+            r.name.chars().take(keep).chain(std::iter::once('…')).collect()
+        };
+        let width = name.chars().count() as u16 + 2;
+        labels.push((name, col));
         col += width + 1;
     }
     labels
@@ -786,7 +889,6 @@ fn build_edges(
             let end_col = target.col + block_width;
             edges.push(Edge {
                 child: block.id.clone(),
-                slot: 0,
                 parent: Some(target.id.clone()),
                 from_track: block.track,
                 to_track: target.track,
@@ -802,7 +904,6 @@ fn build_edges(
             let end_col = target.map_or(0, |b| b.col + block_width);
             edges.push(Edge {
                 child: block.id.clone(),
-                slot,
                 // A parent outside the drawn set is left as `None` so the
                 // renderer draws a stub rather than an arrow to nowhere.
                 parent: target.map(|b| b.id.clone()),
@@ -821,8 +922,10 @@ fn build_edges(
     edges
 }
 
-/// Everything the cursor can land on, in drawing order.
-fn build_focusables(layout: &Layout, head: &Head) -> Vec<Focusable> {
+/// Everything the cursor can land on, in drawing order: the blocks, and the
+/// ref labels written on their borders.  Arrows are not on the list — see
+/// [`Focus`].
+fn build_focusables(layout: &Layout) -> Vec<Focusable> {
     let mut out = Vec::new();
     for block in &layout.blocks {
         let top = layout.track_row(block.track);
@@ -851,19 +954,6 @@ fn build_focusables(layout: &Layout, head: &Head) -> Vec<Focusable> {
             }
         }
     }
-    for edge in &layout.edges {
-        // HEAD's arrow is not a parent link and cannot be moved, so it is not
-        // a place the cursor can land.
-        if edge.child.as_str() == "HEAD" {
-            continue;
-        }
-        out.push(Focusable {
-            focus: Focus::Edge { child: edge.child.clone(), slot: edge.slot },
-            row: layout.arrow_row(edge.from_track),
-            col: edge.col,
-        });
-    }
-    let _ = head;
     out.sort_by_key(|f| (f.col, f.row));
     out
 }
@@ -873,7 +963,7 @@ mod tests {
     use super::*;
     use crate::vcs::{
         plan::{Edit, Plan},
-        Commit, Ref, RefKind, WorkTree,
+        Commit, Head, Ref, RefKind, WorkTree,
     };
 
     fn commit(id: &str, parents: &[&str]) -> Commit {
@@ -1086,7 +1176,7 @@ mod tests {
     fn tracks_that_exactly_fit_are_all_counted_as_visible() {
         let (_, _, layout) = laid_out(120);
         assert_eq!(layout.track_count, 2);
-        let span = 2 * (BLOCK_H + TRACK_GAP) - TRACK_GAP;
+        let span = 2 * track_stride() - TRACK_GAP;
         assert_eq!(layout.visible_tracks(span), 2);
         // And a viewport one row too short honestly reports one.
         assert_eq!(layout.visible_tracks(span - 1), 1);
@@ -1141,16 +1231,32 @@ mod tests {
         );
     }
 
-    /// `h` from a block must land on the arrow immediately to its left, not on
-    /// whatever else happens to be one column back in another track.
+    /// `h` from a block lands on the commit immediately to its left, not on
+    /// whatever else happens to be one column back in another track — and not
+    /// on an arrow, which is no longer somewhere the cursor stops at all.
     #[test]
-    fn moving_back_in_time_prefers_the_arrow_beside_it() {
+    fn moving_back_in_time_lands_on_the_commit_beside_it() {
         let (_, _, layout) = laid_out(120);
-        let from = Focus::Commit(Oid::new("d"));
+        // `f` is `main`'s tip; the block one column band to its left is `c`,
+        // on another branch's row.  With arrows on the walk this took two
+        // presses and the first one landed on nothing you could act on.
+        let from = Focus::Commit(Oid::new("f"));
         assert_eq!(
             layout.step_where(&from, Dir::Left, |_| true),
-            Some(Focus::Edge { child: Oid::new("d"), slot: 0 })
+            Some(Focus::Commit(Oid::new("c")))
         );
+    }
+
+    /// Arrows are not focusable: every focusable is a block or a label on one.
+    /// Stopping on an arrow was a keypress that offered no choice — dragging
+    /// it and dragging its block made the same edit.
+    #[test]
+    fn the_cursor_never_stops_on_an_arrow() {
+        let (_, _, layout) = laid_out(120);
+        assert!(!layout.edges.is_empty(), "the fixture has arrows to skip");
+        let blocks = layout.blocks.len();
+        let labels: usize = layout.blocks.iter().map(|b| b.labels.len()).sum();
+        assert_eq!(layout.focusables.len(), blocks + labels);
     }
 
     #[test]
@@ -1318,6 +1424,22 @@ mod tests {
         assert!(block.labels.len() < 12, "and it stopped early");
     }
 
+    /// A branch whose name is longer than a block is wide keeps a label —
+    /// shortened.  Dropping it left the branch unnamed on its own tip, which
+    /// reads as the editor not knowing it exists.
+    #[test]
+    fn a_name_too_long_for_the_border_is_shortened_not_dropped() {
+        let mut dag = dag();
+        dag.refs = vec![branch("feat/a-branch-name-nobody-would-shorten", "f")];
+        let projection = Plan::default().project(&dag);
+        let layout = compute(&dag, &projection, 200);
+        let block = layout.block(&Oid::new("f")).unwrap();
+        let (name, col) = block.labels.first().expect("a label survives").clone();
+        assert!(name.starts_with("feat/a-branch"), "{name}");
+        assert!(name.ends_with('…'), "{name}");
+        assert!(col + name.chars().count() as u16 + 2 <= layout.block_inner());
+    }
+
     /// An empty repository must lay out without panicking — there is no HEAD
     /// commit, no track and no block.
     #[test]
@@ -1434,14 +1556,31 @@ mod tests {
         let layout = compute(&dag, &projection, 200);
         let tint = |id: &str| layout.block(&Oid::new(id)).expect(id).tint;
 
-        // One row, because that is the truth of this repository…
-        assert_eq!(
-            layout.block(&Oid::new("top")).unwrap().track,
-            layout.block(&Oid::new("base")).unwrap().track
-        );
-        // …and two colours, because there are two branches.
+        // Two branches, so two colours and — since a branch is a row — two
+        // rows.  Sharing one saved a line and cost the only thing on screen
+        // that said which of the two you were looking at.
         assert_ne!(tint("top"), tint("mid"), "the branches are one colour");
         assert_eq!(tint("mid"), tint("base"), "everything at and before `main`");
+        assert_ne!(
+            layout.block(&Oid::new("top")).unwrap().track,
+            layout.block(&Oid::new("base")).unwrap().track,
+            "the two branches share a row"
+        );
+        assert_eq!(
+            layout.block(&Oid::new("mid")).unwrap().track,
+            layout.block(&Oid::new("base")).unwrap().track,
+            "and everything on `main` is in one"
+        );
+        // Each row says whose it is, which is the whole point of giving a
+        // branch one.
+        assert_eq!(
+            layout.lane_label(layout.block(&Oid::new("mid")).unwrap().track),
+            Some("main")
+        );
+        assert_eq!(
+            layout.lane_label(layout.block(&Oid::new("top")).unwrap().track),
+            Some("test-branch")
+        );
 
         // The labels match the commits they name, so a label and its run of
         // history read as one thing.
@@ -1460,9 +1599,16 @@ mod tests {
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
         assert_eq!(head.track, layout.block(&Oid::new("f")).unwrap().track);
 
-        // Part-way along a chain, the arrow from the commit after it owns that
-        // track, so HEAD takes one of its own and points across.
-        let dag = ahead();
+        // Detached part-way along one branch's row, the arrow from the commit
+        // after it owns that row, so HEAD takes one of its own and points
+        // across.
+        let dag = Dag::new(
+            vec![commit("top", &["mid"]), commit("mid", &["base"]), commit("base", &[])],
+            vec![branch("main", "top")],
+            Head { branch: None, target: Some(Oid::new("mid")) },
+            WorkTree::default(),
+            false,
+        );
         let layout = compute(&dag, &Plan::default().project(&dag), 200);
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
         let target = layout.block(&Oid::new("mid")).unwrap();

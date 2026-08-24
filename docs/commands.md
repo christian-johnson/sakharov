@@ -618,12 +618,25 @@ plain buffer.
 ## Version control (`:vc`)
 
 A visual git client: commits are blocks, parent links are arrows, and you
-rearrange history by grabbing an arrow and dropping it somewhere else.
+rearrange history by grabbing a commit and dropping it somewhere else.
 
 **Time runs left to right** — the oldest commit loaded is at the left edge, the
 newest at the right, and every arrow points *backwards*, from a commit to the
-parent it follows. A branch is a row of its own (a "track"); `h`/`l` travel
-through history and `j`/`k` step between branches.
+parent it follows.
+
+**Every branch gets a row of its own**, with its name written above it and
+pinned to the left edge so it stays readable however far along the history you
+have scrolled. `h`/`l` travel through history, `j`/`k` step between branches.
+A branch merely *ahead* of another still gets its own row: sharing one saved a
+line and cost the only thing on screen that said which of the two you were
+looking at.
+
+**Arrows are not selectable.** An arrow is another name for the commit it
+leaves — dragging one and dragging its block made the same edit — so `h`/`l`
+step block to block and the arrow follows whatever you move.
+
+Press **`?`** in the graph for a scrollable sheet of every key with
+walkthroughs of the common gestures.
 
 The organising idea is that **nothing here is a git verb**. You state a shape —
 "this branch should sit on top of that one" — and the editor works out the
@@ -635,7 +648,7 @@ it is simply what comes out when a branch moves and nothing needed rewriting.
 | | What happens | Which commands |
 |---|---|---|
 | **Planned** | Only the picture changes. Reaches the repository once, at `:vc-apply`, behind a confirmation and a backup. | grab/drop, `d`, `m`, `u`, `gx` |
-| **Immediate** | Runs now. | `c`, `s`, `S`, `w`, `Enter`, commit, fetch, pull, push |
+| **Immediate** | Runs now. | `c`, `+`, `-`, `s`, `w`, `Enter`, commit, fetch, pull, push |
 
 The line between them is *could this make a commit unreachable* — which is
 exactly what the backup refs exist to cover.
@@ -647,12 +660,13 @@ exactly what the backup refs exist to cover.
 | `version-control` | `gV` | `:vc`, `:git` | Open the graph for the repository containing the current file |
 | `version-control-close` | `q` | `:vc-close` | Leave the graph |
 | `version-control-refresh` | `r` | `:vc-refresh` | Re-read the repository (discards the plan) |
-| — | `h` / `l` | — | Back / forward through history. They alternate block → arrow → block, which is how an arrow gets selected at all |
+| — | `h` / `l` | — | Back / forward through history, one commit per press |
 | — | `j` / `k` | — | Between branches, staying at the same point in history |
 | — | `J` / `K`, `gg` / `ge` | — | Page back/forward; oldest / newest commit |
 | `version-control-enter` | `Enter` | `:vc-enter` | Act on what the cursor is on: check out a branch label, else read the commit |
 | `version-control-show` | — | `:vc-show` | Open the selected commit's diff in an ordinary buffer (`q` returns to the graph) |
 | `yank-selection` | `y` | — | Copy the selected commit's full hash |
+| `version-control-help` | `?` | `:vc-help` | The keys and walkthroughs, in a scrollable float (`q` / `Esc` closes) |
 
 ### Rearranging history
 
@@ -662,13 +676,12 @@ second time is what you would get. `Esc` puts it back down.
 
 | Holding | Dropping it on a commit means |
 |---------|-------------------------------|
-| an **arrow** | the commit it comes from now follows the one you dropped it on |
-| a **block** | the same, said about that commit's first parent |
+| a **commit block** | that commit now follows the one you dropped it on |
 | a **branch label** | the branch now points there |
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `version-control-grab` | `Space` | `:vc-grab` | Pick up / put down whatever is under the cursor |
+| `version-control-grab` | `Space` | `:vc-grab` | Pick up / put down the commit or branch under the cursor |
 | `version-control-drop` | `d`, `gd` | `:vc-drop` | Remove the selected commit; its children attach to its parent |
 | `version-control-merge` | `m`, `gm` | `:vc-merge` | Plan a merge of the selection into the current branch. The merge commit is drawn before it exists |
 | `version-control-undo-edit` | `u` | `:vc-undo-edit` | Take back the last planned change |
@@ -702,9 +715,10 @@ out. (A dedicated merge-conflict resolver view is on the roadmap.)
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
 | `version-control-checkout` | `c`, `gc` | `:vc-checkout`, `:checkout` | Check out the branch under the cursor. On a remote-tracking branch it creates the matching local one; on a bare commit it detaches HEAD and says so |
-| `version-control-stage` | `s` | `:vc-stage`, `:stage` | Stage every change in the work tree |
-| `version-control-unstage` | `S` | `:vc-unstage`, `:unstage` | Unstage everything |
-| `version-control-status` | `w` | `:vc-status`, `:status` | List every uncommitted **and untracked** file in the working tree; `Enter` opens one in the editor |
+| `version-control-stage` | `+` | `:vc-stage`, `:stage` | Stage every change in the work tree |
+| `version-control-unstage` | `-` | `:vc-unstage`, `:unstage` | Unstage everything |
+| `version-control-status` | `w` | `:vc-status`, `:status` | The staging view: every uncommitted **and untracked** file beside the selected one's diff. `j`/`k` pick a file, `Space` stages or unstages it, `Ctrl+d`/`Ctrl+u` scroll the diff, `Enter` opens the file, `q` closes |
+| `version-control-git-status` | `s` | `:vc-git-status`, `:git-status` | `git status` verbatim, in a scrollable float (`q` / `Esc` closes) |
 | `version-control-commit` | — | `:vc-commit <message>` | Commit what is staged |
 | `version-control-branch` | — | `:vc-branch <name>` | Create a branch at the selected commit and check it out |
 | `version-control-fetch` | — | `:vc-fetch`, `:fetch` | Fetch from every remote |
@@ -722,18 +736,28 @@ The **HEAD block** sits directly to the *right* of the commit it names — where
 the next commit would go, not at the end of the graph, where its arrow would
 have to span however far back HEAD happens to be. It carries the work-tree
 summary: how much is staged, unstaged or conflicted, and how many files git is
-not tracking at all. `w` turns that summary into the list of files, so the
-scratch notebooks and stray outputs that accumulate in a repository are
-something you can actually see and open, rather than a number.
+not tracking at all.
+
+`w` turns that summary into the **staging view** — a two-pane float with the
+files on the left, git's own two status columns beside each one, and the
+selected file's diff on the right. `Space` stages or unstages the file under the
+cursor, so deciding and doing happen in the same place: the question that
+actually stops someone committing is "what is *in* these changes", and answering
+it used to mean leaving the view and opening the file. An untracked file has no
+diff, so the pane shows its contents instead — which is what you need before
+deciding whether it belongs in the repository at all. `s` shows `git status`
+verbatim when you want git's own words.
 
 Each commit block shows its abbreviated hash and ref labels along its top
 border, the subject over two rows, the author and age, and `+added -removed`
 along the bottom border.
 
-**Colour is the branch a commit is on**, not the track it sits in: walking back
-from a branch label, each commit takes that label's colour until the next label,
-so a branch and its run of history read as one thing. HEAD has a colour nothing
-else uses. The cursor marks by **weight** — bold text and a heavy border — so
+**Colour is the branch a commit is on**, and so is the row: walking back from a
+branch label, each commit takes that label's colour — and its row — until the
+next label, so a branch, its name above the row, and its run of history all read
+as one thing. History no branch points into (a topic whose branch was deleted,
+say) has no name to write, so those runs share the rows below the named ones.
+HEAD has a colour nothing else uses. The cursor marks by **weight** — bold text and a heavy border — so
 the thing you are on keeps the colour that says which branch it is; something
 you have *picked up* does recolour, because that is a state it is in.
 

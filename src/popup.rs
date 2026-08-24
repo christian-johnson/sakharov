@@ -1,3 +1,40 @@
+/// Columns a tab advances to.  Eight, because that is what the programs whose
+/// output ends up in a float assume — `git status` indents its file list with a
+/// literal tab and lines its columns up against a tab stop of eight.
+const TAB_STOP: usize = 8;
+
+/// Split `raw` into popup lines, with nothing in them a terminal would act on.
+///
+/// A float shows text the editor did not write — `git status`, a diff, an LSP
+/// hover, a DuckDB error — and a control character stored as a cell's symbol is
+/// emitted **verbatim** by the backend.  A literal tab then advances the real
+/// cursor to the next tab stop mid-flush, so every cell drawn after it on that
+/// row lands in the wrong column: the popup's own right border ends up several
+/// columns out, differently on each row.  ratatui's buffer never sees that, so
+/// the damage survives until a full redraw.
+///
+/// The same failure the minibuffer has (`table::layout::sanitize`), one widget
+/// along.  Tabs are expanded rather than replaced so the alignment they were
+/// written for survives; every other control character becomes a space.
+pub fn sanitize_lines(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|line| {
+            let mut out = String::with_capacity(line.len());
+            for c in line.chars() {
+                match c {
+                    '\t' => {
+                        let pad = TAB_STOP - (out.chars().count() % TAB_STOP);
+                        out.push_str(&" ".repeat(pad));
+                    }
+                    c if c.is_control() => out.push(' '),
+                    c => out.push(c),
+                }
+            }
+            out
+        })
+        .collect()
+}
+
 /// A floating overlay rendered on top of the editor.
 pub struct Popup {
     pub title: Option<String>,
@@ -18,6 +55,85 @@ pub enum PopupContent {
     /// Two-column key → description table. Covers which-key.
     /// Purely informational — any keypress dismisses with passthrough.
     KeyHints(KeyHintsState),
+    /// The work tree, side by side with the selected file's diff.  Covers
+    /// interactive staging.
+    Stage(StageState),
+}
+
+/// One path `git status` reported, with git's own two status columns.
+///
+/// Kept verbatim rather than reduced to a `staged: bool`, because they answer
+/// two different questions — what is on its way into the next commit, and what
+/// is only in the work tree — and a file is very often both at once.
+#[derive(Clone)]
+pub struct StageEntry {
+    /// Repository-relative, which is how it is listed.
+    pub path: String,
+    /// Where `Enter` opens it — resolved when the list is built, since the
+    /// popup has no idea which repository it is describing.
+    pub file: std::path::PathBuf,
+    pub index: char,
+    pub work: char,
+    /// A word for what happened, for the pane heading: git's two columns are
+    /// exact and terse, and "staged, edited since" is the case people are
+    /// surprised by at commit time.
+    pub detail: String,
+}
+
+impl StageEntry {
+    /// Is any of this file on its way into the next commit?
+    pub fn staged(&self) -> bool {
+        !matches!(self.index, ' ' | '?')
+    }
+
+    /// Is *all* of it?  What the toggle keys off: a file with staged and
+    /// unstaged parts is one more `git add` away from being ready, so Space
+    /// stages it rather than undoing the half that was done.
+    pub fn fully_staged(&self) -> bool {
+        self.staged() && self.work == ' '
+    }
+}
+
+/// The work tree, and the diff of whichever entry is selected.
+///
+/// A list on its own answers "what is uncommitted"; the question that actually
+/// stops someone committing is "what is *in* these changes", and answering it
+/// meant leaving the view, opening the file and reading around the edits.  The
+/// two panes are one popup rather than two so the selection and the diff cannot
+/// disagree about which file is being looked at.
+pub struct StageState {
+    pub entries: Vec<StageEntry>,
+    pub selected: usize,
+    /// The selected entry's diff, already sanitised for a cell buffer.
+    pub diff: Vec<String>,
+    pub diff_scroll: usize,
+    /// The path `diff` was read for.  `None` means "re-read it": set by every
+    /// move, and by a staging toggle, so the pane is refreshed exactly when the
+    /// thing it describes changed.
+    pub loaded: Option<String>,
+    /// A stage/unstage the key handler asked for.
+    ///
+    /// Keys are handled where there is no `App` to reach git through, so the
+    /// request is parked here and run by `exec::vcs::pump_stage_popup` on the
+    /// next `PopupAction::Continue` — the same shape the theme picker's live
+    /// preview uses.
+    pub toggle: bool,
+}
+
+impl StageState {
+    pub fn selected_entry(&self) -> Option<&StageEntry> {
+        self.entries.get(self.selected)
+    }
+
+    /// Move the selection, forgetting the diff that belonged to the old one.
+    pub fn select(&mut self, index: usize) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.selected = index.min(self.entries.len() - 1);
+        self.loaded = None;
+        self.diff_scroll = 0;
+    }
 }
 
 pub enum PopupAnchor {
@@ -653,7 +769,7 @@ impl Popup {
         Self {
             title: Some(title.into()),
             content: PopupContent::Text(TextState {
-                lines: content.lines().map(str::to_owned).collect(),
+                lines: sanitize_lines(content),
                 scroll: 0,
                 focused: false,
             }),
@@ -675,6 +791,20 @@ impl Popup {
         if let PopupContent::Text(ref mut text) = popup.content {
             text.focused = true;
         }
+        popup
+    }
+
+    /// Pre-formatted reference text, opened focused and sized to its own
+    /// widest line.
+    ///
+    /// A text float **clips rather than wraps**, so anything authored as a
+    /// laid-out sheet — a key table, `git status`'s own output — has to be
+    /// given the columns it was written for, or the informative half of every
+    /// line is off the edge.  [`Popup::text_focused`]'s 0.6-of-terminal is
+    /// right for a paragraph of prose and wrong for a table.
+    pub fn reference(title: &str, content: &str) -> Self {
+        let mut popup = Self::text_focused(title, content);
+        popup.width = PopupSize::Auto;
         popup
     }
 
@@ -735,6 +865,28 @@ impl Popup {
             anchor: PopupAnchor::CursorBelow,
             width: PopupSize::FractionOfScreen(0.5),
             on_confirm: PopupTarget::ApplyCodeAction,
+        }
+    }
+
+    /// The work tree beside the selected file's diff — interactive staging.
+    ///
+    /// Wide and tall on purpose: it is a reading view, and the right-hand pane
+    /// is a diff.  `Navigate` on confirm, so `Enter` still opens the file the
+    /// way the plain list did.
+    pub fn stage(entries: Vec<StageEntry>) -> Self {
+        Self {
+            title: Some("work tree".into()),
+            content: PopupContent::Stage(StageState {
+                entries,
+                selected: 0,
+                diff: Vec::new(),
+                diff_scroll: 0,
+                loaded: None,
+                toggle: false,
+            }),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.9),
+            on_confirm: PopupTarget::Navigate,
         }
     }
 

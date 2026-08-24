@@ -24,7 +24,7 @@ pub fn render(
 
     let popup_width = compute_width(popup, term.width);
 
-    let popup_height = compute_height(popup, ui_config);
+    let popup_height = compute_height(popup, term.height, ui_config);
 
     let popup_rect = compute_rect(popup, term, popup_width, popup_height, cursor_screen);
 
@@ -47,6 +47,9 @@ pub fn render(
         }
         PopupContent::KeyHints(state) => {
             render_key_hints_popup(frame, state, popup_rect);
+        }
+        PopupContent::Stage(state) => {
+            render_stage_popup(frame, popup, state, popup_rect);
         }
     }
 }
@@ -122,6 +125,11 @@ fn render_completion_doc(
 // Width / height / rect helpers
 // ---------------------------------------------------------------------------
 
+/// Display columns `text` occupies — what a float has to be sized against.
+fn cols(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
 fn compute_width(popup: &Popup, term_width: u16) -> u16 {
     match popup.width {
         PopupSize::FractionOfScreen(f) => {
@@ -129,34 +137,40 @@ fn compute_width(popup: &Popup, term_width: u16) -> u16 {
             w.max(20).min(term_width)
         }
         PopupSize::Auto => {
-            // Compute from content.
+            // Compute from content, in *display columns* rather than bytes: an
+            // em dash is three bytes and one column, and sizing a float by
+            // `str::len` made every sheet with punctuation in it far wider than
+            // the text it holds.
             let natural = match &popup.content {
                 PopupContent::List(s) => s
                     .items
                     .iter()
                     .map(|item| {
-                        let mut w = item.label.len() + 2; // prefix
+                        let mut w = cols(&item.label) + 2; // prefix
                         if let Some(ref d) = item.detail {
-                            w += d.len() + 2;
+                            w += cols(d) + 2;
                         }
                         if let Some(ref k) = item.kind {
-                            w += k.len() + 1;
+                            w += cols(k) + 1;
                         }
                         w
                     })
                     .max()
                     .unwrap_or(20),
                 PopupContent::Text(s) => {
-                    s.lines.iter().map(|l| l.len()).max().unwrap_or(20) + 4
+                    s.lines.iter().map(|l| cols(l)).max().unwrap_or(20) + 4
                 }
                 PopupContent::KeyHints(s) => key_hints_natural_width(s),
+                // Never auto-sized: a diff is as wide as it is, so the pane
+                // takes what the screen has rather than what the text wants.
+                PopupContent::Stage(_) => term_width.saturating_sub(4) as usize,
             } as u16;
             natural.max(20).min(term_width.saturating_sub(4))
         }
     }
 }
 
-fn compute_height(popup: &Popup, ui_config: &crate::config::UiConfig) -> u16 {
+fn compute_height(popup: &Popup, term_height: u16, ui_config: &crate::config::UiConfig) -> u16 {
     match &popup.content {
         PopupContent::List(s) => {
             let is_completion = popup.on_confirm == PopupTarget::InsertText;
@@ -176,6 +190,10 @@ fn compute_height(popup: &Popup, ui_config: &crate::config::UiConfig) -> u16 {
             (2 + lines_shown).max(4)
         }
         PopupContent::KeyHints(s) => (s.hints.len() as u16 + 2).max(3),
+        // A reading view, and the thing being read is a diff: it gets the
+        // screen.  Capped short of the terminal so the status line behind it
+        // stays visible, which is where the graph reports what staging did.
+        PopupContent::Stage(_) => term_height.saturating_sub(4).max(6),
     }
 }
 
@@ -497,7 +515,7 @@ fn render_text_popup(
     }
     if total_lines > inner.height as usize {
         let hint = if state.focused {
-            " j/k scroll · Esc close "
+            " j/k scroll · q close "
         } else {
             " Tab to scroll "
         };
@@ -555,6 +573,156 @@ fn render_text_popup(
 // ---------------------------------------------------------------------------
 // KeyHints popup (BottomRight bordered window)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Staging popup
+// ---------------------------------------------------------------------------
+
+/// Narrowest the file list may be, and the fraction of the float it asks for.
+const STAGE_LIST_MIN: u16 = 24;
+const STAGE_LIST_FRACTION: u16 = 3;
+
+/// The work tree beside the selected file's diff.
+///
+/// Two panes rather than two popups: the whole point is that the selection and
+/// the diff are the same fact seen twice, and a list that says `modified:
+/// src/app.rs` without showing what changed is exactly the question the user
+/// then has to leave the view to answer.
+fn render_stage_popup(
+    frame: &mut Frame,
+    popup: &Popup,
+    state: &crate::popup::StageState,
+    rect: Rect,
+) {
+    let th = crate::theme::active();
+    let mut block = build_block(popup).border_style(Style::default().fg(th.popup_border_focus));
+    block = block.title_bottom(
+        ratatui::text::Line::from(" j/k file · Space stage · Enter open · q close ")
+            .style(Style::default().fg(th.popup_dim).bg(th.popup_bg))
+            .left_aligned(),
+    );
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.width < 8 || inner.height == 0 {
+        return;
+    }
+
+    // The list takes a third, but never less than a path needs to be legible
+    // and never so much that the diff has no room left.
+    let list_width = (inner.width / STAGE_LIST_FRACTION)
+        .max(STAGE_LIST_MIN.min(inner.width / 2))
+        .min(inner.width.saturating_sub(4));
+    let list = Rect { width: list_width, ..inner };
+    let divider = inner.left() + list_width;
+    let diff = Rect {
+        x: divider + 1,
+        width: inner.width.saturating_sub(list_width + 1),
+        ..inner
+    };
+
+    draw_stage_list(frame, state, list);
+    for y in inner.top()..inner.bottom() {
+        frame.buffer_mut()[(divider, y)]
+            .set_char('│')
+            .set_style(Style::default().fg(th.popup_border).bg(th.popup_bg));
+    }
+    draw_stage_diff(frame, state, diff);
+}
+
+/// The file list: git's own two status columns, then the path.
+///
+/// The columns are drawn the way `git status --short` draws them — the staged
+/// one green, the unstaged one red — because that pairing is already what a
+/// git user reads, and inventing a third notation for it would be one more
+/// thing to learn for no information gained.
+fn draw_stage_list(frame: &mut Frame, state: &crate::popup::StageState, area: Rect) {
+    let th = crate::theme::active();
+    let rows = area.height as usize;
+    // Keep the selection on screen without a scroll anchor to maintain: the
+    // list is short and the window is a function of where the cursor is.
+    let first = state.selected.saturating_sub(rows.saturating_sub(1));
+    let buf = frame.buffer_mut();
+
+    for row in 0..rows {
+        let y = area.top() + row as u16;
+        let Some(entry) = state.entries.get(first + row) else { continue };
+        let selected = first + row == state.selected;
+        let bg = if selected { th.popup_selection_bg } else { th.popup_bg };
+        for x in area.left()..area.right() {
+            buf[(x, y)].set_char(' ').set_style(Style::default().bg(bg));
+        }
+
+        let mut x = area.left();
+        let mut put = |c: char, style: Style, x: &mut u16| {
+            if *x < area.right() {
+                buf[(*x, y)].set_char(c).set_style(style.bg(bg));
+                *x += 1;
+            }
+        };
+        put(' ', Style::default(), &mut x);
+        put(entry.index, Style::default().fg(th.git_added), &mut x);
+        put(entry.work, Style::default().fg(th.git_modified), &mut x);
+        put(' ', Style::default(), &mut x);
+
+        let room = area.right().saturating_sub(x) as usize;
+        let path = crate::table::layout::fit_cell(&entry.path, room).0;
+        let fg = if entry.staged() { th.popup_fg } else { th.popup_dim };
+        let mut style = Style::default().fg(fg);
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        for c in path.chars() {
+            put(c, style, &mut x);
+        }
+    }
+}
+
+/// The selected file's diff, under a heading naming what it is.
+///
+/// The heading is a row of its own rather than the first diff line, so it
+/// survives scrolling: three screens into a diff, "which file is this and is it
+/// staged" is exactly the question that has gone off the top.
+fn draw_stage_diff(frame: &mut Frame, state: &crate::popup::StageState, area: Rect) {
+    let th = crate::theme::active();
+    let heading = state
+        .selected_entry()
+        .map(|e| format!("{} — {}", e.path, e.detail));
+    let buf = frame.buffer_mut();
+    for row in 0..area.height as usize {
+        let y = area.top() + row as u16;
+        for x in area.left()..area.right() {
+            buf[(x, y)]
+                .set_char(' ')
+                .set_style(Style::default().bg(th.popup_bg));
+        }
+        if row == 0 {
+            let Some(ref heading) = heading else { continue };
+            for (x, c) in (area.left()..area.right()).zip(heading.chars()) {
+                buf[(x, y)].set_char(c).set_style(
+                    Style::default()
+                        .fg(th.popup_fg)
+                        .bg(th.popup_bg)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+            continue;
+        }
+        let Some(line) = state.diff.get(state.diff_scroll + row - 1) else { continue };
+        let fg = match line.as_bytes().first() {
+            _ if line.starts_with("+++") || line.starts_with("---") => th.popup_dim,
+            Some(b'@') => th.accent,
+            Some(b'+') => th.git_added,
+            Some(b'-') => th.error,
+            _ if line.starts_with("diff ") || line.starts_with("index ") => th.popup_dim,
+            _ => th.popup_fg,
+        };
+        for (x, c) in (area.left()..area.right()).zip(line.chars()) {
+            buf[(x, y)]
+                .set_char(c)
+                .set_style(Style::default().fg(fg).bg(th.popup_bg));
+        }
+    }
+}
 
 fn render_key_hints_popup(
     frame: &mut Frame,
@@ -701,4 +869,6 @@ mod tests {
         assert_ne!(title_cell.fg, th.popup_border);
     }
 }
+
+
 

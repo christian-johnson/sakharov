@@ -1,7 +1,7 @@
 # Version control view — implementation plan
 
 A visual, direct-manipulation git client: commits are blocks, parent links are
-arrows, and you rearrange history by grabbing an arrow and dropping it
+arrows, and you rearrange history by grabbing a commit and dropping it
 somewhere else. Nothing touches the repository until `:vc-apply`.
 
 This is a design record. See CLAUDE.md for the shape of the code that exists.
@@ -16,7 +16,8 @@ belongs over there". The shape is topological, and it is directly drawable.
 So the model here is inverted from every other git UI:
 
 1. Load the real DAG.
-2. Let the user edit a *projection* of it — structurally, by moving arrows.
+2. Let the user edit a *projection* of it — structurally, by moving commits and
+   branch labels; the arrows follow.
 3. **Derive** the git operations that would make the repository match the
    projection.
 
@@ -79,9 +80,9 @@ enum Edit {
 }
 ```
 
-A **provisional** edit sits beside the stack while an arrow is held: the
+A **provisional** edit sits beside the stack while something is held: the
 projection includes it, so the graph rearranges live under the cursor, and
-dropping the arrow is what commits it to the stack.
+dropping is what commits it to the stack.
 
 ## The derivation
 
@@ -139,7 +140,7 @@ checked out.
 
 ## Roadmap
 
-- **V1 — shipped.** The DAG view, arrow-dragging, derive + apply + undo, and
+- **V1 — shipped.** The DAG view, drag-to-reparent, derive + apply + undo, and
   the everyday non-topological actions: checkout, stage/unstage, commit, fetch,
   pull, push, set-upstream. See CLAUDE.md ("Phase V1") for what the code
   actually looks like and `docs/commands.md` for the keys.
@@ -154,9 +155,19 @@ checked out.
     like any other so the user can see the merge before agreeing to it.
   - **A drag preview must be validated like a committed edit.** Setting the
     provisional edit directly bypassed `Plan::push`'s cycle check, so dragging
-    an arrow over its own child drew a cyclic graph — tracks and all — and only
+    a commit over its own child drew a cyclic graph — tracks and all — and only
     objected on release. `state::VcsState::validated` runs the same check
     before previewing, so the picture is always one that could exist.
+  - **Arrows are not something you select, and a branch is a row.** The first
+    cut made every arrow focusable, on the reasoning that an edge is the handle
+    on "which commit does this one follow". In use it was two presses per
+    commit to cross the graph, for a choice that was never a choice — dragging
+    an arrow and dragging its block made the same edit. And tracks were
+    assigned by packing non-overlapping chains, which correctly put a branch
+    merely *ahead* of another in the same row and left nothing on screen saying
+    which of the two you were reading. Now a colour group (= a branch) owns a
+    row outright and the row carries its name, pinned to the viewport's left
+    edge.
 
 - **V2** — a merge-conflict resolver view (its own `View` variant: ours/theirs/
   merged panes over a conflicted file). Until then a conflict stops the apply,

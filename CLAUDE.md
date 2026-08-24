@@ -950,9 +950,13 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
 ### Phase V1 (version-control view) — complete
 - **`gV` / `:vc`** opens the commit graph: commits are blocks laid out left to
   right (oldest first), parent links are arrows pointing back, and history is
-  rearranged by **direct manipulation** — grab an arrow with
-  `Space`, move to another commit, `Space` again.  See `docs/version-control-plan.md`
-  for the design record and `docs/commands.md` for the full key/command reference.
+  rearranged by **direct manipulation** — grab a commit with
+  `Space`, move to another commit, `Space` again.  `?` opens a scrollable help
+  sheet (`exec::vcs::HELP`) with the keys and walkthroughs of the common
+  gestures; it exists because none of the interaction is a git verb, so
+  "Space is grab" is the smaller half of what a reader needs.  See
+  `docs/version-control-plan.md` for the design record and `docs/commands.md`
+  for the full key/command reference.
 - **The premise is that no git verb appears in the interaction.** The user states a
   *shape*; `vcs::derive` works out the commands that would produce it.  Fast-forward
   is not a case in that code — it is what gets emitted when a ref moves and the
@@ -1025,9 +1029,15 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   `close_commit_buffer`) like every other temporary buffer in the editor.
 - **While something is held, the walk is over *destinations* only**
   (`Layout::step_where`, the predicate in `VcsState::step`): commit blocks whose
-  drop is not `Invalid`.  Branch labels and arrows are other names for a commit
-  already on the walk, so stopping on them offered a choice that was never a
-  choice and doubled the presses to cross the graph.
+  drop is not `Invalid`.  A branch label is another name for a commit already
+  on the walk, so stopping on it offered a choice that was never a choice.
+- **Arrows are not focusable at all** (`layout::Focus` has no `Edge` variant).
+  Dragging an arrow and dragging its block made the same `Edit::Reparent`, so
+  every arrow on the walk was a press that offered nothing and put the next
+  real destination one key further away.  Grab the commit; the arrow follows
+  it, and is drawn heavy when its commit is focused so the link visibly comes
+  along.  `Edit::Reparent` keeps its `slot` (a merge's second parent is still
+  a thing `derive` reasons about) — there is simply no gesture that names one.
 - **The cursor marks by weight, not by hue** (`vcs_ui::Cursor::style`): the
   focused thing keeps its own colour and gains **bold** plus a heavy border (or
   a heavy arrow).  Recolouring it erased the one fact the colours carry —
@@ -1055,7 +1065,11 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
 - **The graph runs left to right: oldest at the left edge, newest at the right,**
   and every arrow points *backwards*, from a commit to the parent it follows.
   A branch is a horizontal **track**; `h`/`l` travel through history and `j`/`k`
-  step between branches.  `MIN_BLOCK`/`MAX_BLOCK` clamp how wide a block grows
+  step between branches.  Each track carries its branch's name on the row above
+  it (`LABEL_H`, `Layout::label_row`, `vcs_ui::draw_lane_names`), **pinned to
+  the viewport's left edge** rather than written in graph coordinates: the
+  question "which branch am I looking at" is at its sharpest a hundred commits
+  along, which is exactly where a name in graph coordinates has scrolled off.  `MIN_BLOCK`/`MAX_BLOCK` clamp how wide a block grows
   (a block is as wide as what is written in it) and `BLOCK_H` is fixed at five
   rows — two borders, the summary wrapped over two, and the metadata row — so a
   track is a row band of one size and two blocks in one track are joined by a
@@ -1069,15 +1083,25 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   generation-packed layout can draw a commit visually to the left of one of its own
   descendants, which in a view whose premise is "the picture is the truth" is not
   cosmetic.
-- **A chain owns its row outright**, and that is what keeps arrows off blocks.
-  `place` runs in three steps: **chains** (maximal first-parent runs — where
-  several commits share a parent it joins the chain that *started newest*, so the
-  trunk keeps its row instead of being annexed by whichever topic branch git
-  listed first), **spans** (the columns a chain's blocks occupy, extended left to the
-  commit it points into and right to any merge that points at it — the columns its
-  arrows need too), and greedy **interval colouring** of those spans.  Chains that
-  never coexist horizontally share a track, so a long history does not grow one
-  track per branch that ever existed.
+- **A branch is a row, and a row owns itself outright** — which is also what
+  keeps arrows off blocks.  `place` runs in four steps: **chains** (maximal
+  first-parent runs — where several commits share a parent it joins the chain
+  that *started newest*, so the trunk keeps its row instead of being annexed by
+  whichever topic branch git listed first), **colours** (`assign_tints`, moved
+  ahead of the geometry now that the row a commit sits in *is* the branch it is
+  on), **spans** (the columns a colour group's blocks occupy, extended left to
+  whatever its arrows point into and right to any merge that points at it — the
+  columns its arrows need too), and **rows**: one per local branch, in the order
+  the tips are drawn, then greedy interval colouring for the groups no branch
+  names, strictly *below* the named rows (`claim_track`'s `from` bound — a row
+  with a name written above it must not hold somebody else's commits).
+  A branch merely **ahead** of another used to share its row, correctly by the
+  old rule and uselessly in practice: nothing on screen then said which of the
+  two you were looking at.  The arrow invariant survives because a colour group
+  is a *contiguous segment of one chain* (`assign_tints` only ever moves
+  `current` forward), so a horizontal run inside a row always joins two
+  consecutive blocks of that row.  The cost is one row per branch instead of
+  per overlapping chain; `j`/`k` and the track scroll already handle it.
 - **An arrow crosses tracks at one column, and which column depends on the slot**
   (`Edge::cross_col`).  A first parent crosses **late**, in the gap immediately
   right of the commit it points at, so the long run stays in the child's own track;
@@ -1093,19 +1117,40 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   of its own (`layout::place_head`) when that track is carrying an arrow past it —
   which is any checkout of something other than a branch tip.  A block there hides
   the arrow completely, since blocks are painted after arrows.
-- **The HEAD block carries the work tree, and `w` turns it into a list.**
+- **The HEAD block carries the work tree, and `w` opens the staging view.**
   `WorkTree` holds the `Change` entries `git status --porcelain` reported (path +
   git's own two status columns, kept verbatim) and *derives* every count from
   them, so the summary and the list cannot disagree.  `WorkTree::summary_lines`
   is the one place the two HEAD rows are worded — the layout sizes the block
   against those strings and the renderer draws them, or a block sized from one
-  string and filled with another clips the half that matters.  `w` /
-  `:vc-status` opens the entries as a navigate popup (conflicts, then what is on
-  its way into a commit, then the untracked strays), and `Enter` opens one in
-  the editor: "3 untracked" is the number you can see without being told, and
-  *which three* is the question a repository full of scratch notebooks raises.
-- **Planned vs immediate is a deliberate line**: rewriting history (arrows, branch
-  labels, drop, merge) is planned; checkout / stage / unstage / commit / fetch /
+  string and filled with another clips the half that matters.
+- **`w` / `:vc-status` is the staging view**: a two-pane float
+  (`popup::StageState`, `popup_ui::render_stage_popup`) with the entries on the
+  left — conflicts, then what is on its way into a commit, then the untracked
+  strays, each behind git's own two status columns — and the selected file's
+  diff on the right.  "3 untracked" is the number you can see without being
+  told, *which three* is the question a repository full of scratch notebooks
+  raises, and *what is in them* is the one that actually stops someone
+  committing — which used to mean leaving the view and opening the file.
+  `Space` stages or unstages the file under the cursor, `Enter` opens it, and
+  an untracked file shows its **contents** (it has no diff, and the contents
+  are what you need before deciding whether it belongs in the repository).
+  The diff is against **HEAD**, not the index, so staging never makes the diff
+  you were reading disappear; the status columns are where staging shows.
+  The list is read live from `git status --porcelain` rather than from the
+  snapshot — it has to be, since it changes under the cursor — and each toggle
+  writes the fresh work tree back into `Dag.work`, which the HEAD block's counts
+  and the apply preflight both read.  Keys are handled in `popup_input`, where
+  there is no `App` to reach git through, so the toggle and the pane refresh are
+  parked on `StageState` and run by `exec::vcs::pump_stage_popup` from the
+  `PopupAction::Continue` arm — the same shape the theme picker's live preview
+  uses.
+- **`s` shows `git status` verbatim** in a focused text float
+  (`exec::vcs::show_git_status`).  Everything else here is this view's own
+  wording for the work tree, and git's own output is what a git user checks when
+  something looks wrong.  Staging-everything moved to `+`/`-` to free the key.
+- **Planned vs immediate is a deliberate line**: rewriting history (moving a
+  commit or a branch label, drop, merge) is planned; checkout / stage / unstage / commit / fetch /
   pull / push happen now.  The line is *could this make a commit unreachable* —
   which is the same line the backup refs cover.  Network operations and the replay
   itself run on a background thread (`exec::vcs::VcsJob`, polled by the run loop
@@ -1136,8 +1181,9 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   database needs a Python environment with a driver.
 - The version-control graph has **no search**, and no bisect, submodule or
   interactive-add support (out of scope by decision).  The working-tree list
-  (`w`) is read-only apart from `Enter`: there is no per-file stage, unstage,
-  discard or `.gitignore` gesture — `s`/`S` still stage and unstage everything. A **merge cannot be
+  (`w`) stages and unstages per file with `Space`, but there is no per-hunk
+  staging, no discard and no `.gitignore` gesture — `+`/`-` do everything at
+  once. A **merge cannot be
   replayed** onto a new parent, so a plan whose replay list contains one is refused
   rather than flattened — the same limit `git rebase` has without `--rebase-merges`.
   Conflicts stop the run and are resolved in the ordinary editor; the dedicated
@@ -1285,7 +1331,8 @@ src/
                         request/notification builders, path↔uri + diagnostic_key
   lsp_manager.rs      — LspManager: multiple servers per language, feature routing,
                         diagnostics merge, notebookDocument sync
-  popup.rs            — Popup data model (list/completion/docs/code-actions)
+  popup.rs            — Popup data model (list/completion/docs/code-actions/
+                        staging) + sanitize_lines: what a float may safely hold
   popup_input.rs      — key handling for popups (filter, navigate, confirm)
   popup_ui.rs         — ratatui rendering for popups + floats
   ui.rs               — ratatui rendering for plain text editor; render_chrome draws
@@ -1313,6 +1360,8 @@ src/
                         Focus + the focusable list that navigation walks
     state.rs          — VcsState: snapshot + plan + cursor + the drag state
                         machine (what dropping one thing on another *means*)
+                        Focus is a commit block, a ref label or HEAD — never
+                        an arrow; see the Phase V1 notes above
   vcs_ui.rs           — ratatui renderer for the graph; a Painter writes cells in
                         stack coordinates, clipped to the viewport
   compute/            — the Python engines, owned by App (not by any view)
@@ -1403,6 +1452,19 @@ A `debug_assert` at the top of `execute()` pins the second rule: a command
   entered-but-unpainted alternate screen is an empty screen with a lone cursor, which
   reads as a hang. The query is also skipped outright on Kitty/Ghostty, where the
   flags are pushed regardless of the answer
+- **A popup shows text the editor did not write, so it must be sanitised**
+  (`popup::sanitize_lines`, applied by `Popup::documentation` and by the staging
+  view's diff pane).  A control character stored as a cell's symbol is emitted
+  **verbatim** by the backend: a literal tab in `git status` output advanced the
+  real cursor to the next tab stop mid-flush, so every cell drawn after it on
+  that row landed in the wrong column and the float's own right border came out
+  several columns adrift, differently on each row.  ratatui's buffer never sees
+  it, so the damage survives until a full redraw.  Tabs are *expanded* (stop of
+  8, which is what the programs producing that output assume) so the alignment
+  they were written for survives; every other control character becomes a space.
+  The same rule the minibuffer has (`table::layout::sanitize`), one widget
+  along.  Popup widths are measured in **display columns**, never `str::len` —
+  an em dash is three bytes and one column.
 - Minibuffer messages go through `app.messages.show(...)` (see `app::Messages`), which appends
   to the *Messages* log at show time — never write a message field directly.
   **`SingleLineWidget` flattens what it draws** (`table::layout::sanitize`): the minibuffer

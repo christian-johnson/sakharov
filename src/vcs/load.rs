@@ -289,7 +289,7 @@ fn classify_ref(refname: &str) -> Option<(RefKind, &str)> {
 /// the one worth opening.  Paths git quoted (because they contain something
 /// unusual) keep their quotes stripped rather than being dropped — a file you
 /// cannot see is exactly the file that surprises you.
-pub(super) fn parse_status(out: &str) -> WorkTree {
+pub fn parse_status(out: &str) -> WorkTree {
     let mut entries = Vec::new();
     for line in out.lines() {
         let mut chars = line.chars();

@@ -404,13 +404,21 @@ impl Keymap {
         vcs.insert(KeyBinding::char('c'), vec![Command::VcsCheckout]);
         vcs.insert(KeyBinding::char('d'), vec![Command::VcsDrop]);
         vcs.insert(KeyBinding::char('m'), vec![Command::VcsMerge]);
-        vcs.insert(KeyBinding::char('s'), vec![Command::VcsStage]);
-        vcs.insert(KeyBinding::char('S'), vec![Command::VcsUnstage]);
         vcs.insert(KeyBinding::char('r'), vec![Command::VcsRefresh]);
-        // `w` for the work tree: the files that are not in any commit yet.
+        // `s` is `git status`, verbatim, in a float — the thing every git user
+        // types first and the one output this view paraphrases rather than
+        // shows.  Staging moves to `+`/`-`, which say what they do to the next
+        // commit and are unbound everywhere else.
+        vcs.insert(KeyBinding::char('s'), vec![Command::VcsGitStatus]);
+        vcs.insert(KeyBinding::char('+'), vec![Command::VcsStage]);
+        vcs.insert(KeyBinding::char('-'), vec![Command::VcsUnstage]);
+        // `w` for the work tree: the same files as a list you can open one of.
         // It shadows the word motion, which in a graph is only another name
         // for `l`.
         vcs.insert(KeyBinding::char('w'), vec![Command::VcsStatus]);
+        // `?` is the whole view explained, since nothing here is a git verb
+        // and there is no command line to read the answer off.
+        vcs.insert(KeyBinding::char('?'), vec![Command::VcsHelp]);
         // `q` backs out, as it does from a cell buffer and a derived table.
         vcs.insert(KeyBinding::char('q'), vec![Command::VcsClose]);
         // `J` pages, matching the notebook and the grid.

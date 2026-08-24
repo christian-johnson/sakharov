@@ -131,6 +131,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 // Theme picker: live-preview whatever the selection landed on
                 // (j/k navigation, filter edits resetting the selection, …).
                 exec::preview_selected_theme(app);
+                // Staging view: run the stage/unstage the key asked for and
+                // re-read the diff pane.  Key handling has no `App` to reach
+                // git through, so this is where it happens.
+                exec::vcs::pump_stage_popup(app);
                 return;
             }
         }

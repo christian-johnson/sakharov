@@ -7,6 +7,11 @@ use crate::{
 
 /// Handle a key event when a popup is open.
 /// Returns the action to take; the caller is responsible for acting on it.
+/// Clamp a diff scroll so the pane cannot be scrolled past its last line.
+fn scroll_to(want: usize, stage: &crate::popup::StageState) -> usize {
+    want.min(stage.diff.len().saturating_sub(1))
+}
+
 pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
     // Read before borrowing the popup out of `app`.
     let doc_height = app.config.ui.doc_popup_height as usize;
@@ -23,7 +28,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
     // Text floats (hover docs, the table's cell peek) use the same passive →
     // focused model as the completion popup: the float is a hint overlay you
     // read at a glance, Tab engages with it when it is taller than the float,
-    // and j/k/J/K then scroll it. Esc leaves.
+    // and j/k/J/K then scroll it. Esc or q leaves.
     if let PopupContent::Text(ref mut text) = popup.content {
         let visible = doc_height;
         let page = (visible / 2).max(1);
@@ -43,7 +48,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         }
 
         return match key.code {
-            KeyCode::Esc | KeyCode::Enter => PopupAction::Dismiss,
+            // `q` as well as Esc: a focused float is read like a temporary
+            // buffer, and `q` is how every other temporary thing in the editor
+            // is backed out of.  It is safe to spend here because a focused
+            // float swallows everything it does not use anyway.
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => PopupAction::Dismiss,
             // Tab disengages without closing, mirroring the completion popup.
             KeyCode::Tab => {
                 text.focused = false;
@@ -82,6 +91,69 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
                 PopupAction::Continue
             }
             // Focused means focused: don't leak stray keys into the editor.
+            _ => PopupAction::Continue,
+        };
+    }
+
+    // The staging view: a modal reading pane, so it swallows anything it does
+    // not use rather than leaking keys into the graph behind it.  Stage/unstage
+    // and the diff refresh both need git, which there is no `App` to reach from
+    // here — so they are parked on the state and run by
+    // `exec::vcs::pump_stage_popup` on the next `Continue`, the same shape the
+    // theme picker's live preview uses.
+    if let PopupContent::Stage(ref mut stage) = popup.content {
+        let page = (doc_height / 2).max(1);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let last = stage.entries.len().saturating_sub(1);
+        return match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => PopupAction::Dismiss,
+            KeyCode::Char('j') | KeyCode::Down => {
+                stage.select(stage.selected.saturating_add(1));
+                PopupAction::Continue
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                stage.select(stage.selected.saturating_sub(1));
+                PopupAction::Continue
+            }
+            KeyCode::Char('g') => {
+                stage.select(0);
+                PopupAction::Continue
+            }
+            KeyCode::Char('G') => {
+                stage.select(last);
+                PopupAction::Continue
+            }
+            // The diff pane scrolls on the same keys a focused text float
+            // does, so one file's worth of changes is readable without
+            // leaving the list.
+            KeyCode::Char('d') if ctrl => {
+                stage.diff_scroll = scroll_to(stage.diff_scroll + page, stage);
+                PopupAction::Continue
+            }
+            KeyCode::Char('u') if ctrl => {
+                stage.diff_scroll = stage.diff_scroll.saturating_sub(page);
+                PopupAction::Continue
+            }
+            KeyCode::Char('J') | KeyCode::PageDown => {
+                stage.diff_scroll = scroll_to(stage.diff_scroll + page, stage);
+                PopupAction::Continue
+            }
+            KeyCode::Char('K') | KeyCode::PageUp => {
+                stage.diff_scroll = stage.diff_scroll.saturating_sub(page);
+                PopupAction::Continue
+            }
+            KeyCode::Char(' ') => {
+                stage.toggle = true;
+                PopupAction::Continue
+            }
+            KeyCode::Enter => match stage.selected_entry() {
+                Some(entry) => PopupAction::Confirm(crate::popup::ConfirmPayload::Navigate {
+                    path: entry.file.clone(),
+                    line: 0,
+                    col: 0,
+                }),
+                None => PopupAction::Dismiss,
+            },
             _ => PopupAction::Continue,
         };
     }

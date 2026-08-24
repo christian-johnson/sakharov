@@ -131,6 +131,28 @@ impl Painter<'_, '_> {
             self.cell(row, col + i as u16, ch, style);
         }
     }
+
+    /// `text` at the viewport's own left edge: scrolled with the graph
+    /// vertically, never horizontally.
+    ///
+    /// A row's branch name is the answer to "which branch am I looking at",
+    /// and that question is at its sharpest a hundred commits along a history
+    /// — exactly where a name written in graph coordinates has scrolled off.
+    fn pinned_text(&mut self, row: u16, text: &str, style: Style) {
+        let Some(row) = row.checked_sub(self.scroll_row) else { return };
+        if row >= self.area.height {
+            return;
+        }
+        for (i, ch) in text.chars().enumerate() {
+            let col = i as u16;
+            if col >= self.area.width {
+                return;
+            }
+            self.frame.buffer_mut()[(self.area.x + col, self.area.y + row)]
+                .set_char(ch)
+                .set_style(style);
+        }
+    }
 }
 
 /// Draw the graph for `state` into `area`.
@@ -140,7 +162,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
     let mut p = Painter {
         frame,
         area,
-        scroll_row: layout.track_row(state.scroll_track),
+        scroll_row: layout.label_row(state.scroll_track),
         scroll_col: state.scroll_col,
     };
 
@@ -169,6 +191,32 @@ pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
         draw_block(&mut p, state, &layout, block, &cursor);
     }
     draw_horizon(&mut p, state, &layout);
+    // Last, so a lane's name wins over an arrow that happens to cross the row
+    // it is written on.
+    draw_lane_names(&mut p, &layout);
+}
+
+/// Write each row's branch name above it.
+///
+/// A track *is* a branch (see `vcs::layout::place`), and without the name the
+/// only place a branch is written is the label on its tip — which on a long
+/// history is a screenful to the right of the commits that are on it.  That
+/// was the whole complaint: a feature branch's commits with nothing anywhere
+/// on screen saying they were the feature branch's.
+fn draw_lane_names(p: &mut Painter, layout: &Layout) {
+    let th = theme::active();
+    for track in 0..layout.track_count {
+        let Some(name) = layout.lane_label(track) else { continue };
+        let colour = layout
+            .branch_tints
+            .get(name)
+            .map_or(th.vcs_branch, |&t| th.vcs_tint(t));
+        p.pinned_text(
+            layout.label_row(track),
+            &format!("╾ {name} "),
+            Style::default().fg(colour).add_modifier(Modifier::BOLD),
+        );
+    }
 }
 
 /// Say so when the walk stopped at the commit limit.
@@ -423,7 +471,6 @@ fn draw_commit_contents(
 /// backwards.
 fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     let th = theme::active();
-    let this = Focus::Edge { child: edge.child.clone(), slot: edge.slot };
     // An arrow belongs to the commit it leaves, so it takes that commit's
     // colour and a branch reads as one colour from tip to base.  HEAD's arrow
     // is not a parent link and keeps the neutral edge colour.
@@ -431,10 +478,10 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
         Some(block) if block.kind != BlockKind::Head => th.vcs_tint(block.tint),
         _ => th.vcs_edge,
     };
+    // An arrow is never the cursor's target — it is drawn heavy when the
+    // commit it leaves is, so grabbing a block visibly takes its link with it.
+    let this = Focus::Commit(edge.child.clone());
     let style = cursor.style(&this, base);
-    // A focused arrow is drawn heavy rather than in another colour, the same
-    // way a focused block gets a heavy border: an arrow is a thin line, and
-    // bold alone is not enough to find it.
     let heavy = cursor.mark(&this).is_some();
     let (v, h) = if heavy { ('┃', '━') } else { ('│', '─') };
 
@@ -471,12 +518,32 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
         // very first column: the stroke it turns out of is the block sitting
         // directly beside it, and a bare `│` there reads as a line from
         // nowhere.
-        p.cell(r.from_row, r.cross, if down { '╮' } else { '╰' }, style);
+        //
+        // Both corners join a horizontal run heading *west* to the vertical:
+        // at the top of the drop the vertical continues away from the run, at
+        // the bottom it arrives from the direction the run came down.
+        p.cell(r.from_row, r.cross, corner(down, heavy), style);
         if r.cross > r.head_col {
-            p.cell(r.to_row, r.cross, if down { '╯' } else { '╮' }, style);
+            p.cell(r.to_row, r.cross, corner(!down, heavy), style);
         }
     }
     p.cell(r.to_row, r.head_col, '◀', style);
+}
+
+/// The corner joining a westward horizontal run to a vertical.
+///
+/// `south` says which way the vertical goes.  The weight has to match the
+/// strokes it joins: a focused arrow is drawn with the heavy set, and a light
+/// rounded corner in the middle of it leaves a visible notch where the two
+/// stroke widths fail to meet — which is exactly what a corner is there to
+/// prevent.
+fn corner(south: bool, heavy: bool) -> char {
+    match (south, heavy) {
+        (true, false) => '╮',
+        (true, true) => '┓',
+        (false, false) => '╯',
+        (false, true) => '┛',
+    }
 }
 
 /// A one-line description of what the cursor is on, for the message line.
@@ -485,13 +552,6 @@ pub fn describe_focus(dag: &Dag, focus: &Focus) -> String {
         Focus::Head => "HEAD".to_string(),
         Focus::Ref(name) => format!("branch {name}"),
         Focus::Commit(id) => describe_commit(dag, id),
-        Focus::Edge { child, slot } => {
-            let parent = dag
-                .get(child)
-                .and_then(|c| c.parents.get(*slot))
-                .map_or_else(|| "nothing".to_string(), |p| p.short().to_string());
-            format!("the link from {} to {parent}", child.short())
-        }
     }
 }
 
@@ -587,10 +647,87 @@ mod tests {
         assert!(screen.contains("1 untracked"), "{screen}");
     }
 
+    /// Each branch's row says whose it is, at the viewport's left edge.  The
+    /// label on a branch's tip is a screenful away on a long history, so
+    /// without this nothing on screen names the branch you are reading.
+    #[test]
+    fn every_branch_row_carries_its_name_at_the_left_edge() {
+        let mut state = state();
+        // A second branch, one commit behind, so there are two rows to name.
+        state.dag.refs.push(Ref {
+            name: "older".into(),
+            kind: RefKind::Local,
+            target: Oid::new("bbbbbbb2"),
+            upstream: None,
+        });
+        let lines = draw(&state, 90, 30);
+        for name in ["main", "older"] {
+            assert!(
+                lines.iter().any(|l| l.starts_with(&format!("╾ {name}"))),
+                "no row is named {name}\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+
+    /// …and it stays there once the graph is scrolled sideways, which is
+    /// exactly when the question is worth asking.
+    #[test]
+    fn a_row_keeps_its_name_when_the_graph_is_scrolled() {
+        let mut state = state();
+        state.scroll_col = 30;
+        let lines = draw(&state, 90, 30);
+        assert!(
+            lines.iter().any(|l| l.starts_with("╾ main")),
+            "{}",
+            lines.join("\n")
+        );
+    }
+
     #[test]
     fn a_branch_label_is_drawn_on_its_commit() {
         let screen = draw(&state(), 90, 30).join("\n");
         assert!(screen.contains(" main "), "{screen}");
+    }
+
+    /// A focused arrow is drawn with the heavy box-drawing set, and its
+    /// corners have to be heavy too.  A light rounded corner in the middle of
+    /// a heavy run leaves a visible notch exactly where the corner is there to
+    /// join two strokes.
+    #[test]
+    fn a_focused_arrow_has_corners_of_its_own_weight() {
+        let mut state = state();
+        // A branch on the older commit, so the two sit in different rows and
+        // the arrow between them actually turns a corner.
+        state.dag.refs.push(Ref {
+            name: "older".into(),
+            kind: RefKind::Local,
+            target: Oid::new("bbbbbbb2"),
+            upstream: None,
+        });
+        state.focus = Some(Focus::Commit(Oid::new("aaaaaaa1")));
+        let screen = draw(&state, 120, 30).join("\n");
+        assert!(screen.contains('┃'), "the focused arrow is not heavy\n{screen}");
+        // The corner sits immediately left of the run it turns out of, so a
+        // corner of the right weight reads as one stroke with it.  A block's
+        // own corner is always the *last* character of its border, so this
+        // pair can only come from an arrow.
+        assert!(
+            screen.contains("┓━") || screen.contains("┛━"),
+            "a heavy arrow turned a light corner\n{screen}"
+        );
+
+        // …and an unfocused one keeps the light set end to end.
+        state.focus = Some(Focus::Head);
+        let screen = draw(&state, 120, 30).join("\n");
+        assert!(
+            screen.contains("╮─") || screen.contains("╯─"),
+            "the light arrow lost its corner\n{screen}"
+        );
+        assert!(
+            !screen.contains("┓━") && !screen.contains("┛━"),
+            "a light arrow turned a heavy corner\n{screen}"
+        );
     }
 
     /// The arrowhead points at the *parent*, which is to the **left**: a
@@ -634,23 +771,25 @@ mod tests {
             .unwrap();
         let lines = draw(&state, 90, 30);
         let screen = lines.join("\n");
-        // The label is drawn on its block's own top border, so "which block is
-        // it on" is answered by which border row carries both the hash and the
-        // name — not by proximity, which would also match HEAD's `● main`.
-        // Both blocks sit on the same border row now that time runs sideways,
-        // so the hash and the label have to be checked against each other by
-        // column, which `lines` preserves.
-        // Both blocks share a border row now that time runs sideways, so
-        // "which block" is a question about columns: a label belongs to the
-        // hash immediately to its left.
-        let border = lines.iter().find(|l| l.contains(" main ")).expect("the border row");
-        let label = border.find(" main ").expect("the label");
-        let older = border.find("bbbbbbb").expect("the older commit");
-        let newer = border.find("aaaaaaa").expect("the newer commit");
-        let on_older = older < label && label < newer;
-        let on_newer = newer < label;
-        assert!(on_older, "main should now sit on the older commit\n{screen}");
-        assert!(!on_newer, "and no longer on the newer one\n{screen}");
+        // The label is drawn on its block's own top border, and each branch
+        // now has a row of its own — so "which block is it on" is answered by
+        // finding the border row that carries the older commit's hash and
+        // checking the label is on that row, after it.
+        let border = lines
+            .iter()
+            .find(|l| l.contains("bbbbbbb"))
+            .expect("the older commit's border row");
+        let hash = border.find("bbbbbbb").expect("the hash");
+        let label = border
+            .find(" main ")
+            .unwrap_or_else(|| panic!("main should now sit on the older commit\n{screen}"));
+        assert!(hash < label, "the label is not on that block\n{screen}");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("aaaaaaa") && l.contains(" main ")),
+            "and no longer on the newer one\n{screen}"
+        );
     }
 
     #[test]
@@ -668,10 +807,7 @@ mod tests {
         assert_eq!(describe_focus(dag, &Focus::Ref("main".into())), "branch main");
         assert!(describe_focus(dag, &Focus::Commit(Oid::new("aaaaaaa1")))
             .contains("Fix sigterm"));
-        assert_eq!(
-            describe_focus(dag, &Focus::Edge { child: Oid::new("aaaaaaa1"), slot: 0 }),
-            "the link from aaaaaaa to bbbbbbb"
-        );
     }
 }
+
 

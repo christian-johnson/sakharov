@@ -22,7 +22,7 @@ use std::sync::mpsc::{self, Receiver};
 use crate::{
     app::{App, VCS_BUFFER},
     command::Command,
-    popup::Popup,
+    popup::{Popup, StageEntry},
     source::SourceId,
     stash::Stash,
     vcs::{
@@ -150,7 +150,7 @@ pub fn open(app: &mut App) {
         }
     }
     app.vcs_pending = Some(load::start(root, MAX_COMMITS));
-    app.messages.show("Reading the repository…");
+    app.messages.show("Reading the repository…  (? for the keys)");
 }
 
 /// Hand the screen to the graph, detaching the buffer behind it.
@@ -212,7 +212,7 @@ pub fn update_scroll(app: &mut App) {
     let (row, col) = (at.row, at.col);
     let (block_width, total_cols) = (layout.block_width, layout.total_cols);
     let (track_count, visible_tracks) = (layout.track_count, layout.visible_tracks(height));
-    let track = (row / (vcs::layout::BLOCK_H + vcs::layout::TRACK_GAP)) as usize;
+    let track = layout.track_at_row(row);
     let Some(state) = app.vcs.as_mut() else { return };
 
     // Columns move freely: the time axis is the one you travel along, so a
@@ -308,6 +308,8 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         // grid binds Enter to, and it arrives here from a user rebinding.
         Command::VcsEnter | Command::TableOpenCell => enter_action(app),
         Command::VcsStatus => show_work_tree(app),
+        Command::VcsGitStatus => show_git_status(app),
+        Command::VcsHelp => app.popup = Some(Popup::reference("version control", HELP)),
         Command::VcsStage => run_now(app, &["add", "--all"], "Staged everything"),
         Command::VcsUnstage => run_now(app, &["reset"], "Unstaged everything"),
         Command::VcsFetch => remote_job(app, vec!["fetch".into(), "--all".into()], "Fetching"),
@@ -345,8 +347,8 @@ fn page(app: &App, cmd: &Command) -> usize {
         // The ends of the graph: further than it can possibly be.
         Command::GotoFileStart | Command::GotoFileEnd => usize::MAX,
         // Half a screen, measured in blocks rather than columns, so paging
-        // lands on a block rather than mid-border.  Each block costs two steps
-        // (the block, then the arrow beside it).
+        // lands on a block rather than mid-border.  One step per block: arrows
+        // are not somewhere the cursor stops.
         _ => {
             let stride = app
                 .vcs
@@ -355,7 +357,7 @@ fn page(app: &App, cmd: &Command) -> usize {
                     state.layout(app.viewport_width as u16).col_stride()
                 });
             let cols = app.viewport_width as u16 / 2;
-            (2 * (cols / stride)).max(1) as usize
+            (cols / stride).max(1) as usize
         }
     }
 }
@@ -761,7 +763,7 @@ fn commit(app: &mut App, message: &str) {
     let Some(state) = app.vcs.as_ref() else { return };
     if state.dag.work.staged() == 0 {
         app.messages
-            .show("Nothing staged — `s` stages every change in the work tree");
+            .show("Nothing staged — `+` stages every change in the work tree");
         return;
     }
     run_now(app, &["commit", "-m", message], "Committed");
@@ -796,49 +798,290 @@ fn enter_action(app: &mut App) {
     show_commit(app);
 }
 
-/// List everything in the working tree that is not in a commit.
+/// How much of one file's diff the pane will hold.
 ///
-/// The HEAD block says *how many*; this says *which*, and Enter opens one.
-/// The counts are the part you can see without being told — the list is the
-/// part that answers "what is all this?", which is the question a repository
-/// full of untracked scratch files actually raises.
+/// A generated file's diff can be a hundred thousand lines, and the pane is
+/// something you scroll with `Ctrl+d` — reading past this was never going to
+/// happen, and holding it costs the memory of the whole change.
+const MAX_DIFF_LINES: usize = 4000;
+
+/// Everything in the working tree that is not in a commit, worst first.
 ///
 /// Ordered by how much it wants attention rather than alphabetically:
 /// conflicts, then what is on its way into a commit, then the untracked
 /// strays — which is also the order in which the list gets less urgent and
 /// more interesting.
-fn show_work_tree(app: &mut App) {
-    let Some(state) = app.vcs.as_ref() else { return };
-    let root = state.root.clone();
-    let mut entries: Vec<&vcs::Change> = state.dag.work.entries.iter().collect();
-    if entries.is_empty() {
-        app.messages
-            .show("The working tree is clean — nothing uncommitted or untracked");
-        return;
-    }
+fn work_tree_entries(root: &std::path::Path) -> Vec<StageEntry> {
+    let work = load::parse_status(&git(root, &["status", "--porcelain"]).unwrap_or_default());
+    let mut entries = work.entries;
     entries.sort_by_key(|c| match () {
         () if c.is_conflicted() => 0,
         () if c.is_untracked() => 2,
         () => 1,
     });
-    let counts = state.dag.work.summary_lines();
-    let items = entries
-        .iter()
-        .map(|c| {
-            crate::popup::ListItem::navigate(
-                c.path.clone(),
-                c.describe(),
-                &root.join(&c.path),
-                0,
-                0,
-            )
+    entries
+        .into_iter()
+        .map(|c| StageEntry {
+            file: root.join(&c.path),
+            detail: c.describe(),
+            path: c.path,
+            index: c.index,
+            work: c.work,
         })
-        .collect();
-    app.popup = Some(Popup::navigate(
-        &format!("working tree — {}", counts[0]),
-        items,
-    ));
+        .collect()
 }
+
+/// Open the work tree beside the selected file's diff — the staging view.
+///
+/// The HEAD block says *how many*; this says *which*, and shows *what*.  The
+/// counts are the part you can see without being told; the list answers "what
+/// is all this?", which is the question a repository full of scratch notebooks
+/// raises; and the diff answers the one that actually stops someone
+/// committing, which used to mean leaving the view and opening the file.
+///
+/// `Space` stages or unstages the selected file, so deciding and doing are the
+/// same gesture in the same place.  It is an immediate action like the rest of
+/// staging — nothing here can make a commit unreachable.
+fn show_work_tree(app: &mut App) {
+    let Some(root) = app.vcs.as_ref().map(|s| s.root.clone()) else { return };
+    let entries = work_tree_entries(&root);
+    if entries.is_empty() {
+        app.messages
+            .show("The working tree is clean — nothing uncommitted or untracked");
+        return;
+    }
+    app.popup = Some(Popup::stage(entries));
+    // Fill the first diff now rather than on the first keypress, or the pane
+    // opens blank beside a file it is supposed to be describing.
+    pump_stage_popup(app);
+}
+
+/// Run whatever the staging popup's last keypress asked for.
+///
+/// Called from the popup's `PopupAction::Continue` path, because that is the
+/// only place with an `App` to reach git through — the same arrangement the
+/// theme picker's live preview has.  Does nothing unless a staging popup is
+/// open and something it describes has actually changed, so it is safe to call
+/// on every key.
+pub fn pump_stage_popup(app: &mut App) {
+    let Some(root) = app.vcs.as_ref().map(|s| s.root.clone()) else { return };
+    let Some(popup) = app.popup.as_mut() else { return };
+    let crate::popup::PopupContent::Stage(ref mut stage) = popup.content else { return };
+
+    let mut staged = None;
+    if std::mem::take(&mut stage.toggle) {
+        if let Some(entry) = stage.selected_entry() {
+            let path = entry.path.clone();
+            // A file with staged *and* unstaged parts is one `git add` away
+            // from being ready, so Space finishes the job rather than undoing
+            // the half already done.
+            let args: Vec<&str> = if entry.fully_staged() {
+                vec!["reset", "-q", "--", &path]
+            } else {
+                vec!["add", "--", &path]
+            };
+            let result = git(&root, &args);
+            staged = Some((path, result));
+        }
+    }
+
+    if let Some((path, result)) = staged {
+        // Re-read rather than patch the two columns: `git add` on a file with
+        // a conflict, or on one whose change was a rename, does not leave the
+        // status this view guessed it would.
+        let selected = stage.selected;
+        stage.entries = work_tree_entries(&root);
+        stage.select(
+            stage
+                .entries
+                .iter()
+                .position(|e| e.path == path)
+                .unwrap_or(selected),
+        );
+        // The HEAD block's counts and the apply preflight both read this, and
+        // both would be a keystroke out of date otherwise.
+        if let Some(state) = app.vcs.as_mut() {
+            state.dag.work = vcs::WorkTree::new(
+                load::parse_status(&git(&root, &["status", "--porcelain"]).unwrap_or_default())
+                    .entries,
+            );
+        }
+        if let Err(why) = result {
+            app.messages.show(why);
+            return;
+        }
+        let Some(popup) = app.popup.as_mut() else { return };
+        let crate::popup::PopupContent::Stage(ref mut again) = popup.content else { return };
+        refresh_stage_diff(&root, again);
+        return;
+    }
+
+    refresh_stage_diff(&root, stage);
+}
+
+/// Read the selected entry's diff, if the pane is not already showing it.
+fn refresh_stage_diff(root: &std::path::Path, stage: &mut crate::popup::StageState) {
+    let Some(entry) = stage.selected_entry() else {
+        stage.diff = vec!["The working tree is clean.".to_string()];
+        stage.loaded = None;
+        return;
+    };
+    if stage.loaded.as_deref() == Some(entry.path.as_str()) {
+        return;
+    }
+    let path = entry.path.clone();
+    let untracked = entry.index == '?';
+    let file = entry.file.clone();
+    stage.diff = if untracked {
+        untracked_preview(&file)
+    } else {
+        file_diff(root, &path)
+    };
+    stage.loaded = Some(path);
+    stage.diff_scroll = 0;
+}
+
+/// What changed in `path`, against the last commit.
+///
+/// `HEAD` rather than the index, because the pane answers "what is not in a
+/// commit yet" — which is the same thing the work tree itself means, and stays
+/// the same picture as you stage, so `Space` never makes the diff you were
+/// reading disappear.  The fallbacks cover a repository with no commits, where
+/// there is no `HEAD` to diff against.
+fn file_diff(root: &std::path::Path, path: &str) -> Vec<String> {
+    for args in [
+        vec!["diff", "HEAD", "--", path],
+        vec!["diff", "--cached", "--", path],
+        vec!["diff", "--", path],
+    ] {
+        let Ok(text) = git(root, &args) else { continue };
+        if text.trim().is_empty() {
+            continue;
+        }
+        return cap(crate::popup::sanitize_lines(&text));
+    }
+    vec![format!("No textual change in {path}.")]
+}
+
+/// An untracked file has no diff — it has contents, which is what you need to
+/// see before deciding whether it belongs in the repository at all.
+fn untracked_preview(file: &std::path::Path) -> Vec<String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => std::iter::once("(untracked — the whole file)".to_string())
+            .chain(cap(crate::popup::sanitize_lines(&text)))
+            .collect(),
+        Err(why) => vec![format!("(untracked — cannot be shown as text: {why})")],
+    }
+}
+
+fn cap(mut lines: Vec<String>) -> Vec<String> {
+    if lines.len() > MAX_DIFF_LINES {
+        lines.truncate(MAX_DIFF_LINES);
+        lines.push(format!("… truncated at {MAX_DIFF_LINES} lines"));
+    }
+    lines
+}
+
+/// `git status`, verbatim, in a float.
+///
+/// The graph paraphrases the work tree — two summary rows on the HEAD block,
+/// and `w` for the list of paths.  Both are this view's own wording, and
+/// neither is what a git user checks when something looks wrong.  git's own
+/// output is: it names the branch, how far it is from its upstream, what is
+/// staged, what is not, and what it is in the middle of.  Shown rather than
+/// re-worded, because the value of it is that it is the familiar text.
+///
+/// A focused float, like the SQL error and the cell peek: a passive one is
+/// dismissed by the next keystroke, and this is several screens of text on a
+/// busy tree.  `Esc` or `q` leaves.  Sized to its own widest line
+/// ([`Popup::reference`]), because a text float clips rather than wraps and
+/// git's output is laid out in columns.
+fn show_git_status(app: &mut App) {
+    let Some(root) = app.vcs.as_ref().map(|s| s.root.clone()) else { return };
+    match git(&root, &["status"]) {
+        Ok(text) => app.popup = Some(Popup::reference("git status", text.trim_end())),
+        Err(why) => app.messages.show(why),
+    }
+}
+
+/// What `?` shows.
+///
+/// Written out rather than generated from the keymap because the keys are the
+/// smaller half: this view has no git verb anywhere in it, so what a reader
+/// needs is not "Space is grab" but *what grabbing a commit means* and what
+/// does and does not touch the repository.  The walkthroughs are the point;
+/// the tables are there so the walkthroughs can be short.
+const HELP: &str = "\
+The graph is the truth, and moving things in it is how history is changed.
+You state a shape; the editor works out the git commands that produce it.
+
+Nothing here touches the repository until you run :vc-apply — except the
+everyday actions listed under `right now` below, none of which can make a
+commit unreachable.
+
+  MOVING AROUND
+    h / l          back and forward through history
+    j / k          between branches — each branch has a row of its own
+    J / K          half a screen
+    gg / ge        the first / last commit
+    Enter          on a branch: go there.  On a commit: read its diff
+    y              copy the hash under the cursor
+
+  REARRANGING HISTORY  (planned — nothing happens yet)
+    Space          pick up what the cursor is on / put it down here
+    d              remove the selected commit from the planned history
+    m              merge the selection into the branch you are on
+    u              take back the last planned change
+    gx             discard the whole plan
+    :vc-apply      show the git commands the plan becomes, and run them
+    :vc-undo       put every branch back where it was before the last apply
+
+  RIGHT NOW  (these run immediately)
+    c              check out the branch or commit under the cursor
+    s              git status, verbatim
+    w              the work tree beside each file's diff — j/k pick a file,
+                   Space stages or unstages it, Enter opens it
+    +  /  -        stage / unstage everything
+    :vc-commit <message>
+    :vc-branch <name>          a new branch at the selected commit
+    :vc-fetch  :vc-pull  :vc-push
+    r              re-read the repository
+    ?              this sheet
+    q              leave the graph
+
+  WALKTHROUGH — move a commit onto a different parent
+    1. Put the cursor on the commit you want to move (h / l / j / k).
+    2. Space.  It turns amber: you are holding it.
+    3. Move to the commit it should follow.  While you hold something, the
+       cursor only stops where it could actually be dropped, and the graph
+       rearranges under it so you can see the result before deciding.
+    4. Space again.  The plan now has one change in it; the repository has
+       none.  Esc instead of Space puts it back.
+    5. :vc-apply lists what would run (cherry-pick, branch --force, …) and
+       asks.  Everything above the commit you moved is recreated, because
+       recreating a commit gives it a new hash and its children follow.
+
+  WALKTHROUGH — move a branch to a different commit
+    Put the cursor on the branch label itself (it sits on a block's top
+    border), Space, move to the commit, Space.  Whether that becomes a
+    fast-forward or a reset is not something you choose: it is whichever one
+    the shape you drew means.
+
+  WALKTHROUGH — undo an apply
+    Every local branch is saved under refs/sakharov/undo/ before the first
+    write, so :vc-undo restores all of them — including branches the plan
+    never moved, whose commits a replay quietly changed underneath.
+
+  WHAT IS REFUSED, AND WHY
+    A drop that would make a commit its own ancestor is refused as you hover,
+    not when you release — the preview never draws a graph git has no meaning
+    for.  A plan whose replay list contains a merge is refused by name:
+    cherry-pick cannot recreate one.  A dirty work tree blocks apply before
+    anything is written.
+
+  Arrows are not something you select.  An arrow is another name for the
+  commit it leaves, so grab the commit and the arrow follows it.
+";
 
 fn show_commit(app: &mut App) {
     let Some(state) = app.vcs.as_ref() else { return };
@@ -931,6 +1174,7 @@ pub fn goto_hints() -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent};
     use crate::vcs::{layout::Focus, plan::Edit, Commit, Dag, Head, Ref, WorkTree};
 
     fn commit(id: &str, parents: &[&str]) -> Commit {
@@ -991,10 +1235,11 @@ mod tests {
         );
     }
 
-    /// `h` walks back through blocks and arrows alternately, which is what
-    /// makes an arrow selectable at all.
+    /// `h`/`l` walk from block to block.  Nothing in between: an arrow is not
+    /// somewhere the cursor stops, so crossing the graph costs one press per
+    /// commit rather than two.
     #[test]
-    fn h_and_l_walk_the_blocks_and_the_arrows_between_them() {
+    fn h_and_l_walk_the_blocks_with_nothing_in_between() {
         let mut app = app_in_graph();
         let start = focus(&app);
         super::handle(&mut app, &Command::MoveLeft);
@@ -1003,14 +1248,23 @@ mod tests {
         super::handle(&mut app, &Command::MoveRight);
         assert_eq!(focus(&app), start, "the walk is reversible");
 
-        // Somewhere back through history there is an arrow, or nothing can be
-        // dragged.
-        let mut seen_edge = false;
+        // Five commits, so five presses reach the oldest and a sixth has
+        // nowhere left to go.  With arrows on the walk it took eleven.
+        let mut seen = vec![focus(&app)];
         for _ in 0..12 {
             super::handle(&mut app, &Command::MoveLeft);
-            seen_edge |= matches!(focus(&app), Focus::Edge { .. });
+            let at = focus(&app);
+            if seen.last() != Some(&at) {
+                seen.push(at);
+            }
         }
-        assert!(seen_edge, "arrows must be reachable with h");
+        assert!(seen.len() <= 8, "the walk stops on something extra: {seen:?}");
+        for at in &seen {
+            assert!(
+                matches!(at, Focus::Commit(_) | Focus::Ref(_) | Focus::Head),
+                "{at:?} is not a block or a label"
+            );
+        }
     }
 
     /// The headline gesture, through the command layer this time: grab, move,
@@ -1157,6 +1411,78 @@ mod tests {
         }
     }
 
+    /// `?` is the whole view explained, since none of it is a git verb and
+    /// there is no command line to read the answer off.
+    #[test]
+    fn question_mark_opens_the_help_float() {
+        let mut app = app_in_graph();
+        assert!(
+            app.keymap
+                .lookup(crate::keymap::Layer::Vcs, &crate::keymap::KeyBinding::char('?'))
+                .is_some_and(|c| matches!(c, [Command::VcsHelp])),
+            "? has to be bound in the graph"
+        );
+        super::handle(&mut app, &Command::VcsHelp);
+        let popup = app.popup.as_ref().expect("the help opened");
+        let crate::popup::PopupContent::Text(ref text) = popup.content else {
+            panic!("the help is a text float");
+        };
+        assert!(text.focused, "it is read, not glanced at");
+        let body = text.lines.join("\n");
+        for topic in ["WALKTHROUGH", ":vc-apply", "Space"] {
+            assert!(body.contains(topic), "the help never mentions {topic}");
+        }
+    }
+
+    /// Every single-character key the help lists has to actually be bound in
+    /// the graph, or the sheet teaches presses that do nothing.  Listed here
+    /// rather than parsed out of the prose: the help is written for a reader,
+    /// and a parser for it would be pinning the formatting, not the keys.
+    #[test]
+    fn the_help_only_advertises_keys_that_are_bound() {
+        let app = app_in_graph();
+        for key in [
+            'h', 'l', 'j', 'k', 'J', 'K', 'c', 's', 'w', '+', '-', 'r', 'q', 'y', 'd', 'm',
+            'u', ' ', '?',
+        ] {
+            assert!(
+                super::HELP.contains(key),
+                "the help stopped mentioning `{key}`"
+            );
+            assert!(
+                app.keymap
+                    .lookup_layered(crate::keymap::Layer::Vcs, &crate::keymap::KeyBinding::char(key))
+                    .is_some(),
+                "the help advertises `{key}`, which is not bound"
+            );
+        }
+    }
+
+    /// `s` is `git status`, verbatim.  The graph paraphrases the work tree
+    /// everywhere else; this is the one place it shows git's own words, which
+    /// is what a git user checks when something looks wrong.
+    #[test]
+    fn s_shows_git_status_verbatim_in_a_float() {
+        let here = std::env::current_dir().expect("cwd");
+        let Some(root) = load::discover_root(&here) else {
+            return; // not a checkout (a source tarball); nothing to ask git
+        };
+        let mut app = app_in_graph();
+        app.vcs.as_mut().expect("the graph").root = root;
+        super::handle(&mut app, &Command::VcsGitStatus);
+
+        let popup = app.popup.as_ref().expect("the float opened");
+        let crate::popup::PopupContent::Text(ref text) = popup.content else {
+            panic!("git status is shown as text, not a list");
+        };
+        assert!(text.focused, "a passive float would be dismissed by the next key");
+        let body = text.lines.join("\n");
+        assert!(
+            body.contains("On branch") || body.contains("HEAD detached"),
+            "this is not git's own output: {body}"
+        );
+    }
+
     /// The `g` which-key popup must never advertise a key that does nothing —
     /// the same pairing `goto_hints` has with `input::goto_command` elsewhere.
     #[test]
@@ -1216,7 +1542,7 @@ mod tests {
     #[test]
     fn a_drag_walks_only_the_commits_it_could_actually_be_dropped_on() {
         let mut app = app_in_graph();
-        app.vcs.as_mut().unwrap().focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Commit(Oid::new("c")));
         super::handle(&mut app, &Command::VcsGrab);
 
         let mut seen = Vec::new();
@@ -1251,7 +1577,7 @@ mod tests {
     #[test]
     fn the_preview_follows_the_cursor_during_a_drag() {
         let mut app = app_in_graph();
-        app.vcs.as_mut().unwrap().focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Commit(Oid::new("c")));
         super::handle(&mut app, &Command::VcsGrab);
 
         let mut previewed = Vec::new();
@@ -1311,45 +1637,130 @@ mod tests {
         assert!(app.vcs.as_ref().unwrap().focused_branch().is_none());
     }
 
-    /// The working-tree list is the answer to "what is all this?" — the HEAD
-    /// block says how many, this says which, and an untracked scratch file has
-    /// to be in it or the feature misses its whole point.
-    #[test]
-    fn the_work_tree_list_names_every_uncommitted_and_untracked_file() {
-        let mut app = app_in_graph();
-        app.vcs.as_mut().unwrap().dag.work = crate::vcs::WorkTree::new(vec![
-            crate::vcs::Change { path: "src/app.rs".into(), index: 'M', work: ' ' },
-            crate::vcs::Change { path: "scratch.ipynb".into(), index: '?', work: '?' },
-            crate::vcs::Change { path: "merge.rs".into(), index: 'U', work: 'U' },
-        ]);
-        super::handle(&mut app, &Command::VcsStatus);
-
-        let popup = app.popup.as_ref().expect("the list opened");
-        let crate::popup::PopupContent::List(ref list) = popup.content else {
-            panic!("the working tree is a list of files");
-        };
-        let labels: Vec<&str> = list.items.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            ["merge.rs", "src/app.rs", "scratch.ipynb"],
-            "conflicts first, then what is on its way into a commit, then the strays"
-        );
-        let details: Vec<String> = list
-            .items
-            .iter()
-            .map(|i| i.detail.clone().unwrap_or_default())
-            .collect();
-        assert!(details.contains(&"untracked".to_string()), "{details:?}");
-        assert!(details.contains(&"conflicted".to_string()), "{details:?}");
+    /// A throwaway repository with something in every state the staging view
+    /// distinguishes.  Real git, because what is under test is the reading of
+    /// `git status` and the effect of `git add` — a mock would test the mock.
+    fn repo_with_changes(name: &str) -> Option<PathBuf> {
+        // Named per test: they run concurrently, and two of them sharing a
+        // work tree is one staging the other's files out from under it.
+        let root = std::env::temp_dir().join(format!("sv-stage-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).ok()?;
+        let run = |args: &[&str]| git(&root, args).ok();
+        run(&["init", "-b", "main"])?;
+        run(&["config", "user.email", "test@example.com"])?;
+        run(&["config", "user.name", "Test"])?;
+        run(&["config", "commit.gpgsign", "false"])?;
+        std::fs::write(root.join("tracked.rs"), "fn main() {}\n").ok()?;
+        run(&["add", "tracked.rs"])?;
+        run(&["commit", "-m", "first"])?;
+        // One edited-but-unstaged file, and one nobody has told git about.
+        std::fs::write(root.join("tracked.rs"), "fn main() {\n    let x = 1;\n}\n").ok()?;
+        std::fs::write(root.join("scratch.ipynb"), "{}\n").ok()?;
+        Some(root)
     }
 
-    /// A clean tree says so rather than opening an empty list.
+    fn stage_state(app: &App) -> &crate::popup::StageState {
+        let popup = app.popup.as_ref().expect("the staging view is open");
+        let crate::popup::PopupContent::Stage(ref state) = popup.content else {
+            panic!("the work tree is shown as a staging view");
+        };
+        state
+    }
+
+    /// The staging view is the answer to "what is all this?" — the HEAD block
+    /// says how many, this says which, and the pane says *what*, which is the
+    /// question that actually stops someone committing.  An untracked scratch
+    /// file has to be in it or the feature misses its whole point.
+    #[test]
+    fn the_staging_view_lists_the_work_tree_and_shows_the_selection_s_diff() {
+        let Some(root) = repo_with_changes("list") else { return };
+        let mut app = app_in_graph();
+        app.vcs.as_mut().expect("the graph").root = root.clone();
+        super::handle(&mut app, &Command::VcsStatus);
+
+        let state = stage_state(&app);
+        let paths: Vec<&str> = state.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["tracked.rs", "scratch.ipynb"],
+            "what is on its way into a commit first, then the strays"
+        );
+        // The pane is filled when the view opens, not on the first keypress.
+        assert_eq!(state.loaded.as_deref(), Some("tracked.rs"));
+        assert!(
+            state.diff.iter().any(|l| l.contains("+    let x = 1;")),
+            "the diff pane is not showing the change: {:?}",
+            state.diff
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Space stages the selected file and the view immediately shows it as
+    /// staged — deciding and doing in one place is the whole point of the
+    /// pane being there.
+    #[test]
+    fn space_stages_the_selected_file_and_the_view_follows() {
+        let Some(root) = repo_with_changes("space") else { return };
+        let mut app = app_in_graph();
+        app.vcs.as_mut().expect("the graph").root = root.clone();
+        super::handle(&mut app, &Command::VcsStatus);
+        assert!(!stage_state(&app).entries[0].staged(), "it starts unstaged");
+
+        crate::input::handle_key(&mut app, KeyEvent::from(KeyCode::Char(' ')));
+
+        let state = stage_state(&app);
+        assert_eq!(state.entries[0].path, "tracked.rs");
+        assert!(state.entries[0].fully_staged(), "Space did not stage it");
+        assert_eq!(state.selected, 0, "the cursor stayed on the file it acted on");
+        // The graph behind it agrees: the HEAD block's counts and the apply
+        // preflight both read this, and both would be a keystroke stale.
+        assert_eq!(app.vcs.as_ref().unwrap().dag.work.staged(), 1);
+
+        // …and again puts it back.
+        crate::input::handle_key(&mut app, KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!stage_state(&app).entries[0].staged(), "Space did not unstage it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Moving the selection re-reads the pane, so the diff on screen is always
+    /// the diff of the file under the cursor.
+    #[test]
+    fn moving_the_selection_reloads_the_diff_pane() {
+        let Some(root) = repo_with_changes("move") else { return };
+        let mut app = app_in_graph();
+        app.vcs.as_mut().expect("the graph").root = root.clone();
+        super::handle(&mut app, &Command::VcsStatus);
+
+        crate::input::handle_key(&mut app, KeyEvent::from(KeyCode::Char('j')));
+        let state = stage_state(&app);
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.loaded.as_deref(), Some("scratch.ipynb"));
+        // An untracked file has no diff — it has contents, which is what you
+        // need before deciding whether it belongs in the repository at all.
+        assert!(
+            state.diff.first().is_some_and(|l| l.contains("untracked")),
+            "{:?}",
+            state.diff
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A clean tree says so rather than opening an empty list.    /// A clean tree says so rather than opening an empty list.
     #[test]
     fn a_clean_work_tree_says_so_instead_of_listing_nothing() {
+        let root = std::env::temp_dir().join(format!("sv-stage-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp directory");
+        if git(&root, &["init", "-b", "main"]).is_err() {
+            return;
+        }
         let mut app = app_in_graph();
+        app.vcs.as_mut().expect("the graph").root = root.clone();
         super::handle(&mut app, &Command::VcsStatus);
         assert!(app.popup.is_none());
         assert!(app.messages.current().unwrap_or_default().contains("clean"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A `*commit …*` diff is backed out of with `q`, like every other

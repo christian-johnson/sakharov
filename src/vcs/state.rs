@@ -111,13 +111,12 @@ impl VcsState {
 
     /// The commit the cursor is over, whatever kind of thing it is over.
     ///
-    /// A ref label and an arrow both *identify* a commit, and every action
-    /// that takes one (checkout, copy the hash, show the diff) should work
-    /// from any of them rather than only from the block itself.
+    /// A ref label *identifies* a commit, and every action that takes one
+    /// (checkout, copy the hash, show the diff) should work from it rather
+    /// than only from the block itself.
     pub fn focused_commit(&self) -> Option<Oid> {
         match self.focus.as_ref()? {
             Focus::Commit(id) => Some(id.clone()),
-            Focus::Edge { child, .. } => Some(child.clone()),
             Focus::Ref(name) => self
                 .plan
                 .project(&self.dag)
@@ -151,9 +150,8 @@ impl VcsState {
         // While something is held the walk is over *destinations*, and the
         // only destination is a commit: everything being dragged is a pointer,
         // and a pointer points at a commit.  Letting the cursor stop on a
-        // branch label or an arrow on the way offered a choice that was never
-        // a choice — both are just other names for a commit already on the
-        // walk — and doubled the number of presses to cross the graph.
+        // branch label on the way offered a choice that was never a choice —
+        // it is just another name for a commit already on the walk.
         let held = self.grabbed.clone();
         let allow = |focus: &Focus| match (&held, focus) {
             (None, _) => true,
@@ -257,11 +255,6 @@ impl VcsState {
             Focus::Commit(id) => Some(id.clone()),
             Focus::Ref(name) => projection.ref_target(&self.dag, name).cloned(),
             Focus::Head => self.dag.head.target.clone(),
-            // An arrow identifies its child; dropping one arrow on another
-            // means "follow the same commit this one does".
-            Focus::Edge { child, slot } => {
-                projection.parents(&self.dag, child).get(*slot).cloned()
-            }
         }
     }
 
@@ -291,25 +284,9 @@ impl VcsState {
         // contains the preview makes every drop look like a no-op.
         let projection = self.plan.project_committed(&self.dag);
         match held {
-            // An arrow *is* the "follows" relation, so moving it says which
-            // commit its child should follow.
-            Focus::Edge { child, slot } => {
-                if child == target {
-                    return Drop::Invalid("a commit cannot follow itself".to_string());
-                }
-                if projection.parents(&self.dag, child).get(*slot) == Some(target) {
-                    return Drop::Unchanged;
-                }
-                self.validated(Edit::Reparent {
-                    child: child.clone(),
-                    slot: *slot,
-                    new_parent: Some(target.clone()),
-                })
-            }
-
-            // Dragging a block is the same statement made about its first
-            // parent — the gesture most people reach for, and the one the
-            // arrow underneath it would have made.
+            // Dragging a block says which commit it should follow: the block
+            // *is* the handle on its own first-parent link, and the arrow
+            // beneath it simply follows wherever the block is put.
             Focus::Commit(id) => {
                 if id == target {
                     return Drop::Unchanged;
@@ -394,13 +371,13 @@ mod tests {
         VcsState::new(PathBuf::from("/tmp/x"), dag, 0)
     }
 
-    /// The gesture the whole feature is built around: grab an arrow, move to
-    /// another commit, drop.  Between the two presses the graph already shows
-    /// the result, and only the second press makes it a decision.
+    /// The gesture the whole feature is built around: grab a commit, move to
+    /// another one, drop.  Between the two presses the graph already shows the
+    /// result, and only the second press makes it a decision.
     #[test]
-    fn grabbing_an_arrow_and_dropping_it_elsewhere_reparents() {
+    fn grabbing_a_commit_and_dropping_it_elsewhere_reparents() {
         let mut state = state();
-        state.focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+        state.focus = Some(Focus::Commit(Oid::new("c")));
         state.grab().unwrap();
 
         state.focus = Some(Focus::Commit(Oid::new("f")));
@@ -427,7 +404,7 @@ mod tests {
     #[test]
     fn cancelling_a_drag_leaves_the_graph_exactly_as_it_was() {
         let mut state = state();
-        state.focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+        state.focus = Some(Focus::Commit(Oid::new("c")));
         state.grab().unwrap();
         state.focus = Some(Focus::Commit(Oid::new("f")));
         state.retarget_drag();
@@ -498,7 +475,7 @@ mod tests {
     #[test]
     fn dropping_something_back_where_it_started_is_not_an_edit() {
         let mut state = state();
-        state.focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+        state.focus = Some(Focus::Commit(Oid::new("c")));
         state.grab().unwrap();
         state.focus = Some(Focus::Commit(Oid::new("a")));
 
@@ -523,12 +500,12 @@ mod tests {
     }
 
     /// The preview must never draw a graph git has no meaning for.  Dragging
-    /// an arrow over its own child used to render a cyclic graph — lanes and
+    /// a commit over its own child used to render a cyclic graph — lanes and
     /// all — and only object when the drag was released.
     #[test]
     fn a_drag_over_an_impossible_target_previews_nothing() {
         let mut state = state();
-        state.focus = Some(Focus::Edge { child: Oid::new("c"), slot: 0 });
+        state.focus = Some(Focus::Commit(Oid::new("c")));
         state.grab().unwrap();
         // `d` is `c`'s own child: `c` cannot follow it.
         state.focus = Some(Focus::Commit(Oid::new("d")));
@@ -550,13 +527,12 @@ mod tests {
     }
 
     /// Every kind of cursor position identifies a commit, so an action like
-    /// checkout works from a label or an arrow, not only from the block.
+    /// checkout works from a branch label, not only from the block.
     #[test]
     fn every_focus_names_the_commit_it_is_about() {
         let mut state = state();
         for (focus, expected) in [
             (Focus::Commit(Oid::new("c")), "c"),
-            (Focus::Edge { child: Oid::new("c"), slot: 0 }, "c"),
             (Focus::Ref("main".into()), "f"),
             (Focus::Head, "f"),
         ] {

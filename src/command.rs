@@ -243,7 +243,7 @@ commands! {
         VcsClose => "version-control-close", aliases: ["vc-close"], palette: "Leave the version-control graph";
         VcsRefresh => "version-control-refresh", aliases: ["vc-refresh"], palette: "Re-read the repository  [r]";
         // Direct manipulation.
-        VcsGrab => "version-control-grab", aliases: ["vc-grab"], palette: "Pick up / put down the commit, arrow or branch under the cursor  [Space]";
+        VcsGrab => "version-control-grab", aliases: ["vc-grab"], palette: "Pick up / put down the commit or branch under the cursor  [Space]";
         VcsDrop => "version-control-drop", aliases: ["vc-drop"], palette: "Remove the selected commit from the planned history  [d]";
         VcsMerge => "version-control-merge", aliases: ["vc-merge"], palette: "Plan a merge of the selection into the current branch  [m]";
         VcsUndoEdit => "version-control-undo-edit", aliases: ["vc-undo-edit"], palette: "Take back the last planned change  [u]";
@@ -257,9 +257,11 @@ commands! {
         VcsCheckout => "version-control-checkout", aliases: ["vc-checkout", "checkout"], palette: "Check out the branch or commit under the cursor  [c]";
         VcsShow => "version-control-show", aliases: ["vc-show"], palette: "Show the selected commit's diff";
         VcsEnter => "version-control-enter", aliases: ["vc-enter"], palette: "Act on what the cursor is on  [Enter]";
-        VcsStatus => "version-control-status", aliases: ["vc-status", "status"], palette: "List the uncommitted and untracked files  [w]";
-        VcsStage => "version-control-stage", aliases: ["vc-stage", "stage"], palette: "Stage every change in the work tree  [s]";
-        VcsUnstage => "version-control-unstage", aliases: ["vc-unstage", "unstage"], palette: "Unstage everything  [S]";
+        VcsStatus => "version-control-status", aliases: ["vc-status", "status"], palette: "The work tree beside each file's diff; Space stages  [w]";
+        VcsGitStatus => "version-control-git-status", aliases: ["vc-git-status", "git-status"], palette: "Show `git status` verbatim in a float  [s]";
+        VcsStage => "version-control-stage", aliases: ["vc-stage", "stage"], palette: "Stage every change in the work tree  [+]";
+        VcsUnstage => "version-control-unstage", aliases: ["vc-unstage", "unstage"], palette: "Unstage everything  [-]";
+        VcsHelp => "version-control-help", aliases: ["vc-help"], palette: "The version-control keys, with walkthroughs  [?]";
         VcsFetch => "version-control-fetch", aliases: ["vc-fetch", "fetch"], palette: "Fetch from the remote";
         VcsPull => "version-control-pull", aliases: ["vc-pull", "pull"], palette: "Pull the current branch from its upstream";
         VcsPush => "version-control-push", aliases: ["vc-push", "push"], palette: "Push the current branch to its upstream";
