@@ -936,7 +936,14 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   same `DuckDbSource` every `.parquet` uses and then unlinked: a window of a wide frame is
   too big for base64 on the line protocol, and parquet needs no second reader (unlike Arrow
   IPC). Export dispatches to `write_parquet` (polars, duckdb relation) then `to_parquet`
-  (pandas + pyarrow).
+  (pandas), and **falls back to CSV** when no parquet writer is available — pandas'
+  `to_parquet` is a wrapper over pyarrow/fastparquet, which a notebook that only did
+  `pd.read_csv` has no reason to have installed, and demanding an arrow library before
+  the user may look at their own dataframe is not an answer. Which is why the runner
+  reports **the path it actually wrote** and the editor opens that, rather than assuming
+  the one it asked for. The cost is DuckDB re-inferring types from the text, so CSV is
+  the fallback and not the default (`a_frame_with_no_parquet_writer_still_opens` drives
+  the whole chain against a real python3).
 - **Only a bound name crosses.** `:view` refuses anything that isn't an identifier and the
   runner looks it up in the namespace — nothing typed in the editor is ever `eval`'d.
   Introspection stays at type/shape/viewable, never anything that materialises a value.
