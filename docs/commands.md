@@ -441,9 +441,11 @@ df = pl.read_database("select * from orders limit 1000", conn)
 then `gv`. The connection, and the credential it needs, live in the cell — reviewed
 and versioned like the rest of the analysis — and the editor never learns either.
 
-The frame is fetched by writing it to a parquet file in the state directory and
-opening that, so `:view` needs a library that can write one: polars natively,
-pandas or a DuckDB relation with `pyarrow`. What you get is a **snapshot** taken
+The frame is fetched by writing it to a file in the state directory and opening
+that: parquet when the kernel can write one (polars natively, pandas or a DuckDB
+relation with `pyarrow` installed), and **CSV otherwise** — a pandas frame read
+from a CSV in an environment with no arrow library still opens, at the cost of
+DuckDB re-inferring the column types from the text. What you get is a **snapshot** taken
 when you asked; re-run `:view` to refresh it. Requests queue behind a running cell
 (the kernel serves one at a time, which is what keeps anything from reading a
 namespace mid-execution), so a busy kernel says so rather than appearing to hang.

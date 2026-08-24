@@ -1,4 +1,4 @@
-import sys, json, io, traceback, base64, ast, linecache
+import sys, os, json, io, traceback, base64, ast, linecache
 
 _ns = {'__name__': '__main__'}
 _real_stdout = sys.stdout
@@ -135,26 +135,83 @@ def _list_vars():
     items.sort(key=lambda i: (not i['viewable'], i['name']))
     return items
 
-# Write `name` to `path` as parquet, for the editor to open in the grid.
+# Write `obj` out for the editor to open, and return the path actually written.
 #
-# Parquet rather than Arrow IPC because the editor already reads it (it is how
-# every .parquet file opens), so the bridge needs no second reader and no arrow
-# version to agree on.  The frame itself never crosses the pipe.
+# Parquet is preferred: it carries the column types, and the editor already
+# reads it (it is how every .parquet file opens), so the bridge needs no second
+# reader and no arrow version to agree on.
+#
+# But pandas' `to_parquet` is a thin wrapper over pyarrow or fastparquet, and a
+# notebook that did nothing but `pd.read_csv` has no reason to have either
+# installed.  Being told to install an arrow library before you may look at your
+# own dataframe is not an acceptable answer, so when no parquet writer is
+# available we fall back to CSV — which every frame library writes unaided, and
+# which the editor opens through the same DuckDB reader.  The cost is that
+# DuckDB re-infers the column types from the text, so this path is a fallback
+# and not the default.
+def _write_frame(name, obj, path):
+    if path.endswith('.parquet'):
+        csv_path = path[:-len('.parquet')] + '.csv'
+    else:
+        csv_path = path + '.csv'
+
+    def _to_csv():
+        if hasattr(obj, 'write_csv'):          # polars DataFrame, duckdb relation
+            obj.write_csv(csv_path)
+            return csv_path
+        if hasattr(obj, 'to_csv'):             # pandas DataFrame / Series
+            # to_parquet keeps the index; CSV only can if it becomes a column,
+            # and a column of 0..n is worse than no column at all.
+            frame = obj
+            try:
+                import pandas as _pd
+                if not isinstance(obj.index, _pd.RangeIndex):
+                    frame = obj.reset_index()
+            except Exception:
+                pass
+            frame.to_csv(csv_path, index=False)
+            return csv_path
+        return None
+
+    writer = None
+    if hasattr(obj, 'write_parquet'):          # polars DataFrame, duckdb relation
+        writer = lambda: obj.write_parquet(path)
+    elif hasattr(obj, 'to_parquet'):           # pandas DataFrame
+        writer = lambda: obj.to_parquet(path)
+    elif hasattr(obj, 'arrow'):                # duckdb relation, older API
+        def writer():
+            import pyarrow.parquet as _pq
+            _pq.write_table(obj.arrow(), path)
+
+    if writer is None:
+        written = _to_csv()
+        if written is not None:
+            return written
+        raise RuntimeError(
+            repr(name) + ' is a ' + type(obj).__name__ +
+            ', which has no table to export (try a polars/pandas DataFrame)')
+
+    try:
+        writer()
+        return path
+    except Exception as parquet_error:
+        # A half-written parquet stub would otherwise sit in the state dir: the
+        # editor only ever unlinks the path we report back.
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        written = _to_csv()
+        if written is not None:
+            return written
+        raise parquet_error
+
+
 def _export_var(name, path):
     if name not in _ns:
         raise RuntimeError('no variable called ' + repr(name))
     obj = _ns[name]
-    if hasattr(obj, 'write_parquet'):          # polars DataFrame, duckdb relation
-        obj.write_parquet(path)
-    elif hasattr(obj, 'to_parquet'):           # pandas DataFrame (needs pyarrow)
-        obj.to_parquet(path)
-    elif hasattr(obj, 'arrow'):                # duckdb relation, older API
-        import pyarrow.parquet as _pq
-        _pq.write_table(obj.arrow(), path)
-    else:
-        raise RuntimeError(
-            repr(name) + ' is a ' + type(obj).__name__ +
-            ', which has no table to export (try a polars/pandas DataFrame)')
+    path = _write_frame(name, obj, path)
     rows = -1
     try:
         shape = getattr(obj, 'shape', None)

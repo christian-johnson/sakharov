@@ -69,6 +69,10 @@ pub enum RequestKind {
     /// Write the dataframe bound to `var` out to `path` as parquet, so the grid
     /// can open it.  `var` is a *bound name*, validated as an identifier by the
     /// caller — never an expression, so nothing typed in the editor is eval'd.
+    ///
+    /// `path` is a request, not a guarantee: a kernel with no parquet writer
+    /// (pandas without pyarrow) writes CSV instead, and the reply carries the
+    /// path it actually wrote.
     Export { var: String, path: PathBuf },
 }
 

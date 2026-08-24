@@ -19,12 +19,20 @@
 //!
 //! # Transport
 //!
-//! The kernel writes the frame to a parquet file under the state directory and
-//! sends its path; the editor opens that with the same `DuckDbSource` every
-//! `.parquet` file uses, then unlinks it.  Parquet rather than a base64 blob on
+//! The kernel writes the frame to a file under the state directory and sends
+//! back the path it wrote; the editor opens that with the same `DuckDbSource`
+//! every data file uses, then unlinks it.  A file rather than a base64 blob on
 //! the JSON line protocol because a window of a wide frame is not small — and
-//! rather than Arrow IPC because the editor can already read parquet, so the
-//! bridge needs no second reader.
+//! parquet rather than Arrow IPC because the editor can already read parquet,
+//! so the bridge needs no second reader.
+//!
+//! The kernel falls back to **CSV** when no parquet writer is available, which
+//! is why the path comes back on the reply instead of being assumed: pandas'
+//! `to_parquet` needs pyarrow or fastparquet, and a notebook that did nothing
+//! but `pd.read_csv` has no reason to have either.  Requiring an arrow library
+//! before you may look at your own dataframe is not an acceptable answer, so the
+//! transport degrades instead of refusing.  The cost is that DuckDB re-infers
+//! the column types from the text, so it is a fallback and not the default.
 //!
 //! Requests queue behind a running cell (the runner reads stdin only between
 //! executions), which is deliberate — it is what keeps anything from touching a
@@ -153,6 +161,10 @@ pub(super) fn open_exported(app: &mut App, name: &str, path: &std::path::Path, r
 ///
 /// Under `state_dir` rather than the project, so a fetch never drops a file
 /// into a directory the user is working in (or under version control).
+///
+/// This is what the kernel is *asked* for; what it wrote comes back on the
+/// reply, since a kernel with no parquet writer answers with a `.csv` beside
+/// this path instead.
 fn export_path(name: &str) -> std::path::PathBuf {
     let dir = crate::config::state_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -193,6 +205,76 @@ mod tests {
             "{:?}",
             app.messages.log,
         );
+    }
+
+    /// End to end, against a real python3: a frame whose `to_parquet` cannot
+    /// find an arrow library still opens in the grid.
+    ///
+    /// This is the pandas-without-pyarrow case — `pd.read_csv` in an environment
+    /// that has no reason to carry arrow — and it used to come back as a Python
+    /// ImportError telling the user to install one before they could look at
+    /// their own dataframe.  The fake frame stands in for pandas so the test
+    /// needs no third-party package of its own; what it pins is the contract
+    /// between the two sides: the kernel picks the format, reports the path it
+    /// actually wrote, and the editor opens whatever came back.
+    #[cfg(feature = "dataframe")]
+    #[test]
+    fn a_frame_with_no_parquet_writer_still_opens() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 not available — skipping bridge integration test");
+            return;
+        }
+        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        let dir = std::env::temp_dir().join(format!("sv-test-bridge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        crate::exec::buffers::create_new_notebook(&mut app, "bridge");
+
+        if let Some((ref mut nb, _)) = app.notebook {
+            nb.cells[0].source = ropey::Rope::from_str(
+                "class NoArrow:\n\
+                 \x20   shape = (2, 2)\n\
+                 \x20   def to_parquet(self, path):\n\
+                 \x20       raise ImportError('tried pyarrow, fastparquet')\n\
+                 \x20   def to_csv(self, path, index=False):\n\
+                 \x20       open(path, 'w').write('a,b\\n1,x\\n2,y\\n')\n\
+                 df = NoArrow()\n",
+            );
+        }
+        crate::exec::notebook::load_focused_cell(&mut app);
+        crate::exec::execute(&mut app, &crate::command::Command::NotebookExecuteAllCells);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut asked = false;
+        loop {
+            crate::exec::notebook::process_kernel_events(&mut app);
+            if app.table.is_some() {
+                break;
+            }
+            let idle = app
+                .notebook
+                .as_ref()
+                .is_some_and(|(_, s)| s.exec_queue.is_empty() && s.executing_cell.is_none());
+            if idle && !asked {
+                view_variable(&mut app, "df");
+                asked = true;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the bridge never came back: {:?}",
+                app.messages.log,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let session = app.table.as_ref().expect("the frame opened as a grid");
+        let source = session.source();
+        let names: Vec<&str> = source.columns().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"], "{:?}", app.messages.log);
+        assert_eq!(source.row_count(), Some(2));
+        assert_eq!(source.cell(1, 1), Some("y"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
