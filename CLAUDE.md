@@ -1102,6 +1102,17 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   `current` forward), so a horizontal run inside a row always joins two
   consecutive blocks of that row.  The cost is one row per branch instead of
   per overlapping chain; `j`/`k` and the track scroll already handle it.
+- **An arrow's runs are all drawn before any arrow's corners**
+  (`vcs_ui::draw_edge_runs` then `draw_edge_turns`).  A merge's second link runs
+  back along the same track row its target's own chain runs along, so whichever
+  edge was drawn second erased the other's corner and arrowhead — the two cells
+  carrying every bit of the information (which way it turns, where it ends).
+  A corner also has to *face* the runs it joins: the arrow travels right to
+  left, so the segment above a turn is to the corner's **east** and the one
+  below it to the **west** (`vcs_ui::corner` takes both as parameters, because
+  stating either backwards draws a line that appears to come from nowhere), and
+  its weight has to match — a light rounded corner in the middle of a focused
+  arrow's heavy run leaves a notch exactly where the corner exists to join.
 - **An arrow crosses tracks at one column, and which column depends on the slot**
   (`Edge::cross_col`).  A first parent crosses **late**, in the gap immediately
   right of the commit it points at, so the long run stays in the child's own track;
@@ -1145,6 +1156,15 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   parked on `StageState` and run by `exec::vcs::pump_stage_popup` from the
   `PopupAction::Continue` arm — the same shape the theme picker's live preview
   uses.
+- **A command that wants a word asks for it** (`exec::vcs::ask`,
+  `mode::PromptKind::VcsCommit`/`VcsBranch`/`VcsUpstream`).  `:vc-commit`,
+  `:vc-branch` and `:vc-upstream` used to refuse to *parse* without their
+  argument, so the command line answered "Unknown command" — which says the
+  command does not exist rather than that it is missing a word — and the
+  palette, which can only ever invoke a command bare, could not reach any of
+  the three at all.  They now parse bare and open a minibuffer prompt, the same
+  precedent bare `:attach` set.  `:vc-commit` checks for something staged
+  *before* prompting: a message typed and then refused wastes the typing.
 - **`s` shows `git status` verbatim** in a focused text float
   (`exec::vcs::show_git_status`).  Everything else here is this view's own
   wording for the work tree, and git's own output is what a git user checks when

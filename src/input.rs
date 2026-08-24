@@ -583,6 +583,9 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
                 PromptKind::TableFilter => exec::table_filter(app, &name),
                 PromptKind::TableGroupBy => exec::table_group_by(app, &name),
                 PromptKind::Attach => exec::attach_database(app, &name),
+                PromptKind::VcsCommit => exec::vcs::commit(app, &name),
+                PromptKind::VcsBranch => exec::vcs::new_branch(app, &name),
+                PromptKind::VcsUpstream => exec::vcs::set_upstream(app, &name),
             }
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {

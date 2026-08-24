@@ -18,6 +18,12 @@ pub enum PromptKind {
     TableGroupBy,
     /// Path (and optional alias) of a local database file to attach read-only.
     Attach,
+    /// Message for the commit the version-control view is about to make.
+    VcsCommit,
+    /// Name for a new branch at the selected commit.
+    VcsBranch,
+    /// `remote/branch` the current branch should track.
+    VcsUpstream,
 }
 
 /// Editor mode.

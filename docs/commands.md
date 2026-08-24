@@ -719,12 +719,12 @@ out. (A dedicated merge-conflict resolver view is on the roadmap.)
 | `version-control-unstage` | `-` | `:vc-unstage`, `:unstage` | Unstage everything |
 | `version-control-status` | `w` | `:vc-status`, `:status` | The staging view: every uncommitted **and untracked** file beside the selected one's diff. `j`/`k` pick a file, `Space` stages or unstages it, `Ctrl+d`/`Ctrl+u` scroll the diff, `Enter` opens the file, `q` closes |
 | `version-control-git-status` | `s` | `:vc-git-status`, `:git-status` | `git status` verbatim, in a scrollable float (`q` / `Esc` closes) |
-| `version-control-commit` | — | `:vc-commit <message>` | Commit what is staged |
-| `version-control-branch` | — | `:vc-branch <name>` | Create a branch at the selected commit and check it out |
+| `version-control-commit` | — | `:vc-commit <message>` | Commit what is staged. Bare, it asks for the message in the minibuffer (and says so first if nothing is staged) |
+| `version-control-branch` | — | `:vc-branch <name>` | Create a branch at the selected commit and check it out. Bare, it asks for the name |
 | `version-control-fetch` | — | `:vc-fetch`, `:fetch` | Fetch from every remote |
 | `version-control-pull` | — | `:vc-pull`, `:pull` | Pull the current branch (`--ff-only`) |
 | `version-control-push` | — | `:vc-push`, `:push` | Push the current branch, setting the upstream if it has none |
-| `version-control-upstream` | — | `:vc-upstream <remote/branch>` | Set the current branch's upstream |
+| `version-control-upstream` | — | `:vc-upstream <remote/branch>` | Set the current branch's upstream. Bare, it asks for the target |
 
 Fetch, pull and push run on a background thread through **your** git, so your
 `.gitconfig`, hooks and credential helper all apply. The editor never handles a

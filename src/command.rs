@@ -355,20 +355,22 @@ impl Command {
                 None => Some(Command::KernelVariables),
             },
             "detach" => Some(Command::Detach(arg.unwrap_or("").trim().to_string())),
-            // A branch needs a name, and a commit needs a message: with
-            // neither supplied there is nothing sensible to default to, so
-            // these are the one family here that refuses to parse bare.
+            // A branch needs a name, a commit needs a message and an upstream
+            // needs a target.  They still *parse* bare, because refusing to
+            // meant `:vc-commit` — and every palette entry for them, since the
+            // palette can only ever invoke a command bare — answered "Unknown
+            // command", which says the command does not exist rather than that
+            // it wants an argument.  The empty string reaches `exec::vcs`,
+            // which asks for the missing half in the minibuffer, exactly as
+            // bare `:attach` does.
             "version-control-branch" | "vc-branch" | "branch" => {
-                let name = arg.unwrap_or("").trim();
-                (!name.is_empty()).then(|| Command::VcsNewBranch(name.to_string()))
+                Some(Command::VcsNewBranch(arg.unwrap_or("").trim().to_string()))
             }
             "version-control-commit" | "vc-commit" | "commit" => {
-                let message = arg.unwrap_or("").trim();
-                (!message.is_empty()).then(|| Command::VcsCommit(message.to_string()))
+                Some(Command::VcsCommit(arg.unwrap_or("").trim().to_string()))
             }
             "version-control-upstream" | "vc-upstream" | "upstream" => {
-                let target = arg.unwrap_or("").trim();
-                (!target.is_empty()).then(|| Command::VcsSetUpstream(target.to_string()))
+                Some(Command::VcsSetUpstream(arg.unwrap_or("").trim().to_string()))
             }
             "goto-line" => {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;

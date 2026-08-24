@@ -315,9 +315,24 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         Command::VcsFetch => remote_job(app, vec!["fetch".into(), "--all".into()], "Fetching"),
         Command::VcsPull => remote_job(app, vec!["pull".into(), "--ff-only".into()], "Pulling"),
         Command::VcsPush => push(app),
-        Command::VcsNewBranch(name) => new_branch(app, name),
-        Command::VcsCommit(message) => commit(app, message),
-        Command::VcsSetUpstream(target) => set_upstream(app, target),
+        // Each of these needs a word from the user, and the palette can only
+        // ever invoke a command bare — so a missing argument opens a minibuffer
+        // prompt rather than being an error, the same way bare `:attach` does.
+        Command::VcsNewBranch(name) => match name.trim() {
+            "" => return ask(app, crate::mode::PromptKind::VcsBranch),
+            name => new_branch(app, name),
+        },
+        Command::VcsCommit(message) => match message.trim() {
+            // Asked before the prompt, not after: a message typed and then
+            // refused is worse than being told there is nothing to commit.
+            "" if staged(app) == 0 => nothing_staged(app),
+            "" => return ask(app, crate::mode::PromptKind::VcsCommit),
+            message => commit(app, message),
+        },
+        Command::VcsSetUpstream(target) => match target.trim() {
+            "" => return ask(app, crate::mode::PromptKind::VcsUpstream),
+            target => set_upstream(app, target),
+        },
 
         // `:42` has no meaning in a graph, and neither does yanking a
         // selection — but the hash under the cursor is what a user reaching
@@ -339,6 +354,25 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
     }
     update_scroll(app);
     true
+}
+
+/// Ask for the missing half of a command in the minibuffer.
+///
+/// Returns true because the graph handled the command — it just is not finished
+/// with it yet.
+fn ask(app: &mut App, kind: crate::mode::PromptKind) -> bool {
+    app.command_buf.clear();
+    app.mode = crate::mode::Mode::Prompt { kind };
+    true
+}
+
+fn staged(app: &App) -> usize {
+    app.vcs.as_ref().map_or(0, |state| state.dag.work.staged())
+}
+
+fn nothing_staged(app: &mut App) {
+    app.messages
+        .show("Nothing staged — `w` stages a file, `+` stages everything");
 }
 
 /// How many focus steps a paging command takes.
@@ -749,7 +783,7 @@ fn checkout_plan(state: &VcsState) -> Option<(Vec<String>, String)> {
     ))
 }
 
-fn new_branch(app: &mut App, name: &str) {
+pub fn new_branch(app: &mut App, name: &str) {
     let Some(state) = app.vcs.as_ref() else { return };
     let Some(commit) = state.focused_commit() else {
         app.messages.show("No commit selected");
@@ -759,17 +793,15 @@ fn new_branch(app: &mut App, name: &str) {
     run_now(app, &args, &format!("On new branch {name}"));
 }
 
-fn commit(app: &mut App, message: &str) {
-    let Some(state) = app.vcs.as_ref() else { return };
-    if state.dag.work.staged() == 0 {
-        app.messages
-            .show("Nothing staged — `+` stages every change in the work tree");
+pub fn commit(app: &mut App, message: &str) {
+    if staged(app) == 0 {
+        nothing_staged(app);
         return;
     }
     run_now(app, &["commit", "-m", message], "Committed");
 }
 
-fn set_upstream(app: &mut App, target: &str) {
+pub fn set_upstream(app: &mut App, target: &str) {
     let args = ["branch", "--set-upstream-to", target];
     run_now(app, &args, &format!("Tracking {target}"));
 }
@@ -1042,8 +1074,8 @@ commit unreachable.
     w              the work tree beside each file's diff — j/k pick a file,
                    Space stages or unstages it, Enter opens it
     +  /  -        stage / unstage everything
-    :vc-commit <message>
-    :vc-branch <name>          a new branch at the selected commit
+    :vc-commit [message]       (asks for one if you leave it off)
+    :vc-branch [name]          a new branch at the selected commit
     :vc-fetch  :vc-pull  :vc-push
     r              re-read the repository
     ?              this sheet
@@ -1480,6 +1512,52 @@ mod tests {
         assert!(
             body.contains("On branch") || body.contains("HEAD detached"),
             "this is not git's own output: {body}"
+        );
+    }
+
+    /// A command that wants a word asks for it, rather than reporting that it
+    /// does not exist.
+    ///
+    /// `:version-control-commit` refusing to *parse* bare meant the command
+    /// line answered "Unknown command", which says the wrong thing entirely —
+    /// and the palette, which can only ever invoke a command bare, could never
+    /// reach any of these three at all.
+    #[test]
+    fn a_command_missing_its_argument_asks_for_it_in_the_minibuffer() {
+        for (name, kind) in [
+            ("version-control-branch", crate::mode::PromptKind::VcsBranch),
+            ("version-control-upstream", crate::mode::PromptKind::VcsUpstream),
+        ] {
+            let parsed = Command::parse(name)
+                .unwrap_or_else(|| panic!("`:{name}` does not parse bare"));
+            let mut app = app_in_graph();
+            super::handle(&mut app, &parsed);
+            assert_eq!(
+                app.mode,
+                crate::mode::Mode::Prompt { kind },
+                "`:{name}` did not ask for its argument"
+            );
+        }
+    }
+
+    /// …except when the answer could not be used anyway: asking for a commit
+    /// message and *then* refusing it would waste the typing.
+    #[test]
+    fn a_commit_with_nothing_staged_says_so_instead_of_asking_for_a_message() {
+        let parsed = Command::parse("version-control-commit").expect("it parses bare");
+        let mut app = app_in_graph();
+        super::handle(&mut app, &parsed);
+        assert_eq!(app.mode, crate::mode::Mode::Normal);
+        assert!(app.messages.current().unwrap_or_default().contains("Nothing staged"));
+
+        // With something staged it asks.
+        app.vcs.as_mut().unwrap().dag.work = crate::vcs::WorkTree::new(vec![
+            crate::vcs::Change { path: "a.rs".into(), index: 'M', work: ' ' },
+        ]);
+        super::handle(&mut app, &parsed);
+        assert_eq!(
+            app.mode,
+            crate::mode::Mode::Prompt { kind: crate::mode::PromptKind::VcsCommit }
         );
     }
 

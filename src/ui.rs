@@ -750,6 +750,17 @@ pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
                         .collect::<Vec<_>>().join(", ")
                 ),
                 PromptKind::Attach => "Attach database, read-only (path [as alias])".to_string(),
+                // Both name what they will act on, because both act on the
+                // commit under the cursor rather than on "the repository".
+                PromptKind::VcsCommit => match app.vcs.as_ref() {
+                    Some(state) => format!("Commit {} staged change(s), message", state.dag.work.staged()),
+                    None => "Commit message".to_string(),
+                },
+                PromptKind::VcsBranch => match app.vcs.as_ref().and_then(crate::vcs::state::VcsState::focused_commit) {
+                    Some(at) => format!("New branch at {}", at.short()),
+                    None => "New branch".to_string(),
+                },
+                PromptKind::VcsUpstream => "Track (remote/branch)".to_string(),
             };
             (format!("{label}: {}_", app.command_buf), Style::default())
         }

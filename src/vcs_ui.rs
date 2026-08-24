@@ -184,8 +184,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
     // Arrows first: a block drawn over an arrow reads as the arrow passing
     // behind it, which is what a line entering the top of a box should look
     // like.  The other order puts line segments across the text.
+    //
+    // Runs before turns, across *all* the arrows: a merge's second link runs
+    // back along the same row its target's own chain runs along, so whichever
+    // was drawn second erased the other's corner and arrowhead — the two cells
+    // that carry every bit of the information (which way it turns, and where
+    // it ends).  Two passes cost one more walk of a list that is already laid
+    // out, and no arrow can rub out another's ends.
     for edge in &layout.edges {
-        draw_edge(&mut p, &layout, edge, &cursor);
+        draw_edge_runs(&mut p, &layout, edge, &cursor);
+    }
+    for edge in &layout.edges {
+        draw_edge_turns(&mut p, &layout, edge, &cursor);
     }
     for block in &layout.blocks {
         draw_block(&mut p, state, &layout, block, &cursor);
@@ -461,30 +471,31 @@ fn draw_commit_contents(
     );
 }
 
-/// Draw one parent link.
+/// How one arrow is drawn.
 ///
-/// Routed as a horizontal run back through the child's track, a vertical hop
-/// across to the parent's track, and a run into the parent's right-hand
-/// border, where the arrowhead goes.  The arrowhead is at the *parent* end
-/// because that is the direction the link points: a commit names its parent,
-/// never the reverse, and drawing it the other way would teach the graph
-/// backwards.
-fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
+/// An arrow belongs to the commit it leaves, so it takes that commit's colour
+/// and a branch reads as one colour from tip to base.  HEAD's arrow is not a
+/// parent link and keeps the neutral edge colour.  It is drawn heavy when its
+/// commit is the one under the cursor, so grabbing a block visibly takes its
+/// link along — the arrow itself is never a cursor target.
+fn edge_style(layout: &Layout, edge: &Edge, cursor: &Cursor) -> (Style, bool) {
     let th = theme::active();
-    // An arrow belongs to the commit it leaves, so it takes that commit's
-    // colour and a branch reads as one colour from tip to base.  HEAD's arrow
-    // is not a parent link and keeps the neutral edge colour.
     let base = match layout.block(&edge.child) {
         Some(block) if block.kind != BlockKind::Head => th.vcs_tint(block.tint),
         _ => th.vcs_edge,
     };
-    // An arrow is never the cursor's target — it is drawn heavy when the
-    // commit it leaves is, so grabbing a block visibly takes its link with it.
     let this = Focus::Commit(edge.child.clone());
-    let style = cursor.style(&this, base);
-    let heavy = cursor.mark(&this).is_some();
-    let (v, h) = if heavy { ('┃', '━') } else { ('│', '─') };
+    (cursor.style(&this, base), cursor.mark(&this).is_some())
+}
 
+/// The straight runs of one parent link.
+///
+/// Routed as a horizontal run back through the child's track, a vertical hop
+/// across to the parent's track, and a run into the parent's right-hand
+/// border, where the arrowhead goes.
+fn draw_edge_runs(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
+    let (style, heavy) = edge_style(layout, edge, cursor);
+    let (v, h) = if heavy { ('┃', '━') } else { ('│', '─') };
     let r = layout.route(edge);
 
     if r.stub {
@@ -510,6 +521,19 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     for col in r.head_col..r.cross {
         p.cell(r.to_row, col, h, style);
     }
+}
+
+/// The corners and the arrowhead of one parent link.
+///
+/// The arrowhead is at the *parent* end because that is the direction the link
+/// points: a commit names its parent, never the reverse, and drawing it the
+/// other way would teach the graph backwards.
+fn draw_edge_turns(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
+    let (style, heavy) = edge_style(layout, edge, cursor);
+    let r = layout.route(edge);
+    if r.stub {
+        return;
+    }
 
     if r.from_row != r.to_row {
         // Corners, so the run reads as one line rather than three.
@@ -519,30 +543,42 @@ fn draw_edge(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
         // directly beside it, and a bare `│` there reads as a line from
         // nowhere.
         //
-        // Both corners join a horizontal run heading *west* to the vertical:
-        // at the top of the drop the vertical continues away from the run, at
-        // the bottom it arrives from the direction the run came down.
-        p.cell(r.from_row, r.cross, corner(down, heavy), style);
+        // The run the arrow leaves along is to the corner's east (it started
+        // at the child, which is further right), and the run it arrives along
+        // is to the corner's west (it ends at the parent, further left).  The
+        // vertical leaves the first corner in the direction of travel and
+        // arrives at the second from the opposite one.
+        p.cell(r.from_row, r.cross, corner(true, down, heavy), style);
         if r.cross > r.head_col {
-            p.cell(r.to_row, r.cross, corner(!down, heavy), style);
+            p.cell(r.to_row, r.cross, corner(false, !down, heavy), style);
         }
     }
     p.cell(r.to_row, r.head_col, '◀', style);
 }
 
-/// The corner joining a westward horizontal run to a vertical.
+/// The corner where an arrow turns.
 ///
-/// `south` says which way the vertical goes.  The weight has to match the
-/// strokes it joins: a focused arrow is drawn with the heavy set, and a light
-/// rounded corner in the middle of it leaves a visible notch where the two
-/// stroke widths fail to meet — which is exactly what a corner is there to
-/// prevent.
-fn corner(south: bool, heavy: bool) -> char {
-    match (south, heavy) {
-        (true, false) => '╮',
-        (true, true) => '┓',
-        (false, false) => '╯',
-        (false, true) => '┛',
+/// `east` says which side of the corner the horizontal run is on and `south`
+/// which way the vertical leaves it — the two facts that decide which of the
+/// four glyphs joins them, and the two that are easy to state backwards.  The
+/// arrow runs *right to left*, so the segment at the top of a turn is to the
+/// corner's **east** and the segment at the bottom is to its **west**; a corner
+/// facing the wrong way draws a line that appears to come from nowhere.
+///
+/// The weight has to match the strokes it joins too: a focused arrow is drawn
+/// with the heavy set, and a light rounded corner in the middle of it leaves a
+/// visible notch where the two stroke widths fail to meet — which is exactly
+/// what a corner is there to prevent.
+fn corner(east: bool, south: bool, heavy: bool) -> char {
+    match (east, south, heavy) {
+        (true, true, false) => '╭',
+        (true, true, true) => '┏',
+        (true, false, false) => '╰',
+        (true, false, true) => '┗',
+        (false, true, false) => '╮',
+        (false, true, true) => '┓',
+        (false, false, false) => '╯',
+        (false, false, true) => '┛',
     }
 }
 
@@ -690,6 +726,103 @@ mod tests {
         assert!(screen.contains(" main "), "{screen}");
     }
 
+    /// The exact character drawn at `(row, col)` of the graph.
+    ///
+    /// The corner tests need one cell rather than a line: a corner glyph on
+    /// its own says nothing about *which way it faces*, and facing is the
+    /// whole property under test.
+    fn cell_at(state: &VcsState, row: u16, col: u16) -> char {
+        let (w, h) = (140u16, 40u16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state)).unwrap();
+        terminal.backend().buffer()[(col, row)]
+            .symbol()
+            .chars()
+            .next()
+            .expect("a cell")
+    }
+
+    /// A graph that turns every way an arrow can.
+    ///
+    /// Three branches, so three rows; `a` is a row of its own below `feature`
+    /// and above `main`, so one arrow turns down into it and another turns up.
+    /// `f` is a merge, whose second parent is the one arrow whose horizontal
+    /// run reaches its target far enough away to need a corner at *both* ends.
+    ///
+    /// ```text
+    ///   feature:      c ── d
+    ///   base:     a
+    ///   main:         e ── f   (f also follows c)
+    /// ```
+    fn forked() -> VcsState {
+        let dag = Dag::new(
+            vec![
+                commit("d", &["c"], "four"),
+                commit("f", &["e", "c"], "three"),
+                commit("c", &["a"], "two"),
+                commit("e", &["a"], "two again"),
+                commit("a", &[], "one"),
+            ],
+            vec![
+                Ref { name: "feature".into(), kind: RefKind::Local, target: Oid::new("d"), upstream: None },
+                Ref { name: "base".into(), kind: RefKind::Local, target: Oid::new("a"), upstream: None },
+                Ref { name: "main".into(), kind: RefKind::Local, target: Oid::new("f"), upstream: None },
+            ],
+            Head { branch: Some("main".into()), target: Some(Oid::new("f")) },
+            WorkTree::default(),
+            false,
+        );
+        VcsState::new(std::path::PathBuf::from("/tmp/r"), dag, 0)
+    }
+
+    /// A corner faces the runs it joins.
+    ///
+    /// The arrow travels **right to left**, so the segment above a turn is to
+    /// the corner's east and the segment below it is to the west — and a
+    /// corner drawn the other way round is a line that appears to come from
+    /// nowhere.  Checked cell by cell against the route the layout published,
+    /// because the glyph alone does not say which way it faces.
+    #[test]
+    fn an_arrow_turns_its_corners_towards_the_runs_they_join() {
+        let mut state = forked();
+        state.focus = None;
+        let layout = state.layout(140);
+        let mut seen_down = false;
+        let mut seen_up = false;
+
+        for edge in &layout.edges {
+            let r = layout.route(edge);
+            if r.stub || r.from_row == r.to_row {
+                continue;
+            }
+            let down = r.to_row > r.from_row;
+            seen_down |= down;
+            seen_up |= !down;
+
+            // Leaving: the run is to the east, the vertical goes on downwards
+            // (or upwards) from here.
+            assert_eq!(
+                cell_at(&state, r.from_row, r.cross),
+                if down { '╭' } else { '╰' },
+                "the arrow {} -> {:?} leaves through a corner facing the wrong way",
+                edge.child,
+                edge.parent
+            );
+            // Arriving: the run is to the west, and the vertical came from the
+            // side the arrow travelled down.
+            if r.cross > r.head_col {
+                assert_eq!(
+                    cell_at(&state, r.to_row, r.cross),
+                    if down { '╯' } else { '╮' },
+                    "the arrow {} -> {:?} arrives through a corner facing the wrong way",
+                    edge.child,
+                    edge.parent
+                );
+            }
+        }
+        assert!(seen_down && seen_up, "the fixture must turn both ways");
+    }
+
     /// A focused arrow is drawn with the heavy box-drawing set, and its
     /// corners have to be heavy too.  A light rounded corner in the middle of
     /// a heavy run leaves a visible notch exactly where the corner is there to
@@ -706,27 +839,26 @@ mod tests {
             upstream: None,
         });
         state.focus = Some(Focus::Commit(Oid::new("aaaaaaa1")));
-        let screen = draw(&state, 120, 30).join("\n");
-        assert!(screen.contains('┃'), "the focused arrow is not heavy\n{screen}");
-        // The corner sits immediately left of the run it turns out of, so a
-        // corner of the right weight reads as one stroke with it.  A block's
-        // own corner is always the *last* character of its border, so this
-        // pair can only come from an arrow.
-        assert!(
-            screen.contains("┓━") || screen.contains("┛━"),
-            "a heavy arrow turned a light corner\n{screen}"
+        let layout = state.layout(140);
+        let edge = layout
+            .edges
+            .iter()
+            .find(|e| e.child == Oid::new("aaaaaaa1"))
+            .expect("the arrow");
+        let r = layout.route(edge);
+        assert!(r.from_row < r.to_row, "the fixture has to turn a corner");
+        assert_eq!(
+            cell_at(&state, r.from_row, r.cross),
+            '┏',
+            "a heavy arrow turned a light corner"
         );
 
         // …and an unfocused one keeps the light set end to end.
-        state.focus = Some(Focus::Head);
-        let screen = draw(&state, 120, 30).join("\n");
-        assert!(
-            screen.contains("╮─") || screen.contains("╯─"),
-            "the light arrow lost its corner\n{screen}"
-        );
-        assert!(
-            !screen.contains("┓━") && !screen.contains("┛━"),
-            "a light arrow turned a heavy corner\n{screen}"
+        state.focus = None;
+        assert_eq!(
+            cell_at(&state, r.from_row, r.cross),
+            '╭',
+            "a light arrow turned a heavy corner"
         );
     }
 
@@ -809,5 +941,6 @@ mod tests {
             .contains("Fix sigterm"));
     }
 }
+
 
 
