@@ -640,6 +640,29 @@ mod tests {
         VcsState::new(std::path::PathBuf::from("/tmp/r"), dag, 86_400 * 3)
     }
 
+    /// `main`, and a second branch with a commit of its own hanging off the
+    /// same root — two rows, and an arrow that has to change track between
+    /// them.  The second branch needs a commit `main` does not contain: one
+    /// merely *behind* the branch you are on owns no run and so no row (see
+    /// `layout::a_branch_left_behind_does_not_own_the_trunk_beneath_it`).
+    fn two_branches() -> VcsState {
+        let dag = Dag::new(
+            vec![
+                commit("aaaaaaa1", &["bbbbbbb2"], "Fix sigterm handling"),
+                commit("ccccccc3", &["bbbbbbb2"], "Try something else"),
+                commit("bbbbbbb2", &[], "Initial commit"),
+            ],
+            vec![
+                Ref { name: "main".into(), kind: RefKind::Local, target: Oid::new("aaaaaaa1"), upstream: None },
+                Ref { name: "older".into(), kind: RefKind::Local, target: Oid::new("ccccccc3"), upstream: None },
+            ],
+            Head { branch: Some("main".into()), target: Some(Oid::new("aaaaaaa1")) },
+            WorkTree::default(),
+            false,
+        );
+        VcsState::new(std::path::PathBuf::from("/tmp/r"), dag, 86_400 * 3)
+    }
+
     fn draw(state: &VcsState, w: u16, h: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
@@ -688,14 +711,7 @@ mod tests {
     /// without this nothing on screen names the branch you are reading.
     #[test]
     fn every_branch_row_carries_its_name_at_the_left_edge() {
-        let mut state = state();
-        // A second branch, one commit behind, so there are two rows to name.
-        state.dag.refs.push(Ref {
-            name: "older".into(),
-            kind: RefKind::Local,
-            target: Oid::new("bbbbbbb2"),
-            upstream: None,
-        });
+        let state = two_branches();
         let lines = draw(&state, 90, 30);
         for name in ["main", "older"] {
             assert!(
@@ -757,15 +773,21 @@ mod tests {
     fn forked() -> VcsState {
         let dag = Dag::new(
             vec![
-                commit("d", &["c"], "four"),
+                // `main`'s tip first: rows are handed out in the order the
+                // tips are drawn, so this is what puts a branch *below* the
+                // trunk and gives the fixture a turn in each direction.
                 commit("f", &["e", "c"], "three"),
+                commit("d", &["c"], "four"),
                 commit("c", &["a"], "two"),
                 commit("e", &["a"], "two again"),
+                commit("b", &["a"], "aside"),
                 commit("a", &[], "one"),
             ],
             vec![
                 Ref { name: "feature".into(), kind: RefKind::Local, target: Oid::new("d"), upstream: None },
-                Ref { name: "base".into(), kind: RefKind::Local, target: Oid::new("a"), upstream: None },
+                // Its own commit, not one `main` already contains: a branch
+                // behind the one you are on owns no run and so no row.
+                Ref { name: "base".into(), kind: RefKind::Local, target: Oid::new("b"), upstream: None },
                 Ref { name: "main".into(), kind: RefKind::Local, target: Oid::new("f"), upstream: None },
             ],
             Head { branch: Some("main".into()), target: Some(Oid::new("f")) },
@@ -829,27 +851,22 @@ mod tests {
     /// join two strokes.
     #[test]
     fn a_focused_arrow_has_corners_of_its_own_weight() {
-        let mut state = state();
-        // A branch on the older commit, so the two sit in different rows and
-        // the arrow between them actually turns a corner.
-        state.dag.refs.push(Ref {
-            name: "older".into(),
-            kind: RefKind::Local,
-            target: Oid::new("bbbbbbb2"),
-            upstream: None,
-        });
-        state.focus = Some(Focus::Commit(Oid::new("aaaaaaa1")));
+        // The second branch's commit sits in its own row, so its arrow back to
+        // the shared root actually turns a corner.
+        let mut state = two_branches();
+        state.focus = Some(Focus::Commit(Oid::new("ccccccc3")));
         let layout = state.layout(140);
         let edge = layout
             .edges
             .iter()
-            .find(|e| e.child == Oid::new("aaaaaaa1"))
+            .find(|e| e.child == Oid::new("ccccccc3"))
             .expect("the arrow");
         let r = layout.route(edge);
-        assert!(r.from_row < r.to_row, "the fixture has to turn a corner");
+        assert_ne!(r.from_row, r.to_row, "the fixture has to turn a corner");
+        let down = r.to_row > r.from_row;
         assert_eq!(
             cell_at(&state, r.from_row, r.cross),
-            '┏',
+            if down { '┏' } else { '┗' },
             "a heavy arrow turned a light corner"
         );
 
@@ -857,7 +874,7 @@ mod tests {
         state.focus = None;
         assert_eq!(
             cell_at(&state, r.from_row, r.cross),
-            '╭',
+            if down { '╭' } else { '╰' },
             "a light arrow turned a heavy corner"
         );
     }

@@ -23,7 +23,7 @@
 //! to the left of one of its own descendants, and in a view whose entire
 //! purpose is that the picture is the truth, that is not a cosmetic problem.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{
     plan::Projection,
@@ -722,6 +722,16 @@ fn place_head(
 /// another is not a fork, so both sit in one row, correctly — and colouring by
 /// row then painted the whole history one colour and lost the very distinction
 /// the colours exist to draw.
+///
+/// One label is skipped on that walk: a branch **the branch you are on has
+/// left behind** — one whose tip is an ancestor of HEAD's branch.  It owns no
+/// history of its own; it is a pointer *into* the history you are standing in.
+/// Letting it take the run gave a stale topic branch credit for the whole
+/// trunk beneath it, so a repository whose every commit was made on `main`
+/// drew almost all of them under some abandoned branch's name — the graph
+/// saying the opposite of what happened.  It keeps its colour and its label on
+/// the commit it points at, and since it then claims no commits it is given no
+/// row (a named row with nothing in it says even less).
 fn assign_tints(
     members: &[Vec<Oid>],
     dag: &Dag,
@@ -746,6 +756,24 @@ fn assign_tints(
         .map(|(t, (_, name, _))| (name.clone(), t))
         .collect();
 
+    // The branches HEAD's own branch contains outright: they name a commit in
+    // the history you are on rather than any history of their own.  Detached,
+    // there is no such branch and every label owns its run as before.
+    let behind: HashSet<&str> = dag
+        .head
+        .branch
+        .as_deref()
+        .and_then(|on| projection.ref_target(dag, on).map(|tip| (on, tip)))
+        .map(|(on, tip)| {
+            let reach: HashSet<Oid> = projection.ancestors(dag, tip).into_iter().collect();
+            branches
+                .iter()
+                .filter(|(_, name, target)| name != on && reach.contains(target))
+                .map(|(_, name, _)| name.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut tint = HashMap::new();
     for (c, m) in members.iter().enumerate() {
         // A chain with no branch on it at all still needs a colour of its own;
@@ -755,6 +783,7 @@ fn assign_tints(
             if let Some(t) = branches
                 .iter()
                 .filter(|(_, _, target)| target == id)
+                .filter(|(_, name, _)| !behind.contains(name.as_str()))
                 .filter_map(|(_, name, _)| branch_tints.get(name))
                 .min()
             {
@@ -1586,6 +1615,36 @@ mod tests {
         // history read as one thing.
         assert_eq!(layout.branch_tints.get("test-branch"), Some(&tint("top")));
         assert_eq!(layout.branch_tints.get("main"), Some(&tint("mid")));
+    }
+
+    /// The mirror of [`commits_take_the_colour_of_the_branch_they_are_on`]: the
+    /// stale label is the *topic* branch and the trunk is the one that moved
+    /// on.  Every one of these commits was made on `main`, so drawing them
+    /// under `topic`'s name — which is what the nearest-label walk did on its
+    /// own — says the opposite of what happened.
+    #[test]
+    fn a_branch_left_behind_does_not_own_the_trunk_beneath_it() {
+        let dag = Dag::new(
+            vec![commit("top", &["mid"]), commit("mid", &["base"]), commit("base", &[])],
+            vec![branch("main", "top"), branch("topic", "mid")],
+            Head { branch: Some("main".into()), target: Some(Oid::new("top")) },
+            WorkTree::default(),
+            false,
+        );
+        let projection = Plan::default().project(&dag);
+        let layout = compute(&dag, &projection, 200);
+        let tint = |id: &str| layout.block(&Oid::new(id)).expect(id).tint;
+
+        assert_eq!(tint("top"), tint("mid"), "`topic` took the trunk it is on");
+        assert_eq!(tint("mid"), tint("base"), "and the history below it");
+        assert_eq!(tint("base"), layout.branch_tints["main"], "which is `main`'s");
+
+        // Owning no commits, it is given no row: a branch name written over an
+        // empty band claims a track's worth of screen and says nothing.
+        assert_eq!(layout.track_count, 1, "`topic` was given a row of its own");
+        for track in 0..layout.track_count {
+            assert_ne!(layout.lane_label(track), Some("topic"));
+        }
     }
 
     /// HEAD sits directly after the commit it names, in that commit's track —

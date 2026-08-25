@@ -1062,6 +1062,15 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   child's colour, and a local branch label takes its own, so a label and its
   run of history read as one thing.  The default palette excludes `warning` and
   HEAD's lavender: those mean *held* and *where you are*.
+  **A branch the branch you are on has left behind is skipped on that walk** —
+  one whose tip is an ancestor of HEAD's branch.  It owns no history of its
+  own; it is a pointer *into* the history you are standing in.  Without the
+  skip a stale topic branch took credit for the whole trunk beneath its label,
+  so a repository whose every commit was made on `main` drew almost all of them
+  in a feature branch's colour, under that branch's name — the graph saying the
+  opposite of what happened.  Claiming no commits, it is also given no row
+  (`place` allocates a named row only for a tint with a span), which is why an
+  abandoned branch costs a label on one block and nothing else.
 - **HEAD has a colour of its own** (`theme.vcs_head`, lavender by default) and
   nothing else uses it — "where you are" is the one pointer that has to be
   findable at a glance, which it cannot be if it is also a lane or a label.
