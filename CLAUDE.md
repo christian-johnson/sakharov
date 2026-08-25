@@ -1089,21 +1089,27 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   arrow routing, the focus walk, the scroll — is written once and is true of
   both pictures, which is what makes `no_arrow_is_drawn_through_a_block` a test
   that can simply be run twice.
-  **Horizontal** (default) puts the oldest commit at the left edge, makes a
+  **Horizontal** puts the oldest commit at the left edge, makes a
   branch a row, and writes each track's name in a band above it (`LABEL_H`,
   `Layout::label_across`) pinned to the viewport's left edge — the question
   "which branch am I looking at" is at its sharpest a hundred commits along,
   which is exactly where a name in graph coordinates has scrolled off.
-  **Vertical** (`o` / `:vc-flip`, `[vcs] orientation`) puts the **newest**
+  **Vertical** (the shipped default; `o` / `:vc-flip`, `[vcs] orientation`)
+  puts the **newest**
   commit at the top, the order `git log` prints, makes a branch a column, and
   names every track at once in a row the renderer reserves above the graph.
   That reversal is the one place the graph's own time axis and the screen
   disagree, and it lives entirely in `Layout::display_along`.
   The keys follow the picture (`Layout::travel`): whichever axis history runs
   along is the one `h`/`l` or `j`/`k` travel, so there is nothing extra to
-  remember — and the two motions that are about history rather than the screen
-  (paging, `gg`/`ge`) ask for a direction by name (`Orientation::newer`/
-  `older`).  A block is the *same box* either way — `block_width` by `BLOCK_H`
+  remember.  Paging and `gg`/`ge` ask for a direction by name too, but in
+  **screen** terms (`Orientation::forward`/`back`) — `gg` is the top of the
+  graph and `J` pages down it, in a graph exactly as in a buffer; stating those
+  two in history's terms instead sent `gg` walking away from the top of the
+  screen, which is the one thing `gg` means everywhere else in the editor.
+  The flip lasts the **session** (`App::vcs_orientation`), not the open view:
+  `close` discards the graph's state, so a preference living only in `VcsState`
+  was forgotten the moment you opened a file and came back.  A block is the *same box* either way — `block_width` by `BLOCK_H`
   (five rows: two borders, the summary over two, the metadata row) — so
   everything drawn inside one is written in plain screen coordinates and knows
   nothing about any of this.

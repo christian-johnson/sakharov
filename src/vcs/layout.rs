@@ -111,24 +111,28 @@ impl Orientation {
         }
     }
 
-    /// The screen direction that travels toward newer commits, and toward
-    /// older ones.
+    /// Along the time axis, the way the screen goes *forward* — right, or
+    /// down — and the way it goes back.
     ///
-    /// The two motions that are about *history* rather than about the screen
-    /// — paging, and the ends of the graph — ask for them by name, so `ge`
-    /// reaches the newest commit in either picture instead of walking off
-    /// sideways in one of them.
-    pub fn newer(self) -> Dir {
+    /// Paging and the two end-of-graph motions ask by name, and they ask in
+    /// **screen** terms rather than in history's: `J` pages down the screen and
+    /// `gg` goes to the top of it, in a graph exactly as in a buffer.  Which
+    /// end of history that lands on is then a property of the picture — the
+    /// oldest commit is at the left in one and at the bottom in the other —
+    /// and stating it the other way round made `gg` walk *away* from the top
+    /// of the screen, which is the one thing `gg` means everywhere else in the
+    /// editor.
+    pub fn forward(self) -> Dir {
         match self {
             Orientation::Horizontal => Dir::Right,
-            Orientation::Vertical => Dir::Up,
+            Orientation::Vertical => Dir::Down,
         }
     }
 
-    pub fn older(self) -> Dir {
+    pub fn back(self) -> Dir {
         match self {
             Orientation::Horizontal => Dir::Left,
-            Orientation::Vertical => Dir::Down,
+            Orientation::Vertical => Dir::Up,
         }
     }
 }

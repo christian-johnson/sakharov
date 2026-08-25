@@ -276,7 +276,10 @@ fn enter(app: &mut App) {
 
 fn install(app: &mut App, root: PathBuf, dag: vcs::Dag) {
     let now = vcs::now_secs();
-    let orient = vcs::layout::Orientation::parse(&app.config.vcs.orientation);
+    // The session's orientation, not the config's: `:vc-flip` is a preference
+    // you state once, and a graph that came back horizontal after you looked at
+    // a file was asking you to state it again every time.
+    let orient = app.vcs_orientation;
     match app.vcs.as_mut() {
         Some(state) => state.reload(dag, now),
         None => {
@@ -294,6 +297,7 @@ fn install(app: &mut App, root: PathBuf, dag: vcs::Dag) {
 fn flip(app: &mut App) {
     let Some(state) = app.vcs.as_mut() else { return };
     let orient = state.flip();
+    app.vcs_orientation = orient;
     update_scroll(app);
     app.messages.show(format!(
         "History runs {} — `[vcs] orientation = \"{}\"` to keep it",
@@ -421,14 +425,16 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
 
     match cmd {
         // Paging and the file-end motions walk the same focus list along the
-        // time axis; there is no separate "line" to address in a graph, and
-        // "the start of the graph" is its oldest commit.
+        // time axis; there is no separate "line" to address in a graph.  They
+        // are stated as screen directions (`forward`/`back`), so `gg` reaches
+        // the top of the graph and `J` pages down it whichever way round it is
+        // drawn — which end of history that is depends on the picture.
         Command::PageDown | Command::GotoFileEnd => {
-            repeat_step(app, orientation(app).newer(), page(app, cmd));
+            repeat_step(app, orientation(app).forward(), page(app, cmd));
             return true;
         }
         Command::PageUp | Command::GotoFileStart => {
-            repeat_step(app, orientation(app).older(), page(app, cmd));
+            repeat_step(app, orientation(app).back(), page(app, cmd));
             return true;
         }
 
@@ -530,7 +536,7 @@ fn nothing_staged(app: &mut App) {
 
 /// Which way the graph is currently drawn.
 fn orientation(app: &App) -> vcs::layout::Orientation {
-    app.vcs.as_ref().map(|s| s.orient).unwrap_or_default()
+    app.vcs.as_ref().map_or(app.vcs_orientation, |s| s.orient)
 }
 
 /// How many focus steps a paging command takes.
@@ -1200,7 +1206,7 @@ commit unreachable.
                    (turned vertical with `o`, j / k walk history and h / l
                     step between branches: the keys follow the picture)
     J / K          half a screen
-    gg / ge        the first / last commit
+    gg / ge        the top / bottom of the graph
     Enter          on a branch: go there.  On a commit: read its diff
     y              copy the hash under the cursor
 
@@ -1578,7 +1584,7 @@ mod tests {
             app.vcs.as_mut().unwrap().orient = orient;
 
             // Walk to the oldest end and back, checking every step.
-            for dir in [orient.older(), orient.newer()] {
+            for dir in [orient.back(), orient.forward()] {
                 for _ in 0..12 {
                     super::handle(&mut app, &Command::MoveLeft);
                     app.vcs.as_mut().unwrap().step(dir, 60);
@@ -1607,6 +1613,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `gg` goes to the top of the graph and `ge` to the bottom, in a graph
+    /// exactly as in a buffer.  Which end of *history* that is depends on the
+    /// picture — the newest commit is at the right in one and at the top in
+    /// the other — and saying it the other way round sent `gg` walking away
+    /// from the top of the screen.
+    #[test]
+    fn gg_and_ge_reach_the_ends_of_the_screen_not_the_ends_of_history() {
+        for orient in [
+            vcs::layout::Orientation::Horizontal,
+            vcs::layout::Orientation::Vertical,
+        ] {
+            let mut app = app_in_graph();
+            app.vcs.as_mut().unwrap().orient = orient;
+
+            let screen_pos = |app: &App| {
+                let state = app.vcs.as_ref().unwrap();
+                let layout = state.layout(120);
+                let at = layout.locate(state.focus.as_ref().unwrap()).expect("a cursor");
+                layout.screen(at.along, at.across)
+            };
+            let forward_axis = |(x, y): (u16, u16)| match orient {
+                vcs::layout::Orientation::Horizontal => x,
+                vcs::layout::Orientation::Vertical => y,
+            };
+
+            super::handle(&mut app, &Command::GotoFileStart);
+            let top = forward_axis(screen_pos(&app));
+            super::handle(&mut app, &Command::GotoFileEnd);
+            let bottom = forward_axis(screen_pos(&app));
+            assert!(
+                top < bottom,
+                "{orient:?}: gg landed at {top} and ge at {bottom} — the wrong way round"
+            );
+
+            // …and paging goes the same way as `ge`, not the opposite one.
+            super::handle(&mut app, &Command::GotoFileStart);
+            super::handle(&mut app, &Command::PageDown);
+            assert!(
+                forward_axis(screen_pos(&app)) > top,
+                "{orient:?}: J paged backwards"
+            );
+        }
+    }
+
+    /// A preference stated once has to survive the view going away: the graph
+    /// is closed and reopened constantly (`q`, a file, `H`/`L`), and `close`
+    /// throws the session's state away.
+    #[test]
+    fn the_orientation_survives_the_view_being_closed_and_reopened() {
+        let mut app = app_in_graph();
+        let start = app.vcs.as_ref().unwrap().orient;
+        super::handle(&mut app, &Command::VcsFlip);
+        let flipped = app.vcs.as_ref().unwrap().orient;
+        assert_ne!(flipped, start, "the flip did nothing");
+        assert_eq!(app.vcs_orientation, flipped, "the session did not remember");
+
+        // The view is closed — its state, and the orientation with it, is gone.
+        app.vcs = None;
+        // …and reopened, which is a fresh read of the repository.
+        let fresh = app_in_graph().vcs.take().expect("a fixture graph");
+        install(&mut app, fresh.root.clone(), fresh.dag);
+        assert_eq!(
+            app.vcs.as_ref().unwrap().orient,
+            flipped,
+            "the graph came back the way the config says, not the way it was left"
+        );
     }
 
     /// The headline gesture, through the command layer this time: grab, move,

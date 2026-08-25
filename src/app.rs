@@ -446,6 +446,14 @@ pub struct App {
     pub vcs_job: Option<crate::exec::vcs::VcsJob>,
     /// A git command whose output is being streamed into `*git output*`.
     pub vcs_stream: Option<crate::exec::vcs::OutputJob>,
+    /// Which way the commit graph is drawn, for this **session**.
+    ///
+    /// Kept here rather than only in the open `VcsState` because the state does
+    /// not survive `q`: closing the view discards its stash, so a preference
+    /// living only there was forgotten the moment you looked at a file and came
+    /// back.  Starts from `[vcs] orientation` and is moved by `:vc-flip`, which
+    /// says which config key makes it permanent.
+    pub vcs_orientation: crate::vcs::layout::Orientation,
     /// Directory a bare filename in a `:sql` query resolves against.
     ///
     /// Captured when the SQL buffer is opened, because switching into it makes
@@ -701,6 +709,7 @@ impl App {
     /// Create a new App, loading `path` if provided.
     pub fn new(path: Option<&str>, config: Config) -> Result<Self> {
         let is_notebook = path.map(|p| p.ends_with(".ipynb")).unwrap_or(false);
+        let vcs_orientation = crate::vcs::layout::Orientation::parse(&config.vcs.orientation);
 
         let notebook = if is_notebook {
             let p = path.expect("checked above");
@@ -798,6 +807,7 @@ impl App {
             vcs_pending: None,
             vcs_job: None,
             vcs_stream: None,
+            vcs_orientation,
             graphics: GraphicsState::default(),
             cell_focused_edit: false,
             popup: None,

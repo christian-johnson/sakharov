@@ -51,15 +51,15 @@ pub struct Config {
 /// The version-control graph (`[vcs]`).
 #[derive(Debug, Deserialize, Clone)]
 pub struct VcsConfig {
-    /// `"horizontal"` (history left to right) or `"vertical"` (top to bottom,
-    /// newest first).  A new graph opens this way; `:vc-flip` turns the one on
-    /// screen for the session.
+    /// `"vertical"` (top to bottom, newest first) or `"horizontal"` (history
+    /// left to right).  A session starts this way; `:vc-flip` turns the graph
+    /// over for the rest of it.
     #[serde(default = "default_orientation")]
     pub orientation: String,
 }
 
 fn default_orientation() -> String {
-    "horizontal".to_string()
+    "vertical".to_string()
 }
 
 impl Default for VcsConfig {

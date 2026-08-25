@@ -273,10 +273,11 @@ column_sparkline = false
 # editor.tab_width.  Python and Rust intentionally have no override here —
 # they follow the 4-space default.
 [vcs]
-# Which way the commit graph runs: "horizontal" (oldest at the left, a branch
-# is a row) or "vertical" (newest at the top, a branch is a column).
-# `:vc-flip` turns the graph on screen for the session.
-orientation = "horizontal"
+# Which way the commit graph runs: "vertical" (newest at the top, a branch is a
+# column — the order `git log` prints) or "horizontal" (oldest at the left, a
+# branch is a row).  `o` / `:vc-flip` turns the graph over for the session; this
+# is what a new session starts as.
+orientation = "vertical"
 
 [languages.javascript]
 indent_width = 2

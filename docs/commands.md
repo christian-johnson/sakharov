@@ -753,12 +753,19 @@ fine: it keeps writing, and the transcript is whole when you return.
 
 ### Which way it runs
 
-History runs **left to right** by default: the oldest commit loaded at the left
-edge, a branch is a row with its name above it, `h`/`l` travel time and `j`/`k`
-step between branches. `o` (`:vc-flip`) turns it a quarter turn — newest commit
+History runs **top to bottom** by default — newest first, the order `git log`
+prints, a branch is a column — with `j`/`k` travelling time and `h`/`l` stepping
+between branches. Horizontal puts the oldest commit at the left edge and makes
+a branch a row with its name above it, `h`/`l` travelling time instead. `o` (`:vc-flip`) turns it a quarter turn — newest commit
 at the top, a branch is a column named in a row above the graph, and the keys
 follow the picture, so `j`/`k` then walk history and `h`/`l` change branch.
-`[vcs] orientation = "vertical"` makes that the way a graph opens.
+Paging and `gg`/`ge` follow the screen too: `gg` is the top of the graph and
+`J` pages down it, whichever way round it is drawn.
+
+The flip lasts the **session** — the graph is closed and reopened constantly
+(`q`, opening a file, `H`/`L`), and a preference you state once should not have
+to be stated again each time. `[vcs] orientation = "vertical"` (the shipped
+default) or `"horizontal"` is what a session starts as.
 
 It is one layout, not two. The geometry is computed on an *along* (time) axis
 and an *across* (track) axis, and only two things know which screen axis is
