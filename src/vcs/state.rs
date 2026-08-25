@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use super::{
-    layout::{self, Dir, Focus, Layout},
+    layout::{self, Dir, Focus, Layout, Orientation},
     plan::{Edit, Plan},
     Dag, Oid,
 };
@@ -27,12 +27,16 @@ pub struct VcsState {
     /// move rewrites the plan's provisional edit, so the graph rearranges
     /// under the cursor instead of the cursor merely travelling over it.
     pub grabbed: Option<Focus>,
-    /// Scroll anchor: the leftmost column drawn, and the topmost track.
+    /// Which way the graph is drawn.  A per-session preference — `:vc-flip`
+    /// toggles it, `[vcs] orientation` sets what a new session starts as.
+    pub orient: Orientation,
+    /// Scroll anchor: how far along the time axis the viewport starts, and the
+    /// first track drawn.
     ///
-    /// Columns are fine-grained (the time axis is the one you travel along, so
-    /// it has to move smoothly) while tracks move a whole branch row at a
-    /// time — half a block above the top edge is unreadable.
-    pub scroll_col: u16,
+    /// The time axis is fine-grained (it is the one you travel along, so it
+    /// has to move smoothly) while tracks move a whole branch band at a time —
+    /// half a block past the edge is unreadable.
+    pub scroll_along: u16,
     pub scroll_track: usize,
     /// The moment the snapshot was taken, so every "3d ago" on screen is
     /// relative to one instant rather than to whenever each was rendered.
@@ -63,7 +67,8 @@ impl VcsState {
             plan: Plan::default(),
             focus: None,
             grabbed: None,
-            scroll_col: 0,
+            orient: Orientation::default(),
+            scroll_along: 0,
             scroll_track: 0,
             now,
         };
@@ -78,7 +83,19 @@ impl VcsState {
     /// invalidating on exactly the events that make it worth having, and
     /// showing a stale graph is the one failure this view cannot afford.
     pub fn layout(&self, width: u16) -> Layout {
-        layout::compute(&self.dag, &self.plan.project(&self.dag), width)
+        layout::compute(&self.dag, &self.plan.project(&self.dag), width, self.orient)
+    }
+
+    /// Turn the graph a quarter turn, keeping the cursor on whatever it is on.
+    ///
+    /// The scroll anchor is *not* kept: it is measured along an axis that has
+    /// just become the other one, and `update_scroll` puts the cursor back on
+    /// screen on the next frame anyway.
+    pub fn flip(&mut self) -> Orientation {
+        self.orient = self.orient.flipped();
+        self.scroll_along = 0;
+        self.scroll_track = 0;
+        self.orient
     }
 
     /// The graph as it stands, ignoring any drag in progress.
@@ -91,7 +108,12 @@ impl VcsState {
     /// presses.  What the user is choosing between is *things* — this commit
     /// or that one — and those are the same set either way.
     fn stable_layout(&self, width: u16) -> Layout {
-        layout::compute(&self.dag, &self.plan.project_committed(&self.dag), width)
+        layout::compute(
+            &self.dag,
+            &self.plan.project_committed(&self.dag),
+            width,
+            self.orient,
+        )
     }
 
     /// Replace the snapshot after a refresh, keeping the cursor where it can

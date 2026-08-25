@@ -32,6 +32,8 @@ pub struct Config {
     #[serde(default)]
     pub table: TableConfig,
     #[serde(default)]
+    pub vcs: VcsConfig,
+    #[serde(default)]
     pub keys: KeysConfig,
     /// Language server definitions, keyed by language id (e.g. "python", "rust").
     #[serde(default)]
@@ -44,6 +46,26 @@ pub struct Config {
     /// Per-language editor overrides, keyed by language id (e.g. "python").
     #[serde(default)]
     pub languages: HashMap<String, LanguageConfig>,
+}
+
+/// The version-control graph (`[vcs]`).
+#[derive(Debug, Deserialize, Clone)]
+pub struct VcsConfig {
+    /// `"horizontal"` (history left to right) or `"vertical"` (top to bottom,
+    /// newest first).  A new graph opens this way; `:vc-flip` turns the one on
+    /// screen for the session.
+    #[serde(default = "default_orientation")]
+    pub orientation: String,
+}
+
+fn default_orientation() -> String {
+    "horizontal".to_string()
+}
+
+impl Default for VcsConfig {
+    fn default() -> Self {
+        VcsConfig { orientation: default_orientation() }
+    }
 }
 
 /// Per-language editor settings (`[languages.<lang>]`).

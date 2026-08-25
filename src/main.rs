@@ -7,6 +7,7 @@ mod config;
 mod exec;
 mod fold;
 mod git;
+mod git_highlight;
 mod highlight;
 mod history;
 mod indent;

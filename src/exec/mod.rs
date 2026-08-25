@@ -1129,6 +1129,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         | Command::VcsHelp
         | Command::VcsStage
         | Command::VcsUnstage
+        | Command::VcsFlip
         | Command::VcsFetch
         | Command::VcsPull
         | Command::VcsPush

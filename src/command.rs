@@ -265,6 +265,7 @@ commands! {
         VcsFetch => "version-control-fetch", aliases: ["vc-fetch", "fetch"], palette: "Fetch from the remote";
         VcsPull => "version-control-pull", aliases: ["vc-pull", "pull"], palette: "Pull the current branch from its upstream";
         VcsPush => "version-control-push", aliases: ["vc-push", "push"], palette: "Push the current branch to its upstream";
+        VcsFlip => "version-control-flip", aliases: ["vc-flip", "vc-orientation"], palette: "Turn the graph: history across, or down the screen  [o]";
         VcsOutput => "version-control-output", aliases: ["vc-output"], palette: "The last git command's output, as it ran";
 
         // --- Toggles / config ---

@@ -533,6 +533,13 @@ fn render_text_popup(
 
     let buf = frame.buffer_mut();
     let visible_rows = inner.height as usize;
+    // `git status` says what a file's state is once, in a heading, and every
+    // line under it inherits that — so the scan has to start at the top of the
+    // text rather than at the top of the window.
+    let mut section = crate::git_highlight::Section::default();
+    for line in state.lines.iter().take(state.scroll) {
+        crate::git_highlight::line_spans(line, &mut section);
+    }
 
     for row in 0..visible_rows {
         let line_idx = state.scroll + row;
@@ -549,10 +556,21 @@ fn render_text_popup(
             continue;
         };
 
-        for (x, c) in (inner.left()..inner.right()).zip(line.chars()) {
-            buf[(x, y)]
-                .set_char(c)
-                .set_style(Style::default().fg(th.popup_fg).bg(th.popup_bg));
+        // Git's own output is coloured the same way the diff and status
+        // buffers are — one classifier, so a status read in a float and the
+        // same status read in a buffer do not disagree about what is staged.
+        let spans = if state.git {
+            crate::git_highlight::line_spans(line, &mut section)
+        } else {
+            Vec::new()
+        };
+        for (i, (x, c)) in (inner.left()..inner.right()).zip(line.chars()).enumerate() {
+            let fg = spans
+                .iter()
+                .find(|(from, to, _)| i >= *from && i < *to)
+                .and_then(|(_, _, index)| crate::theme::style_for_highlight(*index).fg)
+                .unwrap_or(th.popup_fg);
+            buf[(x, y)].set_char(c).set_style(Style::default().fg(fg).bg(th.popup_bg));
         }
     }
 
@@ -708,18 +726,19 @@ fn draw_stage_diff(frame: &mut Frame, state: &crate::popup::StageState, area: Re
             continue;
         }
         let Some(line) = state.diff.get(state.diff_scroll + row - 1) else { continue };
-        let fg = match line.as_bytes().first() {
-            _ if line.starts_with("+++") || line.starts_with("---") => th.popup_dim,
-            Some(b'@') => th.accent,
-            Some(b'+') => th.git_added,
-            Some(b'-') => th.error,
-            _ if line.starts_with("diff ") || line.starts_with("index ") => th.popup_dim,
-            _ => th.popup_fg,
-        };
-        for (x, c) in (area.left()..area.right()).zip(line.chars()) {
-            buf[(x, y)]
-                .set_char(c)
-                .set_style(Style::default().fg(fg).bg(th.popup_bg));
+        // Through the shared classifier: this pane, the `*commit …*` buffer
+        // and `git status` in a float all show git's output, and a diff that
+        // is coloured one way here and another way there is two answers to one
+        // question.
+        let mut section = crate::git_highlight::Section::default();
+        let spans = crate::git_highlight::line_spans(line, &mut section);
+        for (i, (x, c)) in (area.left()..area.right()).zip(line.chars()).enumerate() {
+            let fg = spans
+                .iter()
+                .find(|(from, to, _)| i >= *from && i < *to)
+                .and_then(|(_, _, index)| crate::theme::style_for_highlight(*index).fg)
+                .unwrap_or(th.popup_fg);
+            buf[(x, y)].set_char(c).set_style(Style::default().fg(fg).bg(th.popup_bg));
         }
     }
 }

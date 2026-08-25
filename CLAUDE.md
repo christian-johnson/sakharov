@@ -1078,18 +1078,58 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   (`exec::vcs::checkout_plan`): `c` on a commit a local branch points at checks
   out that branch.  Detached HEAD should be somewhere you arrive deliberately,
   from the middle of history.
-- **The graph runs left to right: oldest at the left edge, newest at the right,**
-  and every arrow points *backwards*, from a commit to the parent it follows.
-  A branch is a horizontal **track**; `h`/`l` travel through history and `j`/`k`
-  step between branches.  Each track carries its branch's name on the row above
-  it (`LABEL_H`, `Layout::label_row`, `vcs_ui::draw_lane_names`), **pinned to
-  the viewport's left edge** rather than written in graph coordinates: the
-  question "which branch am I looking at" is at its sharpest a hundred commits
-  along, which is exactly where a name in graph coordinates has scrolled off.  `MIN_BLOCK`/`MAX_BLOCK` clamp how wide a block grows
-  (a block is as wide as what is written in it) and `BLOCK_H` is fixed at five
-  rows — two borders, the summary wrapped over two, and the metadata row — so a
-  track is a row band of one size and two blocks in one track are joined by a
-  straight line.
+- **The graph runs either way round, and it is one layout, not two.**  Geometry
+  is computed in **graph space**, on an *along* axis (time — 0 is the oldest
+  commit loaded, and every arrow points **back** along it) and an *across* axis
+  (tracks — a commit's track is inherited by its first parent).  Exactly two
+  things know which screen axis is which: `layout::Metrics` (a block's extent
+  along each axis, the gaps, and whether the label band costs a track) and
+  `Layout::screen`/`block_origin`, which the renderer and the navigation both
+  map through.  Everything between — chains, colours, spans, track assignment,
+  arrow routing, the focus walk, the scroll — is written once and is true of
+  both pictures, which is what makes `no_arrow_is_drawn_through_a_block` a test
+  that can simply be run twice.
+  **Horizontal** (default) puts the oldest commit at the left edge, makes a
+  branch a row, and writes each track's name in a band above it (`LABEL_H`,
+  `Layout::label_across`) pinned to the viewport's left edge — the question
+  "which branch am I looking at" is at its sharpest a hundred commits along,
+  which is exactly where a name in graph coordinates has scrolled off.
+  **Vertical** (`o` / `:vc-flip`, `[vcs] orientation`) puts the **newest**
+  commit at the top, the order `git log` prints, makes a branch a column, and
+  names every track at once in a row the renderer reserves above the graph.
+  That reversal is the one place the graph's own time axis and the screen
+  disagree, and it lives entirely in `Layout::display_along`.
+  The keys follow the picture (`Layout::travel`): whichever axis history runs
+  along is the one `h`/`l` or `j`/`k` travel, so there is nothing extra to
+  remember — and the two motions that are about history rather than the screen
+  (paging, `gg`/`ge`) ask for a direction by name (`Orientation::newer`/
+  `older`).  A block is the *same box* either way — `block_width` by `BLOCK_H`
+  (five rows: two borders, the summary over two, the metadata row) — so
+  everything drawn inside one is written in plain screen coordinates and knows
+  nothing about any of this.
+- **Arrow strokes merge into junctions rather than overwriting each other**
+  (`vcs_ui::Painter::at`, `line_strokes`/`line_glyph`).  Several children of one
+  commit converge on the same crossing line, and whichever turned there last
+  used to stamp a corner into the middle of another arrow's straight run — a
+  `╰` with line above and below it, which reads as one line ending and an
+  unrelated one starting.  Corners and arrowheads are worked out from the
+  *screen* directions of the neighbouring cells (`vcs_ui::side`, `corner`,
+  `arrowhead`), never from a rule written down per orientation; the head points
+  at **the commit it names**, which is the same thing as the direction of
+  travel in the horizontal picture and is not in the vertical one.  The test
+  that holds all of this together is `every_arrow_reads_as_one_unbroken_line`:
+  every consecutive pair of cells on an arrow's path must have strokes facing
+  each other, in both orientations.  It is what found the routing bug below.
+- **An arrow that would run through a block takes the other crossing point**
+  (`layout::cross_at`).  A first parent crosses late and a merge's other
+  parents cross early (see `Edge::cross_along`), and either choice puts the
+  long run in *somebody's* track — which is only clear between two consecutive
+  blocks of the group that owns it.  Merge a feature branch and keep working on
+  it, and the merge's second parent has blocks of its own track sitting between
+  it and the merge: the early run went straight through them.  Blocks are
+  painted after arrows, so that is not cosmetic — the line disappears into a
+  box and the parent it names is anybody's guess.  When the preferred run is
+  blocked and the other is clear, the other is taken.
 - **`vcs::layout` is the single geometry model** (the graph's `table::layout`): block
   positions, track assignment, arrow routing (`Layout::route` → `EdgeRoute::cells`)
   and the focusable list all come from it, so the renderer and the navigation cannot
@@ -1172,6 +1212,26 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   parked on `StageState` and run by `exec::vcs::pump_stage_popup` from the
   `PopupAction::Continue` arm — the same shape the theme picker's live preview
   uses.
+- **Git's output is coloured by the editor, from the text** (`git_highlight.rs`).
+  A diff, `git status` and a hook's own printing all reach the user as flat
+  text, and for a diff the one distinction that matters — added or taken away —
+  is then left to a `+` in column zero.  Passing the *terminal's* colours
+  through would be the obvious answer and mostly does not work: git and the
+  tools a hook runs check whether they are talking to a terminal, and here they
+  are talking to a pipe, so most of the time there is nothing to pass through —
+  and what does arrive is an escape sequence that has to be stripped before it
+  reaches a rope anyway (`run::clean`).  Colouring the text works either way and
+  comes out in the user's theme, which is the standing rule for every colour in
+  this editor.  `line_spans` is the single classifier — a diff, a commit header,
+  `git status` (whose sections it carries between lines, since the same
+  `modified:` is green under one heading and red under another), and a small set
+  of verdict words (`Passed`, `failed`, `warning`, and `black.........Passed`,
+  where the verdict is a suffix rather than a word).  `0 failed` is deliberately
+  not red.  It feeds the `*commit …*` and `*git output*` buffers through
+  `highlight::Highlighter` (the `GIT_*` indices, themed from the git colours the
+  editor already uses in the gutter), and the staging pane and the `git status`
+  float through `popup_ui` — one classifier, so a diff read in a float and the
+  same diff read in a buffer cannot disagree.
 - **A command that runs a hook is watched, not waited on** (`vcs/run.rs` +
   `exec::vcs::stream_now`).  Commit, fetch, pull and push spawn git with both
   pipes drained by threads onto a channel, and the run loop empties that channel
@@ -1244,6 +1304,11 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   rather than flattened — the same limit `git rebase` has without `--rebase-merges`.
   Conflicts stop the run and are resolved in the ordinary editor; the dedicated
   merge-conflict resolver is the next view on the roadmap.
+- A streamed command's transcript is **not** an ANSI terminal: escape sequences
+  are stripped, and the colour comes from `git_highlight` reading the text (see
+  above).  A tool that draws a box or repositions the cursor will not look like
+  it does in a terminal, and a colour it assigns to something the classifier
+  does not recognise is simply not shown.
 - The graph is a **snapshot** taken when it was read: `r` / `:vc-refresh` re-reads
   it, and any apply refreshes automatically. Nothing detects a change made in a
   shell in the meantime.
@@ -1329,6 +1394,10 @@ src/
                         closed, open/close/toggle, and the (kind, depth, label) type-matching
                         behind zt/zT); tree-sitter fold ranges + assign_depths, shared with
                         markdown.rs so depth means the same thing in both
+  git_highlight.rs    — colouring git's own output (a diff, `git status`, a
+                        hook's printing) by the text rather than by escape
+                        sequences; one classifier shared by the buffers and the
+                        floats
   markdown.rs         — custom Markdown (.md/.markdown/.qmd) highlighter + section/fence
                         folding; produces the same Vec<Span> / Vec<FoldRange> (no tree-sitter)
   sql_highlight.rs    — custom SQL lexer (.sql files + the *sql* buffer) producing the same
@@ -1415,8 +1484,11 @@ src/
     run.rs            — a git command whose *output* is the point: child +
                         pipe-draining threads → Event channel, plus `clean`
                         (what a hook's output may safely become in a rope)
-    layout.rs         — THE geometry model: blocks, tracks, arrow routing,
-                        Focus + the focusable list that navigation walks
+    layout.rs         — THE geometry model, in graph space (along = time,
+                        across = tracks): blocks, tracks, arrow routing, Focus +
+                        the focusable list that navigation walks.  Metrics +
+                        Layout::screen are the only things that know which
+                        screen axis is which (see Orientation)
     state.rs          — VcsState: snapshot + plan + cursor + the drag state
                         machine (what dropping one thing on another *means*)
                         Focus is a commit block, a ref label or HEAD — never

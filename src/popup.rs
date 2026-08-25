@@ -639,6 +639,11 @@ fn is_subsequence(label: &str, filter: &str) -> bool {
 pub struct TextState {
     pub lines: Vec<String>,
     pub scroll: usize,
+    /// True when these lines are git's own output, so the renderer colours
+    /// them the way the diff and status buffers are coloured
+    /// (`crate::git_highlight`).  A float holds text from anywhere — an LSP
+    /// hover, a cell's value, a SQL error — and only the caller knows which.
+    pub git: bool,
     /// True once the user has pressed Tab to engage with the text, exactly as
     /// [`ListState::focused`] works for the completion popup: passive floats are
     /// hint overlays that any key dismisses, focused ones capture navigation.
@@ -771,6 +776,7 @@ impl Popup {
             content: PopupContent::Text(TextState {
                 lines: sanitize_lines(content),
                 scroll: 0,
+                git: false,
                 focused: false,
             }),
             anchor: PopupAnchor::Center,
@@ -805,6 +811,15 @@ impl Popup {
     pub fn reference(title: &str, content: &str) -> Self {
         let mut popup = Self::text_focused(title, content);
         popup.width = PopupSize::Auto;
+        popup
+    }
+
+    /// Git's own output, opened focused and coloured as such.
+    pub fn git_output(title: &str, content: &str) -> Self {
+        let mut popup = Self::reference(title, content);
+        if let PopupContent::Text(ref mut text) = popup.content {
+            text.git = true;
+        }
         popup
     }
 

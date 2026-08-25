@@ -419,6 +419,10 @@ impl Keymap {
         // `?` is the whole view explained, since nothing here is a git verb
         // and there is no command line to read the answer off.
         vcs.insert(KeyBinding::char('?'), vec![Command::VcsHelp]);
+        // `o` turns the graph a quarter turn — which way history runs is a
+        // preference, not a mode, so it is one key rather than a setting to go
+        // and find.
+        vcs.insert(KeyBinding::char('o'), vec![Command::VcsFlip]);
         // `q` backs out, as it does from a cell buffer and a derived table.
         vcs.insert(KeyBinding::char('q'), vec![Command::VcsClose]);
         // `J` pages, matching the notebook and the grid.

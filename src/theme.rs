@@ -760,6 +760,19 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         s(pick(&[c(&md.quote)], dim)).add_modifier(Modifier::ITALIC);
     syntax[crate::highlight::MD_LIST] = s(pick(&[c(&md.list), constant], Color::Yellow));
 
+    // --- git output ---
+    //
+    // Deliberately the same colours the editor already uses for git elsewhere
+    // (the gutter marks, the staging pane, the commit graph's counts), so a
+    // diff reads the same wherever it is shown, and a theme that sets them
+    // sets them everywhere.
+    syntax[crate::highlight::GIT_ADDED] = s(git_added);
+    syntax[crate::highlight::GIT_REMOVED] = s(error);
+    syntax[crate::highlight::GIT_HUNK] = s(info);
+    syntax[crate::highlight::GIT_META] = s(if themed { dim } else { Color::Gray });
+    syntax[crate::highlight::GIT_HASH] = s(vcs_hash).add_modifier(bold);
+    syntax[crate::highlight::GIT_WARNING] = s(warning);
+
     // --- Mode colors ---
     let m = &spec.modes;
     let mc = |v: &str| -> Option<Color> {

@@ -8,6 +8,25 @@
 //! Everything is drawn into a cell buffer directly rather than through
 //! ratatui widgets: blocks overlap arrows, arrows cross tracks, and the whole
 //! picture is a coordinate grid rather than a stack of rectangles.
+//!
+//! ## Which way up
+//!
+//! The graph is drawn either way round (`vcs::layout::Orientation`), and this
+//! module contains no second copy of anything to do it.  Two things differ,
+//! and they are the two things that are genuinely about the screen rather than
+//! about the graph:
+//!
+//! * **Where a graph cell lands** — [`Painter::at`] asks the layout
+//!   (`Layout::screen`), which is also what the navigation walks, so the two
+//!   cannot disagree about what is under the cursor.
+//! * **Which glyph a stroke is** — a run along the time axis is `─` in one
+//!   picture and `│` in the other ([`Strokes`]), and a corner or an arrowhead
+//!   is worked out from the *screen* directions its arms leave on
+//!   ([`corner`], [`arrowhead`]) rather than from a rule written down twice.
+//!
+//! A block is the same box either way: `block_width` by [`BLOCK_H`].  So
+//! everything inside one is drawn in ordinary screen coordinates from the
+//! block's origin, and none of it knows the orientation exists.
 
 use ratatui::{
     layout::Rect,
@@ -19,7 +38,7 @@ use crate::{
     theme,
     render_util::wrap_segments,
     vcs::{
-        layout::{Block, BlockKind, Edge, Focus, Layout, BLOCK_H, GAP},
+        layout::{Block, BlockKind, Edge, Focus, Layout, Orientation, BLOCK_H},
         relative_time,
         state::VcsState,
         Dag, Oid, RefKind,
@@ -105,52 +124,127 @@ enum Mark {
 /// outside `area` and nothing has to check the scroll for itself — which
 /// matters more than usual in a view that paints cells directly rather than
 /// rendering widgets into rectangles.
-struct Painter<'a, 'b> {
+struct Painter<'a, 'b, 'c> {
     frame: &'a mut Frame<'b>,
+    /// Where the graph itself is drawn.
     area: Rect,
-    scroll_row: u16,
-    scroll_col: u16,
+    /// The row branch names are pinned to, when they are pinned to one at all
+    /// (vertical: one row above the graph, naming every track at once).
+    names: Option<Rect>,
+    layout: &'c Layout,
+    scroll_x: u16,
+    scroll_y: u16,
 }
 
-impl Painter<'_, '_> {
-    /// One cell, or nothing if it is scrolled off or past the edge.
-    fn cell(&mut self, row: u16, col: u16, ch: char, style: Style) {
-        let Some(row) = row.checked_sub(self.scroll_row) else { return };
-        let Some(col) = col.checked_sub(self.scroll_col) else { return };
-        if row >= self.area.height || col >= self.area.width {
+impl Painter<'_, '_, '_> {
+    /// One cell in screen coordinates, or nothing if it is scrolled off or
+    /// past the edge.
+    fn put(&mut self, x: u16, y: u16, ch: char, style: Style) {
+        let Some(x) = x.checked_sub(self.scroll_x) else { return };
+        let Some(y) = y.checked_sub(self.scroll_y) else { return };
+        if y >= self.area.height || x >= self.area.width {
             return;
         }
-        self.frame.buffer_mut()[(self.area.x + col, self.area.y + row)]
+        self.frame.buffer_mut()[(self.area.x + x, self.area.y + y)]
             .set_char(ch)
             .set_style(style);
     }
 
-    /// `text`, truncated to `max` columns.
-    fn text(&mut self, row: u16, col: u16, text: &str, style: Style, max: u16) {
+    /// One cell in *graph* coordinates — the only place the orientation is
+    /// consulted, and it is consulted by asking the layout.
+    ///
+    /// Where two arrows meet, their strokes are **merged into a junction**
+    /// rather than one overwriting the other.  Several children of one commit
+    /// converge on the same crossing line, and whichever turned there last
+    /// used to stamp a corner into the middle of another arrow's straight run
+    /// — a `╰` with line above and below it, which reads as one line ending
+    /// and an unrelated one starting.
+    fn at(&mut self, along: u16, across: u16, ch: char, style: Style) {
+        let (x, y) = self.layout.screen(along, across);
+        let ch = match (line_strokes(ch), self.read(x, y).and_then(line_strokes)) {
+            (Some((new, heavy)), Some((old, was_heavy))) => {
+                let mut merged = [false; 4];
+                for (i, side) in merged.iter_mut().enumerate() {
+                    *side = new[i] || old[i];
+                }
+                line_glyph(merged, heavy || was_heavy).unwrap_or(ch)
+            }
+            _ => ch,
+        };
+        self.put(x, y, ch, style);
+    }
+
+    /// A cell that replaces whatever is there, junctions included.
+    ///
+    /// An arrowhead is where a line *stops*; merging it with a run that
+    /// happens to pass through would turn the one glyph carrying "this is the
+    /// end, and this is what it points at" into a piece of plumbing.
+    fn put_over(&mut self, along: u16, across: u16, ch: char, style: Style) {
+        let (x, y) = self.layout.screen(along, across);
+        self.put(x, y, ch, style);
+    }
+
+    /// What is already drawn at a screen cell, if it is on screen at all.
+    fn read(&mut self, x: u16, y: u16) -> Option<char> {
+        let x = x.checked_sub(self.scroll_x)?;
+        let y = y.checked_sub(self.scroll_y)?;
+        if y >= self.area.height || x >= self.area.width {
+            return None;
+        }
+        self.frame.buffer_mut()[(self.area.x + x, self.area.y + y)]
+            .symbol()
+            .chars()
+            .next()
+    }
+
+    /// `text`, truncated to `max` columns, in screen coordinates.
+    fn text(&mut self, x: u16, y: u16, text: &str, style: Style, max: u16) {
         for (i, ch) in text.chars().take(max as usize).enumerate() {
-            self.cell(row, col + i as u16, ch, style);
+            self.put(x + i as u16, y, ch, style);
         }
     }
 
-    /// `text` at the viewport's own left edge: scrolled with the graph
-    /// vertically, never horizontally.
+    /// A track's branch name, written where that picture keeps them.
     ///
-    /// A row's branch name is the answer to "which branch am I looking at",
-    /// and that question is at its sharpest a hundred commits along a history
-    /// — exactly where a name written in graph coordinates has scrolled off.
-    fn pinned_text(&mut self, row: u16, text: &str, style: Style) {
-        let Some(row) = row.checked_sub(self.scroll_row) else { return };
-        if row >= self.area.height {
-            return;
-        }
-        for (i, ch) in text.chars().enumerate() {
-            let col = i as u16;
-            if col >= self.area.width {
-                return;
+    /// Horizontal writes it in the band above the track, at the viewport's own
+    /// left edge — scrolled with the graph across tracks, never along time.
+    /// Vertical writes it in the reserved row above the whole graph, over its
+    /// track's columns, scrolled the same way.  Either way it is pinned along
+    /// the time axis, because "which branch am I looking at" is at its
+    /// sharpest a hundred commits along — exactly where a name written in
+    /// graph coordinates has scrolled off.
+    fn lane_name(&mut self, track: usize, text: &str, style: Style) {
+        let across = self.layout.label_across(track);
+        match self.names {
+            // Vertical: the reserved row, at the track's own columns.
+            Some(row) => {
+                let Some(x) = across.checked_sub(self.scroll_x) else { return };
+                for (i, ch) in text.chars().enumerate() {
+                    let x = x + i as u16;
+                    if x >= row.width {
+                        return;
+                    }
+                    self.frame.buffer_mut()[(row.x + x, row.y)]
+                        .set_char(ch)
+                        .set_style(style);
+                }
             }
-            self.frame.buffer_mut()[(self.area.x + col, self.area.y + row)]
-                .set_char(ch)
-                .set_style(style);
+            // Horizontal: the band above the track, at the left edge.
+            None => {
+                let Some(y) = across.checked_sub(self.scroll_y) else { return };
+                if y >= self.area.height {
+                    return;
+                }
+                for (i, ch) in text.chars().enumerate() {
+                    let x = i as u16;
+                    if x >= self.area.width {
+                        return;
+                    }
+                    self.frame.buffer_mut()[(self.area.x + x, self.area.y + y)]
+                        .set_char(ch)
+                        .set_style(style);
+                }
+            }
         }
     }
 }
@@ -159,19 +253,29 @@ impl Painter<'_, '_> {
 pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
     let th = theme::active();
     let layout = state.layout(area.width);
-    let mut p = Painter {
-        frame,
-        area,
-        scroll_row: layout.label_row(state.scroll_track),
-        scroll_col: state.scroll_col,
+    // Vertical names every track at once in a row above the graph, so that row
+    // comes off the top before anything is laid against it.  Horizontal gives
+    // each track a name band of its own inside the stack (`label_across`), so
+    // there is nothing to reserve.
+    let vertical = layout.metrics.orient == Orientation::Vertical;
+    let names = (vertical && area.height > 1).then_some(Rect { height: 1, ..area });
+    let graph = match names {
+        Some(row) => Rect {
+            y: area.y + row.height,
+            height: area.height - row.height,
+            ..area
+        },
+        None => area,
     };
+    let (scroll_x, scroll_y) = layout.screen_scroll(state.scroll_along, state.scroll_track);
+    let mut p = Painter { frame, area: graph, names, layout: &layout, scroll_x, scroll_y };
 
     if state.dag.is_empty() && state.dag.head.branch.is_none() {
-        p.scroll_row = 0;
-        p.scroll_col = 0;
+        p.scroll_x = 0;
+        p.scroll_y = 0;
         p.text(
-            0,
             2,
+            0,
             "no commits yet — this repository has no history to show",
             Style::default().fg(th.dim),
             area.width,
@@ -201,8 +305,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
         draw_block(&mut p, state, &layout, block, &cursor);
     }
     draw_horizon(&mut p, state, &layout);
-    // Last, so a lane's name wins over an arrow that happens to cross the row
-    // it is written on.
+    // Last, so a track's name wins over an arrow that happens to cross the
+    // cells it is written in.
     draw_lane_names(&mut p, &layout);
 }
 
@@ -215,15 +319,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
 /// on screen saying they were the feature branch's.
 fn draw_lane_names(p: &mut Painter, layout: &Layout) {
     let th = theme::active();
+    // The tail points *into* the band the name belongs to: sideways at a row,
+    // downwards at a column.
+    let tail = match layout.metrics.orient {
+        Orientation::Horizontal => '╾',
+        Orientation::Vertical => '╽',
+    };
     for track in 0..layout.track_count {
         let Some(name) = layout.lane_label(track) else { continue };
         let colour = layout
             .branch_tints
             .get(name)
             .map_or(th.vcs_branch, |&t| th.vcs_tint(t));
-        p.pinned_text(
-            layout.label_row(track),
-            &format!("╾ {name} "),
+        p.lane_name(
+            track,
+            &format!("{tail} {name} "),
             Style::default().fg(colour).add_modifier(Modifier::BOLD),
         );
     }
@@ -233,20 +343,21 @@ fn draw_lane_names(p: &mut Painter, layout: &Layout) {
 ///
 /// Without it the oldest block on screen looks like the repository's first
 /// commit, and its missing parent arrow looks like a root — a picture that is
-/// simply false about older history.  Written in the gap row under the oldest
-/// block, because the columns to its left are the few the stub arrow needs.
+/// simply false about older history.  Written in the gap just below the oldest
+/// block, because the cells before it are the few the stub arrow needs.
 fn draw_horizon(p: &mut Painter, state: &VcsState, layout: &Layout) {
     if !state.dag.truncated {
         return;
     }
     let Some(oldest) = state.dag.commits().last() else { return };
     let Some(block) = layout.block(&oldest.id) else { return };
+    let (left, top) = layout.block_origin(block);
     p.text(
-        layout.track_row(block.track) + BLOCK_H,
-        block.col,
+        left,
+        top + BLOCK_H,
         "⋯ older history not loaded",
         Style::default().fg(theme::active().dim),
-        layout.block_width + GAP,
+        layout.block_width,
     );
 }
 
@@ -272,27 +383,30 @@ fn border_style(block: &Block, cursor: &Cursor) -> (Style, bool) {
     (cursor.style(&this, base), cursor.mark(&this).is_some())
 }
 
+/// A block is the same box in either picture, so it — and everything written
+/// inside it — is drawn in plain screen coordinates from
+/// `Layout::block_origin`.  Only where that origin *is* depends on the
+/// orientation.
 fn draw_block(p: &mut Painter, state: &VcsState, layout: &Layout, block: &Block, cursor: &Cursor) {
     let (style, heavy) = border_style(block, cursor);
     let ch = if heavy { &HEAVY } else { &LIGHT };
-    let left = block.col;
-    let top = layout.track_row(block.track);
+    let (left, top) = layout.block_origin(block);
     let right = left + layout.block_width - 1;
     let bottom = top + BLOCK_H - 1;
 
     // --- frame ---
-    for col in left..=right {
-        p.cell(top, col, ch.h, style);
-        p.cell(bottom, col, ch.h, style);
+    for x in left..=right {
+        p.put(x, top, ch.h, style);
+        p.put(x, bottom, ch.h, style);
     }
-    for row in top + 1..bottom {
-        p.cell(row, left, ch.v, style);
-        p.cell(row, right, ch.v, style);
+    for y in top + 1..bottom {
+        p.put(left, y, ch.v, style);
+        p.put(right, y, ch.v, style);
     }
-    p.cell(top, left, ch.tl, style);
-    p.cell(top, right, ch.tr, style);
-    p.cell(bottom, left, ch.bl, style);
-    p.cell(bottom, right, ch.br, style);
+    p.put(left, top, ch.tl, style);
+    p.put(right, top, ch.tr, style);
+    p.put(left, bottom, ch.bl, style);
+    p.put(right, bottom, ch.br, style);
 
     match block.kind {
         BlockKind::Head => draw_head_contents(p, state, layout, block),
@@ -307,9 +421,9 @@ fn draw_block(p: &mut Painter, state: &VcsState, layout: &Layout, block: &Block,
 /// becoming the next block to the right.
 fn draw_head_contents(p: &mut Painter, state: &VcsState, layout: &Layout, block: &Block) {
     let th = theme::active();
-    let (left, top, inner) = (block.col, layout.track_row(block.track), layout.block_inner());
+    let ((left, top), inner) = (layout.block_origin(block), layout.block_inner());
     let bold = Style::default().fg(th.vcs_head).add_modifier(Modifier::BOLD);
-    p.text(top, left + 2, " HEAD ", bold, inner);
+    p.text(left + 2, top, " HEAD ", bold, inner);
 
     let head = &state.dag.head;
     let where_ = match (&head.branch, &head.target) {
@@ -317,7 +431,7 @@ fn draw_head_contents(p: &mut Painter, state: &VcsState, layout: &Layout, block:
         (None, Some(oid)) => format!("● detached at {}", oid.short()),
         (None, None) => "● no commits yet".to_string(),
     };
-    p.text(top + 1, left + 2, &where_, bold, inner.saturating_sub(1));
+    p.text(left + 2, top + 1, &where_, bold, inner.saturating_sub(1));
 
     // Two rows, because they answer two different questions: what would go
     // into the next commit, and what is lying around the tree that git is not
@@ -338,10 +452,10 @@ fn draw_head_contents(p: &mut Painter, state: &VcsState, layout: &Layout, block:
     } else {
         th.dim
     };
-    p.text(top + 2, left + 2, &tracked, Style::default().fg(colour), inner.saturating_sub(1));
+    p.text(left + 2, top + 2, &tracked, Style::default().fg(colour), inner.saturating_sub(1));
     p.text(
-        top + 3,
         left + 2,
+        top + 3,
         &stray,
         Style::default().fg(th.dim),
         inner.saturating_sub(1),
@@ -363,7 +477,7 @@ fn draw_commit_contents(
     cursor: &Cursor,
 ) {
     let th = theme::active();
-    let (left, top, inner) = (block.col, layout.track_row(block.track), layout.block_inner());
+    let ((left, top), inner) = (layout.block_origin(block), layout.block_inner());
     let pending = state
         .plan
         .project(&state.dag)
@@ -379,7 +493,7 @@ fn draw_commit_contents(
         BlockKind::Pending => Style::default().fg(th.vcs_pending).add_modifier(Modifier::BOLD),
         _ => Style::default().fg(th.vcs_hash).add_modifier(Modifier::BOLD),
     };
-    p.text(top, left + 1, &hash, hash_style, inner);
+    p.text(left + 1, top, &hash, hash_style, inner);
 
     // --- ref labels, further along the same border ---
     for (name, col) in &block.labels {
@@ -402,7 +516,7 @@ fn draw_commit_contents(
         if cursor.mark(&this).is_some() {
             style = style.add_modifier(Modifier::REVERSED);
         }
-        p.text(top, left + col, &format!(" {name} "), style, inner);
+        p.text(left + col, top, &format!(" {name} "), style, inner);
     }
 
     // --- summary, wrapped over the two text rows ---
@@ -427,8 +541,8 @@ fn draw_commit_contents(
             line.push('…');
         }
         p.text(
-            top + 1 + row as u16,
             left + 2,
+            top + 1 + row as u16,
             line.trim_end(),
             Style::default(),
             text_width as u16,
@@ -438,8 +552,8 @@ fn draw_commit_contents(
     // --- author · age ---
     let Some(commit) = commit else {
         p.text(
-            top + 1 + SUMMARY_ROWS as u16,
             left + 2,
+            top + 1 + SUMMARY_ROWS as u16,
             "created by :vc-apply",
             Style::default().fg(th.vcs_pending),
             inner.saturating_sub(1),
@@ -448,8 +562,8 @@ fn draw_commit_contents(
     };
     let meta = format!("{} · {}", commit.author, relative_time(commit.when, state.now));
     p.text(
-        top + 1 + SUMMARY_ROWS as u16,
         left + 2,
+        top + 1 + SUMMARY_ROWS as u16,
         &meta,
         Style::default().fg(th.dim),
         inner.saturating_sub(1),
@@ -461,10 +575,10 @@ fn draw_commit_contents(
     let width = plus.chars().count() as u16 + minus.chars().count() as u16;
     let col = left + 1 + inner.saturating_sub(width);
     let bottom = top + BLOCK_H - 1;
-    p.text(bottom, col, &plus, Style::default().fg(th.git_added), width);
+    p.text(col, bottom, &plus, Style::default().fg(th.git_added), width);
     p.text(
-        bottom,
         col + plus.chars().count() as u16,
+        bottom,
         &minus,
         Style::default().fg(th.error),
         width,
@@ -488,38 +602,207 @@ fn edge_style(layout: &Layout, edge: &Edge, cursor: &Cursor) -> (Style, bool) {
     (cursor.style(&this, base), cursor.mark(&this).is_some())
 }
 
+/// Which sides of a cell a box-drawing glyph has a stroke on: `[N, S, E, W]`.
+///
+/// `None` for anything that is not a line — a block's border is drawn *after*
+/// the arrows and simply covers them, and an arrowhead terminates a line
+/// rather than continuing it.
+fn line_strokes(ch: char) -> Option<([bool; 4], bool)> {
+    let (sides, heavy) = match ch {
+        '─' => ([false, false, true, true], false),
+        '━' => ([false, false, true, true], true),
+        '│' => ([true, true, false, false], false),
+        '┃' => ([true, true, false, false], true),
+        '╭' => ([false, true, true, false], false),
+        '┏' => ([false, true, true, false], true),
+        '╮' => ([false, true, false, true], false),
+        '┓' => ([false, true, false, true], true),
+        '╰' => ([true, false, true, false], false),
+        '┗' => ([true, false, true, false], true),
+        '╯' => ([true, false, false, true], false),
+        '┛' => ([true, false, false, true], true),
+        '├' => ([true, true, true, false], false),
+        '┣' => ([true, true, true, false], true),
+        '┤' => ([true, true, false, true], false),
+        '┫' => ([true, true, false, true], true),
+        '┬' => ([false, true, true, true], false),
+        '┳' => ([false, true, true, true], true),
+        '┴' => ([true, false, true, true], false),
+        '┻' => ([true, false, true, true], true),
+        '┼' => ([true, true, true, true], false),
+        '╋' => ([true, true, true, true], true),
+        _ => return None,
+    };
+    Some((sides, heavy))
+}
+
+/// The glyph with strokes on exactly these sides.
+fn line_glyph(sides: [bool; 4], heavy: bool) -> Option<char> {
+    let light = match sides {
+        [false, false, true, true] => '─',
+        [true, true, false, false] => '│',
+        [false, true, true, false] => '╭',
+        [false, true, false, true] => '╮',
+        [true, false, true, false] => '╰',
+        [true, false, false, true] => '╯',
+        [true, true, true, false] => '├',
+        [true, true, false, true] => '┤',
+        [false, true, true, true] => '┬',
+        [true, false, true, true] => '┴',
+        [true, true, true, true] => '┼',
+        _ => return None,
+    };
+    Some(if heavy {
+        match light {
+            '─' => '━',
+            '│' => '┃',
+            '╭' => '┏',
+            '╮' => '┓',
+            '╰' => '┗',
+            '╯' => '┛',
+            '├' => '┣',
+            '┤' => '┫',
+            '┬' => '┳',
+            '┴' => '┻',
+            _ => '╋',
+        }
+    } else {
+        light
+    })
+}
+
+/// The strokes an arrow is built from, in the weight it is drawn.
+///
+/// A run *along time* is a horizontal line in one picture and a vertical one
+/// in the other, and the crossing stroke is whichever the run is not.  Naming
+/// them by the axis they travel rather than by their shape is what lets
+/// [`draw_edge_runs`] be written once.
+struct Strokes {
+    along: char,
+    across: char,
+    stub: char,
+}
+
+fn strokes(orient: Orientation, heavy: bool) -> Strokes {
+    let (h, v) = if heavy { ('━', '┃') } else { ('─', '│') };
+    match orient {
+        Orientation::Horizontal => Strokes { along: h, across: v, stub: '╌' },
+        Orientation::Vertical => Strokes { along: v, across: h, stub: '┆' },
+    }
+}
+
+/// Which side of a cell a neighbour lies on, on screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    N,
+    S,
+    E,
+    W,
+}
+
+/// The side of `from` that `to` lies on, both given as graph cells.
+///
+/// Going through the layout's own mapping rather than reasoning about the
+/// orientation here: a corner that faces the wrong way draws a line which
+/// appears to come from nowhere, and that is exactly the mistake a second
+/// statement of the rule invites.
+fn side(layout: &Layout, from: (u16, u16), to: (u16, u16)) -> Side {
+    let (fx, fy) = layout.screen(from.0, from.1);
+    let (tx, ty) = layout.screen(to.0, to.1);
+    if tx > fx {
+        Side::E
+    } else if tx < fx {
+        Side::W
+    } else if ty > fy {
+        Side::S
+    } else {
+        Side::N
+    }
+}
+
+/// The corner glyph joining two arms leaving on sides `a` and `b`.
+///
+/// Stated in absolute screen directions, so it holds for a graph turned any
+/// way up.  The weight has to match the strokes it joins: a light rounded
+/// corner in the middle of a focused arrow's heavy run leaves a visible notch
+/// exactly where a corner exists to prevent one.
+fn corner(a: Side, b: Side, heavy: bool) -> char {
+    let has = |s: Side| a == s || b == s;
+    match (has(Side::E), has(Side::S), heavy) {
+        (true, true, false) => '╭',
+        (true, true, true) => '┏',
+        (true, false, false) => '╰',
+        (true, false, true) => '┗',
+        (false, true, false) => '╮',
+        (false, true, true) => '┓',
+        (false, false, false) => '╯',
+        (false, false, true) => '┛',
+    }
+}
+
+/// The arrowhead for a link whose parent lies on `side` of the head cell.
+///
+/// Stated as "which way the commit it names is", not "which way the line was
+/// travelling".  The two agree whenever the last stretch runs into the parent,
+/// which is every arrow in the horizontal picture — and they part company in
+/// the vertical one, where an arrow that changes track at its very last cell
+/// arrives sideways and would otherwise point along the row instead of at the
+/// block directly below it.
+fn arrowhead(side: Side) -> char {
+    match side {
+        Side::E => '▶',
+        Side::W => '◀',
+        Side::S => '▼',
+        Side::N => '▲',
+    }
+}
+
 /// The straight runs of one parent link.
 ///
-/// Routed as a horizontal run back through the child's track, a vertical hop
-/// across to the parent's track, and a run into the parent's right-hand
-/// border, where the arrowhead goes.
+/// Routed as a run back through the child's track, a hop across to the
+/// parent's track, and a run into the parent's near border, where the
+/// arrowhead goes.
 fn draw_edge_runs(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Cursor) {
     let (style, heavy) = edge_style(layout, edge, cursor);
-    let (v, h) = if heavy { ('┃', '━') } else { ('│', '─') };
+    let st = strokes(layout.metrics.orient, heavy);
     let r = layout.route(edge);
 
     if r.stub {
         // Past the horizon: a short stub that visibly goes nowhere, rather
         // than an arrow into empty space.
-        for (row, col) in r.cells() {
-            p.cell(row, col, '╌', style);
+        for (along, across) in r.cells() {
+            p.at(along, across, st.stub, style);
         }
         return;
     }
 
-    // Back through the child's track to the crossing column…
-    for col in r.cross + 1..=r.start {
-        p.cell(r.from_row, col, h, style);
+    // Where both ends are in one track the arrow is a single straight run,
+    // stated as such rather than as three pieces that happen to line up: the
+    // crossing stroke laid over the middle of it would be a `│` across a `─`.
+    if r.from_across == r.to_across {
+        for along in r.head..=r.start {
+            p.at(along, r.from_across, st.along, style);
+        }
+        return;
     }
-    // …across…
-    let (lo, hi) = (r.from_row.min(r.to_row), r.from_row.max(r.to_row));
-    for row in lo..=hi {
-        p.cell(row, r.cross, v, style);
+
+    // Back through the child's track to the crossing point…
+    for along in r.cross + 1..=r.start {
+        p.at(along, r.from_across, st.along, style);
     }
-    // …and on through the parent's track to the arrowhead.  Where the two
-    // tracks are the same all three reduce to one straight run.
-    for col in r.head_col..r.cross {
-        p.cell(r.to_row, col, h, style);
+    // …across, *between* the two turns: the cells they sit on are theirs, and
+    // a stroke laid there first merges into the corner as an arm pointing at
+    // nothing.
+    let (lo, hi) = (
+        r.from_across.min(r.to_across),
+        r.from_across.max(r.to_across),
+    );
+    for across in lo + 1..hi {
+        p.at(r.cross, across, st.across, style);
+    }
+    // …and on through the parent's track to the arrowhead.
+    for along in r.head..r.cross {
+        p.at(along, r.to_across, st.along, style);
     }
 }
 
@@ -535,51 +818,48 @@ fn draw_edge_turns(p: &mut Painter, layout: &Layout, edge: &Edge, cursor: &Curso
         return;
     }
 
-    if r.from_row != r.to_row {
-        // Corners, so the run reads as one line rather than three.
-        let down = r.to_row > r.from_row;
-        // The turn always gets a corner, even when the arrow crosses in the
-        // very first column: the stroke it turns out of is the block sitting
-        // directly beside it, and a bare `│` there reads as a line from
-        // nowhere.
-        //
-        // The run the arrow leaves along is to the corner's east (it started
-        // at the child, which is further right), and the run it arrives along
-        // is to the corner's west (it ends at the parent, further left).  The
-        // vertical leaves the first corner in the direction of travel and
-        // arrives at the second from the opposite one.
-        p.cell(r.from_row, r.cross, corner(true, down, heavy), style);
-        if r.cross > r.head_col {
-            p.cell(r.to_row, r.cross, corner(false, !down, heavy), style);
+    let leaving = (r.cross, r.from_across);
+    let arriving = (r.cross, r.to_across);
+    if r.from_across != r.to_across {
+        // Corners, so the run reads as one line rather than three.  The turn
+        // always gets one, even when the arrow crosses at its very first cell:
+        // the stroke it turns out of is the block sitting directly beside it,
+        // and a bare stroke there reads as a line from nowhere.
+        // The arms are named by the *neighbouring cell* in each direction,
+        // never by the far end of the run: a merge's second parent crosses at
+        // the arrow's very first cell, so the far end is the corner itself and
+        // asking which side it lies on has no answer.
+        p.at(
+            leaving.0,
+            leaving.1,
+            corner(
+                side(layout, leaving, (r.cross + 1, r.from_across)),
+                side(layout, leaving, arriving),
+                heavy,
+            ),
+            style,
+        );
+        if r.cross > r.head {
+            p.at(
+                arriving.0,
+                arriving.1,
+                corner(
+                    side(layout, arriving, leaving),
+                    side(layout, arriving, (r.cross - 1, r.to_across)),
+                    heavy,
+                ),
+                style,
+            );
         }
     }
-    p.cell(r.to_row, r.head_col, '◀', style);
-}
 
-/// The corner where an arrow turns.
-///
-/// `east` says which side of the corner the horizontal run is on and `south`
-/// which way the vertical leaves it — the two facts that decide which of the
-/// four glyphs joins them, and the two that are easy to state backwards.  The
-/// arrow runs *right to left*, so the segment at the top of a turn is to the
-/// corner's **east** and the segment at the bottom is to its **west**; a corner
-/// facing the wrong way draws a line that appears to come from nowhere.
-///
-/// The weight has to match the strokes it joins too: a focused arrow is drawn
-/// with the heavy set, and a light rounded corner in the middle of it leaves a
-/// visible notch where the two stroke widths fail to meet — which is exactly
-/// what a corner is there to prevent.
-fn corner(east: bool, south: bool, heavy: bool) -> char {
-    match (east, south, heavy) {
-        (true, true, false) => '╭',
-        (true, true, true) => '┏',
-        (true, false, false) => '╰',
-        (true, false, true) => '┗',
-        (false, true, false) => '╮',
-        (false, true, true) => '┓',
-        (false, false, false) => '╯',
-        (false, false, true) => '┛',
-    }
+    // Where the head is entered from: the run before it when there is one,
+    // otherwise the crossing stroke itself.
+    // The head sits one step forward in time from the parent's border, so one
+    // step *back* from it is the block it names.
+    let head = (r.head, r.to_across);
+    let parent = (r.head.saturating_sub(1), r.to_across);
+    p.put_over(head.0, head.1, arrowhead(side(layout, head, parent)), style);
 }
 
 /// A one-line description of what the cursor is on, for the message line.
@@ -724,10 +1004,40 @@ mod tests {
 
     /// …and it stays there once the graph is scrolled sideways, which is
     /// exactly when the question is worth asking.
+    /// Vertical has no room for a name band per track, so every track is
+    /// named at once in a row pinned above the graph — over its own columns,
+    /// which is the only thing that says which column is which.
+    #[test]
+    fn every_branch_column_is_named_in_the_row_above_the_graph() {
+        let mut state = two_branches();
+        state.orient = Orientation::Vertical;
+        let lines = draw(&state, 100, 40);
+        let header = lines.first().expect("a row above the graph");
+        assert!(header.contains("main"), "the header does not name main: {header}");
+        assert!(header.contains("older"), "the header does not name older: {header}");
+
+        // Each name sits over its own track's columns, not all in one place.
+        let layout = state.layout(100);
+        for track in 0..layout.track_count {
+            let Some(name) = layout.lane_label(track) else { continue };
+            // Character columns, not byte offsets: the tail glyph is three
+            // bytes and one column.
+            let byte = header.find(name).expect("the name is drawn");
+            let at = header[..byte].chars().count();
+            let want = layout.label_across(track) as usize;
+            assert!(
+                at >= want && at <= want + 3,
+                "{name} is written at {at}, not over its own column at {want}"
+            );
+        }
+        // …and the graph itself starts below that row.
+        assert!(lines[1].contains('╭') || lines[1].contains('┏'), "{:?}", lines[1]);
+    }
+
     #[test]
     fn a_row_keeps_its_name_when_the_graph_is_scrolled() {
         let mut state = state();
-        state.scroll_col = 30;
+        state.scroll_along = 30;
         let lines = draw(&state, 90, 30);
         assert!(
             lines.iter().any(|l| l.starts_with("╾ main")),
@@ -747,15 +1057,64 @@ mod tests {
     /// The corner tests need one cell rather than a line: a corner glyph on
     /// its own says nothing about *which way it faces*, and facing is the
     /// whole property under test.
-    fn cell_at(state: &VcsState, row: u16, col: u16) -> char {
-        let (w, h) = (140u16, 40u16);
-        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    /// What is drawn at one *graph* cell, whichever way the graph is turned.
+    ///
+    /// Going through the layout's own mapping is the point: a test that read
+    /// screen coordinates directly would be a second statement of the
+    /// orientation, and would pass while the renderer and the navigation
+    /// disagreed about where things are.
+    /// The screen this module's tests draw into.  Big enough to hold the
+    /// widest fixture either way up, so a cell being off it means the test
+    /// asked for one that is genuinely not drawn.
+    const TEST_W: u16 = 200;
+    const TEST_H: u16 = 80;
+
+    fn cell_at(state: &VcsState, along: u16, across: u16) -> Option<char> {
+        let mut terminal = Terminal::new(TestBackend::new(TEST_W, TEST_H)).unwrap();
         terminal.draw(|f| render(f, f.area(), state)).unwrap();
-        terminal.backend().buffer()[(col, row)]
-            .symbol()
-            .chars()
-            .next()
-            .expect("a cell")
+        let layout = state.layout(TEST_W);
+        let (x, y) = layout.screen(along, across);
+        // Vertical reserves the top row for the branch names.
+        let y = y + u16::from(layout.metrics.orient == Orientation::Vertical);
+        if x >= TEST_W || y >= TEST_H {
+            return None;
+        }
+        terminal.backend().buffer()[(x, y)].symbol().chars().next()
+    }
+
+    /// The sides of a cell an arrow glyph continues on.
+    ///
+    /// `None` for anything that is not part of an arrow, which is how the
+    /// check below notices a gap rather than reading a block's border as a
+    /// continuation of the line.  An arrowhead accepts a line from **any**
+    /// side: several children of one commit converge on the same cell beside
+    /// its border, and one glyph cannot point four ways.
+    fn strokes_of(ch: char) -> Option<[bool; 4]> {
+        match ch {
+            '◀' | '▶' | '▲' | '▼' => Some([true; 4]),
+            _ => line_strokes(ch).map(|(sides, _)| sides),
+        }
+    }
+
+    /// One arrow's cells in the order it travels them.
+    fn path(layout: &Layout, edge: &Edge) -> Vec<(u16, u16)> {
+        let r = layout.route(edge);
+        let mut path: Vec<(u16, u16)> = (r.cross + 1..=r.start)
+            .rev()
+            .map(|along| (along, r.from_across))
+            .collect();
+        let (from, to) = (r.from_across as i32, r.to_across as i32);
+        let step = if to >= from { 1 } else { -1 };
+        let mut across = from;
+        loop {
+            path.push((r.cross, across as u16));
+            if across == to {
+                break;
+            }
+            across += step;
+        }
+        path.extend((r.head..r.cross).rev().map(|along| (along, r.to_across)));
+        path
     }
 
     /// A graph that turns every way an arrow can.
@@ -805,44 +1164,50 @@ mod tests {
     /// nowhere.  Checked cell by cell against the route the layout published,
     /// because the glyph alone does not say which way it faces.
     #[test]
-    fn an_arrow_turns_its_corners_towards_the_runs_they_join() {
-        let mut state = forked();
-        state.focus = None;
-        let layout = state.layout(140);
-        let mut seen_down = false;
-        let mut seen_up = false;
+    fn every_arrow_reads_as_one_unbroken_line() {
+        for orient in [Orientation::Horizontal, Orientation::Vertical] {
+            let mut state = forked();
+            state.orient = orient;
+            state.focus = None;
+            let layout = state.layout(TEST_W);
+            let mut turns = 0;
 
-        for edge in &layout.edges {
-            let r = layout.route(edge);
-            if r.stub || r.from_row == r.to_row {
-                continue;
+            for edge in &layout.edges {
+                let r = layout.route(edge);
+                if r.stub {
+                    continue;
+                }
+                turns += usize::from(r.from_across != r.to_across);
+                let cells = path(&layout, edge);
+                for pair in cells.windows(2) {
+                    let (a, b) = (pair[0], pair[1]);
+                    let (ax, ay) = layout.screen(a.0, a.1);
+                    let (bx, by) = layout.screen(b.0, b.1);
+                    // [north, south, east, west]
+                    let (from_a, from_b) = match (bx as i32 - ax as i32, by as i32 - ay as i32) {
+                        (dx, _) if dx > 0 => (2, 3),
+                        (dx, _) if dx < 0 => (3, 2),
+                        (_, dy) if dy > 0 => (1, 0),
+                        _ => (0, 1),
+                    };
+                    let (Some(ga), Some(gb)) = (cell_at(&state, a.0, a.1), cell_at(&state, b.0, b.1))
+                    else {
+                        continue;
+                    };
+                    let (sa, sb) = (
+                        strokes_of(ga).unwrap_or_else(|| panic!("{orient:?}: {ga:?} is not part of an arrow")),
+                        strokes_of(gb).unwrap_or_else(|| panic!("{orient:?}: {gb:?} is not part of an arrow")),
+                    );
+                    assert!(
+                        sa[from_a] && sb[from_b],
+                        "{orient:?}: the arrow {} -> {:?} breaks between {ga:?} and {gb:?}",
+                        edge.child,
+                        edge.parent
+                    );
+                }
             }
-            let down = r.to_row > r.from_row;
-            seen_down |= down;
-            seen_up |= !down;
-
-            // Leaving: the run is to the east, the vertical goes on downwards
-            // (or upwards) from here.
-            assert_eq!(
-                cell_at(&state, r.from_row, r.cross),
-                if down { '╭' } else { '╰' },
-                "the arrow {} -> {:?} leaves through a corner facing the wrong way",
-                edge.child,
-                edge.parent
-            );
-            // Arriving: the run is to the west, and the vertical came from the
-            // side the arrow travelled down.
-            if r.cross > r.head_col {
-                assert_eq!(
-                    cell_at(&state, r.to_row, r.cross),
-                    if down { '╯' } else { '╮' },
-                    "the arrow {} -> {:?} arrives through a corner facing the wrong way",
-                    edge.child,
-                    edge.parent
-                );
-            }
+            assert!(turns >= 2, "{orient:?}: the fixture must turn");
         }
-        assert!(seen_down && seen_up, "the fixture must turn both ways");
     }
 
     /// A focused arrow is drawn with the heavy box-drawing set, and its
@@ -853,30 +1218,34 @@ mod tests {
     fn a_focused_arrow_has_corners_of_its_own_weight() {
         // The second branch's commit sits in its own row, so its arrow back to
         // the shared root actually turns a corner.
-        let mut state = two_branches();
-        state.focus = Some(Focus::Commit(Oid::new("ccccccc3")));
-        let layout = state.layout(140);
-        let edge = layout
-            .edges
-            .iter()
-            .find(|e| e.child == Oid::new("ccccccc3"))
-            .expect("the arrow");
-        let r = layout.route(edge);
-        assert_ne!(r.from_row, r.to_row, "the fixture has to turn a corner");
-        let down = r.to_row > r.from_row;
-        assert_eq!(
-            cell_at(&state, r.from_row, r.cross),
-            if down { '┏' } else { '┗' },
-            "a heavy arrow turned a light corner"
-        );
+        for orient in [Orientation::Horizontal, Orientation::Vertical] {
+            let mut state = two_branches();
+            state.orient = orient;
+            state.focus = Some(Focus::Commit(Oid::new("ccccccc3")));
+            let layout = state.layout(TEST_W);
+            let edge = layout
+                .edges
+                .iter()
+                .find(|e| e.child == Oid::new("ccccccc3"))
+                .expect("the arrow");
+            let r = layout.route(edge);
+            assert_ne!(r.from_across, r.to_across, "the fixture has to turn a corner");
 
-        // …and an unfocused one keeps the light set end to end.
-        state.focus = None;
-        assert_eq!(
-            cell_at(&state, r.from_row, r.cross),
-            if down { '╭' } else { '╰' },
-            "a light arrow turned a heavy corner"
-        );
+            // Asked of the module's own weight table rather than a list
+            // written out here: a corner where two arrows meet is a junction
+            // glyph, and a second list would have to remember that.
+            let weight = |state: &VcsState| {
+                let turn = cell_at(state, r.cross, r.from_across).expect("the corner is drawn");
+                line_strokes(turn)
+                    .unwrap_or_else(|| panic!("{orient:?}: {turn:?} is not a line at all"))
+                    .1
+            };
+            assert!(weight(&state), "{orient:?}: a heavy arrow turned a light corner");
+
+            // …and an unfocused one keeps the light set end to end.
+            state.focus = None;
+            assert!(!weight(&state), "{orient:?}: a light arrow turned a heavy corner");
+        }
     }
 
     /// The arrowhead points at the *parent*, which is to the **left**: a

@@ -6,22 +6,35 @@
 //! moves through the same [`Layout`], so "what is under the cursor" and "what
 //! is on screen" cannot drift apart.
 //!
-//! ## The shape
+//! ## Two axes, not four directions
 //!
-//! Time runs **left to right**: the oldest commit loaded is at the left edge,
-//! the newest at the right, and an arrow points *backwards* — from a commit to
-//! the parent it follows.  That is the direction people already read a
-//! timeline in, and it is the direction the branch metaphor is drawn in
-//! everywhere else (a branch comes *off* a line and rejoins it further along).
+//! The graph can be drawn either way round — history left to right, or top to
+//! bottom ([`Orientation`]).  Rather than two layouts, everything here is
+//! computed in **graph space**, whose two axes are named for what they carry
+//! rather than for where they end up on screen:
 //!
-//! One commit per column band, and **tracks** give the vertical position: a
-//! commit's track is inherited by its first parent, so a chain stays in a row
-//! and a branch point opens another.
+//! * **along** — the time axis.  `along` 0 is the *oldest* commit loaded and
+//!   grows toward the newest, whichever way the picture is later turned, and
+//!   an arrow always points **back** along it, from a commit to the parent it
+//!   follows.
+//! * **across** — the track axis.  A commit's track is inherited by its first
+//!   parent, so a chain keeps one track and a branch point opens another.
 //!
-//! Commits are *not* packed several to a column even when they would fit.  A
-//! generation-packed layout looks tidier, but it can place a commit visually
-//! to the left of one of its own descendants, and in a view whose entire
-//! purpose is that the picture is the truth, that is not a cosmetic problem.
+//! [`Metrics`] is the only thing that knows which screen axis is which: it
+//! gives a block its extent along each, and the renderer maps a graph cell to
+//! a screen cell through [`Layout::screen`].  Everything between — chains,
+//! colours, spans, track assignment, arrow routing, the focus walk — is
+//! written once and is true of both pictures.
+//!
+//! Vertical draws the newest commit at the *top* (the order `git log` prints,
+//! and the order the old vertical view used), so its along axis is reversed on
+//! the way to the screen and nowhere else — see [`Layout::display_along`].
+//!
+//! One commit per band along the time axis.  Commits are *not* packed several
+//! to a band even when they would fit: a generation-packed layout looks
+//! tidier, but it can place a commit visually before one of its own
+//! descendants, and in a view whose entire purpose is that the picture is the
+//! truth, that is not a cosmetic problem.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,23 +43,15 @@ use super::{
     Dag, Oid,
 };
 
-/// Rows in a block: border, two summary rows, metadata, border.
+/// A block's extent across the track axis: border, two summary rows,
+/// metadata, border.
 ///
-/// Every block is the same height, HEAD included, so a track is a row band of
-/// one fixed size and the arrows between two blocks in one track are a
-/// straight line.
+/// Every block is the same size, HEAD included, so a track is a band of one
+/// fixed size and the arrows between two blocks in one track are a straight
+/// line.  On screen this is always the block's **height**: a block is drawn as
+/// the same five-row box whichever way the graph runs, and only the axis its
+/// neighbours are found along changes.
 pub const BLOCK_H: u16 = 5;
-/// Columns between one block and the next, where the arrows are drawn.
-pub const GAP: u16 = 3;
-/// Rows between one track and the next.
-pub const TRACK_GAP: u16 = 1;
-/// The row above each track that carries the name of the branch owning it.
-///
-/// A track *is* a branch now (see [`place`]), so the row band needs somewhere
-/// to say which one — otherwise the only place a branch is named is the label
-/// on its tip, which on a long history is a screenful away from the commits
-/// that are on it.
-pub const LABEL_H: u16 = 1;
 /// Narrowest a block may be.
 pub const MIN_BLOCK: u16 = 22;
 /// Widest a block grows, so one long commit message does not eat the whole
@@ -66,6 +71,149 @@ const COUNTS_COLS: u16 = 12;
 /// Columns the abbreviated hash takes on a block's top border, with its
 /// surrounding spaces — where the ref labels start.
 pub const HASH_COLS: u16 = super::SHORT_LEN as u16 + 3;
+
+/// Which way the graph is drawn.
+///
+/// A preference, not a mode: the two pictures show the same graph and every
+/// gesture means the same thing in both.  `h`/`l` and `j`/`k` follow the
+/// screen, so whichever axis history runs along is the one they travel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Orientation {
+    /// History left to right, a branch is a row.
+    #[default]
+    Horizontal,
+    /// History top to bottom, newest first, a branch is a column.
+    Vertical,
+}
+
+impl Orientation {
+    /// Parse a config value.  Anything unrecognised is horizontal, which is
+    /// the default rather than an error: a typo in a display preference must
+    /// not stop the view opening.
+    pub fn parse(name: &str) -> Orientation {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "vertical" | "down" | "v" => Orientation::Vertical,
+            _ => Orientation::Horizontal,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Orientation::Horizontal => "horizontal",
+            Orientation::Vertical => "vertical",
+        }
+    }
+
+    pub fn flipped(self) -> Orientation {
+        match self {
+            Orientation::Horizontal => Orientation::Vertical,
+            Orientation::Vertical => Orientation::Horizontal,
+        }
+    }
+
+    /// The screen direction that travels toward newer commits, and toward
+    /// older ones.
+    ///
+    /// The two motions that are about *history* rather than about the screen
+    /// — paging, and the ends of the graph — ask for them by name, so `ge`
+    /// reaches the newest commit in either picture instead of walking off
+    /// sideways in one of them.
+    pub fn newer(self) -> Dir {
+        match self {
+            Orientation::Horizontal => Dir::Right,
+            Orientation::Vertical => Dir::Up,
+        }
+    }
+
+    pub fn older(self) -> Dir {
+        match self {
+            Orientation::Horizontal => Dir::Left,
+            Orientation::Vertical => Dir::Down,
+        }
+    }
+}
+
+/// How big things are in graph space, for one orientation.
+///
+/// The one place that knows which screen axis is which.  A block is always the
+/// same box on screen — [`Layout::block_width`] columns by [`BLOCK_H`] rows —
+/// so turning the graph only swaps which of the two the time axis runs along.
+#[derive(Debug, Clone, Copy)]
+pub struct Metrics {
+    pub orient: Orientation,
+    /// A block's extent along the time axis.
+    pub block_along: u16,
+    /// A block's extent across the track axis.
+    pub block_across: u16,
+    /// Between one block and the next, where the arrows run.
+    pub gap_along: u16,
+    /// Between one track and the next.
+    pub gap_across: u16,
+    /// Extent the branch name band takes inside each track's stride.
+    ///
+    /// Horizontal writes the name on the row above its track, which costs a
+    /// row per track.  Vertical writes it in one row pinned to the top of the
+    /// viewport, above every track at once — so it costs nothing here, and the
+    /// renderer reserves that row instead.
+    pub label_across: u16,
+}
+
+/// Columns between blocks in the horizontal picture, where arrows run.
+const GAP_H: u16 = 3;
+/// Rows between tracks in the horizontal picture.
+const TRACK_GAP_H: u16 = 1;
+/// Rows between blocks in the vertical picture.
+const GAP_V: u16 = 2;
+/// Columns between tracks in the vertical picture.
+const TRACK_GAP_V: u16 = 3;
+/// The row above each horizontal track that carries the name of the branch
+/// owning it.
+///
+/// A track *is* a branch (see [`place`]), so the band needs somewhere to say
+/// which one — otherwise the only place a branch is named is the label on its
+/// tip, which on a long history is a screenful away from the commits that are
+/// on it.
+pub const LABEL_H: u16 = 1;
+
+impl Metrics {
+    /// The metrics for `orient`, given the width one block was sized to.
+    pub fn new(orient: Orientation, block_width: u16) -> Metrics {
+        match orient {
+            Orientation::Horizontal => Metrics {
+                orient,
+                block_along: block_width,
+                block_across: BLOCK_H,
+                gap_along: GAP_H,
+                gap_across: TRACK_GAP_H,
+                label_across: LABEL_H,
+            },
+            Orientation::Vertical => Metrics {
+                orient,
+                block_along: BLOCK_H,
+                block_across: block_width,
+                gap_along: GAP_V,
+                gap_across: TRACK_GAP_V,
+                label_across: 0,
+            },
+        }
+    }
+
+    /// From one block's start to the next's, along the time axis.
+    pub fn along_stride(self) -> u16 {
+        self.block_along + self.gap_along
+    }
+
+    /// From one track's start to the next's.
+    pub fn across_stride(self) -> u16 {
+        self.block_across + self.gap_across + self.label_across
+    }
+
+    /// True when the along axis is drawn back to front — vertical puts the
+    /// newest commit at the top.
+    pub fn reversed(self) -> bool {
+        self.orient == Orientation::Vertical
+    }
+}
 
 /// What the cursor can be on.
 ///
@@ -98,11 +246,11 @@ pub enum BlockKind {
 pub struct Block {
     pub id: Oid,
     pub kind: BlockKind,
-    /// Which row band the block sits in.
+    /// Which track band the block sits in.
     pub track: usize,
-    /// Leftmost column, measured across the whole graph rather than the
-    /// viewport.
-    pub col: u16,
+    /// Where the block starts on the time axis, measured across the whole
+    /// graph rather than the viewport.
+    pub along: u16,
     /// Ref labels drawn along this block's top border, with the column each
     /// starts at (relative to the block).  Computed here rather than in the
     /// renderer so the focusable positions and the drawn positions agree.
@@ -121,21 +269,21 @@ pub struct Edge {
     pub parent: Option<Oid>,
     pub from_track: usize,
     pub to_track: usize,
-    /// Column the arrow starts in (immediately left of the child block).
-    pub col: u16,
-    /// Column the arrowhead sits in (immediately right of the parent block),
-    /// or 0 when the parent was never loaded.
-    pub end_col: u16,
-    /// The column the arrow changes track on.
+    /// Where the arrow starts: one step back along time from the child block.
+    pub along: u16,
+    /// Where the arrowhead sits — one step *forward* in time from the parent
+    /// block's far edge — or 0 when the parent was never loaded.
+    pub end_along: u16,
+    /// The point on the time axis where the arrow changes track.
     ///
-    /// A first-parent link crosses **late**, in the gap immediately right of
-    /// the commit it points at, so the long part of the run stays in the
-    /// child's own track — which that chain owns outright.  A merge's second
-    /// parent crosses **early**, immediately left of the child, because the
-    /// child's track continues on to its own first parent and the run would
-    /// go straight through it.  Either way the horizontal never enters a
-    /// track somebody else's blocks are sitting in.
-    pub cross_col: u16,
+    /// A first-parent link crosses **late**, in the gap immediately after the
+    /// commit it points at, so the long part of the run stays in the child's
+    /// own track — which that chain owns outright.  A merge's second parent
+    /// crosses **early**, immediately before the child, because the child's
+    /// track continues on to its own first parent and the run would go
+    /// straight through it.  Either way the long run never enters a track
+    /// somebody else's blocks are sitting in.
+    pub cross_along: u16,
 }
 
 /// Where one arrow's cells actually go.
@@ -146,46 +294,50 @@ pub struct Edge {
 /// [`no_arrow_is_drawn_through_a_block`] able to check the invariant the whole
 /// track assignment exists to provide.
 pub struct EdgeRoute {
-    /// Row the arrow leaves along, and the row it arrives along.
-    pub from_row: u16,
-    pub to_row: u16,
-    /// First column of the arrow, the column it changes track on, and the
-    /// column the arrowhead sits in.  Columns *decrease* along the arrow:
-    /// it points back in time.
+    /// The track line the arrow leaves along, and the one it arrives along.
+    pub from_across: u16,
+    pub to_across: u16,
+    /// Where the arrow starts, where it changes track, and where the arrowhead
+    /// sits.  These *decrease* along the route: it points back in time.
     pub start: u16,
     pub cross: u16,
-    pub head_col: u16,
+    pub head: u16,
     /// A parent past the loaded horizon: a stub that visibly goes nowhere.
     pub stub: bool,
 }
 
 impl EdgeRoute {
-    /// Every cell the arrow paints.
+    /// Every cell the arrow paints, as `(along, across)`.
     pub fn cells(&self) -> Vec<(u16, u16)> {
         if self.stub {
             return (self.start.saturating_sub(1)..=self.start)
-                .map(|col| (self.from_row, col))
+                .map(|along| (along, self.from_across))
                 .collect();
         }
-        let (lo, hi) = (self.from_row.min(self.to_row), self.from_row.max(self.to_row));
+        let (lo, hi) = (
+            self.from_across.min(self.to_across),
+            self.from_across.max(self.to_across),
+        );
         (self.cross + 1..=self.start)
-            .map(|col| (self.from_row, col))
-            .chain((lo..=hi).map(|row| (row, self.cross)))
-            .chain((self.head_col..self.cross).map(|col| (self.to_row, col)))
+            .map(|along| (along, self.from_across))
+            .chain((lo..=hi).map(|across| (self.cross, across)))
+            .chain((self.head..self.cross).map(|along| (along, self.to_across)))
             .collect()
     }
 }
 
 /// Something the cursor can sit on, and where it is.
 ///
-/// Positions are `(row, col)` across the whole graph rather than track
-/// indices, so several labels on one block's border are distinguishable and
-/// `h`/`l` walks them in the order they are drawn.
+/// Positions are graph cells rather than track indices, so several labels on
+/// one block's border are distinguishable and the walk reaches them in the
+/// order they are drawn.
 #[derive(Debug, Clone)]
 pub struct Focusable {
     pub focus: Focus,
-    pub row: u16,
-    pub col: u16,
+    /// Position on the time axis.
+    pub along: u16,
+    /// Position on the track axis.
+    pub across: u16,
 }
 
 /// The whole drawn graph.
@@ -201,14 +353,12 @@ pub struct Layout {
     /// The branch each track belongs to, for the name written above it.
     /// Absent for a track holding history no branch points into.
     pub lane_labels: HashMap<usize, String>,
-    /// Total width of the graph, for the scroll anchor to clamp against.
-    pub total_cols: u16,
+    /// Total extent of the graph along the time axis, for the scroll anchor
+    /// to clamp against.
+    pub total_along: u16,
+    /// Which way this graph is drawn, and how big everything is in it.
+    pub metrics: Metrics,
     index: HashMap<Oid, usize>,
-}
-
-/// Rows from the top of one track's name to the top of the next one's.
-pub fn track_stride() -> u16 {
-    BLOCK_H + LABEL_H + TRACK_GAP
 }
 
 /// Which way a motion goes.
@@ -241,59 +391,117 @@ impl Layout {
     /// are drawn after arrows so a line entering a box reads as passing behind
     /// it, which means anything drawn on the border itself is overwritten.
     pub fn route(&self, edge: &Edge) -> EdgeRoute {
-        let head_col = edge.end_col.min(edge.col);
+        let head = edge.end_along.min(edge.along);
         EdgeRoute {
-            from_row: self.arrow_row(edge.from_track),
-            to_row: self.arrow_row(edge.to_track),
-            start: edge.col,
-            cross: edge.cross_col.clamp(head_col, edge.col),
-            head_col,
+            from_across: self.arrow_across(edge.from_track),
+            to_across: self.arrow_across(edge.to_track),
+            start: edge.along,
+            cross: edge.cross_along.clamp(head, edge.along),
+            head,
             stub: edge.parent.is_none(),
         }
     }
 
-    /// The screen row a track starts at — one row below its name.
-    pub fn track_row(&self, track: usize) -> u16 {
-        track as u16 * track_stride() + LABEL_H
+    /// Where a track's band starts — just past its name band, where it has one.
+    pub fn track_across(&self, track: usize) -> u16 {
+        track as u16 * self.metrics.across_stride() + self.metrics.label_across
     }
 
-    /// The row a track's branch name is written on.
-    pub fn label_row(&self, track: usize) -> u16 {
-        self.track_row(track) - LABEL_H
+    /// Where a track's branch name is written.
+    ///
+    /// Horizontal writes it on the row above the band; vertical has no band of
+    /// its own for it (`label_across` is 0) and the name goes in a row the
+    /// renderer pins to the top of the viewport, over the track's columns.
+    pub fn label_across(&self, track: usize) -> u16 {
+        self.track_across(track) - self.metrics.label_across
     }
 
-    /// Which track `row` falls in.  The inverse of [`Layout::track_row`], and
-    /// the only place anything outside this module is allowed to work it out.
-    pub fn track_at_row(&self, row: u16) -> usize {
-        (row / track_stride()) as usize
+    /// Which track `across` falls in.  The inverse of [`Layout::track_across`],
+    /// and the only place anything outside this module is allowed to work it
+    /// out.
+    pub fn track_at(&self, across: u16) -> usize {
+        (across / self.metrics.across_stride()) as usize
     }
 
-    /// The branch whose row `track` is, if it is a branch's.
+    /// The branch whose track this is, if it is a branch's.
     pub fn lane_label(&self, track: usize) -> Option<&str> {
         self.lane_labels.get(&track).map(String::as_str)
     }
 
-    /// The row arrows run along within a track: the middle of a block, so a
+    /// The line arrows run along within a track: the middle of a block, so a
     /// link between two blocks in one track is a straight line through the
     /// gap between them.
-    pub fn arrow_row(&self, track: usize) -> u16 {
-        self.track_row(track) + BLOCK_H / 2
+    pub fn arrow_across(&self, track: usize) -> u16 {
+        self.track_across(track) + self.metrics.block_across / 2
     }
 
-    /// Columns from one block's left edge to the next one's.
-    pub fn col_stride(&self) -> u16 {
-        self.block_width + GAP
+    /// From one block's start to the next's, along the time axis.
+    pub fn along_stride(&self) -> u16 {
+        self.metrics.along_stride()
     }
 
-    /// How many whole tracks fit in `height`.
+    /// How many whole tracks fit in `extent` (the viewport's size across).
     ///
-    /// The `+ TRACK_GAP` is not a fudge: tracks are laid out with a gap
+    /// The `+ gap_across` is not a fudge: tracks are laid out with a gap
     /// *between* them, so N tracks occupy `N * stride - gap`.  Dividing the
-    /// bare height instead reports one track too few whenever they fit
-    /// exactly, which scrolled a two-branch graph on a screen tall enough for
+    /// bare extent instead reports one track too few whenever they fit
+    /// exactly, which scrolled a two-branch graph on a screen big enough for
     /// all of it.
-    pub fn visible_tracks(&self, height: u16) -> usize {
-        ((height + TRACK_GAP) / track_stride()).max(1) as usize
+    pub fn visible_tracks(&self, extent: u16) -> usize {
+        ((extent + self.metrics.gap_across) / self.metrics.across_stride()).max(1) as usize
+    }
+
+    /// Where a run of `extent` cells starting at `along` is drawn.
+    ///
+    /// The identity in the horizontal picture.  Vertical draws the newest
+    /// commit at the top, so its time axis is reversed here — the one place
+    /// that happens, and the reason every other function in this module can be
+    /// written as though time ran forwards.
+    pub fn display_along(&self, along: u16, extent: u16) -> u16 {
+        if self.metrics.reversed() {
+            self.total_along.saturating_sub(along + extent)
+        } else {
+            along
+        }
+    }
+
+    /// A graph cell as a screen cell `(x, y)`, before scrolling.
+    ///
+    /// The whole of the orientation, in four lines: which axis is which, and
+    /// which way time runs.  The renderer maps through here and never works
+    /// out a coordinate itself.
+    pub fn screen(&self, along: u16, across: u16) -> (u16, u16) {
+        let along = self.display_along(along, 1);
+        match self.metrics.orient {
+            Orientation::Horizontal => (along, across),
+            Orientation::Vertical => (across, along),
+        }
+    }
+
+    /// Where the viewport's scroll anchor lands on screen.
+    ///
+    /// `along` is already in display terms (it is what `update_scroll`
+    /// maintains); the track becomes the other axis.
+    pub fn screen_scroll(&self, along: u16, track: usize) -> (u16, u16) {
+        let across = self.label_across(track);
+        match self.metrics.orient {
+            Orientation::Horizontal => (along, across),
+            Orientation::Vertical => (across, along),
+        }
+    }
+
+    /// A block's top-left corner on screen, before scrolling.
+    ///
+    /// Blocks are the same box either way round, so this is the only thing the
+    /// renderer needs in order to draw one: everything inside it is written in
+    /// ordinary screen coordinates.
+    pub fn block_origin(&self, block: &Block) -> (u16, u16) {
+        let along = self.display_along(block.along, self.metrics.block_along);
+        let across = self.track_across(block.track);
+        match self.metrics.orient {
+            Orientation::Horizontal => (along, across),
+            Orientation::Vertical => (across, along),
+        }
     }
 
     /// Width available inside a block's borders.
@@ -301,17 +509,38 @@ impl Layout {
         self.block_width.saturating_sub(2)
     }
 
+    /// Which way `dir` travels in graph space: `+1`/`-1` along time, or
+    /// across tracks.
+    ///
+    /// The only place a screen direction becomes a graph one.  Turning the
+    /// graph turns the keys with it — in the vertical picture `j`/`k` walk
+    /// history and `h`/`l` step between branches, without either the caller or
+    /// the walk below knowing anything about it.  `Up` is *newer* there, since
+    /// vertical draws the newest commit at the top.
+    fn travel(&self, dir: Dir) -> (bool, i32) {
+        match (self.metrics.orient, dir) {
+            (Orientation::Horizontal, Dir::Right) => (true, 1),
+            (Orientation::Horizontal, Dir::Left) => (true, -1),
+            (Orientation::Horizontal, Dir::Down) => (false, 1),
+            (Orientation::Horizontal, Dir::Up) => (false, -1),
+            (Orientation::Vertical, Dir::Up) => (true, 1),
+            (Orientation::Vertical, Dir::Down) => (true, -1),
+            (Orientation::Vertical, Dir::Right) => (false, 1),
+            (Orientation::Vertical, Dir::Left) => (false, -1),
+        }
+    }
+
     /// The nearest focusable in `dir` from `current`.
     ///
-    /// Motion **along time** (`h`/`l`) sorts by distance travelled first, so
-    /// `h` from a block lands on the arrow immediately to its left rather than
-    /// on whatever happens to be furthest back.
+    /// Motion **along time** sorts by distance travelled first, so one press
+    /// from a block lands on the commit immediately before it rather than on
+    /// whatever happens to be furthest back.
     ///
-    /// Motion **across tracks** (`j`/`k`) sorts the other way round — nearest
-    /// column first, then nearest row.  A track is wide and short, so the
-    /// thing two rows down is very often forty columns away (a label on some
-    /// other branch's block), and travelling to it is not what `j` means.
-    /// What `j` means is "the next branch, beside where I am".
+    /// Motion **across tracks** sorts the other way round — nearest point in
+    /// history first, then nearest track.  A track is long and thin, so the
+    /// thing one track over is very often forty columns away (a label on some
+    /// other branch's block), and travelling to it is not what that press
+    /// means.  What it means is "the next branch, beside where I am".
     ///
     /// Restricted to the focusables `allow` accepts.  Used while something is
     /// being dragged: the walk is over *destinations* then, and stepping onto
@@ -324,26 +553,28 @@ impl Layout {
         allow: impl Fn(&Focus) -> bool,
     ) -> Option<Focus> {
         let from = self.locate(current)?;
-        let (row, col) = (from.row as i32, from.col as i32);
+        let (start_along, start_across) = (from.along as i32, from.across as i32);
+        let (time_axis, sign) = self.travel(dir);
 
         self.focusables
             .iter()
             .filter(|f| f.focus != *current)
             .filter(|f| allow(&f.focus))
             .filter_map(|f| {
-                let (dr, dc) = (f.row as i32 - row, f.col as i32 - col);
-                let along = match dir {
-                    Dir::Down => dr,
-                    Dir::Up => -dr,
-                    Dir::Right => dc,
-                    Dir::Left => -dc,
+                let d_along = (f.along as i32 - start_along) * sign;
+                let d_across = (f.across as i32 - start_across) * sign;
+                let (travelled, sideways) = if time_axis {
+                    (d_along, d_across.abs())
+                } else {
+                    (d_across, d_along.abs())
                 };
                 // Strictly forward along the axis of travel; ties on the other
                 // axis are what the second sort key resolves.
-                (along > 0).then(|| {
-                    let key = match dir {
-                        Dir::Left | Dir::Right => (along, dr.abs()),
-                        Dir::Up | Dir::Down => (dc.abs(), along),
+                (travelled > 0).then(|| {
+                    let key = if time_axis {
+                        (travelled, sideways)
+                    } else {
+                        (sideways, travelled)
                     };
                     (key, f.focus.clone())
                 })
@@ -353,7 +584,7 @@ impl Layout {
     }
 
     /// The first thing worth putting the cursor on: HEAD if it is drawn, else
-    /// the newest thing in the graph, which is the right-hand end.
+    /// the newest thing in the graph, which is the far end of the time axis.
     pub fn initial_focus(&self) -> Option<Focus> {
         self.focusables
             .iter()
@@ -363,15 +594,17 @@ impl Layout {
     }
 }
 
-/// Lay out `dag` as `projection` leaves it, for a content area `width` wide.
-pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
+/// Lay out `dag` as `projection` leaves it, for a content area `width` columns
+/// wide, drawn the way `orient` says.
+pub fn compute(dag: &Dag, projection: &Projection, width: u16, orient: Orientation) -> Layout {
     let order = draw_order(dag, projection);
-    // The block width settles first: where a block sits along the time axis is
-    // a multiple of it, and the track assignment then needs those columns to
-    // know which chains overlap and therefore cannot share a row.
+    // The block width settles first: it is the block's width on screen in
+    // either picture, so it decides both extents in graph space — and where a
+    // block sits along the time axis is a multiple of one of them.
     let block_width = block_width(width, natural_width(dag, projection, &order));
-    let (cols, head_col, total_cols) = assign_cols(dag, &order, block_width);
-    let placed = place(&order, &cols, head_col, block_width, dag, projection);
+    let metrics = Metrics::new(orient, block_width);
+    let (cols, head_col, total_along) = assign_cols(dag, &order, metrics);
+    let placed = place(&order, &cols, head_col, metrics, dag, projection);
     let inner = block_width.saturating_sub(2);
 
     let mut blocks = Vec::new();
@@ -387,7 +620,7 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
             id: Oid::new("HEAD"),
             kind: BlockKind::Head,
             track: placed.head_track,
-            col,
+            along: col,
             labels: Vec::new(),
             tint: 0,
         });
@@ -399,12 +632,12 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
             id: id.clone(),
             kind,
             track: placed.track.get(id).copied().unwrap_or(0),
-            col: cols[id],
+            along: cols[id],
             labels: labels_for(dag, projection, id, inner),
             tint: placed.tint.get(id).copied().unwrap_or(0),
         });
     }
-    blocks.sort_by_key(|b| b.col);
+    blocks.sort_by_key(|b| b.along);
 
     let index: HashMap<Oid, usize> = blocks
         .iter()
@@ -412,7 +645,7 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
         .map(|(i, b)| (b.id.clone(), i))
         .collect();
 
-    let edges = build_edges(&blocks, &index, dag, projection, block_width);
+    let edges = build_edges(&blocks, &index, dag, projection, metrics);
     let mut layout = Layout {
         focusables: Vec::new(),
         blocks,
@@ -421,7 +654,8 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16) -> Layout {
         block_width,
         branch_tints: placed.branch_tints,
         lane_labels: placed.lane_labels,
-        total_cols,
+        total_along,
+        metrics,
         index,
     };
     layout.focusables = build_focusables(&layout);
@@ -449,19 +683,18 @@ fn draw_order(dag: &Dag, projection: &Projection) -> Vec<Oid> {
         .collect()
 }
 
-/// Where every block sits along the time axis: one per column band, oldest
-/// first.
+/// Where every block sits along the time axis: one per band, oldest first.
 ///
-/// Returns the commits' columns, HEAD's column if it is drawn, and the total
-/// width of the graph.  Every block occupies the same column bands whatever
-/// track it ends up in, which is what makes the gap columns between them gaps
-/// in *every* track — and that is what lets an arrow change track without ever
-/// running through a block.
-fn assign_cols(dag: &Dag, order: &[Oid], block_width: u16) -> (HashMap<Oid, u16>, Option<u16>, u16) {
+/// Returns the commits' positions, HEAD's if it is drawn, and the total extent
+/// of the graph.  Every block occupies the same band whatever track it ends up
+/// in, which is what makes the gaps between them gaps in *every* track — and
+/// that is what lets an arrow change track without ever running through a
+/// block.
+fn assign_cols(dag: &Dag, order: &[Oid], metrics: Metrics) -> (HashMap<Oid, u16>, Option<u16>, u16) {
     let mut cols = HashMap::new();
-    let stride = block_width + GAP;
-    // Room at the left for the stub that says older history was not loaded.
-    let mut col = if dag.truncated { GAP } else { 0 };
+    let stride = metrics.along_stride();
+    // Room at the old end for the stub that says older history was not loaded.
+    let mut col = if dag.truncated { metrics.gap_along } else { 0 };
     let mut head_col = None;
 
     let head_at = dag.head.target.clone().filter(|id| order.contains(id));
@@ -473,18 +706,18 @@ fn assign_cols(dag: &Dag, order: &[Oid], block_width: u16) -> (HashMap<Oid, u16>
     }
 
     // Backwards: `order` is newest-first, and the oldest commit belongs at the
-    // left edge.
+    // start of the time axis.
     for id in order.iter().rev() {
         cols.insert(id.clone(), col);
         col += stride;
-        // HEAD sits immediately to the right of the commit it names — the slot
-        // the next commit would take.
+        // HEAD sits immediately after the commit it names — the slot the next
+        // commit would take.
         if head_col.is_none() && head_at.as_ref() == Some(id) {
             head_col = Some(col);
             col += stride;
         }
     }
-    (cols, head_col, col.saturating_sub(GAP))
+    (cols, head_col, col.saturating_sub(metrics.gap_along))
 }
 
 /// Where every branch and the HEAD block sit vertically, and what colour each
@@ -538,10 +771,11 @@ fn place(
     order: &[Oid],
     cols: &HashMap<Oid, u16>,
     head_col: Option<u16>,
-    block_width: u16,
+    metrics: Metrics,
     dag: &Dag,
     projection: &Projection,
 ) -> Placement {
+    let block_along = metrics.block_along;
     // --- 1. chains ---
     let mut chain: HashMap<Oid, usize> = HashMap::new();
     let mut members: Vec<Vec<Oid>> = Vec::new();
@@ -583,9 +817,9 @@ fn place(
     let mut spans: HashMap<usize, (u16, u16)> = HashMap::new();
     for id in order {
         let (Some(&t), Some(col)) = (tint.get(id), col_of(id)) else { continue };
-        let span = spans.entry(t).or_insert((col, col + block_width));
+        let span = spans.entry(t).or_insert((col, col + block_along));
         span.0 = span.0.min(col);
-        span.1 = span.1.max(col + block_width);
+        span.1 = span.1.max(col + block_along);
     }
     for id in order {
         let Some(&t) = tint.get(id) else { continue };
@@ -595,7 +829,7 @@ fn place(
         if let Some(parent) = projection.parents(dag, id).first() {
             if tint.get(parent) != Some(&t) {
                 if let (Some(col), Some(span)) = (col_of(parent), spans.get_mut(&t)) {
-                    span.0 = span.0.min(col + block_width);
+                    span.0 = span.0.min(col + block_along);
                 }
             }
         }
@@ -637,7 +871,7 @@ fn place(
         .iter()
         .filter_map(|(name, t)| track_of_tint.get(t).map(|&row| (row, name.clone())))
         .collect();
-    let head_track = place_head(&mut used, &track, cols, head_col, block_width, dag);
+    let head_track = place_head(&mut used, &track, cols, head_col, block_along, dag);
 
     Placement {
         track_count: used.len().max(1),
@@ -685,7 +919,7 @@ fn place_head(
     track: &HashMap<Oid, usize>,
     cols: &HashMap<Oid, u16>,
     head_col: Option<u16>,
-    block_width: u16,
+    block_along: u16,
     dag: &Dag,
 ) -> usize {
     let Some(head_col) = head_col else { return 0 };
@@ -693,8 +927,8 @@ fn place_head(
     // Back to the gap right of its commit: that is where HEAD's own arrow runs.
     let left = target
         .and_then(|id| cols.get(id))
-        .map_or(head_col, |col| col + block_width);
-    let span = (left.min(head_col), head_col + block_width);
+        .map_or(head_col, |col| col + block_along);
+    let span = (left.min(head_col), head_col + block_along);
     let (lo, hi) = span;
     let free = |taken: &Vec<(u16, u16)>| taken.iter().all(|&(a, b)| hi <= a || lo >= b);
 
@@ -904,8 +1138,9 @@ fn build_edges(
     index: &HashMap<Oid, usize>,
     dag: &Dag,
     projection: &Projection,
-    block_width: u16,
+    metrics: Metrics,
 ) -> Vec<Edge> {
+    let block_along = metrics.block_along;
     let mut edges = Vec::new();
     for block in blocks {
         // The HEAD block points at the commit it names, which is the whole
@@ -915,22 +1150,22 @@ fn build_edges(
                 continue;
             };
             let target = &blocks[*target];
-            let end_col = target.col + block_width;
+            let end_along = target.along + block_along;
             edges.push(Edge {
                 child: block.id.clone(),
                 parent: Some(target.id.clone()),
                 from_track: block.track,
                 to_track: target.track,
-                col: block.col.saturating_sub(1),
-                end_col,
-                cross_col: end_col,
+                along: block.along.saturating_sub(1),
+                end_along,
+                cross_along: end_along,
             });
             continue;
         }
         for (slot, parent) in projection.parents(dag, &block.id).iter().enumerate() {
             let target = index.get(parent).map(|&i| &blocks[i]);
-            let col = block.col.saturating_sub(1);
-            let end_col = target.map_or(0, |b| b.col + block_width);
+            let along = block.along.saturating_sub(1);
+            let end_along = target.map_or(0, |b| b.along + block_along);
             edges.push(Edge {
                 child: block.id.clone(),
                 // A parent outside the drawn set is left as `None` so the
@@ -938,17 +1173,65 @@ fn build_edges(
                 parent: target.map(|b| b.id.clone()),
                 from_track: block.track,
                 to_track: target.map_or(block.track, |b| b.track),
-                col,
-                end_col,
-                // See `Edge::cross_col`: the first parent crosses late, in the
-                // gap right of the commit it points at, so the run stays in
-                // the child's own track; a merge's other parents cross early,
-                // because the child's track carries on past them.
-                cross_col: if slot == 0 { end_col.min(col) } else { col },
+                along,
+                end_along,
+                cross_along: cross_at(blocks, block, target, slot, along, end_along, metrics),
             });
         }
     }
     edges
+}
+
+/// Where one arrow changes track.
+///
+/// See [`Edge::cross_along`] for the rule: a first parent crosses **late**, so
+/// its long run stays in the child's own track; a merge's other parents cross
+/// **early**, because the child's track carries on past them to its own first
+/// parent.
+///
+/// Either choice puts the long run in *somebody's* track, and a track is only
+/// clear between two consecutive blocks of the group that owns it.  A merge of
+/// a commit its branch has since built on — merge a feature branch, keep
+/// working on it — leaves blocks between the merge and its parent, and the
+/// early run went straight through them.  Blocks are painted after arrows, so
+/// that is not a cosmetic problem: the line vanishes into a box and comes out
+/// the other side, and the parent it names is anybody's guess.  So when the
+/// preferred run is blocked and the other one is clear, the other one is taken;
+/// when both are blocked the preference stands, which is at least the picture
+/// the reader already knows.
+fn cross_at(
+    blocks: &[Block],
+    child: &Block,
+    parent: Option<&Block>,
+    slot: usize,
+    along: u16,
+    end_along: u16,
+    metrics: Metrics,
+) -> u16 {
+    let (early, late) = (along, end_along.min(along));
+    let preferred = if slot == 0 { late } else { early };
+    let Some(parent) = parent else { return preferred };
+
+    // Which track the long run travels in, for each choice.
+    let clear = |track: usize| {
+        !blocks.iter().any(|b| {
+            b.track == track
+                && b.along + metrics.block_along > late
+                && b.along < along
+                && b.id != child.id
+                && b.id != parent.id
+        })
+    };
+    let (preferred_track, other_track, other) = if slot == 0 {
+        (child.track, parent.track, early)
+    } else {
+        (parent.track, child.track, late)
+    };
+    if clear(preferred_track) || !clear(other_track) {
+        preferred
+    } else {
+        other
+    }
 }
 
 /// Everything the cursor can land on, in drawing order: the blocks, and the
@@ -956,34 +1239,56 @@ fn build_edges(
 /// [`Focus`].
 fn build_focusables(layout: &Layout) -> Vec<Focusable> {
     let mut out = Vec::new();
+    let vertical = layout.metrics.orient == Orientation::Vertical;
+    // Where the block's top border is, in graph terms.  Vertical draws the
+    // newest commit at the top, so a block's top row is its *newest* cell
+    // along time — the far end of the block, not its start.
+    let top_of = |block: &Block| {
+        if vertical {
+            block.along + layout.metrics.block_along - 1
+        } else {
+            block.along
+        }
+    };
     for block in &layout.blocks {
-        let top = layout.track_row(block.track);
+        let track = layout.track_across(block.track);
+        let top = top_of(block);
+        // A label is written along the block's top border in both pictures,
+        // because text always reads left to right — so the offset the layout
+        // gave it is an offset along time in one picture and across tracks in
+        // the other.  Everything downstream (the walk, the renderer) then
+        // treats it as an ordinary graph cell.
+        let label_at = |offset: u16| {
+            if vertical {
+                (top, track + offset)
+            } else {
+                (top + offset, track)
+            }
+        };
+        // One step *into* the block from its top border, so a press off a
+        // branch label lands on the commit it labels rather than skipping past
+        // it.
+        let body = if vertical { (top - 1, track) } else { (top, track + 1) };
         match block.kind {
             BlockKind::Head => out.push(Focusable {
                 focus: Focus::Head,
-                row: top + 1,
-                col: block.col,
+                along: body.0,
+                across: body.1,
             }),
             _ => {
-                // Labels sit on the block's top border, one row above the
-                // block's own focus point, so `j` off a branch label lands on
-                // the commit it labels rather than skipping past it.
-                for (name, col) in &block.labels {
-                    out.push(Focusable {
-                        focus: Focus::Ref(name.clone()),
-                        row: top,
-                        col: block.col + col,
-                    });
+                for (name, offset) in &block.labels {
+                    let (along, across) = label_at(*offset);
+                    out.push(Focusable { focus: Focus::Ref(name.clone()), along, across });
                 }
                 out.push(Focusable {
                     focus: Focus::Commit(block.id.clone()),
-                    row: top + 1,
-                    col: block.col,
+                    along: body.0,
+                    across: body.1,
                 });
             }
         }
     }
-    out.sort_by_key(|f| (f.col, f.row));
+    out.sort_by_key(|f| (f.along, f.across));
     out
 }
 
@@ -1085,6 +1390,27 @@ mod tests {
         )
     }
 
+    /// A merge of a commit whose branch then carried on.
+    ///
+    /// Merge a feature branch, keep working on it: the merge's second parent
+    /// is no longer its branch's tip, so blocks of that branch sit between the
+    /// merge and the commit it names — right where that arrow wants to run.
+    fn merge_of_a_busy_branch() -> Dag {
+        Dag::new(
+            vec![
+                commit("later", &["side"]),
+                commit("m", &["trunk", "side"]),
+                commit("side", &["root"]),
+                commit("trunk", &["root"]),
+                commit("root", &[]),
+            ],
+            vec![branch("main", "m"), branch("feature", "later")],
+            Head { branch: Some("main".into()), target: Some(Oid::new("m")) },
+            WorkTree::default(),
+            false,
+        )
+    }
+
     /// A real merge: two parents, the second of which starts its own chain.
     fn merged() -> Dag {
         Dag::new(
@@ -1104,7 +1430,7 @@ mod tests {
     fn laid_out(width: u16) -> (Dag, Projection, Layout) {
         let dag = dag();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, width);
+        let layout = compute(&dag, &projection, width, Orientation::Horizontal);
         (dag, projection, layout)
     }
 
@@ -1131,14 +1457,14 @@ mod tests {
         let mut last_right = 0;
         for block in &layout.blocks {
             assert!(
-                block.col >= last_right,
+                block.along >= last_right,
                 "block {} starts at {} but the previous ended at {last_right}",
                 block.id,
-                block.col
+                block.along
             );
-            last_right = block.col + layout.block_width;
+            last_right = block.along + layout.block_width;
         }
-        assert!(layout.total_cols >= last_right - GAP);
+        assert!(layout.total_along >= last_right - layout.metrics.gap_along);
     }
 
     /// The oldest commit is at the left edge and time runs to the right, so
@@ -1154,7 +1480,7 @@ mod tests {
                     continue;
                 };
                 assert!(
-                    parent.col + layout.block_width <= child.col,
+                    parent.along + layout.block_width <= child.along,
                     "{} is not drawn after its parent",
                     child.id
                 );
@@ -1175,11 +1501,11 @@ mod tests {
         let target = layout.block(&Oid::new("f")).expect("its commit is drawn");
         assert_eq!(head.kind, BlockKind::Head);
         assert_eq!(head.track, target.track, "and in the same track");
-        assert_eq!(target.col + layout.col_stride(), head.col, "one gap apart");
+        assert_eq!(target.along + layout.along_stride(), head.along, "one gap apart");
         assert!(layout.locate(&Focus::Head).is_some());
         // `f` is not the newest commit in this fixture, so this really is a
         // placement decision and not the end of the list by accident.
-        assert!(head.col + layout.block_width < layout.total_cols);
+        assert!(head.along + layout.block_width < layout.total_along);
     }
 
     /// A repository with no commits still has a HEAD worth showing: it names
@@ -1193,7 +1519,7 @@ mod tests {
             WorkTree::default(),
             false,
         );
-        let layout = compute(&dag, &Plan::default().project(&dag), 100);
+        let layout = compute(&dag, &Plan::default().project(&dag), 100, Orientation::Horizontal);
         assert_eq!(layout.blocks.len(), 1);
         assert_eq!(layout.blocks[0].kind, BlockKind::Head);
     }
@@ -1205,7 +1531,7 @@ mod tests {
     fn tracks_that_exactly_fit_are_all_counted_as_visible() {
         let (_, _, layout) = laid_out(120);
         assert_eq!(layout.track_count, 2);
-        let span = 2 * track_stride() - TRACK_GAP;
+        let span = 2 * layout.metrics.across_stride() - layout.metrics.gap_across;
         assert_eq!(layout.visible_tracks(span), 2);
         // And a viewport one row too short honestly reports one.
         assert_eq!(layout.visible_tracks(span - 1), 1);
@@ -1246,7 +1572,7 @@ mod tests {
             true,
         );
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 100);
+        let layout = compute(&dag, &projection, 100, Orientation::Horizontal);
         let edge = layout
             .edges
             .iter()
@@ -1255,7 +1581,7 @@ mod tests {
         assert_eq!(edge.parent, None);
         assert!(layout.route(edge).stub);
         assert!(
-            layout.block(&Oid::new("x")).unwrap().col >= GAP,
+            layout.block(&Oid::new("x")).unwrap().along >= layout.metrics.gap_along,
             "the stub needs room to the left of the oldest block"
         );
     }
@@ -1311,18 +1637,18 @@ mod tests {
     fn moving_across_tracks_stays_at_the_same_point_in_history() {
         let (_, _, layout) = laid_out(120);
         let from = Focus::Commit(Oid::new("d"));
-        let col_of = |f: &Focus| layout.locate(f).unwrap().col as i32;
+        let along_of = |f: &Focus| layout.locate(f).unwrap().along as i32;
         let target = layout
             .step_where(&from, Dir::Down, |_| true)
             .expect("a track below");
         assert!(
-            (col_of(&target) - col_of(&from)).abs() <= layout.col_stride() as i32,
-            "crossing tracks travelled {} columns",
-            (col_of(&target) - col_of(&from)).abs()
+            (along_of(&target) - along_of(&from)).abs() <= layout.along_stride() as i32,
+            "crossing tracks travelled {} along the time axis",
+            (along_of(&target) - along_of(&from)).abs()
         );
         // And it really did change track.
-        let row_of = |f: &Focus| layout.locate(f).unwrap().row;
-        assert!(row_of(&target) > row_of(&from));
+        let across_of = |f: &Focus| layout.locate(f).unwrap().across;
+        assert!(across_of(&target) > across_of(&from));
     }
 
     /// A branch label sits on its block's top border, so `j` off the label
@@ -1332,7 +1658,7 @@ mod tests {
         let (_, _, layout) = laid_out(120);
         let label = layout.locate(&Focus::Ref("main".into())).expect("main is drawn");
         let block = layout.block(&Oid::new("f")).unwrap();
-        assert_eq!(label.row, layout.track_row(block.track));
+        assert_eq!(label.across, layout.track_across(block.track));
         assert_eq!(
             layout.step_where(&Focus::Ref("main".into()), Dir::Down, |_| true),
             Some(Focus::Commit(Oid::new("f")))
@@ -1347,7 +1673,7 @@ mod tests {
         let mut plan = Plan::default();
         plan.push(&dag, Edit::MoveRef { name: "main".into(), new_target: Oid::new("a") })
             .unwrap();
-        let layout = compute(&dag, &plan.project(&dag), 120);
+        let layout = compute(&dag, &plan.project(&dag), 120, Orientation::Horizontal);
 
         let block_of = |id: &str| layout.block(&Oid::new(id)).unwrap();
         assert!(block_of("a").labels.iter().any(|(n, _)| n == "main"));
@@ -1360,7 +1686,7 @@ mod tests {
         let dag = dag();
         let mut plan = Plan::default();
         plan.push(&dag, Edit::Drop { commit: Oid::new("c") }).unwrap();
-        let layout = compute(&dag, &plan.project(&dag), 120);
+        let layout = compute(&dag, &plan.project(&dag), 120, Orientation::Horizontal);
         assert!(layout.block(&Oid::new("c")).is_none());
         // And `d` now points straight at `a`.
         let edge = layout.edges.iter().find(|e| e.child == Oid::new("d")).unwrap();
@@ -1376,7 +1702,7 @@ mod tests {
         plan.push(&dag, Edit::Merge { into: "main".into(), from: Oid::new("d") })
             .unwrap();
         let projection = plan.project(&dag);
-        let layout = compute(&dag, &projection, 120);
+        let layout = compute(&dag, &projection, 120, Orientation::Horizontal);
 
         let pending = layout
             .blocks
@@ -1428,7 +1754,7 @@ mod tests {
             false,
         );
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 300);
+        let layout = compute(&dag, &projection, 300, Orientation::Horizontal);
         assert_eq!(layout.block_width, MAX_BLOCK, "a long summary fills the clamp");
     }
 
@@ -1441,7 +1767,7 @@ mod tests {
             .map(|i| branch(&format!("branch-number-{i}"), "f"))
             .collect();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 80);
+        let layout = compute(&dag, &projection, 80, Orientation::Horizontal);
         let block = layout.block(&Oid::new("f")).unwrap();
         let inner = layout.block_inner();
         for (name, col) in &block.labels {
@@ -1461,7 +1787,7 @@ mod tests {
         let mut dag = dag();
         dag.refs = vec![branch("feat/a-branch-name-nobody-would-shorten", "f")];
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200);
+        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
         let block = layout.block(&Oid::new("f")).unwrap();
         let (name, col) = block.labels.first().expect("a label survives").clone();
         assert!(name.starts_with("feat/a-branch"), "{name}");
@@ -1475,7 +1801,7 @@ mod tests {
     fn an_empty_repository_lays_out_to_nothing() {
         let dag = Dag::new(Vec::new(), Vec::new(), Head::default(), WorkTree::default(), false);
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 80);
+        let layout = compute(&dag, &projection, 80, Orientation::Horizontal);
         assert!(layout.blocks.is_empty());
         assert!(layout.focusables.is_empty());
         assert_eq!(layout.initial_focus(), None);
@@ -1496,34 +1822,113 @@ mod tests {
             ("two branches", dag()),
             ("many branches", tangled()),
             ("a merge", merged()),
+            // A merge whose second parent has blocks of its own track sitting
+            // between it and the merge — the case that decides `cross_at`.
+            ("a merge of a busy branch", merge_of_a_busy_branch()),
             // HEAD part-way along a chain: the block lands in the middle of a
             // track an arrow is already using.
             ("a branch ahead", ahead()),
         ] {
             let projection = Plan::default().project(&dag);
-            for width in [40, 80, 120, 400] {
-                let layout = compute(&dag, &projection, width);
+            for (width, orient) in [40, 80, 120, 400]
+                .into_iter()
+                .flat_map(|w| [(w, Orientation::Horizontal), (w, Orientation::Vertical)])
+            {
+                let layout = compute(&dag, &projection, width, orient);
                 for edge in &layout.edges {
-                    for (row, col) in layout.route(edge).cells() {
+                    for (along, across) in layout.route(edge).cells() {
                         for block in &layout.blocks {
                             // The endpoints are meant to touch: an arrow
                             // leaves one border and its head sits in the gap
                             // beside the next.  Everything else is a crossing.
-                            let top = layout.track_row(block.track);
-                            let inside = col > block.col
-                                && col < block.col + layout.block_width
-                                && row >= top
-                                && row < top + BLOCK_H;
+                            let start = layout.track_across(block.track);
+                            let m = layout.metrics;
+                            let inside = along > block.along
+                                && along < block.along + m.block_along
+                                && across >= start
+                                && across < start + m.block_across;
                             assert!(
                                 !inside,
-                                "{name} at width {width}: the arrow {} -> {:?} runs through \
-                                 block {} at ({row}, {col})",
+                                "{name} at width {width} ({orient:?}): the arrow {} -> {:?} \
+                                 runs through block {} at ({along}, {across})",
                                 edge.child, edge.parent, block.id
                             );
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Turning the graph turns the keys with it: whichever way history runs
+    /// is the way `h`/`l` or `j`/`k` travel it.  Anything else would be a
+    /// second thing to remember for the same picture.
+    #[test]
+    fn the_keys_follow_whichever_way_history_runs() {
+        let dag = dag();
+        let projection = Plan::default().project(&dag);
+        // `f` is `main`'s tip and the block one band back is `c`, on another
+        // branch's track — the same pair `moving_back_in_time_lands_on_the_
+        // commit_beside_it` pins for the horizontal picture.
+        let from = Focus::Commit(Oid::new("f"));
+
+        let across = compute(&dag, &projection, 120, Orientation::Horizontal);
+        assert_eq!(
+            across.step_where(&from, Dir::Left, |_| true),
+            Some(Focus::Commit(Oid::new("c"))),
+            "left goes back in time when history runs left to right"
+        );
+
+        let down = compute(&dag, &projection, 120, Orientation::Vertical);
+        assert_eq!(
+            down.step_where(&from, Dir::Down, |_| true),
+            Some(Focus::Commit(Oid::new("c"))),
+            "down goes back in time when history runs down the screen"
+        );
+        // …and the sideways keys are then the ones that change branch.
+        let track = |f: &Focus| down.track_at(down.locate(f).unwrap().across);
+        let sideways = [Dir::Right, Dir::Left]
+            .into_iter()
+            .filter_map(|dir| down.step_where(&from, dir, |_| true))
+            .find(|f| track(f) != track(&from));
+        assert!(sideways.is_some(), "no sideways key reached another branch");
+    }
+
+    /// Vertical draws the newest commit at the *top*, the order `git log`
+    /// prints.  The graph's own time axis still runs oldest-first, so this is
+    /// the one place the two disagree — and the only place that may.
+    #[test]
+    fn vertical_puts_the_newest_commit_at_the_top() {
+        let dag = dag();
+        let projection = Plan::default().project(&dag);
+        let layout = compute(&dag, &projection, 120, Orientation::Vertical);
+
+        let screen_y = |id: &str| {
+            let block = layout.block(&Oid::new(id)).expect(id);
+            layout.block_origin(block).1
+        };
+        // `f` follows `e` follows `a`, so each is drawn above the one it
+        // follows, and every block is a whole block clear of the next.
+        assert!(screen_y("f") < screen_y("e"), "the newer commit is not above");
+        assert!(screen_y("e") < screen_y("a"), "the newer commit is not above");
+        assert!(screen_y("a") - screen_y("e") >= BLOCK_H, "blocks overlap");
+
+        // A branch is a column, so two branches differ in x and not in y.
+        let x = |id: &str| layout.block_origin(layout.block(&Oid::new(id)).expect(id)).0;
+        assert_ne!(x("d"), x("f"), "two branches share a column");
+    }
+
+    /// The blocks themselves are the same box either way up — five rows, and
+    /// as wide as what is written in them.  Only which way the *next* commit
+    /// lies changes, which is what keeps every renderer in one piece.
+    #[test]
+    fn a_block_is_the_same_box_whichever_way_the_graph_runs() {
+        let dag = dag();
+        let projection = Plan::default().project(&dag);
+        for orient in [Orientation::Horizontal, Orientation::Vertical] {
+            let layout = compute(&dag, &projection, 120, orient);
+            assert_eq!(layout.metrics.block_across.max(layout.metrics.block_along), layout.block_width);
+            assert_eq!(layout.metrics.block_across.min(layout.metrics.block_along), BLOCK_H);
         }
     }
 
@@ -1534,7 +1939,7 @@ mod tests {
     fn a_first_parent_chain_keeps_one_track_all_the_way_along() {
         let dag = tangled();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200);
+        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
         let track = |id: &str| layout.block(&Oid::new(id)).expect(id).track;
 
         // The trunk, end to end.
@@ -1568,7 +1973,7 @@ mod tests {
             false,
         );
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200);
+        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
         // Both topics hang off the trunk at different points and neither
         // outlives the other, so two tracks are enough for four chains.
         assert!(layout.track_count <= 2, "{} tracks for two side commits", layout.track_count);
@@ -1582,7 +1987,7 @@ mod tests {
     fn commits_take_the_colour_of_the_branch_they_are_on() {
         let dag = ahead();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200);
+        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
         let tint = |id: &str| layout.block(&Oid::new(id)).expect(id).tint;
 
         // Two branches, so two colours and — since a branch is a row — two
@@ -1632,7 +2037,7 @@ mod tests {
             false,
         );
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200);
+        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
         let tint = |id: &str| layout.block(&Oid::new(id)).expect(id).tint;
 
         assert_eq!(tint("top"), tint("mid"), "`topic` took the trunk it is on");
@@ -1654,7 +2059,7 @@ mod tests {
     fn head_steps_aside_rather_than_landing_on_an_arrow() {
         // At a branch tip there is nothing passing, so it stays put.
         let dag = dag();
-        let layout = compute(&dag, &Plan::default().project(&dag), 200);
+        let layout = compute(&dag, &Plan::default().project(&dag), 200, Orientation::Horizontal);
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
         assert_eq!(head.track, layout.block(&Oid::new("f")).unwrap().track);
 
@@ -1668,10 +2073,10 @@ mod tests {
             WorkTree::default(),
             false,
         );
-        let layout = compute(&dag, &Plan::default().project(&dag), 200);
+        let layout = compute(&dag, &Plan::default().project(&dag), 200, Orientation::Horizontal);
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
         let target = layout.block(&Oid::new("mid")).unwrap();
         assert_ne!(head.track, target.track, "HEAD is sitting on the arrow");
-        assert!(head.col > target.col, "and still directly after its commit");
+        assert!(head.along > target.along, "and still directly after its commit");
     }
 }

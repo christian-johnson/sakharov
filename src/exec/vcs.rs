@@ -276,10 +276,33 @@ fn enter(app: &mut App) {
 
 fn install(app: &mut App, root: PathBuf, dag: vcs::Dag) {
     let now = vcs::now_secs();
+    let orient = vcs::layout::Orientation::parse(&app.config.vcs.orientation);
     match app.vcs.as_mut() {
         Some(state) => state.reload(dag, now),
-        None => app.vcs = Some(VcsState::new(root, dag, now)),
+        None => {
+            let mut state = VcsState::new(root, dag, now);
+            state.orient = orient;
+            app.vcs = Some(state);
+        }
     }
+}
+
+/// Turn the graph a quarter turn.
+///
+/// Session-only, like `:theme`: the message names the config key that makes it
+/// stick, rather than the editor writing to the user's config behind them.
+fn flip(app: &mut App) {
+    let Some(state) = app.vcs.as_mut() else { return };
+    let orient = state.flip();
+    update_scroll(app);
+    app.messages.show(format!(
+        "History runs {} — `[vcs] orientation = \"{}\"` to keep it",
+        match orient {
+            vcs::layout::Orientation::Horizontal => "left to right",
+            vcs::layout::Orientation::Vertical => "down the screen, newest first",
+        },
+        orient.name()
+    ));
 }
 
 /// Leave the graph for whatever was open before it.
@@ -307,35 +330,47 @@ fn refresh(app: &mut App) {
 // Scroll
 // ---------------------------------------------------------------------------
 
-/// Keep the cursor on screen, in columns and in tracks.
+/// Keep the cursor on screen, along time and across tracks.
+///
+/// Written in graph space like everything else in this view: which of the
+/// screen's two dimensions is the time axis is the one thing it asks the
+/// layout ([`viewport`]), so turning the graph does not need a second copy of
+/// the same arithmetic.
 pub fn update_scroll(app: &mut App) {
     let (height, width) = (app.viewport_height as u16, app.viewport_width as u16);
     let Some(state) = app.vcs.as_ref() else { return };
     let Some(focus) = state.focus.clone() else { return };
     let layout = state.layout(width);
     let Some(at) = layout.locate(&focus) else { return };
-    let (row, col) = (at.row, at.col);
-    let (block_width, total_cols) = (layout.block_width, layout.total_cols);
-    let (track_count, visible_tracks) = (layout.track_count, layout.visible_tracks(height));
-    let track = layout.track_at_row(row);
+    let span = layout.metrics.block_along;
+    // Where the focused thing sits on the *display's* time axis: vertical
+    // draws the newest commit at the top, so a graph position and a screen
+    // position run opposite ways there.
+    let start = layout.display_along(at.along, span);
+    let (along_extent, across_extent) = viewport(&layout, width, height);
+    let total_along = layout.total_along;
+    let (track_count, visible_tracks) = (layout.track_count, layout.visible_tracks(across_extent));
+    let track = layout.track_at(at.across);
     let Some(state) = app.vcs.as_mut() else { return };
 
-    // Columns move freely: the time axis is the one you travel along, so a
-    // block clipped at the edge is the price of the cursor tracking smoothly.
-    // What must never happen is the focused block being *partly* off screen,
-    // so the window is nudged by whole blocks' worth when it is.
-    if width > 0 {
-        if col < state.scroll_col {
-            state.scroll_col = col;
-        } else if col + block_width > state.scroll_col + width {
-            state.scroll_col = (col + block_width).saturating_sub(width);
+    // Time moves freely: it is the axis you travel along, so a block clipped
+    // at the edge is the price of the cursor tracking smoothly.  What must
+    // never happen is the focused block being *partly* off screen, so the
+    // window is nudged by whole blocks' worth when it is.
+    if along_extent > 0 {
+        if start < state.scroll_along {
+            state.scroll_along = start;
+        } else if start + span > state.scroll_along + along_extent {
+            state.scroll_along = (start + span).saturating_sub(along_extent);
         }
-        state.scroll_col = state.scroll_col.min(total_cols.saturating_sub(width / 2));
+        state.scroll_along = state
+            .scroll_along
+            .min(total_along.saturating_sub(along_extent / 2));
     }
 
-    // Tracks scroll a whole branch row at a time: half a block above the top
-    // edge is unreadable, so there is nothing to be gained by finer steps.
-    if height > 0 {
+    // Tracks scroll a whole branch band at a time: half a block past the edge
+    // is unreadable, so there is nothing to be gained by finer steps.
+    if across_extent > 0 {
         if track < state.scroll_track {
             state.scroll_track = track;
         } else if track >= state.scroll_track + visible_tracks {
@@ -344,6 +379,17 @@ pub fn update_scroll(app: &mut App) {
         state.scroll_track = state
             .scroll_track
             .min(track_count.saturating_sub(visible_tracks));
+    }
+}
+
+/// The viewport measured in graph space: how much of the time axis it shows,
+/// and how much of the track axis.
+fn viewport(layout: &vcs::layout::Layout, width: u16, height: u16) -> (u16, u16) {
+    match layout.metrics.orient {
+        vcs::layout::Orientation::Horizontal => (width, height),
+        // One row is reserved at the top for the branch names, which are
+        // pinned there rather than written per track.
+        vcs::layout::Orientation::Vertical => (height.saturating_sub(1), width),
     }
 }
 
@@ -378,11 +424,11 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         // time axis; there is no separate "line" to address in a graph, and
         // "the start of the graph" is its oldest commit.
         Command::PageDown | Command::GotoFileEnd => {
-            repeat_step(app, Dir::Right, page(app, cmd));
+            repeat_step(app, orientation(app).newer(), page(app, cmd));
             return true;
         }
         Command::PageUp | Command::GotoFileStart => {
-            repeat_step(app, Dir::Left, page(app, cmd));
+            repeat_step(app, orientation(app).older(), page(app, cmd));
             return true;
         }
 
@@ -421,6 +467,7 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         Command::VcsPull => stream_now(app, &["pull", "--ff-only"], "Pulling", "Pulled"),
         Command::VcsPush => push(app),
         Command::VcsOutput => show_output(app),
+        Command::VcsFlip => flip(app),
         // Each of these needs a word from the user, and the palette can only
         // ever invoke a command bare — so a missing argument opens a minibuffer
         // prompt rather than being an error, the same way bare `:attach` does.
@@ -481,23 +528,28 @@ fn nothing_staged(app: &mut App) {
         .show("Nothing staged — `w` stages a file, `+` stages everything");
 }
 
+/// Which way the graph is currently drawn.
+fn orientation(app: &App) -> vcs::layout::Orientation {
+    app.vcs.as_ref().map(|s| s.orient).unwrap_or_default()
+}
+
 /// How many focus steps a paging command takes.
 fn page(app: &App, cmd: &Command) -> usize {
     match cmd {
         // The ends of the graph: further than it can possibly be.
         Command::GotoFileStart | Command::GotoFileEnd => usize::MAX,
-        // Half a screen, measured in blocks rather than columns, so paging
-        // lands on a block rather than mid-border.  One step per block: arrows
-        // are not somewhere the cursor stops.
+        // Half a screen, measured in blocks rather than cells, so paging lands
+        // on a block rather than mid-border.  One step per block: arrows are
+        // not somewhere the cursor stops.
         _ => {
-            let stride = app
-                .vcs
-                .as_ref()
-                .map_or(vcs::layout::MIN_BLOCK + vcs::layout::GAP, |state| {
-                    state.layout(app.viewport_width as u16).col_stride()
-                });
-            let cols = app.viewport_width as u16 / 2;
-            (cols / stride).max(1) as usize
+            let Some(state) = app.vcs.as_ref() else { return 1 };
+            let layout = state.layout(app.viewport_width as u16);
+            let (along, _) = viewport(
+                &layout,
+                app.viewport_width as u16,
+                app.viewport_height as u16,
+            );
+            ((along / 2) / layout.along_stride().max(1)).max(1) as usize
         }
     }
 }
@@ -1122,7 +1174,7 @@ fn cap(mut lines: Vec<String>) -> Vec<String> {
 fn show_git_status(app: &mut App) {
     let Some(root) = app.vcs.as_ref().map(|s| s.root.clone()) else { return };
     match git(&root, &["status"]) {
-        Ok(text) => app.popup = Some(Popup::reference("git status", text.trim_end())),
+        Ok(text) => app.popup = Some(Popup::git_output("git status", text.trim_end())),
         Err(why) => app.messages.show(why),
     }
 }
@@ -1145,6 +1197,8 @@ commit unreachable.
   MOVING AROUND
     h / l          back and forward through history
     j / k          between branches — each branch has a row of its own
+                   (turned vertical with `o`, j / k walk history and h / l
+                    step between branches: the keys follow the picture)
     J / K          half a screen
     gg / ge        the first / last commit
     Enter          on a branch: go there.  On a commit: read its diff
@@ -1172,6 +1226,7 @@ commit unreachable.
     :vc-branch [name]          a new branch at the selected commit
     :vc-fetch  :vc-pull  :vc-push
     :vc-output                 the last command's output, as it ran
+    o              turn the graph: history across, or down the screen
     r              re-read the repository
     ?              this sheet
     q              leave the graph
@@ -1504,6 +1559,54 @@ mod tests {
         assert!(!app.in_git_output_buffer(), "still in the transcript");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cursor has to stay on screen in either picture — and the two
+    /// pictures scroll different screen dimensions, which is exactly the sort
+    /// of thing that is right in the one that was written first and silently
+    /// wrong in the other.
+    #[test]
+    fn the_cursor_stays_in_view_whichever_way_the_graph_runs() {
+        for orient in [
+            vcs::layout::Orientation::Horizontal,
+            vcs::layout::Orientation::Vertical,
+        ] {
+            let mut app = app_in_graph();
+            // Small enough that the fixture cannot possibly fit.
+            app.viewport_width = 60;
+            app.viewport_height = 12;
+            app.vcs.as_mut().unwrap().orient = orient;
+
+            // Walk to the oldest end and back, checking every step.
+            for dir in [orient.older(), orient.newer()] {
+                for _ in 0..12 {
+                    super::handle(&mut app, &Command::MoveLeft);
+                    app.vcs.as_mut().unwrap().step(dir, 60);
+                    update_scroll(&mut app);
+
+                    let state = app.vcs.as_ref().unwrap();
+                    let layout = state.layout(60);
+                    let Some(focus) = state.focus.clone() else { continue };
+                    let Some(at) = layout.locate(&focus) else { continue };
+                    let start = layout.display_along(at.along, layout.metrics.block_along);
+                    let (along_extent, across_extent) = viewport(&layout, 60, 12);
+                    assert!(
+                        start + 1 > state.scroll_along
+                            && start < state.scroll_along + along_extent,
+                        "{orient:?}: {focus:?} is off screen along time \
+                         (at {start}, window {}..{})",
+                        state.scroll_along,
+                        state.scroll_along + along_extent
+                    );
+                    let track = layout.track_at(at.across);
+                    assert!(
+                        track >= state.scroll_track
+                            && track < state.scroll_track + layout.visible_tracks(across_extent),
+                        "{orient:?}: {focus:?} is off screen across tracks"
+                    );
+                }
+            }
+        }
     }
 
     /// The headline gesture, through the command layer this time: grab, move,

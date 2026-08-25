@@ -728,6 +728,7 @@ out. (A dedicated merge-conflict resolver view is on the roadmap.)
 | `version-control-push` | — | `:vc-push`, `:push` | Push the current branch, setting the upstream if it has none |
 | `version-control-upstream` | — | `:vc-upstream <remote/branch>` | Set the current branch's upstream. Bare, it asks for the target |
 | `version-control-output` | — | `:vc-output` | Reopen the last streamed command's transcript |
+| `version-control-flip` | `o` | `:vc-flip`, `:vc-orientation` | Turn the graph: history left to right, or down the screen |
 
 Commit, fetch, pull and push run on a background thread through **your** git, so
 your `.gitconfig`, hooks and credential helper all apply. The editor never
@@ -738,14 +739,36 @@ opens as they start and fills as they print. A `pre-commit` hook that runs a
 linter suite is the reason: run in the foreground it froze the editor for as
 long as the hook took, with nothing on screen to say anything was happening.
 The buffer is an ordinary text buffer — search, motions and wrap all work — but
-refuses edits, since it is a transcript rather than a document. `q` goes back to
+refuses edits, since it is a transcript rather than a document. It is
+**coloured**: added and removed lines of a diff, hunk headers, commit hashes,
+and a hook's own verdict words (`Passed`, `failed`, `warning` — and
+`black.....Passed`, where the verdict is a suffix). The colours are the
+editor's own, from the text, in your theme — not the tool's ANSI, which mostly
+is not there anyway, since git and everything a hook runs turn colour off when
+they are writing to a pipe. The same colouring applies to a commit's diff
+(`Enter` on a commit), the staging pane's diff, and `git status` in a float. `q` goes back to
 the graph; `:vc-output` brings it back after you have gone off to look at
 whatever the hook complained about. Leaving while a command is still running is
 fine: it keeps writing, and the transcript is whole when you return.
 
+### Which way it runs
+
+History runs **left to right** by default: the oldest commit loaded at the left
+edge, a branch is a row with its name above it, `h`/`l` travel time and `j`/`k`
+step between branches. `o` (`:vc-flip`) turns it a quarter turn — newest commit
+at the top, a branch is a column named in a row above the graph, and the keys
+follow the picture, so `j`/`k` then walk history and `h`/`l` change branch.
+`[vcs] orientation = "vertical"` makes that the way a graph opens.
+
+It is one layout, not two. The geometry is computed on an *along* (time) axis
+and an *across* (track) axis, and only two things know which screen axis is
+which: `Layout::screen`, which the renderer and the navigation both map
+through, and the glyph a stroke is drawn with. So a block is the same box
+either way, and an invariant that holds in one picture holds in the other.
+
 ### What the graph shows
 
-The **HEAD block** sits directly to the *right* of the commit it names — where
+The **HEAD block** sits directly after the commit it names — where
 the next commit would go, not at the end of the graph, where its arrow would
 have to span however far back HEAD happens to be. It carries the work-tree
 summary: how much is staged, unstaged or conflicted, and how many files git is
@@ -765,7 +788,7 @@ Each commit block shows its abbreviated hash and ref labels along its top
 border, the subject over two rows, the author and age, and `+added -removed`
 along the bottom border.
 
-**Colour is the branch a commit is on**, and so is the row: walking back from a
+**Colour is the branch a commit is on**, and so is the track: walking back from a
 branch label, each commit takes that label's colour — and its row — until the
 next label, so a branch, its name above the row, and its run of history all read
 as one thing. History no branch points into (a topic whose branch was deleted,

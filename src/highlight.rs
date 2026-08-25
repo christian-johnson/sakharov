@@ -43,6 +43,13 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
     "markup.link",
     "markup.quote",
     "markup.list",
+    // --- git output (indices 37.. — see the GIT_* constants below) ---
+    "git.added",
+    "git.removed",
+    "git.hunk",
+    "git.meta",
+    "git.hash",
+    "git.warning",
 ];
 
 // Highlight indices for the markdown markup names appended to `HIGHLIGHT_NAMES`.
@@ -61,6 +68,17 @@ pub const MD_RAW: usize = 33;
 pub const MD_LINK: usize = 34;
 pub const MD_QUOTE: usize = 35;
 pub const MD_LIST: usize = 36;
+
+// Highlight indices for git output — a diff, `git status`, or a hook's own
+// printing (`crate::git_highlight`).  Six slots rather than a colour per thing
+// git can say: what a reader is scanning for is "added / removed / where /
+// what went wrong", and everything else is context.
+pub const GIT_ADDED: usize = 37;
+pub const GIT_REMOVED: usize = 38;
+pub const GIT_HUNK: usize = 39;
+pub const GIT_META: usize = 40;
+pub const GIT_HASH: usize = 41;
+pub const GIT_WARNING: usize = 42;
 
 /// A highlighted span: (char_start, char_end, highlight_index).
 pub type Span = (usize, usize, usize);
@@ -146,6 +164,10 @@ pub struct Highlighter {
     /// custom `crate::sql_highlight` lexer (same reason as markdown: no usable
     /// grammar at this tree-sitter ABI).
     pub sql: bool,
+    /// True for the buffers git's own output is read in (`*git output*`,
+    /// `*commit …*`, a `.diff`/`.patch` file), coloured by
+    /// `crate::git_highlight`.
+    pub git: bool,
     config: Option<HighlightConfiguration>,
     /// Reused across calls — avoids allocating a new Parser on every highlight pass.
     ts_highlighter: TsHighlighter,
@@ -162,6 +184,7 @@ impl Highlighter {
             language,
             markdown: crate::markdown::is_markdown(path),
             sql: crate::sql_highlight::is_sql(path),
+            git: crate::git_highlight::is_git_output(path),
             config,
             ts_highlighter: TsHighlighter::new(),
         }
@@ -189,6 +212,9 @@ impl Highlighter {
         }
         if self.sql {
             return Ok(crate::sql_highlight::highlight(rope));
+        }
+        if self.git {
+            return Ok(crate::git_highlight::highlight(rope));
         }
         let config = match &self.config {
             Some(c) => c,
@@ -317,6 +343,7 @@ mod tests {
                 language: Some(lang),
                 markdown: false,
                 sql: false,
+                git: false,
                 config: Some(config),
                 ts_highlighter: TsHighlighter::new(),
             };
