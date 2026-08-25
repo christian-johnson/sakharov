@@ -46,7 +46,7 @@ pub(crate) fn keymap_layer(app: &App) -> crate::keymap::Layer {
         View::Vcs => Layer::Vcs,
         View::Text if app.in_cell_buffer() => Layer::Cell,
         View::Text if app.in_sql_buffer() => Layer::Sql,
-        View::Text if app.in_commit_buffer() => Layer::Commit,
+        View::Text if app.in_commit_buffer() || app.in_git_output_buffer() => Layer::Commit,
         View::Text => Layer::Normal,
     }
 }
@@ -294,7 +294,14 @@ pub fn handle_paste(app: &mut App, text: &str) {
         }
         Mode::Insert => begin_insert_edit(app),
         // Outside Insert a paste behaves like `P`: the text lands at the
-        // cursor, replacing the selection when there is one.
+        // cursor, replacing the selection when there is one.  Except in a
+        // read-only transcript, which cannot be entered in Insert mode at all
+        // — this is the one edit path that does not go through a command.
+        _ if app.in_git_output_buffer() => {
+            app.messages
+                .show("This is git's output, read-only (q goes back to the graph)");
+            return;
+        }
         _ => {
             app.buffer.begin_edit_session();
             let (start, end) = (app.selection.start(), app.selection.end());

@@ -727,10 +727,21 @@ out. (A dedicated merge-conflict resolver view is on the roadmap.)
 | `version-control-pull` | — | `:vc-pull`, `:pull` | Pull the current branch (`--ff-only`) |
 | `version-control-push` | — | `:vc-push`, `:push` | Push the current branch, setting the upstream if it has none |
 | `version-control-upstream` | — | `:vc-upstream <remote/branch>` | Set the current branch's upstream. Bare, it asks for the target |
+| `version-control-output` | — | `:vc-output` | Reopen the last streamed command's transcript |
 
-Fetch, pull and push run on a background thread through **your** git, so your
-`.gitconfig`, hooks and credential helper all apply. The editor never handles a
-credential.
+Commit, fetch, pull and push run on a background thread through **your** git, so
+your `.gitconfig`, hooks and credential helper all apply. The editor never
+handles a credential.
+
+Those four **stream their output into a read-only `*git output*` buffer**, which
+opens as they start and fills as they print. A `pre-commit` hook that runs a
+linter suite is the reason: run in the foreground it froze the editor for as
+long as the hook took, with nothing on screen to say anything was happening.
+The buffer is an ordinary text buffer — search, motions and wrap all work — but
+refuses edits, since it is a transcript rather than a document. `q` goes back to
+the graph; `:vc-output` brings it back after you have gone off to look at
+whatever the hook complained about. Leaving while a command is still running is
+fine: it keeps writing, and the transcript is whole when you return.
 
 ### What the graph shows
 

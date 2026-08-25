@@ -132,6 +132,20 @@ pub fn execute(app: &mut App, cmd: &Command) {
         cmd.name()
     );
 
+    // The `*git output*` transcript is a text buffer — search, motions and
+    // wrap all work in it, which is the point of putting a hook's output in
+    // one — but it is a record of something that happened, not a document.
+    // The same classification the bufferless views use, applied to a buffer
+    // that is real: nothing here would be saved anywhere, so an edit is only
+    // ever a typo in the evidence you opened it to read.
+    if app.in_git_output_buffer()
+        && crate::view::refusal(cmd) == Some(crate::view::Refusal::ReadOnly)
+    {
+        app.messages
+            .show("This is git's output, read-only (q goes back to the graph)");
+        return;
+    }
+
     // Capture cursor line before the command so we can detect movement direction.
     let pre_exec_line: usize = {
         let rope = &app.buffer.rope;
@@ -1087,6 +1101,13 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // rather than silently ignoring.
         Command::VcsOpen => {
             vcs::open(app);
+            return;
+        }
+        // Reachable from anywhere, like `:vc` itself: the transcript is read
+        // in a text buffer, so by the time you want it back the graph is not
+        // what is on screen and `vcs::handle` never sees the command.
+        Command::VcsOutput => {
+            vcs::show_output(app);
             return;
         }
         Command::VcsClose

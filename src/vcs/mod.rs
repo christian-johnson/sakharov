@@ -17,6 +17,7 @@ pub mod derive;
 pub mod layout;
 pub mod load;
 pub mod plan;
+pub mod run;
 pub mod state;
 
 use std::collections::HashMap;

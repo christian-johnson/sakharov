@@ -32,6 +32,7 @@ use crate::{
         layout::Dir,
         load::{self, git, RepoLoad},
         plan::Edit,
+        run,
         state::VcsState,
         Oid, RefKind,
     },
@@ -50,28 +51,21 @@ const ESCAPE_HATCH: &str = ":vc-close";
 // Background work
 // ---------------------------------------------------------------------------
 
-/// What a finished background job produced.
-pub enum JobDone {
-    /// A plain report for the message line.
-    Message(String),
-    /// A plan run to completion (or to its first conflict).
-    Applied(Box<Outcome>),
-}
-
-/// A git invocation running off the UI thread.
+/// The replay running off the UI thread.
 ///
-/// Fetch, pull and push talk to a network; a replay can run a hook per commit.
-/// None of that may block a frame, so all of it goes through here and is
-/// collected by [`poll`] in the run loop, the same shape as the table load and
-/// the Quarto export.
+/// A replay can run a hook per commit, which may not block a frame, so it is
+/// collected by [`poll`] in the run loop — the same shape as the table load
+/// and the Quarto export.  Everything else long-running is an [`OutputJob`]
+/// instead: the difference is whether the *result* is the point (a plan run to
+/// completion, reported as an [`Outcome`]) or the *output* is.
 pub struct VcsJob {
     pub label: String,
-    rx: Receiver<Result<JobDone, String>>,
+    rx: Receiver<Result<Box<Outcome>, String>>,
 }
 
 fn spawn<F>(app: &mut App, label: &str, work: F)
 where
-    F: FnOnce() -> Result<JobDone, String> + Send + 'static,
+    F: FnOnce() -> Result<Box<Outcome>, String> + Send + 'static,
 {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -81,9 +75,124 @@ where
     app.messages.show(format!("{label}…"));
 }
 
+/// A git command being watched line by line in `*git output*`.
+///
+/// The commands that go through here are the ones whose *middle* is worth
+/// seeing: a commit runs the `pre-commit` hook, a push counts objects over a
+/// network.  Run with `Command::output()` they froze the editor for however
+/// long that took — no spinner, no output, nothing to distinguish a linter
+/// suite from a hang.  Now the output buffer opens immediately and fills as
+/// the hook prints, which is the same answer lazygit reaches by dropping back
+/// to the terminal, without leaving the editor to get it.
+pub struct OutputJob {
+    /// What is happening, for the message line ("Committing").
+    label: String,
+    /// What to say when it works.  git's own last line is usually noise on
+    /// success ("1 file changed…" is already in the buffer) and the useful
+    /// report is the editor's own.
+    ok: String,
+    stream: run::Stream,
+}
+
+/// Run a git command in the output buffer, watching it as it goes.
+///
+/// Switches to `*git output*` up front rather than when something takes too
+/// long: a rule of "only if it is slow" means the screen can jump under you
+/// halfway through reading the graph, and a two-line transcript of a fast
+/// commit is not a cost worth a timer to avoid.  `q` goes back.
+fn stream_now(app: &mut App, args: &[&str], label: &str, ok: &str) {
+    let Some(root) = app.vcs.as_ref().map(|s| s.root.clone()) else { return };
+    let stream = match run::Stream::start(&root, args) {
+        Ok(stream) => stream,
+        Err(why) => {
+            app.messages.show(why);
+            return;
+        }
+    };
+
+    // The command being run, as its own first line: the buffer is a transcript
+    // and a transcript that does not say what was run is half of one.
+    let header = format!("$ git {}\n", args.join(" "));
+    app.special_buffer_ropes
+        .insert(crate::app::GIT_OUTPUT_BUFFER.to_string(), ropey::Rope::from_str(&header));
+    super::buffers::switch_to_special_buffer(app, crate::app::GIT_OUTPUT_BUFFER);
+
+    app.messages.show(format!("{label}…  (q to go back)"));
+    app.vcs_stream = Some(OutputJob { label: label.to_string(), ok: ok.to_string(), stream });
+}
+
+/// Append finished lines to the output buffer, wherever it currently lives.
+///
+/// The buffer is usually the one on screen, but `q` during a long hook leaves
+/// the job running with nowhere visible to write — so the stash is the
+/// fallback, and the transcript is whole either way when you come back.
+fn append_output(app: &mut App, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+
+    if app.in_git_output_buffer() {
+        let end = app.buffer.rope.len_chars();
+        app.buffer.rope.insert(end, &text);
+        // Follow the tail.  Watching output that does not scroll is watching
+        // the first screenful of it.
+        let last = app.buffer.rope.len_lines().saturating_sub(1);
+        let head = app.buffer.rope.line_to_char(last);
+        app.selection = crate::selection::Selection::point(head);
+        super::recompute_highlights(app);
+    } else if let Some(rope) = app
+        .special_buffer_ropes
+        .get_mut(crate::app::GIT_OUTPUT_BUFFER)
+    {
+        let end = rope.len_chars();
+        rope.insert(end, &text);
+    }
+}
+
+/// Drain the streaming job.  Returns true when the screen changed.
+fn poll_stream(app: &mut App) -> bool {
+    let Some(mut job) = app.vcs_stream.take() else { return false };
+
+    let mut lines = Vec::new();
+    let mut verdict = None;
+    for event in job.stream.drain() {
+        match event {
+            run::Event::Line(line) => lines.push(line),
+            run::Event::Finished(result) => verdict = Some(result),
+        }
+    }
+    let changed = !lines.is_empty() || verdict.is_some();
+    append_output(app, &lines);
+
+    match verdict {
+        None => app.vcs_stream = Some(job),
+        Some(result) => {
+            let report = match result {
+                Ok(()) => job.ok.clone(),
+                Err(why) => format!("{}: {why}", job.label),
+            };
+            // Into the buffer as well as the message line: the verdict belongs
+            // with the output it is a verdict on, and the message line is one
+            // keystroke from being replaced.
+            append_output(app, &[String::new(), format!("— {report}  (q to go back)")]);
+            app.messages.show(report);
+            // The repository moved under the graph, whether or not it is what
+            // is on screen: the next `open` must not restore a stale snapshot.
+            app.stashes.discard(&SourceId::virtual_named(VCS_BUFFER));
+            refresh(app);
+        }
+    }
+    changed
+}
+
 /// Collect a finished load or job.  Returns true when the screen changed.
 pub fn poll(app: &mut App) -> bool {
-    let mut changed = false;
+    let mut changed = poll_stream(app);
 
     if let Some(result) = app.vcs_pending.as_ref().and_then(RepoLoad::poll) {
         let load = app.vcs_pending.take().expect("just polled it");
@@ -101,11 +210,7 @@ pub fn poll(app: &mut App) -> bool {
         let job = app.vcs_job.take().expect("just polled it");
         changed = true;
         match result {
-            Ok(JobDone::Message(text)) => {
-                app.messages.show(text);
-                refresh(app);
-            }
-            Ok(JobDone::Applied(outcome)) => {
+            Ok(outcome) => {
                 report_outcome(app, &outcome);
                 refresh(app);
             }
@@ -117,7 +222,7 @@ pub fn poll(app: &mut App) -> bool {
 
 /// Anything in flight, for the status-line spinner.
 pub fn busy(app: &App) -> bool {
-    app.vcs_pending.is_some() || app.vcs_job.is_some()
+    app.vcs_pending.is_some() || app.vcs_job.is_some() || app.vcs_stream.is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -312,9 +417,10 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         Command::VcsHelp => app.popup = Some(Popup::reference("version control", HELP)),
         Command::VcsStage => run_now(app, &["add", "--all"], "Staged everything"),
         Command::VcsUnstage => run_now(app, &["reset"], "Unstaged everything"),
-        Command::VcsFetch => remote_job(app, vec!["fetch".into(), "--all".into()], "Fetching"),
-        Command::VcsPull => remote_job(app, vec!["pull".into(), "--ff-only".into()], "Pulling"),
+        Command::VcsFetch => stream_now(app, &["fetch", "--all"], "Fetching", "Fetched"),
+        Command::VcsPull => stream_now(app, &["pull", "--ff-only"], "Pulling", "Pulled"),
         Command::VcsPush => push(app),
+        Command::VcsOutput => show_output(app),
         // Each of these needs a word from the user, and the palette can only
         // ever invoke a command bare — so a missing argument opens a minibuffer
         // prompt rather than being an error, the same way bare `:attach` does.
@@ -577,7 +683,7 @@ pub fn apply_confirmed(app: &mut App) {
 
     spawn(app, "Applying", move || {
         vcs_apply::run(&root, &branches, &ops, &stamp)
-            .map(|outcome| JobDone::Applied(Box::new(outcome)))
+            .map(Box::new)
     });
 }
 
@@ -661,8 +767,12 @@ fn in_progress(
 // Immediate actions
 // ---------------------------------------------------------------------------
 
-/// Run a local git command now and report.  Local operations only: anything
-/// that can touch a network goes through [`remote_job`].
+/// Run a local git command now and report.
+///
+/// For the quick ones only — staging, a checkout, moving a ref: they finish in
+/// milliseconds and have nothing to say while they do.  Anything that can run
+/// a hook or talk to a network goes through [`stream_now`], or it blocks the
+/// frame for as long as it takes with no sign that it is working.
 fn run_now(app: &mut App, args: &[&str], ok: &str) {
     let Some(root) = app.vcs.as_ref().map(|s| s.root.clone()) else { return };
     match git(&root, args) {
@@ -672,22 +782,6 @@ fn run_now(app: &mut App, args: &[&str], ok: &str) {
         }
         Err(why) => app.messages.show(why),
     }
-}
-
-fn remote_job(app: &mut App, args: Vec<String>, label: &str) {
-    let Some(root) = app.vcs.as_ref().map(|s| s.root.clone()) else { return };
-    let label_owned = label.to_string();
-    spawn(app, label, move || {
-        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        git(&root, &borrowed).map(|out| {
-            let tail = out.lines().last().unwrap_or("").trim().to_owned();
-            JobDone::Message(if tail.is_empty() {
-                format!("{label_owned} finished")
-            } else {
-                format!("{label_owned}: {tail}")
-            })
-        })
-    });
 }
 
 /// Push, setting the upstream when the branch has none.
@@ -706,17 +800,12 @@ fn push(app: &mut App) {
         .dag
         .find_ref(&branch)
         .is_some_and(|r| r.upstream.is_some());
-    let args = if has_upstream {
-        vec!["push".to_string()]
+    let args: Vec<&str> = if has_upstream {
+        vec!["push"]
     } else {
-        vec![
-            "push".to_string(),
-            "--set-upstream".to_string(),
-            "origin".to_string(),
-            branch,
-        ]
+        vec!["push", "--set-upstream", "origin", &branch]
     };
-    remote_job(app, args, "Pushing");
+    stream_now(app, &args, "Pushing", "Pushed");
 }
 
 fn checkout(app: &mut App) {
@@ -798,7 +887,9 @@ pub fn commit(app: &mut App, message: &str) {
         nothing_staged(app);
         return;
     }
-    run_now(app, &["commit", "-m", message], "Committed");
+    // Streamed rather than run outright: this is the command that runs the
+    // `pre-commit` hook, and a hook is the whole reason this path exists.
+    stream_now(app, &["commit", "-m", message], "Committing", "Committed");
 }
 
 pub fn set_upstream(app: &mut App, target: &str) {
@@ -1074,9 +1165,13 @@ commit unreachable.
     w              the work tree beside each file's diff — j/k pick a file,
                    Space stages or unstages it, Enter opens it
     +  /  -        stage / unstage everything
+
+  A commit, fetch, pull or push opens *git output* and fills it as the
+  command runs — a pre-commit hook prints there as it goes.  q comes back.
     :vc-commit [message]       (asks for one if you leave it off)
     :vc-branch [name]          a new branch at the selected commit
     :vc-fetch  :vc-pull  :vc-push
+    :vc-output                 the last command's output, as it ran
     r              re-read the repository
     ?              this sheet
     q              leave the graph
@@ -1140,24 +1235,47 @@ fn show_commit(app: &mut App) {
     super::buffers::switch_to_special_buffer(app, &name);
 }
 
-/// `q` / `:bd` in a `*commit …*` buffer — back to the graph it was opened
-/// from, which is the only place it makes sense to go.  Returns false when
-/// that buffer is not what is open, so the caller carries on with its own
-/// close.
+/// `q` / `:bd` in a buffer the graph opened — a `*commit …*` diff, or the
+/// `*git output*` transcript — back to the graph, which is the only place it
+/// makes sense to go.  Returns false when neither is what is open, so the
+/// caller carries on with its own close.
 ///
 /// The same "back out of the temporary thing" gesture as `q` in a `*cell …*`
 /// buffer or a derived table.  Without it `:bd` refused the `*…*` name
 /// outright and `q` was unbound, which made the diff a buffer you could only
 /// leave by naming somewhere else to go.
-pub(super) fn close_commit_buffer(app: &mut App) -> bool {
-    if !app.in_commit_buffer() {
+///
+/// A transcript whose command is still running is *kept*: leaving to watch the
+/// graph while a hook finishes must not throw away the output it is still
+/// writing (`append_output` carries on into the stash), and `:vc-output`
+/// brings it back.
+pub(super) fn close_transient_buffer(app: &mut App) -> bool {
+    if !app.in_commit_buffer() && !app.in_git_output_buffer() {
         return false;
     }
-    if let Some(id) = app.current_source_id() {
-        app.special_buffer_ropes.remove(id.label());
+    if app.vcs_stream.is_none() {
+        if let Some(id) = app.current_source_id() {
+            app.special_buffer_ropes.remove(id.label());
+        }
     }
     open(app);
     true
+}
+
+/// `:vc-output` — the last streamed command's transcript.
+///
+/// Cheap to reach again on purpose: the interesting output is a failing hook's,
+/// and the natural thing to do on seeing it fail is to go and look at the code
+/// — which means leaving the buffer, and then wanting it back.
+pub fn show_output(app: &mut App) {
+    if !app
+        .special_buffer_ropes
+        .contains_key(crate::app::GIT_OUTPUT_BUFFER)
+    {
+        app.messages.show("No git command has run yet");
+        return;
+    }
+    super::buffers::switch_to_special_buffer(app, crate::app::GIT_OUTPUT_BUFFER);
 }
 
 fn yank_hash(app: &mut App) {
@@ -1297,6 +1415,95 @@ mod tests {
                 "{at:?} is not a block or a label"
             );
         }
+    }
+
+    /// A repository with a `pre-commit` hook that prints and takes its time —
+    /// the case this whole streaming path exists for.  Real git, because what
+    /// is being tested is that a hook's output reaches the buffer while the
+    /// hook is still running, and a mock hook is not a hook.
+    fn repo_with_a_talkative_hook() -> Option<PathBuf> {
+        let root = std::env::temp_dir().join(format!("sv-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).ok()?;
+        let run = |args: &[&str]| git(&root, args).ok();
+        run(&["init", "-b", "main"])?;
+        run(&["config", "user.email", "test@example.com"])?;
+        run(&["config", "user.name", "Test"])?;
+        run(&["config", "commit.gpgsign", "false"])?;
+
+        // An initial commit before the hook exists, so the snapshot the view
+        // is built from has a history to show.
+        std::fs::write(root.join("a.txt"), "hello\n").ok()?;
+        run(&["add", "a.txt"])?;
+        run(&["commit", "-m", "initial"])?;
+
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            // Colour and a progress bar on purpose: both have to be gone by
+            // the time the text is in a rope.
+            "#!/bin/sh\nprintf '\\033[32mruff\\033[0m...Passed\\n'\nprintf '10%%\\r100%% done\\n'\nsleep 0.2\necho 'black...Passed'\n",
+        )
+        .ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).ok()?;
+        }
+
+        std::fs::write(root.join("a.txt"), "hello again\n").ok()?;
+        run(&["add", "a.txt"])?;
+        Some(root)
+    }
+
+    /// The end-to-end shape of a commit that runs a hook: the output buffer
+    /// opens at once, fills as the hook prints, and reports the verdict — and
+    /// the editor is *visibly* busy throughout, which is the whole complaint
+    /// that started this (a synchronous commit froze the frame with no
+    /// spinner, so a linter suite and a hang looked identical).
+    #[test]
+    fn a_commit_streams_its_hook_into_a_read_only_buffer() {
+        let Some(root) = repo_with_a_talkative_hook() else { return };
+        let mut app = app_in_graph();
+        let load = load::start(root.clone(), 50);
+        let dag = loop {
+            if let Some(result) = load.poll() {
+                break result.expect("read the repository");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        app.vcs = Some(VcsState::new(root.clone(), dag, 0));
+
+        super::commit(&mut app, "second");
+        assert!(app.in_git_output_buffer(), "the transcript is what is on screen");
+        assert!(busy(&app), "the spinner has something to animate");
+
+        // Drive the run loop until the job reports.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.vcs_stream.is_some() && std::time::Instant::now() < deadline {
+            super::poll(&mut app);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let text = app.buffer.rope.to_string();
+        assert!(text.starts_with("$ git commit"), "no transcript header: {text}");
+        assert!(text.contains("ruff...Passed"), "hook output missing: {text}");
+        assert!(text.contains("black...Passed"), "later hook output missing: {text}");
+        assert!(!text.contains('\u{1b}'), "an escape sequence reached the rope");
+        assert!(!text.contains("10%"), "a progress bar's earlier frames were kept");
+        assert!(text.contains("Committed"), "no verdict: {text}");
+        assert!(!busy(&app), "the job is done");
+
+        // Read-only: the transcript is evidence, not a document.
+        super::super::execute(&mut app, &Command::EnterInsert);
+        assert_eq!(app.mode, crate::mode::Mode::Normal, "Insert opened in a transcript");
+        assert_eq!(app.buffer.rope.to_string(), text, "the transcript changed");
+
+        // And `q` backs out of it, like every other buffer the graph opens.
+        assert!(close_transient_buffer(&mut app), "q had nothing to back out of");
+        assert!(!app.in_git_output_buffer(), "still in the transcript");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The headline gesture, through the command layer this time: grab, move,

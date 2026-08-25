@@ -1172,6 +1172,26 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   parked on `StageState` and run by `exec::vcs::pump_stage_popup` from the
   `PopupAction::Continue` arm — the same shape the theme picker's live preview
   uses.
+- **A command that runs a hook is watched, not waited on** (`vcs/run.rs` +
+  `exec::vcs::stream_now`).  Commit, fetch, pull and push spawn git with both
+  pipes drained by threads onto a channel, and the run loop empties that channel
+  into a read-only `*git output*` buffer — which opens as the command starts and
+  fills as it prints.  Run with `Command::output()` they blocked the frame for
+  as long as the interesting part took, with no spinner and no output, so a
+  `pre-commit` hook running a linter suite was indistinguishable from a hang.
+  Lazygit answers this by dropping back to the terminal; a buffer keeps the
+  output where search and motions work, and `:vc-output` brings it back after
+  you have gone to look at whatever the hook complained about.  Every line is
+  cleaned first (`run::clean`: carriage-return discipline, escape sequences
+  dropped, other control characters flattened) — a hook prints arbitrary
+  program output, and an escape sequence written into a rope is emitted
+  verbatim by the backend, taking the real cursor with it.  The quick local
+  commands (staging, checkout, moving a ref) still go through `run_now`: they
+  finish in milliseconds and have nothing to say while they do.  The buffer is
+  refused edits by the same `view::refusal(cmd) == ReadOnly` classification the
+  bufferless views use, applied to a buffer that is real; `q` backs out of it
+  (`close_transient_buffer`, shared with the `*commit …*` diff), and leaving
+  while the command still runs keeps it writing into the stash.
 - **A command that wants a word asks for it** (`exec::vcs::ask`,
   `mode::PromptKind::VcsCommit`/`VcsBranch`/`VcsUpstream`).  `:vc-commit`,
   `:vc-branch` and `:vc-upstream` used to refuse to *parse* without their
@@ -1392,6 +1412,9 @@ src/
                         algorithm (see "Phase V1" above)
     apply.rs          — the only module here that writes: preflight, backup
                         refs, run, undo, abort/resume
+    run.rs            — a git command whose *output* is the point: child +
+                        pipe-draining threads → Event channel, plus `clean`
+                        (what a hook's output may safely become in a rope)
     layout.rs         — THE geometry model: blocks, tracks, arrow routing,
                         Focus + the focusable list that navigation walks
     state.rs          — VcsState: snapshot + plan + cursor + the drag state

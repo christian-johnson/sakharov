@@ -293,6 +293,11 @@ pub const SQL_BUFFER: &str = "*sql*";
 /// name, like the scratch buffer.
 pub const VCS_BUFFER: &str = "*git*";
 
+/// Where a streaming git command's output is read (see `crate::vcs::run`).
+/// One name rather than a family: there is one such command at a time, and
+/// what you want when a hook fails is *the* output, not a list of them.
+pub const GIT_OUTPUT_BUFFER: &str = "*git output*";
+
 /// Name prefix of the `*cell …*` buffers — a grid cell's full text opened for
 /// reading (`*cell 3:price*`).  A family rather than one name, so it is matched
 /// by prefix through `SourceId::is_virtual_kind`.
@@ -439,6 +444,8 @@ pub struct App {
     pub vcs_pending: Option<crate::vcs::load::RepoLoad>,
     /// An in-flight git invocation (a fetch, a push, a replay).
     pub vcs_job: Option<crate::exec::vcs::VcsJob>,
+    /// A git command whose output is being streamed into `*git output*`.
+    pub vcs_stream: Option<crate::exec::vcs::OutputJob>,
     /// Directory a bare filename in a `:sql` query resolves against.
     ///
     /// Captured when the SQL buffer is opened, because switching into it makes
@@ -632,6 +639,15 @@ impl App {
             .is_some_and(|id| id.is_virtual_kind(COMMIT_BUFFER_PREFIX))
     }
 
+    /// True while the `*git output*` buffer — a streaming git command's
+    /// output, opened from the graph — is the current buffer.  Like
+    /// [`App::in_commit_buffer`] the view is [`View::Text`]; this selects the
+    /// `q`-goes-back keymap override, and marks the buffer read-only (it is a
+    /// transcript of something that happened, not a document).
+    pub fn in_git_output_buffer(&self) -> bool {
+        self.current_source_id() == Some(crate::source::SourceId::virtual_named(GIT_OUTPUT_BUFFER))
+    }
+
     /// True while the `*sql*` query buffer is the active buffer.
     ///
     /// An ordinary text buffer with one addition: the execute keys run its
@@ -781,6 +797,7 @@ impl App {
             vcs: None,
             vcs_pending: None,
             vcs_job: None,
+            vcs_stream: None,
             graphics: GraphicsState::default(),
             cell_focused_edit: false,
             popup: None,

@@ -595,7 +595,8 @@ pub(super) fn write_and_quit(app: &mut App) {
 pub(super) fn close_buffer(app: &mut App, force: bool) {
 
         // A `*cell …*` buffer, a computed table, the `*sql*` query buffer and
-        // a `*commit …*` diff are *backed out of* rather than closed: each was
+        // a `*commit …*` diff or `*git output*` transcript are *backed out
+        // of* rather than closed: each was
         // opened from
         // somewhere, and that somewhere is the only place it makes sense to
         // return to.  Without this they hit the refusal below and there is
@@ -603,7 +604,7 @@ pub(super) fn close_buffer(app: &mut App, force: bool) {
         if super::table::close_cell_buffer(app)
             || super::table::close_derived_table(app)
             || super::sql::close_buffer(app)
-            || super::vcs::close_commit_buffer(app)
+            || super::vcs::close_transient_buffer(app)
         {
             return;
         }

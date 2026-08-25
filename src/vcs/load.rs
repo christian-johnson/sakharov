@@ -49,7 +49,7 @@ const LOG_FORMAT: &str = "--format=%x1e%H%x1f%P%x1f%an%x1f%ct%x1f%s";
 /// creating them in the developer's own repository, alongside re-initialising
 /// it and overwriting its `user.email`.  Clearing them makes `-C` mean what it
 /// reads as.
-fn git_command(root: &Path) -> Command {
+pub(crate) fn git_command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
     for var in [
         "GIT_DIR",
