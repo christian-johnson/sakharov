@@ -958,12 +958,27 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
 - **`gV` / `:vc`** opens the commit graph: commits are blocks laid out left to
   right (oldest first), parent links are arrows pointing back, and history is
   rearranged by **direct manipulation** — grab a commit with
-  `Space`, move to another commit, `Space` again.  `?` opens a scrollable help
-  sheet (`exec::vcs::HELP`) with the keys and walkthroughs of the common
-  gestures; it exists because none of the interaction is a git verb, so
-  "Space is grab" is the smaller half of what a reader needs.  See
+  `Space`, move to another commit, `Space` again.  See
   `docs/version-control-plan.md` for the design record and `docs/commands.md`
   for the full key/command reference.
+- **Help is two sheets, because the keys and their meaning are two questions.**
+  `?` is **every key the view binds** (`exec::vcs::key_sheet`) as one grouped
+  `PopupContent::KeyHints` float — the same which-key surface `g` and `z` open,
+  now able to carry headings (`KeyHint::heading`) and to **spill into columns**
+  when it outgrows the screen (`popup_ui::key_hints_shape` is the one geometry
+  model; that content has no scroll, so a row past the last one drawn is
+  documented nowhere the user can see).  Pinned to the keymap by
+  `the_key_sheet_only_lists_keys_that_are_bound`, the same hint-vs-dispatch
+  pairing `goto_hints` has.  `g?` is the **prose** (`exec::vcs::HELP`) — what
+  grabbing a commit *means*, the walkthroughs, and what is refused — which is
+  the half a key sheet cannot carry and the half that matters most in a view
+  with no git verb in it.
+- **Every everyday git action is one keypress, not a name to type.**  `f`/`p`/`P`
+  fetch/pull/push, `C` commits, `n` branches, `gu` sets the upstream, `go`
+  reopens the transcript, and `gU`/`gA`/`gC` undo an apply / abort / continue.
+  They were all commands from the start and reachable only from the palette,
+  which in a view built on direct manipulation reads as "fetching is not part
+  of this".
 - **The premise is that no git verb appears in the interaction.** The user states a
   *shape*; `vcs::derive` works out the commands that would produce it.  Fast-forward
   is not a case in that code — it is what gets emitted when a ref moves and the
@@ -1007,6 +1022,21 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   is refused by name (`cherry-pick` cannot recreate one — the same limit `git rebase`
   has without `--rebase-merges`); a **dirty work tree** blocks apply before the
   backup is even written.
+- **Rewriting history a remote already has is confirmed twice**
+  (`vcs::derive::published_rewrites`, `Popup::vcs_published_warning`).  A commit
+  a remote-tracking branch contains is one anybody who has fetched may be
+  building on; recreating it gives it a new hash, and their history and yours
+  diverge.  It is the one mistake in this view whose cost lands on somebody
+  else, which is why it is worth a press — and why it is *not* a refusal:
+  amending a commit pushed a minute ago is an everyday thing to want.  The
+  first dialog **names the commits and the branches carrying them** and puts
+  *Stop* first, so a reflexive `Enter` stops; only then does the ordinary
+  command list open (`confirm_apply_published` re-derives rather than smuggling
+  the ops through the popup).  The set is the *recreation fixpoint* intersected
+  with each remote ref's ancestors — not the commits that were dragged, since
+  propagation is exactly the case that surprises people.  A plan touching only
+  unpushed work still gets one dialog: a warning that fires on the everyday
+  case is a warning nobody reads.
 - **Undo is a real ref, not the reflog**: every local branch is saved under
   `refs/sakharov/undo/<stamp>/<branch>` before the first write.  *Every* branch, not
   only the ones the projection moved — a replay changes where a branch points
@@ -1339,7 +1369,8 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   replayed** onto a new parent, so a plan whose replay list contains one is refused
   rather than flattened — the same limit `git rebase` has without `--rebase-merges`.
   Conflicts stop the run and are resolved in the ordinary editor; the dedicated
-  merge-conflict resolver is the next view on the roadmap.
+  merge-conflict resolver is the next view on the roadmap (designed in
+  `docs/merge-conflict-plan.md`).
 - A streamed command's transcript is **not** an ANSI terminal: escape sequences
   are stripped, and the colour comes from `git_highlight` reading the text (see
   above).  A tool that draws a box or repositions the cursor will not look like
@@ -1782,9 +1813,13 @@ Phase 4 list has also shipped: `/`?`/`n`/`N` search, multiple buffers + buffer
 picker, and config-driven keybinding overrides in TOML.
 
 ### Still open
-- A **merge-conflict resolver view** (ours / theirs / merged panes over a
-  conflicted file) — the natural next view, and what the version-control view
-  currently hands off to the plain editor
+- A **merge-conflict resolver view** — the natural next view, and what the
+  version-control view currently hands off to the plain editor.  Designed in
+  `docs/merge-conflict-plan.md`: it reads the **index stages** (base / ours /
+  theirs) rather than parsing git's markers back out of the working file,
+  resolves each side to a real label from whatever operation is in progress
+  (and states the ours/theirs **inversion during a replay** in words), and makes
+  each side of a hunk a **switch** rather than a menu item
 - Split panes
 - User-defined named commands in TOML (`[commands]` section)
 - Incremental tree-sitter highlighting (avoid full reparse on every keystroke)

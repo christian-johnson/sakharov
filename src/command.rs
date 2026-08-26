@@ -261,7 +261,8 @@ commands! {
         VcsGitStatus => "version-control-git-status", aliases: ["vc-git-status", "git-status"], palette: "Show `git status` verbatim in a float  [s]";
         VcsStage => "version-control-stage", aliases: ["vc-stage", "stage"], palette: "Stage every change in the work tree  [+]";
         VcsUnstage => "version-control-unstage", aliases: ["vc-unstage", "unstage"], palette: "Unstage everything  [-]";
-        VcsHelp => "version-control-help", aliases: ["vc-help"], palette: "The version-control keys, with walkthroughs  [?]";
+        VcsHelp => "version-control-help", aliases: ["vc-help", "vc-keys"], palette: "Every key the version-control graph binds  [?]";
+        VcsGuide => "version-control-guide", aliases: ["vc-guide"], palette: "What the graph's gestures mean, with walkthroughs  [g?]";
         VcsFetch => "version-control-fetch", aliases: ["vc-fetch", "fetch"], palette: "Fetch from the remote";
         VcsPull => "version-control-pull", aliases: ["vc-pull", "pull"], palette: "Pull the current branch from its upstream";
         VcsPush => "version-control-push", aliases: ["vc-push", "push"], palette: "Push the current branch to its upstream";

@@ -668,7 +668,8 @@ exactly what the backup refs exist to cover.
 | `version-control-enter` | `Enter` | `:vc-enter` | Act on what the cursor is on: check out a branch label, else read the commit |
 | `version-control-show` | — | `:vc-show` | Open the selected commit's diff in an ordinary buffer (`q` returns to the graph) |
 | `yank-selection` | `y` | — | Copy the selected commit's full hash |
-| `version-control-help` | `?` | `:vc-help` | The keys and walkthroughs, in a scrollable float (`q` / `Esc` closes) |
+| `version-control-help` | `?` | `:vc-help`, `:vc-keys` | Every key the graph binds, as one grouped sheet — the same which-key float the `g` prefix opens, spilling into columns when it outgrows the screen |
+| `version-control-guide` | `g?` | `:vc-guide` | What the gestures *mean*: the two kinds of action, the walkthroughs, and what is refused. A scrollable float (`Tab` to scroll, `Esc` closes) |
 
 ### Rearranging history
 
@@ -698,9 +699,9 @@ ancestor, and a **merge cannot be replayed onto a new parent** (the same limit
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
 | `version-control-apply` | `ga` | `:vc-apply`, `:apply` | Show the derived git commands, then run them |
-| `version-control-undo` | — | `:vc-undo` | Put every branch back where it was before the last apply |
-| `version-control-abort` | — | `:vc-abort` | Abort the cherry-pick / merge a conflict left in progress |
-| `version-control-continue` | — | `:vc-continue` | Resume after resolving a conflict |
+| `version-control-undo` | `gU` | `:vc-undo` | Put every branch back where it was before the last apply |
+| `version-control-abort` | `gA` | `:vc-abort` | Abort the cherry-pick / merge a conflict left in progress |
+| `version-control-continue` | `gC` | `:vc-continue` | Resume after resolving a conflict |
 
 `:vc-apply` refuses outright while the work tree is dirty — replaying commits
 over uncommitted work is the reliable way to lose it. Before the first write it
@@ -708,9 +709,21 @@ saves every local branch under `refs/sakharov/undo/<stamp>/<branch>`; `:vc-undo`
 restores them and deletes the backup. A real ref rather than the reflog, because
 it survives `gc` and covers branches that were never checked out.
 
+**Rewriting history the remote already has** is confirmed **twice**. A commit a
+remote-tracking branch contains is one anybody who has fetched may already be
+building on; recreating it gives it a new hash, so their history and yours
+diverge and each of them has to reconcile it by hand. It is not refused —
+amending a commit you pushed a minute ago is an everyday thing to want — but
+the first dialog names the commits and the remote branches carrying them, and
+its first row (the one a reflexive `Enter` takes) is *Stop*. Only after
+agreeing does the ordinary list of git commands appear. A plan that rewrites
+only your own unpushed work gets one dialog, as before: a warning that fires on
+the everyday case is a warning nobody reads.
+
 A **conflict** stops the run where it stopped and names the conflicted files.
 Resolve them in the ordinary editor, then `:vc-continue` — or `:vc-abort` to back
-out. (A dedicated merge-conflict resolver view is on the roadmap.)
+out. (A dedicated merge-conflict resolver view is designed in
+`docs/merge-conflict-plan.md` and not yet built.)
 
 ### Everyday actions
 
@@ -721,13 +734,13 @@ out. (A dedicated merge-conflict resolver view is on the roadmap.)
 | `version-control-unstage` | `-` | `:vc-unstage`, `:unstage` | Unstage everything |
 | `version-control-status` | `w` | `:vc-status`, `:status` | The staging view: every uncommitted **and untracked** file beside the selected one's diff. `j`/`k` pick a file, `Space` stages or unstages it, `Ctrl+d`/`Ctrl+u` scroll the diff, `Enter` opens the file, `q` closes |
 | `version-control-git-status` | `s` | `:vc-git-status`, `:git-status` | `git status` verbatim, in a scrollable float (`q` / `Esc` closes) |
-| `version-control-commit` | — | `:vc-commit <message>` | Commit what is staged. Bare, it asks for the message in the minibuffer (and says so first if nothing is staged) |
-| `version-control-branch` | — | `:vc-branch <name>` | Create a branch at the selected commit and check it out. Bare, it asks for the name |
-| `version-control-fetch` | — | `:vc-fetch`, `:fetch` | Fetch from every remote |
-| `version-control-pull` | — | `:vc-pull`, `:pull` | Pull the current branch (`--ff-only`) |
-| `version-control-push` | — | `:vc-push`, `:push` | Push the current branch, setting the upstream if it has none |
-| `version-control-upstream` | — | `:vc-upstream <remote/branch>` | Set the current branch's upstream. Bare, it asks for the target |
-| `version-control-output` | — | `:vc-output` | Reopen the last streamed command's transcript |
+| `version-control-commit` | `C` | `:vc-commit <message>` | Commit what is staged. Bare, it asks for the message in the minibuffer (and says so first if nothing is staged) |
+| `version-control-branch` | `n` | `:vc-branch <name>` | Create a branch at the selected commit and check it out. Bare, it asks for the name |
+| `version-control-fetch` | `f` | `:vc-fetch`, `:fetch` | Fetch from every remote |
+| `version-control-pull` | `p` | `:vc-pull`, `:pull` | Pull the current branch (`--ff-only`) |
+| `version-control-push` | `P` | `:vc-push`, `:push` | Push the current branch, setting the upstream if it has none |
+| `version-control-upstream` | `gu` | `:vc-upstream <remote/branch>` | Set the current branch's upstream. Bare, it asks for the target |
+| `version-control-output` | `go` | `:vc-output` | Reopen the last streamed command's transcript |
 | `version-control-flip` | `o` | `:vc-flip`, `:vc-orientation` | Turn the graph: history left to right, or down the screen |
 | `version-control-visible-branches` | `b` | `:vc-visible`, `:vc-hidden` | Which branches the graph draws — `Space` shows/hides, `a` shows all, `q` closes |
 | `version-control-hide-branch` | `x` | `:vc-hide` | Take the branch under the cursor out of the graph |

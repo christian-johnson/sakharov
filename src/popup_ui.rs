@@ -6,8 +6,8 @@ use ratatui::{
 };
 
 use crate::popup::{
-    match_positions, DocPanel, KeyHintsState, Popup, PopupAnchor, PopupContent, PopupSize,
-    PopupTarget,
+    match_positions, DocPanel, KeyHint, KeyHintsState, Popup, PopupAnchor, PopupContent,
+    PopupSize, PopupTarget,
 };
 
 /// Render a popup on top of the current frame.
@@ -22,7 +22,7 @@ pub fn render(
         return;
     }
 
-    let popup_width = compute_width(popup, term.width);
+    let popup_width = compute_width(popup, term.width, term.height);
 
     let popup_height = compute_height(popup, term.height, ui_config);
 
@@ -46,7 +46,7 @@ pub fn render(
             render_text_popup(frame, popup, state, popup_rect);
         }
         PopupContent::KeyHints(state) => {
-            render_key_hints_popup(frame, state, popup_rect);
+            render_key_hints_popup(frame, popup, state, popup_rect, term.height);
         }
         PopupContent::Stage(state) => {
             render_stage_popup(frame, popup, state, popup_rect);
@@ -133,7 +133,7 @@ fn cols(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
 }
 
-fn compute_width(popup: &Popup, term_width: u16) -> u16 {
+fn compute_width(popup: &Popup, term_width: u16, term_height: u16) -> u16 {
     match popup.width {
         PopupSize::FractionOfScreen(f) => {
             let w = (term_width as f32 * f) as u16;
@@ -163,7 +163,7 @@ fn compute_width(popup: &Popup, term_width: u16) -> u16 {
                 PopupContent::Text(s) => {
                     s.lines.iter().map(|l| cols(l)).max().unwrap_or(20) + 4
                 }
-                PopupContent::KeyHints(s) => key_hints_natural_width(s),
+                PopupContent::KeyHints(s) => key_hints_natural_width(s, term_height),
                 PopupContent::Toggles(s) => s
                     .items
                     .iter()
@@ -198,7 +198,14 @@ fn compute_height(popup: &Popup, term_height: u16, ui_config: &crate::config::Ui
             let lines_shown = s.lines.len().min(ui_config.doc_popup_height as usize) as u16;
             (2 + lines_shown).max(4)
         }
-        PopupContent::KeyHints(s) => (s.hints.len() as u16 + 2).max(3),
+        // Borders, an optional footer, and the tallest column: a sheet too
+        // long for the screen spills sideways rather than off the bottom,
+        // since this content has no scroll.
+        PopupContent::KeyHints(s) => {
+            // The footer rides in the bottom border, so it costs no row.
+            let (rows, _) = key_hints_shape(s, term_height);
+            (rows as u16 + 2).max(3).min(term_height)
+        }
         // Borders, the footer, and one row per switch — capped so a repository
         // with fifty branches does not fill the screen with them.
         PopupContent::Toggles(s) => (s.items.len() as u16 + 3).clamp(4, term_height.saturating_sub(4).max(4)),
@@ -843,20 +850,75 @@ fn draw_stage_diff(frame: &mut Frame, state: &crate::popup::StageState, area: Re
     }
 }
 
+/// How a key sheet is laid out: how many rows each column holds, and how many
+/// columns there are.
+///
+/// The one geometry model for a `KeyHints` float — [`compute_height`],
+/// [`key_hints_natural_width`] and [`render_key_hints_popup`] all derive from
+/// it, so a sheet can never be sized for one shape and drawn in another.  A
+/// long sheet spills into columns rather than off the bottom of the screen:
+/// this content has no scroll state, so anything past the last row is simply
+/// unreachable.
+fn key_hints_shape(s: &KeyHintsState, term_height: u16) -> (usize, usize) {
+    // Borders, and a row of terminal left over above and below.
+    let room = (term_height as usize).saturating_sub(4).max(3);
+    let n = s.hints.len().max(1);
+    let columns = n.div_ceil(room).max(1);
+    (n.div_ceil(columns), columns)
+}
+
+/// The rows of each column, in order.
+fn key_hints_columns(s: &KeyHintsState, term_height: u16) -> Vec<&[KeyHint]> {
+    let (rows, _) = key_hints_shape(s, term_height);
+    s.hints.chunks(rows).collect()
+}
+
+/// Width one column of `hints` needs: the key column, the separator, and the
+/// widest description.
+fn key_hints_column_width(hints: &[KeyHint]) -> usize {
+    let keys = hints
+        .iter()
+        .filter(|h| !h.is_heading())
+        .map(|h| cols(&h.key))
+        .max()
+        .unwrap_or(1);
+    let descs = hints.iter().map(|h| cols(&h.description)).max().unwrap_or(0);
+    // 1 (left pad) + key + separator + description
+    1 + keys + cols(SEP) + descs
+}
+
+/// What sits between a key and what it does.
+const SEP: &str = "  →  ";
+
+/// Gap between two columns of a sheet.
+const COLUMN_GAP: usize = 2;
+
 fn render_key_hints_popup(
     frame: &mut Frame,
+    popup: &Popup,
     state: &KeyHintsState,
     rect: Rect,
+    term_height: u16,
 ) {
     let th = crate::theme::active();
-    // Build a block with the prefix as the title (e.g. " g ")
-    let block = Block::default()
-        .title(format!(" {} ", state.prefix))
+    let title = popup
+        .title
+        .clone()
+        .unwrap_or_else(|| format!(" {} ", state.prefix));
+    let mut block = Block::default()
+        .title(format!(" {} ", title.trim()))
         .title_style(title_style(&th))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(th.popup_border))
         .style(Style::default().bg(th.popup_bg));
+    if !state.footer.is_empty() {
+        block = block.title_bottom(
+            ratatui::text::Line::from(format!(" {} ", state.footer))
+                .style(Style::default().fg(th.popup_dim).bg(th.popup_bg))
+                .left_aligned(),
+        );
+    }
 
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -865,67 +927,70 @@ fn render_key_hints_popup(
         return;
     }
 
-    // Compute the max key label width for column alignment.
-    let max_key_w = state.hints.iter().map(|(k, _)| k.len()).max().unwrap_or(1);
-
     // Keys use the same accent as the picker match highlight (`popup_match`) so
     // the emphasis colour is identical across every popup surface.
-    let key_style = Style::default()
-        .fg(th.popup_match)
-        .add_modifier(Modifier::BOLD);
-    let desc_style = Style::default()
-        .fg(th.popup_fg);
-    let sep_style = Style::default()
-        .fg(th.popup_dim);
+    let key_style = Style::default().fg(th.popup_match).add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(th.popup_fg);
+    let head_style = Style::default().fg(th.popup_dim).add_modifier(Modifier::BOLD);
+    let sep_style = Style::default().fg(th.popup_dim);
 
-    for (row, (key, desc)) in state.hints.iter().enumerate() {
-        if row as u16 >= inner.height {
+    let mut x0 = inner.left();
+    for column in key_hints_columns(state, term_height) {
+        let width = key_hints_column_width(column) as u16;
+        let key_w = column
+            .iter()
+            .filter(|h| !h.is_heading())
+            .map(|h| cols(&h.key))
+            .max()
+            .unwrap_or(1);
+
+        for (row, hint) in column.iter().enumerate() {
+            if row as u16 >= inner.height {
+                break;
+            }
+            let y = inner.top() + row as u16;
+            let mut x = x0;
+            let mut put = |text: &str, style: Style, x: &mut u16| {
+                for c in text.chars() {
+                    if *x < inner.right() {
+                        frame.buffer_mut()[(*x, y)]
+                            .set_char(c)
+                            .set_style(style.bg(th.popup_bg));
+                        *x += 1;
+                    }
+                }
+            };
+
+            put(" ", Style::default(), &mut x);
+            if hint.is_heading() {
+                // A heading is the group's name where the key would be, so the
+                // description column still lines up beneath it.
+                put(&hint.description, head_style, &mut x);
+                continue;
+            }
+            put(&hint.key, key_style, &mut x);
+            for _ in cols(&hint.key)..key_w {
+                put(" ", Style::default(), &mut x);
+            }
+            put(SEP, sep_style, &mut x);
+            put(&hint.description, desc_style, &mut x);
+        }
+
+        x0 += width + COLUMN_GAP as u16;
+        if x0 >= inner.right() {
             break;
-        }
-        let y = inner.top() + row as u16;
-        let mut x = inner.left();
-
-        // 1-char left padding
-        if x < inner.right() {
-            frame.buffer_mut()[(x, y)].set_char(' ').set_style(Style::default());
-            x += 1;
-        }
-
-        // Key (padded to max_key_w)
-        for c in key.chars() {
-            if x >= inner.right() { break; }
-            frame.buffer_mut()[(x, y)].set_char(c).set_style(key_style);
-            x += 1;
-        }
-        // Pad key column
-        for _ in key.len()..max_key_w {
-            if x >= inner.right() { break; }
-            frame.buffer_mut()[(x, y)].set_char(' ').set_style(Style::default());
-            x += 1;
-        }
-
-        // Separator "  →  "
-        for c in "  →  ".chars() {
-            if x >= inner.right() { break; }
-            frame.buffer_mut()[(x, y)].set_char(c).set_style(sep_style);
-            x += 1;
-        }
-
-        // Description (truncated to remaining width)
-        for c in desc.chars() {
-            if x >= inner.right() { break; }
-            frame.buffer_mut()[(x, y)].set_char(c).set_style(desc_style);
-            x += 1;
         }
     }
 }
 
-/// Natural width of a KeyHints popup: wide enough to fit the widest row.
-fn key_hints_natural_width(s: &KeyHintsState) -> usize {
-    let max_key = s.hints.iter().map(|(k, _)| k.len()).max().unwrap_or(1);
-    let max_desc = s.hints.iter().map(|(_, d)| d.len()).max().unwrap_or(0);
-    // 1 (left pad) + max_key + 5 (separator "  →  ") + max_desc + 1 (right pad) + 2 (borders)
-    1 + max_key + 5 + max_desc + 1 + 2
+/// Natural width of a KeyHints popup: every column, plus the gaps and borders.
+fn key_hints_natural_width(s: &KeyHintsState, term_height: u16) -> usize {
+    let columns = key_hints_columns(s, term_height);
+    let content: usize = columns.iter().map(|c| key_hints_column_width(c)).sum();
+    let gaps = COLUMN_GAP * columns.len().saturating_sub(1);
+    let footer = if s.footer.is_empty() { 0 } else { cols(&s.footer) + 2 };
+    // + 1 right pad + 2 borders
+    (content + gaps + 1 + 2).max(footer + 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,4 +1128,68 @@ mod tests {
         assert!(text.contains("branch d2b3187"), "no detail\n{text}");
         assert!(text.contains("Space show/hide"), "no footer\n{text}");
     }
+
+    use crate::popup::KeyHint;
+
+    fn sheet(n: usize) -> Popup {
+        let hints = (0..n)
+            .map(|i| KeyHint::binding(&format!("k{i}"), &format!("does thing number {i}")))
+            .collect();
+        Popup::key_sheet("keys", hints, "Esc closes")
+    }
+
+    fn draw(popup: &Popup, w: u16, h: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| render(f, popup, None, &crate::config::UiConfig::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    /// A sheet longer than the screen spills into columns rather than off the
+    /// bottom: this content has no scroll, so a row past the last one drawn is
+    /// simply unreachable — which for a help sheet means bindings that are
+    /// documented nowhere the user can see.
+    #[test]
+    fn a_key_sheet_too_long_for_the_screen_spills_sideways() {
+        let popup = sheet(40);
+        let rows = draw(&popup, 160, 20);
+        let body = rows.join("\n");
+        assert!(body.contains("k0"), "the first row is missing");
+        assert!(body.contains("k39"), "the last row fell off the sheet");
+        assert!(
+            rows.iter().all(|r| r.chars().count() == 160),
+            "the sheet drew outside the terminal"
+        );
+    }
+
+    /// …and a short one stays a single column, where it reads as a list.
+    #[test]
+    fn a_short_key_sheet_stays_one_column() {
+        let rows = draw(&sheet(6), 160, 40);
+        let with_keys = rows.iter().filter(|r| r.contains("→")).count();
+        assert_eq!(with_keys, 6, "every row is its own line");
+        assert!(
+            rows.iter().all(|r| r.matches('→').count() <= 1),
+            "a sheet that fits must not be split into columns"
+        );
+    }
+
+    /// A heading has no key, so it must not be drawn with an arrow pointing at
+    /// nothing.
+    #[test]
+    fn a_heading_is_drawn_as_a_heading_and_not_as_a_binding() {
+        let popup = Popup::key_sheet(
+            "keys",
+            vec![KeyHint::heading("MOVING"), KeyHint::binding("h", "left")],
+            "",
+        );
+        let rows = draw(&popup, 60, 20);
+        let heading = rows.iter().find(|r| r.contains("MOVING")).expect("the heading");
+        assert!(!heading.contains('→'), "the heading was drawn as a binding: {heading}");
+    }
+
 }

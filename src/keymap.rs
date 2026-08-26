@@ -430,6 +430,20 @@ impl Keymap {
         // preference, not a mode, so it is one key rather than a setting to go
         // and find.
         vcs.insert(KeyBinding::char('o'), vec![Command::VcsFlip]);
+        // The remote, on the letters that name it.  These are commands the
+        // view has had all along and could only be reached by typing their
+        // names — which, in a view whose premise is that you never type a git
+        // verb, meant they may as well not have been there.  `f`/`p` are word
+        // motions in Normal mode, and a graph has no words.
+        vcs.insert(KeyBinding::char('f'), vec![Command::VcsFetch]);
+        vcs.insert(KeyBinding::char('p'), vec![Command::VcsPull]);
+        vcs.insert(KeyBinding::char('P'), vec![Command::VcsPush]);
+        // The two that make something new.  Both open a minibuffer prompt for
+        // the word they need, so the bare key is the whole gesture.  `C` and
+        // `n` rather than `c` and `b`, which are checkout and the branch list
+        // — the keys you press far more often.
+        vcs.insert(KeyBinding::char('C'), vec![Command::VcsCommit(String::new())]);
+        vcs.insert(KeyBinding::char('n'), vec![Command::VcsNewBranch(String::new())]);
         // `q` backs out, as it does from a cell buffer and a derived table.
         vcs.insert(KeyBinding::char('q'), vec![Command::VcsClose]);
         // `J` pages, matching the notebook and the grid.

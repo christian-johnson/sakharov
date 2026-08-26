@@ -161,6 +161,90 @@ pub fn derive(dag: &Dag, plan: &Plan) -> Result<Vec<Op>, String> {
     Ok(prune(ops))
 }
 
+/// Commits a plan would rewrite that a remote already has.
+///
+/// Rewriting a commit gives it a new object id.  For a commit only you have,
+/// that is the whole point of this view.  For one that a remote-tracking
+/// branch contains — which is to say, one that anybody who has fetched may
+/// already be building on — it means their history and yours have silently
+/// diverged, and every one of them has to reconcile it by hand.  It is the
+/// one git mistake whose cost lands on other people rather than on the person
+/// who made it, which is exactly why it is worth an extra keypress.
+///
+/// Not a refusal.  Amending the tip of a branch you pushed ten seconds ago is
+/// an everyday thing to want, and a view that refused it would be lying about
+/// what git can do.  What this buys is that the confirmation can *name* the
+/// commits and the branches carrying them, so the choice is made knowing
+/// which it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Published {
+    /// The commits that would be recreated, newest first, as the snapshot
+    /// lists them.
+    pub commits: Vec<Oid>,
+    /// The remote-tracking branches that contain at least one of them.
+    pub remotes: Vec<String>,
+}
+
+/// Which of `plan`'s rewrites are of history a remote already carries.
+///
+/// `None` when the plan rewrites nothing published — the ordinary case, and
+/// the one that must stay a single confirmation.
+pub fn published_rewrites(dag: &Dag, plan: &Plan) -> Option<Published> {
+    if plan.is_empty() {
+        return None;
+    }
+    let recreate = commits_needing_recreation(dag, &plan.project(dag));
+    if recreate.is_empty() {
+        return None;
+    }
+
+    let mut hit: HashSet<Oid> = HashSet::new();
+    let mut remotes = Vec::new();
+    for r in dag.refs.iter().filter(|r| r.kind == super::RefKind::Remote) {
+        let carried: Vec<Oid> = ancestors(dag, &r.target)
+            .into_iter()
+            .filter(|id| recreate.contains(id))
+            .collect();
+        if carried.is_empty() {
+            continue;
+        }
+        remotes.push(r.name.clone());
+        hit.extend(carried);
+    }
+    if hit.is_empty() {
+        return None;
+    }
+
+    // Newest first, in the snapshot's own topological order: the same order
+    // the graph draws them, so the list reads against the picture.
+    let commits = dag
+        .commits()
+        .iter()
+        .map(|c| c.id.clone())
+        .filter(|id| hit.contains(id))
+        .collect();
+    Some(Published { commits, remotes })
+}
+
+/// `id` and everything reachable from it, within the snapshot.
+///
+/// Bounded by the snapshot rather than by git: a remote branch whose tip is
+/// past the loaded horizon contributes the part of itself that was loaded,
+/// which is the part the user is looking at and the part a plan can move.
+fn ancestors(dag: &Dag, id: &Oid) -> HashSet<Oid> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![id.clone()];
+    while let Some(next) = stack.pop() {
+        if !seen.insert(next.clone()) {
+            continue;
+        }
+        if let Some(commit) = dag.get(&next) {
+            stack.extend(commit.parents.iter().cloned());
+        }
+    }
+    seen
+}
+
 /// Every commit whose object id would change.
 ///
 /// The fixpoint from the module docs, computed by walking the projected graph
@@ -353,6 +437,72 @@ mod tests {
             WorkTree::default(),
             false,
         )
+    }
+
+    fn remote(name: &str, target: &str) -> Ref {
+        Ref { name: name.into(), kind: RefKind::Remote, target: Oid::new(target), upstream: None }
+    }
+
+    /// The same graph with `origin/feature` at `c` — so `c` and everything
+    /// under it is history somebody else may already have.
+    fn dag_with_remote() -> Dag {
+        let mut dag = dag();
+        dag.refs.push(remote("origin/feature", "c"));
+        dag
+    }
+
+    fn reparent(child: &str, onto: &str) -> Edit {
+        Edit::Reparent { child: Oid::new(child), slot: 0, new_parent: Some(Oid::new(onto)) }
+    }
+
+    /// Moving a commit a remote already carries is the one mistake in this
+    /// view whose cost lands on other people, so it has to be *detectable*
+    /// before anything is derived.
+    #[test]
+    fn rewriting_a_commit_the_remote_has_is_reported() {
+        let dag = dag_with_remote();
+        let mut plan = Plan::default();
+        plan.push(&dag, reparent("c", "f")).unwrap();
+
+        let published = published_rewrites(&dag, &plan).expect("c is on origin/feature");
+        assert_eq!(published.remotes, vec!["origin/feature".to_string()]);
+        assert_eq!(published.commits, vec![Oid::new("c")], "only `c` is on the remote");
+    }
+
+    /// `d` is above the remote's tip: it is the user's own unpushed work, and
+    /// rewriting it is the everyday case this view exists for.  Warning about
+    /// it would train the warning away.
+    #[test]
+    fn rewriting_only_unpushed_commits_warns_about_nothing() {
+        let dag = dag_with_remote();
+        let mut plan = Plan::default();
+        plan.push(&dag, reparent("d", "f")).unwrap();
+        assert_eq!(published_rewrites(&dag, &plan), None);
+    }
+
+    /// A repository with no remote at all is the same case, and must not pay
+    /// for the check with a spurious confirmation.
+    #[test]
+    fn a_repository_with_no_remote_never_warns() {
+        let dag = dag();
+        let mut plan = Plan::default();
+        plan.push(&dag, reparent("c", "f")).unwrap();
+        assert_eq!(published_rewrites(&dag, &plan), None);
+    }
+
+    /// The propagation the whole derivation turns on applies here too: moving
+    /// `a` recreates `c` and `e` above it, and `c` is on the remote — so the
+    /// warning fires for a commit the user never touched.  Reporting only what
+    /// was dragged would miss exactly the case that surprises people.
+    #[test]
+    fn a_commit_recreated_by_propagation_counts_as_published() {
+        let mut dag = dag_with_remote();
+        dag.refs.push(remote("origin/main", "e"));
+        let mut plan = Plan::default();
+        plan.push(&dag, reparent("e", "c")).unwrap();
+
+        let published = published_rewrites(&dag, &plan).expect("e is on origin/main");
+        assert!(published.commits.contains(&Oid::new("e")));
     }
 
     fn described(ops: &[Op]) -> Vec<String> {

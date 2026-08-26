@@ -951,13 +951,14 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
         PopupTarget::RestoreRecovery => {
             crate::recovery::handle_choice(app, payload.as_text());
         }
-        PopupTarget::ApplyVcsPlan => {
-            if payload.as_text() == "apply" {
-                exec::vcs::apply_confirmed(app);
-            } else {
-                app.messages.show("Nothing applied");
-            }
-        }
+        PopupTarget::ApplyVcsPlan => match payload.as_text() {
+            "apply" => exec::vcs::apply_confirmed(app),
+            // The first of two confirmations, when the plan rewrites commits
+            // a remote already carries.  Agreeing here only opens the
+            // ordinary command list; nothing has been written yet.
+            "published" => exec::vcs::confirm_apply_published(app),
+            _ => app.messages.show("Nothing applied"),
+        },
         PopupTarget::ViewVariable => {
             exec::execute(app, &Command::ViewVariable(payload.as_text().to_string()));
         }

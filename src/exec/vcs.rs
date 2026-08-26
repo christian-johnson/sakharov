@@ -22,7 +22,7 @@ use std::sync::mpsc::{self, Receiver};
 use crate::{
     app::{App, VCS_BUFFER},
     command::Command,
-    popup::{Popup, StageEntry},
+    popup::{KeyHint, Popup, StageEntry},
     source::SourceId,
     stash::Stash,
     vcs::{
@@ -480,7 +480,14 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         Command::VcsEnter | Command::TableOpenCell => enter_action(app),
         Command::VcsStatus => show_work_tree(app),
         Command::VcsGitStatus => show_git_status(app),
-        Command::VcsHelp => app.popup = Some(Popup::reference("version control", HELP)),
+        Command::VcsHelp => {
+            app.popup = Some(Popup::key_sheet(
+                "version control",
+                key_sheet(),
+                "g? for what the gestures mean · Esc closes",
+            ));
+        }
+        Command::VcsGuide => app.popup = Some(Popup::reference("version control", HELP)),
         Command::VcsStage => run_now(app, &["add", "--all"], "Staged everything"),
         Command::VcsUnstage => run_now(app, &["reset"], "Unstaged everything"),
         Command::VcsFetch => stream_now(app, &["fetch", "--all"], "Fetching", "Fetched"),
@@ -740,8 +747,61 @@ fn confirm_apply(app: &mut App) {
         app.messages.show("The planned changes cancel out — nothing to do");
         return;
     }
+
+    // The one mistake in this view whose cost lands on somebody else: a
+    // commit a remote already carries is one other people may have pulled,
+    // and rewriting it gives it a new hash they will have to reconcile by
+    // hand.  Confirmed twice, and the first confirmation names the commits —
+    // "this rewrites published history" is the warning, and *which* commits
+    // is what says whether it is the tip you pushed a minute ago or the week
+    // everyone else is working on top of.
+    if let Some(published) = derive::published_rewrites(&state.dag, &state.plan) {
+        let commits = published
+            .commits
+            .iter()
+            .map(|id| describe_commit(&state.dag, id))
+            .collect();
+        app.popup = Some(Popup::vcs_published_warning(commits, published.remotes));
+        return;
+    }
+
+    show_plan(app, &ops);
+}
+
+/// The list of git commands the plan became — the ordinary confirmation, and
+/// the second one when a rewrite of published history has been agreed to.
+fn show_plan(app: &mut App, ops: &[derive::Op]) {
     let lines: Vec<String> = ops.iter().map(derive::Op::describe).collect();
     app.popup = Some(Popup::vcs_plan(lines));
+}
+
+/// Re-derive and show the command list, after the published-history warning
+/// was accepted.
+///
+/// Derived again rather than carried in the popup: the popup holds a choice,
+/// not a plan, and a plan smuggled through a confirmation is one that could be
+/// shown after the graph underneath it moved.
+pub fn confirm_apply_published(app: &mut App) {
+    let Some(state) = app.vcs.as_ref() else { return };
+    match derive::derive(&state.dag, &state.plan) {
+        Ok(ops) if !ops.is_empty() => show_plan(app, &ops),
+        Ok(_) => app.messages.show("The planned changes cancel out — nothing to do"),
+        Err(why) => app.messages.show(format!("Cannot apply: {why}")),
+    }
+}
+
+/// A commit as one line of the published-history warning: the hash, when it
+/// was made, and what it says it did.
+fn describe_commit(dag: &vcs::Dag, id: &Oid) -> String {
+    match dag.get(id) {
+        Some(c) => format!(
+            "{}  {}  {}",
+            id.short(),
+            vcs::relative_time(c.when, vcs::now_secs()),
+            c.summary
+        ),
+        None => id.short().to_string(),
+    }
 }
 
 /// Run the plan.  Called from the popup's confirmation.
@@ -1322,64 +1382,97 @@ fn show_git_status(app: &mut App) {
     }
 }
 
-/// What `?` shows.
+/// Every key the graph binds, as one sheet.
 ///
-/// Written out rather than generated from the keymap because the keys are the
-/// smaller half: this view has no git verb anywhere in it, so what a reader
-/// needs is not "Space is grab" but *what grabbing a commit means* and what
-/// does and does not touch the repository.  The walkthroughs are the point;
-/// the tables are there so the walkthroughs can be short.
+/// This is what `?` shows, because "which keys does this view have" is the
+/// question a help key is pressed to answer, and the answer has to be
+/// *complete* — a sheet that lists `c` and `m` but not `f` or `p` teaches
+/// that fetching is not here.  Grouped by what the keys do to the
+/// repository, which is the distinction the whole view turns on: the middle
+/// group changes only the picture until `ga`, and the group after it changes
+/// the repository the moment it is pressed.
+///
+/// Pinned to the keymap by `the_key_sheet_only_lists_keys_that_are_bound`, so
+/// it can never advertise a press that does nothing.  What the gestures
+/// *mean* is [`HELP`], one key further along at `g?`.
+pub fn key_sheet() -> Vec<KeyHint> {
+    let key = KeyHint::binding;
+    vec![
+        KeyHint::heading("MOVING AROUND"),
+        key("h l", "back / forward through history"),
+        key("j k", "between branches"),
+        key("J K", "half a screen"),
+        key("g g", "the top of the graph"),
+        key("g e", "the bottom of the graph"),
+        key("Enter", "branch: go there · commit: read its diff"),
+        key("y", "copy the hash under the cursor"),
+        key("g b", "buffer picker"),
+        KeyHint::heading("REARRANGING  (planned)"),
+        key("Space", "pick up / put down what is under the cursor"),
+        key("Esc", "put down what you are holding"),
+        key("d", "remove the selected commit"),
+        key("m", "merge the selection into this branch"),
+        key("u", "take back the last planned change"),
+        key("g x", "discard the whole plan"),
+        key("g a", "apply the plan — the only step that writes"),
+        key("g U", "put every branch back after an apply"),
+        key("g A", "abort the run a conflict stopped"),
+        key("g C", "carry on after resolving a conflict"),
+        KeyHint::heading("RIGHT NOW  (these run immediately)"),
+        key("c", "check out the branch or commit"),
+        key("w", "work tree — Space stages, Enter opens"),
+        key("+ -", "stage / unstage everything"),
+        key("C", "commit what is staged"),
+        key("s", "git status, verbatim"),
+        key("f", "fetch from every remote"),
+        key("p", "pull (fast-forward only)"),
+        key("P", "push to the upstream"),
+        key("n", "new branch at the selected commit"),
+        key("g u", "set this branch's upstream"),
+        key("g o", "the last command's output, as it ran"),
+        KeyHint::heading("THE PICTURE"),
+        key("b", "which branches the graph draws"),
+        key("x", "take the branch under the cursor out"),
+        key("o", "turn the graph a quarter turn"),
+        key("r", "re-read the repository"),
+        key("g ?", "what the gestures mean"),
+        key("q", "leave the graph"),
+    ]
+}
+
+/// What `g?` shows.
+///
+/// The keys are the smaller half of what a reader of this view needs: nothing
+/// here is a git verb, so the question is not "what does Space do" — the
+/// sheet at `?` answers that — but *what grabbing a commit means* and what
+/// does and does not touch the repository.  The walkthroughs are the point.
 const HELP: &str = "\
 The graph is the truth, and moving things in it is how history is changed.
 You state a shape; the editor works out the git commands that produce it.
 
-Nothing here touches the repository until you run :vc-apply — except the
-everyday actions listed under `right now` below, none of which can make a
-commit unreachable.
+Nothing here touches the repository until you apply the plan with `g a` —
+except the actions the `?` sheet lists under `right now`, none of which can
+make a commit unreachable.  Press `?` for the keys; this sheet is what they
+mean.
 
-  MOVING AROUND
-    h / l          back and forward through history
-    j / k          between branches — each branch has a row of its own
-                   (turned vertical with `o`, j / k walk history and h / l
-                    step between branches: the keys follow the picture)
-    J / K          half a screen
-    gg / ge        the top / bottom of the graph
-    Enter          on a branch: go there.  On a commit: read its diff
-    y              copy the hash under the cursor
-
-  REARRANGING HISTORY  (planned — nothing happens yet)
-    Space          pick up what the cursor is on / put it down here
-    d              remove the selected commit from the planned history
-    m              merge the selection into the branch you are on
-    u              take back the last planned change
-    gx             discard the whole plan
-    :vc-apply      show the git commands the plan becomes, and run them
-    :vc-undo       put every branch back where it was before the last apply
-
-  RIGHT NOW  (these run immediately)
-    c              check out the branch or commit under the cursor
-    s              git status, verbatim
-    w              the work tree beside each file's diff — j/k pick a file,
-                   Space stages or unstages it, Enter opens it
-    +  /  -        stage / unstage everything
+  THE TWO KINDS OF ACTION
+    Planned      Moving a commit or a branch label, dropping a commit,
+                 planning a merge.  These only change the picture.  `g a`
+                 shows the git commands they became and asks before running
+                 any of them, and every local branch is saved first.
+    Immediate    Checkout, staging, commit, fetch, pull, push.  These run as
+                 you press them.  None of them can make a commit unreachable,
+                 which is the same line the backups cover.
 
   A commit, fetch, pull or push opens *git output* and fills it as the
-  command runs — a pre-commit hook prints there as it goes.  q comes back.
+  command runs — a pre-commit hook prints there as it goes.  q comes back,
+  and `g o` brings the transcript back after you have gone to look at
+  whatever the hook complained about.
 
   Hiding a branch (b / x) only changes the picture: the branch is untouched,
   still walked when a plan is applied, still backed up.  A commit stays as
   long as any shown branch leads to it, so hiding a topic branch leaves the
   trunk it was cut from alone.  The modeline says how many are hidden.
-    :vc-commit [message]       (asks for one if you leave it off)
-    :vc-branch [name]          a new branch at the selected commit
-    :vc-fetch  :vc-pull  :vc-push
-    :vc-output                 the last command's output, as it ran
-    b              which branches the graph draws (Space shows/hides, a all)
-    x              take the branch under the cursor out of the picture
-    o              turn the graph: history across, or down the screen
-    r              re-read the repository
-    ?              this sheet
-    q              leave the graph
 
   WALKTHROUGH — move a commit onto a different parent
     1. Put the cursor on the commit you want to move (h / l / j / k).
@@ -1389,9 +1482,9 @@ commit unreachable.
        rearranges under it so you can see the result before deciding.
     4. Space again.  The plan now has one change in it; the repository has
        none.  Esc instead of Space puts it back.
-    5. :vc-apply lists what would run (cherry-pick, branch --force, …) and
-       asks.  Everything above the commit you moved is recreated, because
-       recreating a commit gives it a new hash and its children follow.
+    5. `g a` lists what would run (cherry-pick, branch --force, …) and asks.
+       Everything above the commit you moved is recreated, because recreating
+       a commit gives it a new hash and its children follow.
 
   WALKTHROUGH — move a branch to a different commit
     Put the cursor on the branch label itself (it sits on a block's top
@@ -1403,20 +1496,21 @@ commit unreachable.
     Merging is not a drag: nothing is being *moved*.  You say which commit is
     coming in, and it comes into whichever branch you are on.
     1. Be on the branch that should receive the merge.  Put the cursor on its
-       label and press c if you are not — the modeline's ⎇ says where you are.
+       label and press c if you are not — the modeline's branch says where
+       you are.
     2. Put the cursor on the tip of the branch coming in (its label, or the
        block it sits on).
     3. m.  A new block appears where the merge would be, amber, with two
        arrows: it does not exist yet.
-    4. :vc-apply.  Nothing has touched the repository until then.
+    4. `g a`.  Nothing has touched the repository until then.
     Grabbing the last merge commit and moving it is a different request —
     it says that merge should have followed some other commit — which is a
     rewrite, and is refused: a merge cannot be replayed onto a new parent.
 
   WALKTHROUGH — undo an apply
     Every local branch is saved under refs/sakharov/undo/ before the first
-    write, so :vc-undo restores all of them — including branches the plan
-    never moved, whose commits a replay quietly changed underneath.
+    write, so `g U` restores all of them — including branches the plan never
+    moved, whose commits a replay quietly changed underneath.
 
   WHAT IS REFUSED, AND WHY
     A drop that would make a commit its own ancestor is refused as you hover,
@@ -1424,6 +1518,14 @@ commit unreachable.
     for.  A plan whose replay list contains a merge is refused by name:
     cherry-pick cannot recreate one.  A dirty work tree blocks apply before
     anything is written.
+
+  REWRITING WHAT YOU HAVE ALREADY PUSHED
+    A commit a remote-tracking branch already contains is history somebody
+    else may have pulled.  Rewriting it gives it a new hash, so their copy
+    and yours diverge and every one of them has to sort it out by hand.  A
+    plan that would do it is not refused — sometimes it is exactly what you
+    meant — but it is confirmed twice, and the first confirmation names the
+    commits and the remote branches that carry them.
 
   Arrows are not something you select.  An arrow is another name for the
   commit it leaves, so grab the commit and the arrow follows it.
@@ -1516,6 +1618,17 @@ pub fn goto_command(c: char) -> Option<Command> {
         'm' => Command::VcsMerge,
         'd' => Command::VcsDrop,
         'c' => Command::VcsCheckout,
+        // The rest of the plan's lifecycle, one key further in than the
+        // gestures that build it: undoing an apply, and the two halves of
+        // getting out of a conflict.  Deliberately not bare keys — each is
+        // something you reach for once, after something went wrong.
+        'U' => Command::VcsUndo,
+        'A' => Command::VcsAbort,
+        'C' => Command::VcsContinue,
+        // The remote's paperwork, and the transcript of whatever last ran.
+        'u' => Command::VcsSetUpstream(String::new()),
+        'o' => Command::VcsOutput,
+        '?' => Command::VcsGuide,
         _ => return None,
     })
 }
@@ -1532,7 +1645,13 @@ pub fn goto_hints() -> Vec<(String, String)> {
         ("d", "remove the selected commit"),
         ("a", "apply the planned changes"),
         ("x", "discard the planned changes"),
+        ("U", "put the branches back after an apply"),
+        ("A", "abort the run a conflict stopped"),
+        ("C", "carry on after resolving a conflict"),
+        ("u", "set this branch's upstream"),
+        ("o", "the last command's output"),
         ("r", "re-read the repository"),
+        ("?", "what the gestures mean"),
         ("b", "buffer picker"),
     ]
     .into_iter()
@@ -2015,6 +2134,100 @@ mod tests {
             .contains("Nothing planned"));
     }
 
+    /// Rewriting a commit a remote already carries is confirmed twice, and
+    /// the first confirmation is a different dialog naming the commits — the
+    /// point being that it cannot be cleared by the reflex that clears the
+    /// ordinary one.
+    #[test]
+    fn rewriting_published_history_is_confirmed_twice() {
+        let mut app = app_in_graph();
+        app.vcs.as_mut().unwrap().dag.refs.push(Ref {
+            name: "origin/feature".into(),
+            kind: RefKind::Remote,
+            target: Oid::new("c"),
+            upstream: None,
+        });
+        app.vcs
+            .as_mut()
+            .unwrap()
+            .push_edit(Edit::Reparent {
+                child: Oid::new("c"),
+                slot: 0,
+                new_parent: Some(Oid::new("f")),
+            })
+            .unwrap();
+        super::handle(&mut app, &Command::VcsApply);
+
+        let popup = app.popup.as_ref().expect("the warning opened");
+        assert!(
+            popup.title.as_deref().unwrap_or_default().contains("remote"),
+            "the first dialog has to say what the risk is: {:?}",
+            popup.title
+        );
+        let crate::popup::PopupContent::List(ref list) = popup.content else {
+            panic!("the warning is a list");
+        };
+        let labels: Vec<String> = list.items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.first().is_some_and(|l| l.starts_with("Stop")),
+            "a reflexive Enter has to stop, not proceed: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("origin/feature")),
+            "the warning has to name the branch carrying it: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("c")),
+            "the warning has to name the commits: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("cherry-pick")),
+            "the command list is the *second* dialog: {labels:?}"
+        );
+
+        // Agreeing opens the ordinary command list, and still nothing has run.
+        confirm_apply_published(&mut app);
+        let crate::popup::PopupContent::List(ref list) = app.popup.as_ref().unwrap().content else {
+            panic!("the second dialog is a list of operations");
+        };
+        let labels: Vec<String> = list.items.iter().map(|i| i.label.clone()).collect();
+        assert!(labels.iter().any(|l| l.contains("cherry-pick")), "{labels:?}");
+        assert!(app.vcs_job.is_none(), "nothing may run before the second confirmation");
+    }
+
+    /// …and a plan that only rewrites the user's own unpushed work still gets
+    /// exactly one dialog.  A warning that fires on the everyday case is a
+    /// warning that gets pressed through without reading.
+    #[test]
+    fn rewriting_unpushed_work_is_confirmed_once() {
+        let mut app = app_in_graph();
+        app.vcs.as_mut().unwrap().dag.refs.push(Ref {
+            name: "origin/main".into(),
+            kind: RefKind::Remote,
+            target: Oid::new("f"),
+            upstream: None,
+        });
+        app.vcs
+            .as_mut()
+            .unwrap()
+            .push_edit(Edit::Reparent {
+                child: Oid::new("d"),
+                slot: 0,
+                new_parent: Some(Oid::new("f")),
+            })
+            .unwrap();
+        super::handle(&mut app, &Command::VcsApply);
+
+        let crate::popup::PopupContent::List(ref list) = app.popup.as_ref().unwrap().content else {
+            panic!("a confirmation opened");
+        };
+        let labels: Vec<String> = list.items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("cherry-pick")),
+            "the ordinary case goes straight to the command list: {labels:?}"
+        );
+    }
+
     /// Every destructive apply is confirmed, and the confirmation lists the
     /// actual git commands — the one place a surprise would surface.
     #[test]
@@ -2089,10 +2302,10 @@ mod tests {
         }
     }
 
-    /// `?` is the whole view explained, since none of it is a git verb and
-    /// there is no command line to read the answer off.
+    /// `?` is every key the view binds, listed.  "Which keys does this have"
+    /// is the question a help key is pressed to answer.
     #[test]
-    fn question_mark_opens_the_help_float() {
+    fn question_mark_opens_the_key_sheet() {
         let mut app = app_in_graph();
         assert!(
             app.keymap
@@ -2101,37 +2314,105 @@ mod tests {
             "? has to be bound in the graph"
         );
         super::handle(&mut app, &Command::VcsHelp);
-        let popup = app.popup.as_ref().expect("the help opened");
+        let popup = app.popup.as_ref().expect("the sheet opened");
+        let crate::popup::PopupContent::KeyHints(ref hints) = popup.content else {
+            panic!("the sheet is a key-hint float, like the `g` and `z` popups");
+        };
+        assert!(
+            hints.hints.iter().any(|h| h.is_heading()),
+            "a sheet this long has to be grouped"
+        );
+        assert!(
+            !hints.footer.is_empty(),
+            "the sheet has to say where the prose went"
+        );
+    }
+
+    /// `g?` is what the gestures *mean* — the walkthroughs, which are the half
+    /// a key sheet cannot carry.
+    #[test]
+    fn g_question_mark_opens_the_prose_guide() {
+        let mut app = app_in_graph();
+        assert!(matches!(goto_command('?'), Some(Command::VcsGuide)));
+        super::handle(&mut app, &Command::VcsGuide);
+        let popup = app.popup.as_ref().expect("the guide opened");
         let crate::popup::PopupContent::Text(ref text) = popup.content else {
-            panic!("the help is a text float");
+            panic!("the guide is a text float");
         };
         assert!(text.focused, "it is read, not glanced at");
         let body = text.lines.join("\n");
-        for topic in ["WALKTHROUGH", ":vc-apply", "Space"] {
-            assert!(body.contains(topic), "the help never mentions {topic}");
+        for topic in ["WALKTHROUGH", "Space", "remote-tracking"] {
+            assert!(body.contains(topic), "the guide never mentions {topic}");
         }
     }
 
-    /// Every single-character key the help lists has to actually be bound in
-    /// the graph, or the sheet teaches presses that do nothing.  Listed here
-    /// rather than parsed out of the prose: the help is written for a reader,
-    /// and a parser for it would be pinning the formatting, not the keys.
+    /// Every key the sheet lists has to actually be bound, or it teaches
+    /// presses that do nothing — the same pairing `goto_hints` has with
+    /// `goto_command`.  This is what stops the sheet rotting as bindings move.
     #[test]
-    fn the_help_only_advertises_keys_that_are_bound() {
+    fn the_key_sheet_only_lists_keys_that_are_bound() {
         let app = app_in_graph();
-        for key in [
-            'h', 'l', 'j', 'k', 'J', 'K', 'c', 's', 'w', '+', '-', 'r', 'q', 'y', 'd', 'm',
-            'u', ' ', '?',
+        for hint in key_sheet() {
+            if hint.is_heading() {
+                continue;
+            }
+            for token in hint.key.split_whitespace() {
+                // A `g`-prefixed row is written "g a": the prefix itself is
+                // bound in Normal mode, and the letter after it is dispatched
+                // by `goto_command`.
+                let bound = |c: char| {
+                    app.keymap
+                        .lookup_layered(
+                            crate::keymap::Layer::Vcs,
+                            &crate::keymap::KeyBinding::char(c),
+                        )
+                        .is_some()
+                };
+                match token {
+                    "Enter" | "Esc" | "Space" => continue,
+                    _ => {}
+                }
+                let mut chars = token.chars();
+                let first = chars.next().expect("a non-empty token");
+                if let Some(second) = chars.next() {
+                    // "h l", "+ -": two alternatives, each bound on its own.
+                    assert!(bound(first) && bound(second), "`{token}` is not bound");
+                } else {
+                    assert!(
+                        bound(first)
+                            || goto_command(first).is_some()
+                            || crate::input::goto_command(View::Vcs, first).is_some(),
+                        "the sheet lists `{}` ({}), which is not bound",
+                        hint.key,
+                        hint.description
+                    );
+                }
+            }
+        }
+    }
+
+    /// The everyday remote commands must be one keypress, not a name to type.
+    /// They existed as commands from the start and were reachable only from
+    /// the palette, which in a view built on direct manipulation reads as
+    /// "fetching is not part of this".
+    #[test]
+    fn the_remote_commands_are_bound_to_keys() {
+        let app = app_in_graph();
+        for (key, expected) in [
+            ('f', "version-control-fetch"),
+            ('p', "version-control-pull"),
+            ('P', "version-control-push"),
+            ('C', "version-control-commit"),
+            ('n', "version-control-branch"),
         ] {
-            assert!(
-                super::HELP.contains(key),
-                "the help stopped mentioning `{key}`"
-            );
-            assert!(
-                app.keymap
-                    .lookup_layered(crate::keymap::Layer::Vcs, &crate::keymap::KeyBinding::char(key))
-                    .is_some(),
-                "the help advertises `{key}`, which is not bound"
+            let bound = app
+                .keymap
+                .lookup(crate::keymap::Layer::Vcs, &crate::keymap::KeyBinding::char(key))
+                .unwrap_or_else(|| panic!("`{key}` is not bound in the graph"));
+            assert_eq!(
+                bound.iter().map(Command::name).collect::<Vec<_>>(),
+                vec![expected],
+                "`{key}` runs the wrong command"
             );
         }
     }

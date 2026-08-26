@@ -741,9 +741,36 @@ impl TextState {
 // KeyHintsState
 // ---------------------------------------------------------------------------
 
+/// One row of a key sheet.
+///
+/// A heading is a row with no key: a sheet that lists a whole view's
+/// bindings is long enough that the rows need grouping, and a heading is the
+/// cheapest thing that groups them without a second content type.
+pub struct KeyHint {
+    pub key: String,
+    pub description: String,
+}
+
+impl KeyHint {
+    pub fn binding(key: &str, description: &str) -> Self {
+        KeyHint { key: key.to_string(), description: description.to_string() }
+    }
+
+    pub fn heading(text: &str) -> Self {
+        KeyHint { key: String::new(), description: text.to_string() }
+    }
+
+    pub fn is_heading(&self) -> bool {
+        self.key.is_empty()
+    }
+}
+
 pub struct KeyHintsState {
     pub prefix: String,
-    pub hints: Vec<(String, String)>,
+    pub hints: Vec<KeyHint>,
+    /// A line under the sheet saying where the prose is.  Empty for the
+    /// one-prefix strips (`g`, `z`), which are a glance rather than a sheet.
+    pub footer: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -802,6 +829,59 @@ impl Popup {
     /// asked for, and a shape that quietly becomes a nine-commit replay is
     /// exactly what someone would want to see before agreeing.  They carry the
     /// `cancel` payload so that confirming one by reflex does nothing.
+    /// The first of two confirmations, when a plan would rewrite commits a
+    /// remote already carries.
+    ///
+    /// Two popups rather than one sterner one because the cost of this
+    /// mistake lands on other people, and the point of the extra press is
+    /// that it cannot be reached by the reflex that clears the ordinary
+    /// confirmation.  The commits and the branches carrying them are named:
+    /// "this rewrites published history" is a warning, and *which* commits is
+    /// what tells you whether it is the one you pushed a minute ago or the
+    /// week everybody else is working on top of.
+    ///
+    /// Stopping is the first row, so a reflexive Enter stops.
+    pub fn vcs_published_warning(commits: Vec<String>, remotes: Vec<String>) -> Self {
+        let n = commits.len();
+        let carried = remotes.join(", ");
+        let mut items = vec![
+            ListItem {
+                label: "Stop — leave the plan alone".into(),
+                detail: Some("nothing has been written yet".into()),
+                payload: Some(ConfirmPayload::Choice("cancel".into())),
+                ..Default::default()
+            },
+            ListItem {
+                label: "I know — these commits are mine to rewrite".into(),
+                detail: Some("go on to the list of git commands".into()),
+                payload: Some(ConfirmPayload::Choice("published".into())),
+                ..Default::default()
+            },
+            ListItem {
+                label: format!(
+                    "{n} commit{} already on {carried}",
+                    if n == 1 { "" } else { "s" }
+                ),
+                kind: Some("carried by".into()),
+                payload: Some(ConfirmPayload::Choice("cancel".into())),
+                ..Default::default()
+            },
+        ];
+        items.extend(commits.into_iter().map(|c| ListItem {
+            label: c,
+            kind: Some("rewritten".into()),
+            payload: Some(ConfirmPayload::Choice("cancel".into())),
+            ..Default::default()
+        }));
+        Self {
+            title: Some("This rewrites history the remote already has".into()),
+            content: PopupContent::List(ListState::new(items)),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.7),
+            on_confirm: PopupTarget::ApplyVcsPlan,
+        }
+    }
+
     pub fn vcs_plan(ops: Vec<String>) -> Self {
         let mut items: Vec<ListItem> = ops
             .into_iter()
@@ -999,9 +1079,35 @@ impl Popup {
             title: Some(format!(" {prefix} ")),
             content: PopupContent::KeyHints(KeyHintsState {
                 prefix: prefix.into(),
-                hints,
+                hints: hints
+                    .into_iter()
+                    .map(|(key, description)| KeyHint { key, description })
+                    .collect(),
+                footer: String::new(),
             }),
             anchor: PopupAnchor::BottomRight,
+            width: PopupSize::Auto,
+            on_confirm: PopupTarget::Dismiss,
+        }
+    }
+
+    /// A whole view's bindings, as one sheet.
+    ///
+    /// The same rows a which-key strip is made of, because that is what a
+    /// reader wants from a help key: every key that does something, beside
+    /// what it does.  Centred and grouped rather than tucked in a corner, and
+    /// laid out in as many columns as it takes to fit the screen — the prose
+    /// that explains what the gestures *mean* is a separate sheet, named in
+    /// the footer.
+    pub fn key_sheet(title: &str, hints: Vec<KeyHint>, footer: &str) -> Self {
+        Self {
+            title: Some(title.into()),
+            content: PopupContent::KeyHints(KeyHintsState {
+                prefix: String::new(),
+                hints,
+                footer: footer.to_string(),
+            }),
+            anchor: PopupAnchor::Center,
             width: PopupSize::Auto,
             on_confirm: PopupTarget::Dismiss,
         }

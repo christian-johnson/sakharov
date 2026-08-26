@@ -1127,6 +1127,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         | Command::VcsStatus
         | Command::VcsGitStatus
         | Command::VcsHelp
+        | Command::VcsGuide
         | Command::VcsStage
         | Command::VcsUnstage
         | Command::VcsBranches
