@@ -276,15 +276,16 @@ fn enter(app: &mut App) {
 
 fn install(app: &mut App, root: PathBuf, dag: vcs::Dag) {
     let now = vcs::now_secs();
-    // The session's orientation, not the config's: `:vc-flip` is a preference
-    // you state once, and a graph that came back horizontal after you looked at
-    // a file was asking you to state it again every time.
-    let orient = app.vcs_orientation;
+    // The session's own display options, not the config's: flipping the graph
+    // or hiding a branch is a preference you state once, and a graph that came
+    // back the other way up with every branch in it after you looked at a file
+    // was asking you to state it again every time.
+    let options = app.vcs_options.clone();
     match app.vcs.as_mut() {
         Some(state) => state.reload(dag, now),
         None => {
             let mut state = VcsState::new(root, dag, now);
-            state.orient = orient;
+            state.options = options;
             app.vcs = Some(state);
         }
     }
@@ -297,7 +298,7 @@ fn install(app: &mut App, root: PathBuf, dag: vcs::Dag) {
 fn flip(app: &mut App) {
     let Some(state) = app.vcs.as_mut() else { return };
     let orient = state.flip();
-    app.vcs_orientation = orient;
+    app.vcs_options = state.options.clone();
     update_scroll(app);
     app.messages.show(format!(
         "History runs {} — `[vcs] orientation = \"{}\"` to keep it",
@@ -417,7 +418,20 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
     };
     if let Some(dir) = dir {
         if let Some(state) = app.vcs.as_mut() {
-            state.step(dir, width);
+            // While something is held the cursor only stops where it could be
+            // dropped, so a motion with no destination that way moves nothing.
+            // Silence there is the same silence as a wedged editor: say which
+            // it is.
+            if !state.step(dir, width) && state.grabbed.is_some() {
+                let held = state
+                    .grabbed
+                    .as_ref()
+                    .map(|f| crate::vcs_ui::describe_focus(&state.dag, f))
+                    .unwrap_or_default();
+                app.messages.show(format!(
+                    "Nothing that way could take {held} — Esc puts it back down"
+                ));
+            }
         }
         update_scroll(app);
         return true;
@@ -474,6 +488,8 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         Command::VcsPush => push(app),
         Command::VcsOutput => show_output(app),
         Command::VcsFlip => flip(app),
+        Command::VcsBranches => show_branches(app),
+        Command::VcsHideBranch => hide_focused_branch(app),
         // Each of these needs a word from the user, and the palette can only
         // ever invoke a command bare — so a missing argument opens a minibuffer
         // prompt rather than being an error, the same way bare `:attach` does.
@@ -536,7 +552,9 @@ fn nothing_staged(app: &mut App) {
 
 /// Which way the graph is currently drawn.
 fn orientation(app: &App) -> vcs::layout::Orientation {
-    app.vcs.as_ref().map_or(app.vcs_orientation, |s| s.orient)
+    app.vcs
+        .as_ref()
+        .map_or(app.vcs_options.orientation, |s| s.options.orientation)
 }
 
 /// How many focus steps a paging command takes.
@@ -593,6 +611,7 @@ fn grab_or_release(app: &mut App) {
         }
         return;
     }
+    let width = app.viewport_width as u16;
     match state.grab() {
         Ok(()) => {
             let held = state
@@ -600,6 +619,16 @@ fn grab_or_release(app: &mut App) {
                 .as_ref()
                 .map(|f| crate::vcs_ui::describe_focus(&state.dag, f))
                 .unwrap_or_default();
+            // A grab with nowhere to go is not a grab: every motion key would
+            // do nothing and say nothing, which reads as the editor having
+            // stopped responding.  Refuse it, with the reason.
+            if state.destinations(width) == 0 {
+                state.grabbed = None;
+                app.messages.show(format!(
+                    "{held} has nowhere to go — everything else in the graph descends from it"
+                ));
+                return;
+            }
             app.messages
                 .show(format!("Holding {held} — move to a commit and press Space again"));
         }
@@ -1037,6 +1066,114 @@ fn show_work_tree(app: &mut App) {
     pump_stage_popup(app);
 }
 
+/// The branch picker: every ref, and whether the graph draws it.
+///
+/// A repository with thirty branches draws thirty tracks, and the two you are
+/// working on are somewhere in the middle of them.  Hiding is a *display*
+/// choice and nothing else — the branch is still there, still walked by
+/// `derive`, still backed up by an apply — so the way back is always this list
+/// rather than anything in git.
+fn show_branches(app: &mut App) {
+    let Some(state) = app.vcs.as_ref() else { return };
+    let projection = state.plan.project(&state.dag);
+    let items: Vec<crate::popup::ToggleItem> = state
+        .dag
+        .refs
+        .iter()
+        .map(|r| crate::popup::ToggleItem {
+            label: r.name.clone(),
+            detail: match projection.ref_target(&state.dag, &r.name) {
+                Some(oid) => format!("{} {}", kind_word(r.kind), oid.short()),
+                None => kind_word(r.kind).to_string(),
+            },
+            on: !state.options.hides(&r.name),
+        })
+        .collect();
+    if items.is_empty() {
+        app.messages.show("No branches yet — nothing to show or hide");
+        return;
+    }
+    app.popup = Some(Popup::toggles("branches", items));
+}
+
+fn kind_word(kind: RefKind) -> &'static str {
+    match kind {
+        RefKind::Local => "branch",
+        RefKind::Remote => "remote",
+        RefKind::Tag => "tag",
+    }
+}
+
+/// Run whatever the branch picker's last keypress asked for.
+///
+/// The same arrangement as [`pump_stage_popup`]: the key handler has no `App`
+/// to reach the graph through, so it parks the request and this runs it.
+pub fn pump_branch_popup(app: &mut App) {
+    let width = app.viewport_width as u16;
+    let Some(popup) = app.popup.as_mut() else { return };
+    let crate::popup::PopupContent::Toggles(ref mut toggles) = popup.content else { return };
+    let Some(index) = toggles.toggled.take() else { return };
+
+    // `usize::MAX` is `a`: show everything.  A sentinel rather than a second
+    // field, because the two are the same request — "these rows are on now".
+    let names: Vec<String> = if index == usize::MAX {
+        toggles
+            .items
+            .iter()
+            .filter(|item| !item.on)
+            .map(|item| item.label.clone())
+            .collect()
+    } else {
+        toggles.items.get(index).map(|i| vec![i.label.clone()]).into_iter().flatten().collect()
+    };
+    for item in toggles.items.iter_mut() {
+        if names.contains(&item.label) {
+            item.on = !item.on;
+        }
+    }
+
+    let Some(state) = app.vcs.as_mut() else { return };
+    for name in &names {
+        state.toggle_branch(name, width);
+    }
+    app.vcs_options = state.options.clone();
+    let hidden = state.options.hidden.len();
+    update_scroll(app);
+    app.messages.show(match hidden {
+        0 => "Every branch is in the graph".to_string(),
+        1 => "1 branch hidden".to_string(),
+        n => format!("{n} branches hidden"),
+    });
+}
+
+/// `x` — take the branch under the cursor out of the picture.
+///
+/// The fast half of the gesture: hiding is nearly always something you decide
+/// while looking straight at the branch you are tired of.  There is
+/// deliberately no `x` to put one *back* — what is hidden is not on screen to
+/// press a key on — so the message names the list that can.
+fn hide_focused_branch(app: &mut App) {
+    let width = app.viewport_width as u16;
+    let Some(state) = app.vcs.as_mut() else { return };
+    // A ref label, specifically — not `focused_branch`, which also answers for
+    // the HEAD block.  HEAD is a big target sitting exactly where the cursor
+    // starts, and hiding the branch you are standing on is not what pressing a
+    // key there means.
+    let Some(crate::vcs::layout::Focus::Ref(name)) = state.focus.clone() else {
+        app.messages
+            .show("Put the cursor on a branch label to hide it (b lists them all)");
+        return;
+    };
+    let hidden = state.toggle_branch(&name, width);
+    app.vcs_options = state.options.clone();
+    update_scroll(app);
+    app.messages.show(if hidden {
+        format!("{name} hidden — b to bring it back")
+    } else {
+        format!("{name} is back in the graph")
+    });
+}
+
 /// Run whatever the staging popup's last keypress asked for.
 ///
 /// Called from the popup's `PopupAction::Continue` path, because that is the
@@ -1228,10 +1365,17 @@ commit unreachable.
 
   A commit, fetch, pull or push opens *git output* and fills it as the
   command runs — a pre-commit hook prints there as it goes.  q comes back.
+
+  Hiding a branch (b / x) only changes the picture: the branch is untouched,
+  still walked when a plan is applied, still backed up.  A commit stays as
+  long as any shown branch leads to it, so hiding a topic branch leaves the
+  trunk it was cut from alone.  The modeline says how many are hidden.
     :vc-commit [message]       (asks for one if you leave it off)
     :vc-branch [name]          a new branch at the selected commit
     :vc-fetch  :vc-pull  :vc-push
     :vc-output                 the last command's output, as it ran
+    b              which branches the graph draws (Space shows/hides, a all)
+    x              take the branch under the cursor out of the picture
     o              turn the graph: history across, or down the screen
     r              re-read the repository
     ?              this sheet
@@ -1254,6 +1398,20 @@ commit unreachable.
     border), Space, move to the commit, Space.  Whether that becomes a
     fast-forward or a reset is not something you choose: it is whichever one
     the shape you drew means.
+
+  WALKTHROUGH — merge one branch into another
+    Merging is not a drag: nothing is being *moved*.  You say which commit is
+    coming in, and it comes into whichever branch you are on.
+    1. Be on the branch that should receive the merge.  Put the cursor on its
+       label and press c if you are not — the modeline's ⎇ says where you are.
+    2. Put the cursor on the tip of the branch coming in (its label, or the
+       block it sits on).
+    3. m.  A new block appears where the merge would be, amber, with two
+       arrows: it does not exist yet.
+    4. :vc-apply.  Nothing has touched the repository until then.
+    Grabbing the last merge commit and moving it is a different request —
+    it says that merge should have followed some other commit — which is a
+    rewrite, and is refused: a merge cannot be replayed onto a new parent.
 
   WALKTHROUGH — undo an apply
     Every local branch is saved under refs/sakharov/undo/ before the first
@@ -1581,7 +1739,7 @@ mod tests {
             // Small enough that the fixture cannot possibly fit.
             app.viewport_width = 60;
             app.viewport_height = 12;
-            app.vcs.as_mut().unwrap().orient = orient;
+            app.vcs.as_mut().unwrap().options.orientation = orient;
 
             // Walk to the oldest end and back, checking every step.
             for dir in [orient.back(), orient.forward()] {
@@ -1615,6 +1773,110 @@ mod tests {
         }
     }
 
+    /// A grab that cannot be completed is refused rather than entered.
+    ///
+    /// This is what "the whole thing froze" was: holding something narrows the
+    /// walk to places it could be dropped, and grabbing the oldest commit in a
+    /// graph leaves none — every other commit descends from it, and a commit
+    /// cannot follow its own descendant.  Every motion key then did nothing
+    /// and said nothing, which is exactly what a wedged editor looks like.
+    #[test]
+    fn a_grab_with_nowhere_to_go_says_so_instead_of_going_quiet() {
+        let mut app = app_in_graph();
+        // `a` is the root: everything else in the fixture descends from it.
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Commit(Oid::new("a")));
+        super::handle(&mut app, &Command::VcsGrab);
+
+        assert!(app.vcs.as_ref().unwrap().grabbed.is_none(), "the grab was entered anyway");
+        let said = app.messages.current().unwrap_or_default();
+        assert!(said.contains("nowhere to go"), "it went quiet instead: {said:?}");
+    }
+
+    /// …and a motion that finds no destination *that way* says so too, rather
+    /// than looking like a key that was not received.
+    #[test]
+    fn a_motion_with_no_destination_that_way_says_so() {
+        let mut app = app_in_graph();
+        // `c` can be dropped on `a` (older) but not on anything that descends
+        // from it, so travelling toward the newest end has nowhere to stop.
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Commit(Oid::new("c")));
+        super::handle(&mut app, &Command::VcsGrab);
+        assert!(app.vcs.as_ref().unwrap().grabbed.is_some(), "the fixture must allow the grab");
+
+        app.messages.clear();
+        for _ in 0..8 {
+            super::handle(&mut app, &Command::MoveRight);
+        }
+        let said = app.messages.current().unwrap_or_default();
+        assert!(
+            said.contains("Nothing that way"),
+            "a motion that moved nothing said {said:?}"
+        );
+    }
+
+    /// The two halves of the gesture: `x` takes the branch under the cursor
+    /// out of the picture, and the picker is the only way back — since what is
+    /// hidden is not on screen to press a key on.
+    #[test]
+    fn x_hides_the_branch_under_the_cursor_and_the_picker_brings_it_back() {
+        let mut app = app_in_graph();
+        app.vcs.as_mut().unwrap().focus = Some(Focus::Ref("feature".into()));
+        super::handle(&mut app, &Command::VcsHideBranch);
+
+        let state = app.vcs.as_ref().unwrap();
+        assert!(state.options.hides("feature"), "the branch is still drawn");
+        assert!(app.vcs_options.hides("feature"), "the session did not remember");
+        // The cursor was *on* what just disappeared, so it has to have moved
+        // to something that still exists.
+        let layout = state.layout(120);
+        let focus = state.focus.clone().expect("a cursor");
+        assert!(layout.locate(&focus).is_some(), "the cursor is on {focus:?}, which is gone");
+
+        // The picker lists it as off; Space turns it back on.
+        super::handle(&mut app, &Command::VcsBranches);
+        let popup = app.popup.as_mut().expect("the picker opened");
+        let crate::popup::PopupContent::Toggles(ref mut toggles) = popup.content else {
+            panic!("the picker is not a list of switches");
+        };
+        let at = toggles
+            .items
+            .iter()
+            .position(|item| item.label == "feature")
+            .expect("feature is listed");
+        assert!(!toggles.items[at].on, "a hidden branch is listed as shown");
+        toggles.toggled = Some(at);
+        pump_branch_popup(&mut app);
+
+        assert!(!app.vcs.as_ref().unwrap().options.hides("feature"));
+        assert!(!app.vcs_options.hides("feature"));
+        assert!(
+            app.vcs.as_ref().unwrap().layout(120).block(&Oid::new("d")).is_some(),
+            "the branch's commits did not come back"
+        );
+    }
+
+    /// `a` in the picker is the way out of having hidden one thing too many.
+    #[test]
+    fn a_in_the_picker_shows_everything_again() {
+        let mut app = app_in_graph();
+        for name in ["feature", "main"] {
+            app.vcs.as_mut().unwrap().focus = Some(Focus::Ref(name.into()));
+            super::handle(&mut app, &Command::VcsHideBranch);
+        }
+        assert_eq!(app.vcs_options.hidden.len(), 2);
+
+        super::handle(&mut app, &Command::VcsBranches);
+        let popup = app.popup.as_mut().expect("the picker opened");
+        let crate::popup::PopupContent::Toggles(ref mut toggles) = popup.content else {
+            panic!("the picker is not a list of switches");
+        };
+        toggles.toggled = Some(usize::MAX);
+        pump_branch_popup(&mut app);
+
+        assert!(app.vcs_options.hidden.is_empty(), "something stayed hidden");
+        assert!(app.vcs.as_ref().unwrap().options.hidden.is_empty());
+    }
+
     /// `gg` goes to the top of the graph and `ge` to the bottom, in a graph
     /// exactly as in a buffer.  Which end of *history* that is depends on the
     /// picture — the newest commit is at the right in one and at the top in
@@ -1627,7 +1889,7 @@ mod tests {
             vcs::layout::Orientation::Vertical,
         ] {
             let mut app = app_in_graph();
-            app.vcs.as_mut().unwrap().orient = orient;
+            app.vcs.as_mut().unwrap().options.orientation = orient;
 
             let screen_pos = |app: &App| {
                 let state = app.vcs.as_ref().unwrap();
@@ -1665,11 +1927,11 @@ mod tests {
     #[test]
     fn the_orientation_survives_the_view_being_closed_and_reopened() {
         let mut app = app_in_graph();
-        let start = app.vcs.as_ref().unwrap().orient;
+        let start = app.vcs.as_ref().unwrap().options.orientation;
         super::handle(&mut app, &Command::VcsFlip);
-        let flipped = app.vcs.as_ref().unwrap().orient;
+        let flipped = app.vcs.as_ref().unwrap().options.orientation;
         assert_ne!(flipped, start, "the flip did nothing");
-        assert_eq!(app.vcs_orientation, flipped, "the session did not remember");
+        assert_eq!(app.vcs_options.orientation, flipped, "the session did not remember");
 
         // The view is closed — its state, and the orientation with it, is gone.
         app.vcs = None;
@@ -1677,7 +1939,7 @@ mod tests {
         let fresh = app_in_graph().vcs.take().expect("a fixture graph");
         install(&mut app, fresh.root.clone(), fresh.dag);
         assert_eq!(
-            app.vcs.as_ref().unwrap().orient,
+            app.vcs.as_ref().unwrap().options.orientation,
             flipped,
             "the graph came back the way the config says, not the way it was left"
         );

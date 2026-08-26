@@ -692,6 +692,7 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
             },
             detached: s.dag.head.detached(),
             planned: s.plan.edits().len(),
+            hidden: s.options.hidden.len(),
             work: (s.dag.work.staged(), s.dag.work.unstaged(), s.dag.work.conflicted()),
             selection: s
                 .focus

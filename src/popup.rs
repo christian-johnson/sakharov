@@ -58,6 +58,44 @@ pub enum PopupContent {
     /// The work tree, side by side with the selected file's diff.  Covers
     /// interactive staging.
     Stage(StageState),
+    /// A list of things that are each either on or off.  Covers which branches
+    /// the commit graph draws.
+    Toggles(ToggleListState),
+}
+
+/// One row of a [`ToggleListState`].
+#[derive(Clone)]
+pub struct ToggleItem {
+    pub label: String,
+    /// Shown dimmed after the label — what this row *is*, when the name alone
+    /// does not say (a branch's tip, whether it is a remote).
+    pub detail: String,
+    pub on: bool,
+}
+
+/// A list whose rows are switches rather than destinations.
+///
+/// Separate from [`ListState`] because that list's keys are a fuzzy filter —
+/// every printable key types into it, `Space` included — and the one gesture
+/// this needs is `Space`.  A list you *pick from* and a list you *set* are
+/// different things to operate, however similar they look.
+pub struct ToggleListState {
+    pub items: Vec<ToggleItem>,
+    pub selected: usize,
+    /// A toggle the key handler asked for, as an index into `items`.
+    ///
+    /// Keys are handled where there is no `App` to act through, so the request
+    /// is parked here and run on the next `PopupAction::Continue` — the same
+    /// shape the staging view and the theme picker's live preview use.
+    pub toggled: Option<usize>,
+}
+
+impl ToggleListState {
+    pub fn select(&mut self, index: usize) {
+        if !self.items.is_empty() {
+            self.selected = index.min(self.items.len() - 1);
+        }
+    }
 }
 
 /// One path `git status` reported, with git's own two status columns.
@@ -92,6 +130,44 @@ impl StageEntry {
     pub fn fully_staged(&self) -> bool {
         self.staged() && self.work == ' '
     }
+
+    /// Is git reporting a conflict on it?  The same table `Change` reads, and
+    /// deliberately the same function.
+    pub fn is_conflicted(&self) -> bool {
+        crate::vcs::conflicted(self.index, self.work)
+    }
+
+    /// How far into the next commit this file is, as one of the three states
+    /// the dot in front of it can be.
+    pub fn state(&self) -> StageMark {
+        if self.is_conflicted() {
+            StageMark::Conflicted
+        } else if self.fully_staged() {
+            StageMark::Staged
+        } else if self.staged() {
+            StageMark::Partly
+        } else {
+            StageMark::Unstaged
+        }
+    }
+}
+
+/// What the dot in front of a file says.
+///
+/// The same language as the branch picker's switches — filled means "in",
+/// hollow means "out" — because they are the same question asked about two
+/// different things, and a reader should not have to learn it twice.  git's own
+/// two status columns stay beside it: the dot is the glance, the columns are
+/// the detail, and neither is a replacement for the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageMark {
+    /// Nothing of it is staged, or it is untracked.
+    Unstaged,
+    /// Staged, with more changed since — the case people are surprised by at
+    /// commit time, so it gets its own colour rather than passing for staged.
+    Partly,
+    Staged,
+    Conflicted,
 }
 
 /// The work tree, and the diff of whichever entry is selected.
@@ -821,6 +897,17 @@ impl Popup {
             text.git = true;
         }
         popup
+    }
+
+    /// A list of on/off switches (`Space` toggles, `Esc` closes).
+    pub fn toggles(title: &str, items: Vec<ToggleItem>) -> Self {
+        Self {
+            title: Some(title.into()),
+            content: PopupContent::Toggles(ToggleListState { items, selected: 0, toggled: None }),
+            anchor: PopupAnchor::Center,
+            width: PopupSize::FractionOfScreen(0.5),
+            on_confirm: PopupTarget::Dismiss,
+        }
     }
 
     /// Fuzzy-filterable navigate list (buffer picker, symbol picker, diagnostics).

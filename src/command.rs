@@ -265,6 +265,11 @@ commands! {
         VcsFetch => "version-control-fetch", aliases: ["vc-fetch", "fetch"], palette: "Fetch from the remote";
         VcsPull => "version-control-pull", aliases: ["vc-pull", "pull"], palette: "Pull the current branch from its upstream";
         VcsPush => "version-control-push", aliases: ["vc-push", "push"], palette: "Push the current branch to its upstream";
+        // Named for what it does — decides what is *shown* — rather than
+        // `…-branches`, which sat one letter from `version-control-branch`
+        // (which creates one) in a palette that fuzzy-matches.
+        VcsBranches => "version-control-visible-branches", aliases: ["vc-visible", "vc-hidden"], palette: "Which branches the graph draws  [b]";
+        VcsHideBranch => "version-control-hide-branch", aliases: ["vc-hide"], palette: "Take the branch under the cursor out of the graph  [x]";
         VcsFlip => "version-control-flip", aliases: ["vc-flip", "vc-orientation"], palette: "Turn the graph: history across, or down the screen  [o]";
         VcsOutput => "version-control-output", aliases: ["vc-output"], palette: "The last git command's output, as it ran";
 

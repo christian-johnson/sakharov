@@ -419,6 +419,13 @@ impl Keymap {
         // `?` is the whole view explained, since nothing here is a git verb
         // and there is no command line to read the answer off.
         vcs.insert(KeyBinding::char('?'), vec![Command::VcsHelp]);
+        // `b` is the branch list — which of them the graph draws — and `x`
+        // takes the one under the cursor out of it.  `x` is the gesture you
+        // reach for while looking at the branch you are tired of; `b` is the
+        // only way back, since what is hidden is not on screen to press a key
+        // on.
+        vcs.insert(KeyBinding::char('b'), vec![Command::VcsBranches]);
+        vcs.insert(KeyBinding::char('x'), vec![Command::VcsHideBranch]);
         // `o` turns the graph a quarter turn — which way history runs is a
         // preference, not a mode, so it is one key rather than a setting to go
         // and find.

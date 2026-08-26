@@ -74,6 +74,12 @@ pub struct VcsView {
     pub planned: usize,
     /// Uncommitted work: `(staged, unstaged, conflicted)`.
     pub work: (usize, usize, usize),
+    /// How many branches have been hidden from the graph.
+    ///
+    /// Here for the same reason `planned` is: a graph with a branch missing
+    /// looks exactly like a repository without that branch, and the setting
+    /// that did it is not visible anywhere else.
+    pub hidden: usize,
     /// What the cursor is on.
     pub selection: String,
     /// What is being dragged, if anything.
@@ -296,6 +302,13 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
             Some(v) if v.planned > 0 => vec![Segment::new(
                 format!("✎{} planned", v.planned),
                 base.fg(th.vcs_pending).add_modifier(Modifier::BOLD),
+            )],
+            _ => vec![],
+        },
+        "vcs_hidden" => match &ctx.vcs {
+            Some(v) if v.hidden > 0 => vec![Segment::new(
+                format!("◌{} hidden", v.hidden),
+                base.fg(th.dim),
             )],
             _ => vec![],
         },

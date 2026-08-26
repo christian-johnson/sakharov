@@ -135,6 +135,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 // re-read the diff pane.  Key handling has no `App` to reach
                 // git through, so this is where it happens.
                 exec::vcs::pump_stage_popup(app);
+                // Branch picker: apply the show/hide the key asked for.
+                exec::vcs::pump_branch_popup(app);
                 return;
             }
         }

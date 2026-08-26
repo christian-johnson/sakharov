@@ -158,6 +158,42 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
         };
     }
 
+    // A list of switches, not of destinations: every key is a verb, and none
+    // of them types into a filter.
+    if let PopupContent::Toggles(ref mut toggles) = popup.content {
+        let last = toggles.items.len().saturating_sub(1);
+        return match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => PopupAction::Dismiss,
+            KeyCode::Char('j') | KeyCode::Down => {
+                toggles.select(toggles.selected.saturating_add(1));
+                PopupAction::Continue
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                toggles.select(toggles.selected.saturating_sub(1));
+                PopupAction::Continue
+            }
+            KeyCode::Char('g') => {
+                toggles.select(0);
+                PopupAction::Continue
+            }
+            KeyCode::Char('G') => {
+                toggles.select(last);
+                PopupAction::Continue
+            }
+            KeyCode::Char(' ') => {
+                toggles.toggled = Some(toggles.selected);
+                PopupAction::Continue
+            }
+            // `a` turns everything back on: the way out of having hidden one
+            // thing too many, without pressing Space down the whole list.
+            KeyCode::Char('a') => {
+                toggles.toggled = Some(usize::MAX);
+                PopupAction::Continue
+            }
+            _ => PopupAction::Continue,
+        };
+    }
+
     let is_completion = popup.on_confirm == PopupTarget::InsertText;
 
     // Completion popups use a passive → focused two-state model.

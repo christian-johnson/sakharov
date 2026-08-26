@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use super::{
-    layout::{self, Dir, Focus, Layout, Orientation},
+    layout::{self, Dir, Focus, Layout, Options, Orientation},
     plan::{Edit, Plan},
     Dag, Oid,
 };
@@ -27,9 +27,12 @@ pub struct VcsState {
     /// move rewrites the plan's provisional edit, so the graph rearranges
     /// under the cursor instead of the cursor merely travelling over it.
     pub grabbed: Option<Focus>,
-    /// Which way the graph is drawn.  A per-session preference — `:vc-flip`
-    /// toggles it, `[vcs] orientation` sets what a new session starts as.
-    pub orient: Orientation,
+    /// How the graph is drawn: which way round, and which branches are in it.
+    ///
+    /// A per-session preference rather than part of the snapshot, kept in step
+    /// with `App::vcs_options` so it survives the view being closed — see
+    /// there for why that matters.
+    pub options: Options,
     /// Scroll anchor: how far along the time axis the viewport starts, and the
     /// first track drawn.
     ///
@@ -67,7 +70,7 @@ impl VcsState {
             plan: Plan::default(),
             focus: None,
             grabbed: None,
-            orient: Orientation::default(),
+            options: Options::default(),
             scroll_along: 0,
             scroll_track: 0,
             now,
@@ -83,7 +86,7 @@ impl VcsState {
     /// invalidating on exactly the events that make it worth having, and
     /// showing a stale graph is the one failure this view cannot afford.
     pub fn layout(&self, width: u16) -> Layout {
-        layout::compute(&self.dag, &self.plan.project(&self.dag), width, self.orient)
+        layout::compute(&self.dag, &self.plan.project(&self.dag), width, &self.options)
     }
 
     /// Turn the graph a quarter turn, keeping the cursor on whatever it is on.
@@ -92,10 +95,30 @@ impl VcsState {
     /// just become the other one, and `update_scroll` puts the cursor back on
     /// screen on the next frame anyway.
     pub fn flip(&mut self) -> Orientation {
-        self.orient = self.orient.flipped();
+        self.options.orientation = self.options.orientation.flipped();
         self.scroll_along = 0;
         self.scroll_track = 0;
-        self.orient
+        self.options.orientation
+    }
+
+    /// Show or hide one ref, and put the cursor somewhere that still exists.
+    ///
+    /// Hiding is the one display change that can take away *what the cursor is
+    /// on* — the label you pressed the key on, and any commits only it led to
+    /// — so re-seeding is part of the operation rather than something every
+    /// caller has to remember.  Returns true when the branch is now hidden.
+    pub fn toggle_branch(&mut self, name: &str, width: u16) -> bool {
+        let hidden = if self.options.hidden.remove(name) {
+            false
+        } else {
+            self.options.hidden.insert(name.to_string());
+            true
+        };
+        let layout = self.layout(width);
+        if self.focus.as_ref().map_or(true, |f| layout.locate(f).is_none()) {
+            self.focus = layout.initial_focus();
+        }
+        hidden
     }
 
     /// The graph as it stands, ignoring any drag in progress.
@@ -112,7 +135,7 @@ impl VcsState {
             &self.dag,
             &self.plan.project_committed(&self.dag),
             width,
-            self.orient,
+            &self.options,
         )
     }
 
@@ -188,6 +211,28 @@ impl VcsState {
         self.focus = Some(next);
         self.retarget_drag();
         true
+    }
+
+    /// The commits the held thing could actually be dropped on.
+    ///
+    /// Needed because "nowhere to go" is otherwise **indistinguishable from a
+    /// frozen editor**: while something is held the walk is over destinations
+    /// only, so if there are none, every motion key does nothing at all and
+    /// says nothing about why.  Grab a commit near the root of a chain and
+    /// almost everything on screen is its own descendant — dropping it there
+    /// would make it its own ancestor — so that is not a rare corner.
+    pub fn destinations(&self, width: u16) -> usize {
+        let Some(held) = self.grabbed.as_ref() else { return 0 };
+        let layout = self.stable_layout(width);
+        layout
+            .focusables
+            .iter()
+            .filter(|f| Some(&f.focus) != self.focus.as_ref())
+            .filter(|f| match &f.focus {
+                Focus::Commit(id) => !matches!(self.drop_onto(held, id), Drop::Invalid(_)),
+                _ => false,
+            })
+            .count()
     }
 
     /// Start dragging whatever the cursor is on.

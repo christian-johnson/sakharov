@@ -196,7 +196,7 @@ right = ["spinner", "table_column", "table_position"]
 #   vcs_worktree   !conflicted  ●staged  ○unstaged  (each hidden at zero)
 #   vcs_selection  what the cursor is on; says "holding …" mid-drag
 [statusline.vcs]
-left  = ["mode", "file", "vcs_head", "vcs_plan"]
+left  = ["mode", "file", "vcs_head", "vcs_plan", "vcs_hidden"]
 right = ["spinner", "vcs_worktree", "vcs_selection"]
 
 # Jupyter notebook settings.

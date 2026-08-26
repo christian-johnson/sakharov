@@ -729,6 +729,8 @@ out. (A dedicated merge-conflict resolver view is on the roadmap.)
 | `version-control-upstream` | — | `:vc-upstream <remote/branch>` | Set the current branch's upstream. Bare, it asks for the target |
 | `version-control-output` | — | `:vc-output` | Reopen the last streamed command's transcript |
 | `version-control-flip` | `o` | `:vc-flip`, `:vc-orientation` | Turn the graph: history left to right, or down the screen |
+| `version-control-visible-branches` | `b` | `:vc-visible`, `:vc-hidden` | Which branches the graph draws — `Space` shows/hides, `a` shows all, `q` closes |
+| `version-control-hide-branch` | `x` | `:vc-hide` | Take the branch under the cursor out of the graph |
 
 Commit, fetch, pull and push run on a background thread through **your** git, so
 your `.gitconfig`, hooks and credential helper all apply. The editor never
@@ -773,6 +775,46 @@ which: `Layout::screen`, which the renderer and the navigation both map
 through, and the glyph a stroke is drawn with. So a block is the same box
 either way, and an invariant that holds in one picture holds in the other.
 
+### Merging one branch into another
+
+Merging is not a drag — nothing is being *moved*. You say which commit is
+coming in, and it comes into whichever branch you are on:
+
+1. Be on the branch that should **receive** the merge (the modeline's `⎇` says
+   where you are; `c` on a branch label checks it out).
+2. Put the cursor on the tip of the branch coming in — its label, or the block
+   it sits on.
+3. `m`. A new block appears where the merge would be, amber, with two arrows:
+   it does not exist yet.
+4. `:vc-apply`. Nothing has touched the repository until then.
+
+Grabbing the previous merge commit and moving it is a different request — it
+says *that merge should have followed some other commit* — which is a rewrite of
+history, and is refused when applied: cherry-pick cannot recreate a merge.
+
+### Which branches are in it
+
+A repository with thirty branches draws thirty tracks, and the two you are
+working on are somewhere in the middle of them. `b` (`:vc-visible`) lists every ref with a mark
+saying whether the graph draws it; `Space` shows or hides the one under the
+cursor, `a` shows everything again. `x` hides the branch label the cursor is on
+without opening the list — the fast half of the gesture, since hiding is
+usually something you decide while looking straight at the branch you are tired
+of. There is deliberately no `x` to put one back: what is hidden is not on
+screen to press a key on, so `b` is the way.
+
+Hiding is a **display** choice and nothing else. The branch is untouched: still
+in git, still walked by `:vc-apply`, still backed up before a rewrite. A commit
+stays visible as long as *any* shown ref leads to it, so hiding a topic branch
+takes away the commits only it leads to and leaves the trunk it was cut from
+alone; hiding the branch HEAD is on takes away its label and none of its
+history. What is hidden lasts the session, like the orientation, and the
+modeline's `vcs_hidden` module says how many there are — a graph with a branch
+missing otherwise looks exactly like a repository without that branch.
+
+Hidden branches are still *loaded*: the walk back is 400 commits from every
+ref, so a busy branch you have hidden still spends some of that budget.
+
 ### What the graph shows
 
 The **HEAD block** sits directly after the commit it names — where
@@ -810,4 +852,5 @@ pointing at commits that were never loaded). When the walk stops at the limit
 the graph says so rather than letting the oldest block pass for a root.
 
 Status-line modules: `vcs_head`, `vcs_plan` (hidden until something is planned),
-`vcs_worktree`, `vcs_selection`. Theme keys live under `[vcs]`.
+`vcs_hidden` (hidden until a branch is), `vcs_worktree`, `vcs_selection`. Theme
+keys live under `[vcs]`.

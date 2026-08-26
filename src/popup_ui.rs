@@ -51,6 +51,9 @@ pub fn render(
         PopupContent::Stage(state) => {
             render_stage_popup(frame, popup, state, popup_rect);
         }
+        PopupContent::Toggles(state) => {
+            render_toggles_popup(frame, popup, state, popup_rect);
+        }
     }
 }
 
@@ -161,6 +164,12 @@ fn compute_width(popup: &Popup, term_width: u16) -> u16 {
                     s.lines.iter().map(|l| cols(l)).max().unwrap_or(20) + 4
                 }
                 PopupContent::KeyHints(s) => key_hints_natural_width(s),
+                PopupContent::Toggles(s) => s
+                    .items
+                    .iter()
+                    .map(|item| cols(&item.label) + cols(&item.detail) + 8)
+                    .max()
+                    .unwrap_or(20),
                 // Never auto-sized: a diff is as wide as it is, so the pane
                 // takes what the screen has rather than what the text wants.
                 PopupContent::Stage(_) => term_width.saturating_sub(4) as usize,
@@ -190,6 +199,9 @@ fn compute_height(popup: &Popup, term_height: u16, ui_config: &crate::config::Ui
             (2 + lines_shown).max(4)
         }
         PopupContent::KeyHints(s) => (s.hints.len() as u16 + 2).max(3),
+        // Borders, the footer, and one row per switch — capped so a repository
+        // with fifty branches does not fill the screen with them.
+        PopupContent::Toggles(s) => (s.items.len() as u16 + 3).clamp(4, term_height.saturating_sub(4).max(4)),
         // A reading view, and the thing being read is a diff: it gets the
         // screen.  Capped short of the terminal so the status line behind it
         // stays visible, which is where the graph reports what staging did.
@@ -606,6 +618,74 @@ const STAGE_LIST_FRACTION: u16 = 3;
 /// the diff are the same fact seen twice, and a list that says `modified:
 /// src/app.rs` without showing what changed is exactly the question the user
 /// then has to leave the view to answer.
+/// A list of switches: a mark, the name, and what it is.
+///
+/// The mark is at the left where a checkbox goes, and a hidden row is drawn
+/// dim throughout — the state has to be readable down the column at a glance,
+/// which is the whole reason to open this rather than count branches on the
+/// graph.
+fn render_toggles_popup(
+    frame: &mut Frame,
+    popup: &Popup,
+    state: &crate::popup::ToggleListState,
+    rect: Rect,
+) {
+    let th = crate::theme::active();
+    let mut block = build_block(popup).border_style(Style::default().fg(th.popup_border_focus));
+    block = block.title_bottom(
+        ratatui::text::Line::from(" j/k · Space show/hide · a all · q close ")
+            .style(Style::default().fg(th.popup_dim).bg(th.popup_bg))
+            .left_aligned(),
+    );
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.width < 6 || inner.height == 0 {
+        return;
+    }
+
+    let rows = inner.height as usize;
+    let first = state.selected.saturating_sub(rows.saturating_sub(1));
+    let buf = frame.buffer_mut();
+    for row in 0..rows {
+        let y = inner.top() + row as u16;
+        let Some(item) = state.items.get(first + row) else { continue };
+        let selected = first + row == state.selected;
+        let bg = if selected { th.popup_selection_bg } else { th.popup_bg };
+        for x in inner.left()..inner.right() {
+            buf[(x, y)].set_char(' ').set_style(Style::default().bg(bg));
+        }
+
+        let mut x = inner.left();
+        let mut put = |text: &str, style: Style, x: &mut u16| {
+            for c in text.chars() {
+                if *x < inner.right() {
+                    buf[(*x, y)].set_char(c).set_style(style.bg(bg));
+                    *x += 1;
+                }
+            }
+        };
+        let (mark, mark_style) = if item.on {
+            ("●", Style::default().fg(th.git_added))
+        } else {
+            ("○", Style::default().fg(th.popup_dim))
+        };
+        put(" ", Style::default(), &mut x);
+        put(mark, mark_style, &mut x);
+        put(" ", Style::default(), &mut x);
+
+        let fg = if item.on { th.popup_fg } else { th.popup_dim };
+        let mut style = Style::default().fg(fg);
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        put(&item.label, style, &mut x);
+        if !item.detail.is_empty() {
+            put("  ", Style::default(), &mut x);
+            put(&item.detail, Style::default().fg(th.popup_dim), &mut x);
+        }
+    }
+}
+
 fn render_stage_popup(
     frame: &mut Frame,
     popup: &Popup,
@@ -647,12 +727,16 @@ fn render_stage_popup(
     draw_stage_diff(frame, state, diff);
 }
 
-/// The file list: git's own two status columns, then the path.
+/// The file list: a dot for how far into the next commit the file is, git's own
+/// two status columns, then the path.
 ///
-/// The columns are drawn the way `git status --short` draws them — the staged
-/// one green, the unstaged one red — because that pairing is already what a
-/// git user reads, and inventing a third notation for it would be one more
-/// thing to learn for no information gained.
+/// The dot is the same switch language the branch picker uses — filled is "in",
+/// hollow is "out" — so one glance down the column answers "what am I about to
+/// commit" without reading anything.  The columns stay beside it, drawn the way
+/// `git status --short` draws them, because that pairing is already what a git
+/// user reads and the dot is a summary of it rather than a replacement.  Amber
+/// is the case the summary would otherwise lose: staged, and changed again
+/// since.
 fn draw_stage_list(frame: &mut Frame, state: &crate::popup::StageState, area: Rect) {
     let th = crate::theme::active();
     let rows = area.height as usize;
@@ -677,7 +761,23 @@ fn draw_stage_list(frame: &mut Frame, state: &crate::popup::StageState, area: Re
                 *x += 1;
             }
         };
+        // The same switch language as the branch picker: filled means "in the
+        // next commit", hollow means "not".  Amber is the half-and-half case —
+        // staged, and changed again since — which passes for staged at a
+        // glance and is the one people are surprised by at commit time.
+        let (mark, mark_style) = match entry.state() {
+            crate::popup::StageMark::Conflicted => ("●", Style::default().fg(th.error)),
+            crate::popup::StageMark::Staged => ("●", Style::default().fg(th.git_added)),
+            crate::popup::StageMark::Partly => ("●", Style::default().fg(th.warning)),
+            crate::popup::StageMark::Unstaged => ("○", Style::default().fg(th.popup_dim)),
+        };
         put(' ', Style::default(), &mut x);
+        for c in mark.chars() {
+            put(c, mark_style, &mut x);
+        }
+        put(' ', Style::default(), &mut x);
+        // git's own two columns stay: the dot is the glance, these are the
+        // detail, and a git user reads them without being taught.
         put(entry.index, Style::default().fg(th.git_added), &mut x);
         put(entry.work, Style::default().fg(th.git_modified), &mut x);
         put(' ', Style::default(), &mut x);
@@ -861,8 +961,11 @@ fn title_style(th: &crate::theme::Theme) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::popup::ToggleItem;
+    use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::widgets::Widget;
+    use ratatui::Terminal;
 
     /// Ratatui applies the (empty) title style *over* the already-drawn border
     /// cells, so a titled block with no explicit title style renders its title
@@ -887,7 +990,77 @@ mod tests {
         assert_eq!(title_cell.fg, th.popup_fg);
         assert_ne!(title_cell.fg, th.popup_border);
     }
+
+    /// The staging list marks each file with the same switch the branch
+    /// picker uses, so one glance says what is going into the commit.
+    #[test]
+    fn the_staging_list_marks_each_file_with_a_dot_for_its_state() {
+        use crate::popup::StageEntry;
+        let entry = |path: &str, index: char, work: char| StageEntry {
+            path: path.into(),
+            file: std::path::PathBuf::from(path),
+            index,
+            work,
+            detail: String::new(),
+        };
+        let popup = Popup::stage(vec![
+            entry("staged.rs", 'M', ' '),
+            entry("half.rs", 'M', 'M'),
+            entry("loose.rs", ' ', 'M'),
+            entry("clash.rs", 'U', 'U'),
+        ]);
+        let crate::popup::PopupContent::Stage(ref state) = popup.content else {
+            panic!("not a staging popup");
+        };
+        let th = crate::theme::active();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|f| draw_stage_list(f, state, Rect::new(0, 0, 40, 6)))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // The mark is the second cell of each row, one row per entry.
+        let mark = |row: u16| (buf[(1, row)].symbol().to_string(), buf[(1, row)].fg);
+        assert_eq!(mark(0), ("●".into(), th.git_added), "staged");
+        assert_eq!(mark(1), ("●".into(), th.warning), "staged with more since");
+        assert_eq!(mark(2), ("○".into(), th.popup_dim), "nothing staged");
+        assert_eq!(mark(3), ("●".into(), th.error), "conflicted");
+        // git's own columns are still there, right after the dot.
+        assert_eq!(buf[(3, 0)].symbol(), "M");
+    }
+
+    /// The switch list has to be legible at a glance: a mark per row, the name,
+    /// and what it is.
+    #[test]
+    fn the_toggle_list_draws_a_mark_a_name_and_a_detail_per_row() {
+        let items = vec![
+            ToggleItem { label: "main".into(), detail: "branch d2b3187".into(), on: true },
+            ToggleItem { label: "feat/vcs".into(), detail: "branch 061a066".into(), on: false },
+        ];
+        let popup = Popup::toggles("branches", items);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|f| {
+                render(f, &popup, None, &crate::config::UiConfig::default())
+            })
+            .unwrap();
+        let screen: Vec<String> = (0..12)
+            .map(|y| {
+                (0..60)
+                    .map(|x| {
+                        terminal.backend().buffer()[(x, y)]
+                            .symbol()
+                            .chars()
+                            .next()
+                            .unwrap_or(' ')
+                    })
+                    .collect()
+            })
+            .collect();
+        let text = screen.join("\n");
+        assert!(text.contains("branches"), "no title\n{text}");
+        assert!(text.contains("● main"), "a shown branch is not marked shown\n{text}");
+        assert!(text.contains("○ feat/vcs"), "a hidden branch is not marked hidden\n{text}");
+        assert!(text.contains("branch d2b3187"), "no detail\n{text}");
+        assert!(text.contains("Space show/hide"), "no footer\n{text}");
+    }
 }
-
-
-

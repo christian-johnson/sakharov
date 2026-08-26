@@ -165,7 +165,7 @@ impl Change {
     /// matter: `AA` and `DD` are conflicts despite looking like ordinary
     /// staged changes.
     pub fn is_conflicted(&self) -> bool {
-        matches!((self.index, self.work), ('D', 'D') | ('A', 'A') | ('U', _) | (_, 'U'))
+        conflicted(self.index, self.work)
     }
 
     pub fn is_staged(&self) -> bool {
@@ -335,6 +335,15 @@ impl Dag {
     pub fn local_branches(&self) -> impl Iterator<Item = &Ref> {
         self.refs.iter().filter(|r| r.kind == RefKind::Local)
     }
+}
+
+/// Whether git's two status columns describe an unmerged path.
+///
+/// A free function because the staging view asks the same question of its own
+/// copy of those two columns, and a second statement of the table is a second
+/// chance to leave out `AA`.
+pub fn conflicted(index: char, work: char) -> bool {
+    matches!((index, work), ('D', 'D') | ('A', 'A') | ('U', _) | (_, 'U'))
 }
 
 /// Render `when` as an age relative to `now`, both unix seconds.

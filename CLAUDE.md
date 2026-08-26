@@ -994,6 +994,13 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   over a **projected** topological order (`projected_order`), not the snapshot's: an
   edit can point a commit at one git listed after it, and deciding a commit before
   its new parent misses exactly the propagation this exists to compute.
+- **A grab that cannot be completed is refused, and a motion with no
+  destination says so** (`VcsState::destinations`, the `Dir` arm of
+  `exec::vcs::handle`).  Holding something narrows the walk to places it could
+  be dropped; grab a commit near the root of a chain and almost everything on
+  screen descends from it, so there is nowhere legal to go.  Every motion key
+  then did nothing *and said nothing*, which is indistinguishable from a wedged
+  editor — the one report this view has had that read as "it froze".
 - **Refusals are stated, never worked around**: a cycle is refused when the edit is
   *pushed* (and equally when a drag previews one — `state::VcsState::validated`, or
   the preview draws a graph git has no meaning for); a **merge in the replay list**
@@ -1107,12 +1114,30 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   graph and `J` pages down it, in a graph exactly as in a buffer; stating those
   two in history's terms instead sent `gg` walking away from the top of the
   screen, which is the one thing `gg` means everywhere else in the editor.
-  The flip lasts the **session** (`App::vcs_orientation`), not the open view:
-  `close` discards the graph's state, so a preference living only in `VcsState`
-  was forgotten the moment you opened a file and came back.  A block is the *same box* either way — `block_width` by `BLOCK_H`
+  The flip lasts the **session** (`App::vcs_options`, mirrored into
+  `VcsState::options`), not the open view: `close` discards the graph's state,
+  so a preference living only in `VcsState` was forgotten the moment you opened
+  a file and came back.  A block is the *same box* either way — `block_width` by `BLOCK_H`
   (five rows: two borders, the summary over two, the metadata row) — so
   everything drawn inside one is written in plain screen coordinates and knows
   nothing about any of this.
+- **Which branches the graph draws is a display option, not a filter on the
+  snapshot** (`layout::Options { orientation, hidden }`, `b` / `:vc-branches`,
+  `x` on a label; `:vc-visible`, named away from `:vc-branch`, which creates
+  one).  A repository with thirty branches draws thirty tracks and
+  the two you care about are somewhere in the middle.  Hiding is done in
+  `layout::compute` — `reachable_from_shown` keeps every commit any *shown* ref
+  (or HEAD, or a pending merge) leads to, so hiding a topic branch takes away
+  the commits only it leads to and leaves the trunk alone, and hiding the branch
+  HEAD is on takes its label and nothing else.  It must stay a display
+  concern: filtering the `Dag` instead would keep hidden branches out of
+  `derive` **and out of the backup refs `apply` writes**, which is how a branch
+  you tidied off the picture becomes one nothing can put back.  Nothing hidden
+  means no reachability walk at all — `compute` runs on every frame and every
+  step of a drag.  `Options` lives on `App` for the session
+  (`App::vcs_options`, see the orientation note) and the `vcs_hidden` modeline
+  module says how many are out, since a graph with a branch missing otherwise
+  looks exactly like a repository without it.
 - **Arrow strokes merge into junctions rather than overwriting each other**
   (`vcs_ui::Painter::at`, `line_strokes`/`line_glyph`).  Several children of one
   commit converge on the same crossing line, and whichever turned there last
@@ -1205,7 +1230,12 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   told, *which three* is the question a repository full of scratch notebooks
   raises, and *what is in them* is the one that actually stops someone
   committing — which used to mean leaving the view and opening the file.
-  `Space` stages or unstages the file under the cursor, `Enter` opens it, and
+  Each file carries a **dot** for how far into the next commit it is — filled
+  green for staged, amber for staged-and-changed-again, hollow for not, red for
+  a conflict — the same switch language the branch picker uses, with git's own
+  two status columns still beside it (the dot is the glance, the columns are
+  the detail).  `Space` stages or unstages the file under the cursor, `Enter`
+  opens it, and
   an untracked file shows its **contents** (it has no diff, and the contents
   are what you need before deciding whether it belongs in the repository).
   The diff is against **HEAD**, not the index, so staging never makes the diff
@@ -1463,7 +1493,9 @@ src/
   lsp_manager.rs      — LspManager: multiple servers per language, feature routing,
                         diagnostics merge, notebookDocument sync
   popup.rs            — Popup data model (list/completion/docs/code-actions/
-                        staging) + sanitize_lines: what a float may safely hold
+                        staging/toggles) + sanitize_lines: what a float may
+                        safely hold.  A toggle list is separate from a filter
+                        list because every printable key types into the latter
   popup_input.rs      — key handling for popups (filter, navigate, confirm)
   popup_ui.rs         — ratatui rendering for popups + floats
   ui.rs               — ratatui rendering for plain text editor; render_chrome draws

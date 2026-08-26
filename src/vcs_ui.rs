@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn every_branch_column_is_named_in_the_row_above_the_graph() {
         let mut state = two_branches();
-        state.orient = Orientation::Vertical;
+        state.options.orientation = Orientation::Vertical;
         let lines = draw(&state, 100, 40);
         let header = lines.first().expect("a row above the graph");
         assert!(header.contains("main"), "the header does not name main: {header}");
@@ -1167,7 +1167,7 @@ mod tests {
     fn every_arrow_reads_as_one_unbroken_line() {
         for orient in [Orientation::Horizontal, Orientation::Vertical] {
             let mut state = forked();
-            state.orient = orient;
+            state.options.orientation = orient;
             state.focus = None;
             let layout = state.layout(TEST_W);
             let mut turns = 0;
@@ -1220,7 +1220,7 @@ mod tests {
         // the shared root actually turns a corner.
         for orient in [Orientation::Horizontal, Orientation::Vertical] {
             let mut state = two_branches();
-            state.orient = orient;
+            state.options.orientation = orient;
             state.focus = Some(Focus::Commit(Oid::new("ccccccc3")));
             let layout = state.layout(TEST_W);
             let edge = layout

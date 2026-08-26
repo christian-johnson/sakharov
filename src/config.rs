@@ -393,7 +393,7 @@ fn default_table_layout() -> StatuslineLayout {
 }
 fn default_vcs_layout() -> StatuslineLayout {
     StatuslineLayout::new(
-        &["mode", "file", "vcs_head", "vcs_plan"],
+        &["mode", "file", "vcs_head", "vcs_plan", "vcs_hidden"],
         &["spinner", "vcs_worktree", "vcs_selection"],
     )
 }

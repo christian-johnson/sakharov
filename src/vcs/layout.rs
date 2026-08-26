@@ -137,6 +137,28 @@ impl Orientation {
     }
 }
 
+/// How the graph is drawn: which way round, and which branches are in it.
+///
+/// A display preference rather than part of the snapshot — nothing here
+/// changes what git says, only what is put on screen.  That line matters:
+/// hiding a branch must never keep it out of [`crate::vcs::derive`] or out of
+/// the backup refs `apply` writes, or a branch you had tidied off the picture
+/// would be a branch nothing could put back.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    pub orientation: Orientation,
+    /// Ref names the user has hidden.  A repository with thirty branches is
+    /// unreadable long before it is uninteresting, and the ones worth looking
+    /// at are usually a handful.
+    pub hidden: HashSet<String>,
+}
+
+impl Options {
+    pub fn hides(&self, name: &str) -> bool {
+        self.hidden.contains(name)
+    }
+}
+
 /// How big things are in graph space, for one orientation.
 ///
 /// The one place that knows which screen axis is which.  A block is always the
@@ -599,16 +621,17 @@ impl Layout {
 }
 
 /// Lay out `dag` as `projection` leaves it, for a content area `width` columns
-/// wide, drawn the way `orient` says.
-pub fn compute(dag: &Dag, projection: &Projection, width: u16, orient: Orientation) -> Layout {
-    let order = draw_order(dag, projection);
+/// wide, drawn the way `options` says.
+pub fn compute(dag: &Dag, projection: &Projection, width: u16, options: &Options) -> Layout {
+    let orient = options.orientation;
+    let order = draw_order(dag, projection, options);
     // The block width settles first: it is the block's width on screen in
     // either picture, so it decides both extents in graph space — and where a
     // block sits along the time axis is a multiple of one of them.
-    let block_width = block_width(width, natural_width(dag, projection, &order));
+    let block_width = block_width(width, natural_width(dag, projection, &order, options));
     let metrics = Metrics::new(orient, block_width);
     let (cols, head_col, total_along) = assign_cols(dag, &order, metrics);
-    let placed = place(&order, &cols, head_col, metrics, dag, projection);
+    let placed = place(&order, &cols, head_col, metrics, dag, projection, options);
     let inner = block_width.saturating_sub(2);
 
     let mut blocks = Vec::new();
@@ -637,7 +660,7 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16, orient: Orientati
             kind,
             track: placed.track.get(id).copied().unwrap_or(0),
             along: cols[id],
-            labels: labels_for(dag, projection, id, inner),
+            labels: labels_for(dag, projection, id, inner, options),
             tint: placed.tint.get(id).copied().unwrap_or(0),
         });
     }
@@ -673,7 +696,8 @@ pub fn compute(dag: &Dag, projection: &Projection, width: u16, orient: Orientati
 /// assignment depends on every child being visited before its parents, which
 /// is what git's topological order gives.  [`assign_cols`] walks this list
 /// backwards to put the oldest commit at column zero.
-fn draw_order(dag: &Dag, projection: &Projection) -> Vec<Oid> {
+fn draw_order(dag: &Dag, projection: &Projection, options: &Options) -> Vec<Oid> {
+    let visible = reachable_from_shown(dag, projection, options);
     projection
         .pending()
         .iter()
@@ -684,7 +708,45 @@ fn draw_order(dag: &Dag, projection: &Projection) -> Vec<Oid> {
                 .map(|c| c.id.clone())
                 .filter(|id| !projection.is_dropped(id)),
         )
+        .filter(|id| visible.as_ref().map_or(true, |set| set.contains(id)))
         .collect()
+}
+
+/// The commits still worth drawing once the hidden branches are taken out:
+/// everything reachable from a ref that is still shown, from HEAD, or from a
+/// commit the plan would create.
+///
+/// `None` when nothing is hidden — the overwhelmingly common case, and one
+/// worth not walking the graph for.
+///
+/// Reachability rather than ownership, because a commit belongs to every
+/// branch that contains it: hiding a topic branch must take away the commits
+/// only *it* leads to, and leave the trunk underneath it alone.  HEAD is always
+/// a root, so hiding the branch you are on removes its name from the picture
+/// and not the ground you are standing on.
+fn reachable_from_shown(
+    dag: &Dag,
+    projection: &Projection,
+    options: &Options,
+) -> Option<HashSet<Oid>> {
+    if options.hidden.is_empty() {
+        return None;
+    }
+    let mut visible = HashSet::new();
+    let roots = dag
+        .refs
+        .iter()
+        .filter(|r| !options.hides(&r.name))
+        .filter_map(|r| projection.ref_target(dag, &r.name).cloned())
+        .chain(dag.head.target.clone())
+        .chain(projection.pending().iter().map(|p| p.id.clone()));
+    for root in roots {
+        if visible.contains(&root) {
+            continue;
+        }
+        visible.extend(projection.ancestors(dag, &root));
+    }
+    Some(visible)
 }
 
 /// Where every block sits along the time axis: one per band, oldest first.
@@ -778,6 +840,7 @@ fn place(
     metrics: Metrics,
     dag: &Dag,
     projection: &Projection,
+    options: &Options,
 ) -> Placement {
     let block_along = metrics.block_along;
     // --- 1. chains ---
@@ -814,7 +877,7 @@ fn place(
     //
     // Before the spans, not after: the row a commit sits in *is* the branch it
     // is on, and that is what this decides.
-    let (branch_tints, tint) = assign_tints(&members, dag, projection);
+    let (branch_tints, tint) = assign_tints(&members, dag, projection, options);
 
     // --- 3. spans ---
     let col_of = |id: &Oid| cols.get(id).copied();
@@ -974,13 +1037,14 @@ fn assign_tints(
     members: &[Vec<Oid>],
     dag: &Dag,
     projection: &Projection,
+    options: &Options,
 ) -> (HashMap<String, usize>, HashMap<Oid, usize>) {
     // Branches numbered by where their tip is drawn, so the numbering is
     // stable and neighbouring branches get neighbouring colours.
     let mut branches: Vec<(usize, String, Oid)> = Vec::new();
     for (c, m) in members.iter().enumerate() {
         for (i, id) in m.iter().enumerate() {
-            for r in dag.local_branches() {
+            for r in dag.local_branches().filter(|r| !options.hides(&r.name)) {
                 if projection.ref_target(dag, &r.name) == Some(id) {
                     branches.push((c * 10_000 + i, r.name.clone(), id.clone()));
                 }
@@ -1051,12 +1115,15 @@ fn block_width(width: u16, natural: u16) -> u16 {
 /// then truncates to whatever this settled on ([`labels_for`] does it for the
 /// ref labels), so a block is never wider than its longest line and never
 /// narrower than the clamps allow.
-fn natural_width(dag: &Dag, projection: &Projection, order: &[Oid]) -> u16 {
+fn natural_width(dag: &Dag, projection: &Projection, order: &[Oid], options: &Options) -> u16 {
     let mut inner = 0u16;
     for id in order {
         // The top border: hash, then every ref label that sits here.
         let mut border = HASH_COLS;
         for r in &dag.refs {
+            if options.hides(&r.name) {
+                continue;
+            }
             if projection.ref_target(dag, &r.name) == Some(id) {
                 border += r.name.chars().count() as u16 + 3;
             }
@@ -1106,7 +1173,13 @@ const MIN_LABEL: u16 = 5;
 /// [`MAX_BLOCK`], so dropping meant a branch with a perfectly ordinary name
 /// (`feat/vcs-graph-horizontal` is 25 characters) had no label anywhere on its
 /// own tip, which reads as the editor not knowing the branch exists.
-fn labels_for(dag: &Dag, projection: &Projection, id: &Oid, inner: u16) -> Vec<(String, u16)> {
+fn labels_for(
+    dag: &Dag,
+    projection: &Projection,
+    id: &Oid,
+    inner: u16,
+    options: &Options,
+) -> Vec<(String, u16)> {
     // Projected positions, not the snapshot's: a moved branch has to be drawn
     // where the plan puts it or the preview shows nothing.
     let mut labels = Vec::new();
@@ -1115,7 +1188,7 @@ fn labels_for(dag: &Dag, projection: &Projection, id: &Oid, inner: u16) -> Vec<(
     // did, and the result was a block labelled `╭ main aa ───`.
     let mut col = HASH_COLS;
     for r in &dag.refs {
-        if projection.ref_target(dag, &r.name) != Some(id) {
+        if options.hides(&r.name) || projection.ref_target(dag, &r.name) != Some(id) {
             continue;
         }
         let room = inner.saturating_sub(col);
@@ -1434,7 +1507,7 @@ mod tests {
     fn laid_out(width: u16) -> (Dag, Projection, Layout) {
         let dag = dag();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, width, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, width, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         (dag, projection, layout)
     }
 
@@ -1523,7 +1596,7 @@ mod tests {
             WorkTree::default(),
             false,
         );
-        let layout = compute(&dag, &Plan::default().project(&dag), 100, Orientation::Horizontal);
+        let layout = compute(&dag, &Plan::default().project(&dag), 100, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         assert_eq!(layout.blocks.len(), 1);
         assert_eq!(layout.blocks[0].kind, BlockKind::Head);
     }
@@ -1576,7 +1649,7 @@ mod tests {
             true,
         );
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 100, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 100, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         let edge = layout
             .edges
             .iter()
@@ -1677,7 +1750,7 @@ mod tests {
         let mut plan = Plan::default();
         plan.push(&dag, Edit::MoveRef { name: "main".into(), new_target: Oid::new("a") })
             .unwrap();
-        let layout = compute(&dag, &plan.project(&dag), 120, Orientation::Horizontal);
+        let layout = compute(&dag, &plan.project(&dag), 120, &Options { orientation: Orientation::Horizontal, ..Default::default() });
 
         let block_of = |id: &str| layout.block(&Oid::new(id)).unwrap();
         assert!(block_of("a").labels.iter().any(|(n, _)| n == "main"));
@@ -1690,7 +1763,7 @@ mod tests {
         let dag = dag();
         let mut plan = Plan::default();
         plan.push(&dag, Edit::Drop { commit: Oid::new("c") }).unwrap();
-        let layout = compute(&dag, &plan.project(&dag), 120, Orientation::Horizontal);
+        let layout = compute(&dag, &plan.project(&dag), 120, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         assert!(layout.block(&Oid::new("c")).is_none());
         // And `d` now points straight at `a`.
         let edge = layout.edges.iter().find(|e| e.child == Oid::new("d")).unwrap();
@@ -1706,7 +1779,7 @@ mod tests {
         plan.push(&dag, Edit::Merge { into: "main".into(), from: Oid::new("d") })
             .unwrap();
         let projection = plan.project(&dag);
-        let layout = compute(&dag, &projection, 120, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 120, &Options { orientation: Orientation::Horizontal, ..Default::default() });
 
         let pending = layout
             .blocks
@@ -1739,7 +1812,8 @@ mod tests {
     #[test]
     fn a_block_is_no_wider_than_its_contents() {
         let (dag, projection, layout) = laid_out(300);
-        let natural = natural_width(&dag, &projection, &draw_order(&dag, &projection));
+        let plain = Options::default();
+        let natural = natural_width(&dag, &projection, &draw_order(&dag, &projection, &plain), &plain);
         assert!(natural < MAX_BLOCK, "the fixture is short: {natural}");
         assert_eq!(layout.block_width, natural.max(MIN_BLOCK));
     }
@@ -1758,7 +1832,7 @@ mod tests {
             false,
         );
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 300, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 300, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         assert_eq!(layout.block_width, MAX_BLOCK, "a long summary fills the clamp");
     }
 
@@ -1771,7 +1845,7 @@ mod tests {
             .map(|i| branch(&format!("branch-number-{i}"), "f"))
             .collect();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 80, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 80, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         let block = layout.block(&Oid::new("f")).unwrap();
         let inner = layout.block_inner();
         for (name, col) in &block.labels {
@@ -1791,7 +1865,7 @@ mod tests {
         let mut dag = dag();
         dag.refs = vec![branch("feat/a-branch-name-nobody-would-shorten", "f")];
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 200, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         let block = layout.block(&Oid::new("f")).unwrap();
         let (name, col) = block.labels.first().expect("a label survives").clone();
         assert!(name.starts_with("feat/a-branch"), "{name}");
@@ -1805,7 +1879,7 @@ mod tests {
     fn an_empty_repository_lays_out_to_nothing() {
         let dag = Dag::new(Vec::new(), Vec::new(), Head::default(), WorkTree::default(), false);
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 80, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 80, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         assert!(layout.blocks.is_empty());
         assert!(layout.focusables.is_empty());
         assert_eq!(layout.initial_focus(), None);
@@ -1838,7 +1912,7 @@ mod tests {
                 .into_iter()
                 .flat_map(|w| [(w, Orientation::Horizontal), (w, Orientation::Vertical)])
             {
-                let layout = compute(&dag, &projection, width, orient);
+                let layout = compute(&dag, &projection, width, &Options { orientation: orient, ..Default::default() });
                 for edge in &layout.edges {
                     for (along, across) in layout.route(edge).cells() {
                         for block in &layout.blocks {
@@ -1864,6 +1938,58 @@ mod tests {
         }
     }
 
+    /// Hiding a branch takes away the commits only *it* leads to, and leaves
+    /// the trunk it was cut from alone — a commit belongs to every branch that
+    /// contains it, so "hide this branch" cannot mean "hide everything on it".
+    #[test]
+    fn hiding_a_branch_takes_only_the_history_that_is_its_own() {
+        let dag = dag();
+        let projection = Plan::default().project(&dag);
+        let hidden = Options {
+            hidden: ["feature".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        let layout = compute(&dag, &projection, 120, &hidden);
+
+        // `feature` is `d`, on the chain `a → c → d`.
+        assert!(layout.block(&Oid::new("d")).is_none(), "the branch's own commit stayed");
+        assert!(layout.block(&Oid::new("c")).is_none(), "and the commit under it");
+        // …while `main`'s side of the fork is untouched, root included.
+        for id in ["f", "e", "a"] {
+            assert!(layout.block(&Oid::new(id)).is_some(), "{id} was taken with it");
+        }
+        // The label is gone from every block, and so is its track.
+        assert!(layout.locate(&Focus::Ref("feature".into())).is_none());
+        assert!(!layout.lane_labels.values().any(|n| n == "feature"));
+        assert_eq!(layout.track_count, 1);
+    }
+
+    /// Hiding the branch you are *on* takes its name off the picture and
+    /// nothing else: HEAD is always a root, so the ground under you stays.
+    #[test]
+    fn hiding_the_branch_head_is_on_keeps_its_history() {
+        let dag = dag();
+        let projection = Plan::default().project(&dag);
+        let hidden = Options {
+            hidden: ["main".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        let layout = compute(&dag, &projection, 120, &hidden);
+        assert!(layout.locate(&Focus::Ref("main".into())).is_none(), "the label stayed");
+        for id in ["f", "e", "a"] {
+            assert!(layout.block(&Oid::new(id)).is_some(), "{id} went with the label");
+        }
+    }
+
+    /// Nothing hidden must cost nothing: the reachability walk is skipped
+    /// entirely, since it runs on every frame and every step of a drag.
+    #[test]
+    fn nothing_is_computed_when_nothing_is_hidden() {
+        let dag = dag();
+        let projection = Plan::default().project(&dag);
+        assert!(reachable_from_shown(&dag, &projection, &Options::default()).is_none());
+    }
+
     /// Turning the graph turns the keys with it: whichever way history runs
     /// is the way `h`/`l` or `j`/`k` travel it.  Anything else would be a
     /// second thing to remember for the same picture.
@@ -1876,14 +2002,14 @@ mod tests {
         // commit_beside_it` pins for the horizontal picture.
         let from = Focus::Commit(Oid::new("f"));
 
-        let across = compute(&dag, &projection, 120, Orientation::Horizontal);
+        let across = compute(&dag, &projection, 120, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         assert_eq!(
             across.step_where(&from, Dir::Left, |_| true),
             Some(Focus::Commit(Oid::new("c"))),
             "left goes back in time when history runs left to right"
         );
 
-        let down = compute(&dag, &projection, 120, Orientation::Vertical);
+        let down = compute(&dag, &projection, 120, &Options { orientation: Orientation::Vertical, ..Default::default() });
         assert_eq!(
             down.step_where(&from, Dir::Down, |_| true),
             Some(Focus::Commit(Oid::new("c"))),
@@ -1905,7 +2031,7 @@ mod tests {
     fn vertical_puts_the_newest_commit_at_the_top() {
         let dag = dag();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 120, Orientation::Vertical);
+        let layout = compute(&dag, &projection, 120, &Options { orientation: Orientation::Vertical, ..Default::default() });
 
         let screen_y = |id: &str| {
             let block = layout.block(&Oid::new(id)).expect(id);
@@ -1930,7 +2056,12 @@ mod tests {
         let dag = dag();
         let projection = Plan::default().project(&dag);
         for orient in [Orientation::Horizontal, Orientation::Vertical] {
-            let layout = compute(&dag, &projection, 120, orient);
+            let layout = compute(
+                &dag,
+                &projection,
+                120,
+                &Options { orientation: orient, ..Default::default() },
+            );
             assert_eq!(layout.metrics.block_across.max(layout.metrics.block_along), layout.block_width);
             assert_eq!(layout.metrics.block_across.min(layout.metrics.block_along), BLOCK_H);
         }
@@ -1943,7 +2074,7 @@ mod tests {
     fn a_first_parent_chain_keeps_one_track_all_the_way_along() {
         let dag = tangled();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 200, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         let track = |id: &str| layout.block(&Oid::new(id)).expect(id).track;
 
         // The trunk, end to end.
@@ -1977,7 +2108,7 @@ mod tests {
             false,
         );
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 200, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         // Both topics hang off the trunk at different points and neither
         // outlives the other, so two tracks are enough for four chains.
         assert!(layout.track_count <= 2, "{} tracks for two side commits", layout.track_count);
@@ -1991,7 +2122,7 @@ mod tests {
     fn commits_take_the_colour_of_the_branch_they_are_on() {
         let dag = ahead();
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 200, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         let tint = |id: &str| layout.block(&Oid::new(id)).expect(id).tint;
 
         // Two branches, so two colours and — since a branch is a row — two
@@ -2041,7 +2172,7 @@ mod tests {
             false,
         );
         let projection = Plan::default().project(&dag);
-        let layout = compute(&dag, &projection, 200, Orientation::Horizontal);
+        let layout = compute(&dag, &projection, 200, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         let tint = |id: &str| layout.block(&Oid::new(id)).expect(id).tint;
 
         assert_eq!(tint("top"), tint("mid"), "`topic` took the trunk it is on");
@@ -2063,7 +2194,7 @@ mod tests {
     fn head_steps_aside_rather_than_landing_on_an_arrow() {
         // At a branch tip there is nothing passing, so it stays put.
         let dag = dag();
-        let layout = compute(&dag, &Plan::default().project(&dag), 200, Orientation::Horizontal);
+        let layout = compute(&dag, &Plan::default().project(&dag), 200, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
         assert_eq!(head.track, layout.block(&Oid::new("f")).unwrap().track);
 
@@ -2077,7 +2208,7 @@ mod tests {
             WorkTree::default(),
             false,
         );
-        let layout = compute(&dag, &Plan::default().project(&dag), 200, Orientation::Horizontal);
+        let layout = compute(&dag, &Plan::default().project(&dag), 200, &Options { orientation: Orientation::Horizontal, ..Default::default() });
         let head = layout.block(&Oid::new("HEAD")).expect("HEAD is drawn");
         let target = layout.block(&Oid::new("mid")).unwrap();
         assert_ne!(head.track, target.track, "HEAD is sitting on the arrow");
