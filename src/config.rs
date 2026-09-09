@@ -353,6 +353,11 @@ impl StatuslineConfig {
             View::Notebook => self.notebook.clone(),
             View::Table => self.table.clone(),
             View::Vcs => self.vcs.clone(),
+            // The resolver shares the graph's layout: both are views onto the
+            // repository rather than onto a document, and what the modeline
+            // has to say — which branch, how much is outstanding — is the same
+            // question in each.
+            View::Conflict => self.vcs.clone(),
         }
     }
 }

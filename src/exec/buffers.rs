@@ -85,6 +85,20 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
             }
         }
 
+        // The resolver holds the answers given so far — which is work, and
+        // the natural thing to do halfway through a conflict is leave to read
+        // the code.  Coming back to an empty resolver would punish exactly the
+        // habit the view is built to support.
+        crate::view::View::Conflict => {
+            app.conflict_pending = None;
+            if let Some(state) = app.conflict.take() {
+                app.stashes.put(
+                    crate::source::SourceId::virtual_named(crate::app::CONFLICT_BUFFER),
+                    Stash::Conflict(Box::new(state)),
+                );
+            }
+        }
+
         // Stash the open notebook so edits are preserved if the user comes
         // back.  After this `app.buffer` holds stale cell text — do NOT stash
         // it, and do NOT `did_close` it: it was never opened with the LSP under
@@ -605,6 +619,7 @@ pub(super) fn close_buffer(app: &mut App, force: bool) {
             || super::table::close_derived_table(app)
             || super::sql::close_buffer(app)
             || super::vcs::close_transient_buffer(app)
+            || super::conflict::close_edit_buffer(app)
         {
             return;
         }

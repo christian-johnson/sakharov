@@ -862,12 +862,18 @@ fn report_outcome(app: &mut App, outcome: &Outcome) {
                 .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
                 .collect();
             app.messages.show(format!(
-                "Stopped at step {} of {} — conflicts in {}. \
-                 Fix them in the editor then :vc-continue, or :vc-abort to back out",
+                "Stopped at step {} of {} — conflicts in {}.  Opening the resolver…",
                 outcome.ran + 1,
                 outcome.total,
                 names.join(", ")
             ));
+            // Straight into the resolver rather than telling the user where it
+            // is.  A conflict is the one outcome here with an obvious next
+            // action, and the old message named three commands and left them
+            // to pick — which meant resolving by hand in the plain editor,
+            // markers and all, which is exactly what the resolver exists to
+            // replace.
+            super::conflict::open(app);
         }
         Some(failure) => app.messages.show(format!(
             "Stopped at step {} of {}: {} — {}",

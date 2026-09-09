@@ -720,10 +720,68 @@ agreeing does the ordinary list of git commands appear. A plan that rewrites
 only your own unpushed work gets one dialog, as before: a warning that fires on
 the everyday case is a warning nobody reads.
 
-A **conflict** stops the run where it stopped and names the conflicted files.
-Resolve them in the ordinary editor, then `:vc-continue` — or `:vc-abort` to back
-out. (A dedicated merge-conflict resolver view is designed in
-`docs/merge-conflict-plan.md` and not yet built.)
+A **conflict** stops the run where it stopped, names the conflicted files, and
+**opens the resolver** (below). `g c` (`:vc-continue`) carries on once they are
+resolved; `g a` (`:vc-abort`) backs the whole thing out.
+
+## Merge-conflict resolver
+
+`:conflicts` (aliases `:resolve`, `:merge-conflicts`) opens the two competing
+versions of a conflicted file **side by side, each labelled with whose work it
+is** — a branch name, the commit, its author and its age — instead of git's
+`<<<<<<< HEAD` / `>>>>>>> 9f2c1ab` markers. It also opens by itself when an
+apply conflicts, and `Enter` on a conflicted file in the staging view (`w`) goes
+here rather than opening the raw text.
+
+Three things it shows that the markers do not:
+
+- **Who each side is.** `HEAD` is a pointer and `9f2c1ab` is a hash; neither
+  answers "is the 30 mine or theirs?".
+- **Which way round they are.** In a merge the left pane is your branch. In a
+  **rebase or cherry-pick** — which is what `g a` in the graph runs — git checks
+  out the base and replays your commits onto it, so the left pane is *the branch
+  you are landing on* and the right is *your own commit*. The panes say so in
+  words, and the message line says it on the way in.
+- **The common ancestor** (`3`), which is what tells a real disagreement
+  (`30 → 60` against `30 → 45`) from a one-sided change (`30 → 60` against an
+  untouched `30`). Off by default; it costs a third of the width.
+
+Each side of a conflict is a **switch**, not a menu entry — `Space` toggles the
+focused one, and the merged text is whichever sides are on, in file order. That
+gives take-left, take-right, **keep both** (the answer for two imports or two
+list entries) and **delete the section**, from one key.
+
+Nothing reaches the disk until `Enter`, which writes the merged file and stages
+it — and even that is undone by `:conflict-revert`, since git holds all three
+versions until the operation finishes. A file with an unanswered section is
+**refused** rather than written: the write would silently delete that section
+along with the markers that would have shown the mistake.
+
+| Command | Default Key | Alias | Description |
+|---------|-------------|-------|-------------|
+| `conflicts` | — | `:resolve`, `:merge-conflicts` | Open the resolver |
+| `conflict-close` | `q` | `:resolve-close` | Leave it (answers are kept if you come back) |
+| `conflict-take-side` | `Space` | `:resolve-take` | Take, or drop, the focused version |
+| `conflict-take-left` | `a` | `:resolve-left` | Take only the left version |
+| `conflict-take-right` | `b` | `:resolve-right` | Take only the right version |
+| `conflict-take-left-all` | `A` | `:resolve-left-all` | Take the left for every **unanswered** conflict in this file (answers already given are left alone) |
+| `conflict-take-right-all` | `B` | `:resolve-right-all` | The same, taking the right |
+| `conflict-next` | `n` | `:resolve-next` | Next **unanswered** conflict (`j`/`k` walk every conflict) |
+| `conflict-prev` | `N` | `:resolve-prev` | Previous unanswered conflict |
+| `conflict-next-file` | `]` | `:resolve-next-file` | Next conflicted file |
+| `conflict-prev-file` | `[` | `:resolve-prev-file` | Previous conflicted file |
+| `conflict-toggle-base` | `3` | `:resolve-base` | Show the common ancestor as a third pane |
+| `conflict-edit` | `e` | `:resolve-edit` | Edit this section by hand in a `*conflict …*` buffer; `q` takes the text back as that section's answer |
+| `conflict-write` | `Enter`, `gw` | `:resolve-write` | Write this file's resolution and stage it |
+| `conflict-revert` | `gx` | `:resolve-revert` | Put this file back the way git left it, markers and all |
+| `conflict-diff` | `d` | `:resolve-diff` | This file's diff, in a float |
+| `conflict-refresh` | `r` | `:resolve-refresh` | Re-read the conflicted files, keeping the answers given |
+| `conflict-help` | `?`, `g?` | `:resolve-help` | Every key the resolver binds |
+
+`u` takes back the last choice and puts the cursor on it. `g c` / `g a` carry
+on with or abort the operation, and `g s` shows `git status` verbatim. On a
+terminal too narrow to give each version a readable column the panes **stack**
+instead of splitting, and the motion keys follow the picture.
 
 ### Everyday actions
 

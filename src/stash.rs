@@ -44,6 +44,11 @@ pub enum Stash {
     /// losing it to a buffer switch would make the view unusable for anything
     /// taking more than one gesture.
     Vcs(Box<crate::vcs::state::VcsState>),
+    /// A merge-conflict session: the snapshot of the conflicted index and the
+    /// answers given so far.  Stashed for the reason the view exists — the
+    /// natural thing to do halfway through a conflict is go and read the code,
+    /// and coming back to an empty resolver would punish exactly that.
+    Conflict(Box<crate::conflict::state::ConflictState>),
 }
 
 impl Stash {
@@ -55,6 +60,7 @@ impl Stash {
             Stash::Notebook(_) => View::Notebook,
             Stash::Table(_) => View::Table,
             Stash::Vcs(_) => View::Vcs,
+            Stash::Conflict(_) => View::Conflict,
         }
     }
 

@@ -418,10 +418,33 @@ Invoked as `sv [file]`. Binary at `target/debug/sv` (or `target/release/sv`).
   (one in flight at a time, gated on `completionProvider.resolveProvider`) to fetch it on demand.
   ESC ladder: in search → back to nav; in nav → close docs if open, else dismiss. `Tab` from any
   focused state returns to passive typing.
-- Hover float (`K` / `gk`)
+- Hover float (`K` / `gk`), **with a completion fallback when hover says nothing**.
+  pylsp answers `textDocument/hover` only when jedi's inferred definition's *name* is
+  exactly the word under the cursor, so an attribute whose definition is named
+  something else (`os.path` → `posixpath`) hovers as an empty string — while the very
+  same symbol, asked for as a *completion* and resolved, comes back with a docstring.
+  That is the gap between `K` inside the completion popup and `gk` on the identifier,
+  so an empty hover retries as a `textDocument/completion` at the end of the word plus
+  a `completionItem/resolve` of the item whose label *is* that word
+  (`exec::lsp::start_hover_fallback` → `resolve_hover_fallback` → `show_fallback_doc`,
+  sequenced by `CompletionState.hover_fallback`). The retry is refused in Insert mode,
+  where a completion reply belongs to the popup
 - **Signature help** — typing `(` or `,` in Insert mode requests `textDocument/signatureHelp`;
   the active call's argument list shows in the minibuffer with the current parameter marked
-  `‹like this›`, refreshed as you type and cleared when the call closes / on leaving Insert
+  `‹like this›`, refreshed as you type and cleared when the call closes / on leaving Insert.
+  Its **argument names are also merged into the completion popup** as `name=` items
+  (`exec::lsp::merge_signature_params`, from `App::signature_params`), ahead of the server's
+  own items and the buffer symbols, deduped against both — a server answers signature help
+  for calls its completion pass does not always resolve, so the list already on screen in the
+  minibuffer is the more reliable source for them. `lsp_manager::signature_param_names` keeps
+  only what can actually take a keyword: nothing before a `/`, no `*`/`**` form, no `self`
+- **A completion reply about a word the cursor has already left is dropped**
+  (`CompletionState.requested_at`, checked in the `CompletionResult` arm). jedi is slow
+  enough that the reply for one argument routinely lands after the next has been started, and
+  the stale list then *opens*: the next keystrokes filter it, match nothing, dismiss it and
+  set `suppressed_prefix`, which suppresses every further request for that word. That is why
+  `plt.imshow(x, cm` used to offer only names from elsewhere in the document — or nothing —
+  while the minibuffer was showing `‹cmap›` all along
 - Go-to-definition (`gd`), references (`gr`), type-definition (`gy`), implementation (`gi`).
   `gr` jumps directly when there's a single result; multiple results open a navigate popup
   (one line of source per reference, `cell N:line` / `file:line` detail, Enter to jump —
@@ -1054,6 +1077,19 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   impossible to construct as fixtures otherwise.  `vcs/apply.rs`'s tests do drive a
   **real repository** in a temp dir — that layer's whole job is driving git, and a
   mock would test the mock.
+  **`vcs::load::git_command` is the one place a git process is built**, and it
+  clears the inherited git environment: the discovery variables (`GIT_DIR`,
+  `GIT_INDEX_FILE`, …), which override `-C` outright, *and* the identity ones
+  (`GIT_AUTHOR_NAME`, `GIT_COMMITTER_DATE`, …), which override `user.name` and
+  the commit date from config.  Git exports both families to hooks **and to
+  `$EDITOR`** — the ordinary way this editor is launched from `git commit` — so
+  without the second family a commit made from the staging view during either
+  is stamped with the outer commit's author and date.  The fixtures are the
+  visible half: each pins `user.name = Test` in its temp repository's *config*,
+  which the ambient variables silently outrank, so under the pre-commit hook
+  every fixture commit came out authored by whoever was committing (which is
+  what `conflict_ui`'s attribution assertion caught).  Pinned by
+  `an_inherited_git_environment_cannot_redirect_a_command_or_sign_it`.
 - **Navigation during a drag walks the *un-previewed* graph**
   (`VcsState::stable_layout`).  The preview reshapes the very graph the cursor
   is moving through, so stepping through the previewed layout meant each `j`
@@ -1338,6 +1374,109 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   itself run on a background thread (`exec::vcs::VcsJob`, polled by the run loop
   beside the table load and the Quarto export).
 
+### Phase V2 (merge-conflict resolver) — complete
+- **`:conflicts`** opens the two competing versions of a conflicted file **side
+  by side, each labelled with whose work it is**.  It opens by itself when an
+  apply conflicts, and `Enter` on a conflicted file in the staging view (`w`)
+  routes here (`open_if_conflicted`) rather than opening the raw text — which is
+  precisely what this view replaces.  See `docs/merge-conflict-plan.md` for the
+  design record.
+- **The working file's conflict markers are never parsed.**  They are git's
+  rendering of the conflict in whatever `merge.conflictStyle` the user happens
+  to have, and reading them back would be reading our own output.  The three
+  **index stages** are the data (`git ls-files -u -z`, then `cat-file blob
+  :N:path`), and the regions come from a `git merge-file -p --diff3` this module
+  runs **itself** over those blobs.  Two consequences that are the whole point:
+  the marker style is ours, and the **base is always present** — under the
+  default `merge` style git writes no ancestor at all, so a resolver that parsed
+  the file would have nothing to show in the third pane
+  (`the_regions_do_not_come_from_the_working_files_markers` pins it).
+  Markers are `--marker-size=32` plus a sentinel label, so a file that itself
+  contains `<<<<<<< HEAD` — one recording a past conflict, or a document about
+  them — is content.  `the_marker_constants_match_the_size_the_merge_is_run_with`
+  pins the two together: drifting apart makes every conflict parse as one giant
+  agreed region and the view silently shows a file with nothing to resolve.
+- **The ours/theirs inversion is stated exactly once**
+  (`Operation::left_is_yours`).  In a merge, stage 2 is your branch.  In a
+  **rebase or cherry-pick — which is what this editor's own `g a` runs** — git
+  checks out the base and replays your commits onto it, so stage 2 is *the
+  branch you are landing on* and stage 3 is *your own commit*.  Everything that
+  words a side reads that rather than restating it, because restating it is how
+  it gets stated backwards.  `Side` is `Left`/`Right`, never `Ours`/`Theirs`:
+  those are the two words that cause the confusion, and a test asserts neither
+  appears in a rendered pane.  A replay also says "your work is on the RIGHT" in
+  the message line on the way in.
+- **A side of a conflict is a switch, not a menu entry** (`Choice::Sides`).
+  On/off across two sides gives take-left, take-right, **keep both** (in file
+  order — the answer for two imports, and one a take-ours/take-theirs menu
+  cannot express) and **delete the section** (a real resolution no
+  marker-editing workflow makes easy), from one `Space`.  The same toggle
+  language the staging view and the branch picker use.  `Choice::default()` is
+  *neither* rather than "left", so a file can never be written resolved without
+  anybody having looked at it — that is what `n` walks to and what the footer
+  counts.
+- **Four layers, each a pure function of the one above, and only the last
+  writes** — the same split as `vcs/`, for the same reasons:
+
+  ```
+  conflict/load.rs    ConflictSet — the snapshot: files, stages, resolved
+                                    labels, the operation in progress
+  conflict/hunk.rs    Region      — the three-way diff
+  conflict/mod.rs     Choice      — a stack of answers; folds into the text
+  conflict/write.rs               — writes the file and stages it
+  ```
+
+  `ConflictFile::merged()` is a **fold over the snapshot**, never a buffer
+  edited in place, so the panes and the merged text are two renderings of one
+  state and cannot disagree.  Answers are a stack (`history`), so `u` pops and
+  says *which* region it put back — undoing something off screen without saying
+  where is the same as doing nothing.
+- **An unanswered file is refused, not partly written** (`write::resolve`).  The
+  fold contributes nothing for an unanswered region, so writing one would
+  silently **delete** it — and take the markers that would have shown the
+  mistake with it.  The write is atomic (`buffer::atomic_write`): a conflicted
+  file's only complete copy is in git's index, so a truncated one is not
+  recoverable from anything on disk.  `Enter` needs no confirmation because
+  `:conflict-revert` (`git checkout --merge`) puts the file back markers and
+  all — git holds all three stages until the operation finishes.
+- **A missing stage is a real conflict, not an error.**  An add/add conflict has
+  no stage 1 and a modify/delete has none on the side that deleted it, so the
+  stages are `Option<String>` and an empty side renders as
+  "(nothing — this side removes it)" — which is a useful answer, and an empty
+  pane would read as a drawing bug.
+- **`conflict/layout.rs` is the single geometry model** (the resolver's
+  `table::layout`).  A region is as tall as its **tallest** side, so the same
+  hunk sits on the same screen rows in both panes and the eye compares across
+  rather than counting.  `layout::arrangement` is the one columns-or-stacked
+  rule, asked by `compute` **and** by the motion keys — which have to know
+  whether `h`/`l` choose a pane or walk the file, and would otherwise be a
+  second copy of the comparison that could disagree with what is drawn.
+  Below `MIN_PANE × panes` the panes stack: two columns of hard-wrapped
+  fragments are harder to compare than the same text one above the other.
+- **The ancestor pane is never focusable.**  It is not one of the things that
+  can be taken, so stopping the cursor on it would offer a choice that is not a
+  choice — the same reason arrows are not focusable in the commit graph.  It is
+  off by default (`3`), because it costs a third of the width on every conflict
+  including the many where both sides are plainly different intents.
+- **`e` is the escape hatch**: a section that needs merging rather than choosing
+  opens in a `*conflict …*` buffer — an ordinary buffer, so the whole editor
+  works — seeded with whatever is currently chosen, and `q` takes the text back
+  as that section's answer (`Keymap::ConflictEdit`, `close_edit_buffer`).
+  `app.conflict_edit` holds the `(file, hunk)` it answers, because the resolver
+  is torn down while that buffer is on screen and a pair parsed back out of a
+  display name is a parser nobody should have to write.
+- **The repository already on screen wins over the working directory**
+  (`conflict::open`).  The resolver is most often reached *from* the graph — an
+  apply that conflicted, or `Enter` in the staging view — and the graph may be
+  showing a repository other than the one the editor was launched in.
+  Rediscovering the root from the cwd there is wrong in the quiet way: it
+  reports "nothing is conflicted" about a repository nobody asked about.
+- **The tests drive a real repository** (`conflict::testrepo`), because every
+  layer here is defined by what git's own state looks like — a rebase stopped
+  halfway, an add/add conflict with no base, an index that says a path is
+  resolved — and a mock would test the mock.  The pure parsers are split out so
+  the cases that *can* be fixtures still are.
+
 ### Known rough edges / not yet implemented
 - No split panes
 - The kernel is a single REPL, so cells still *run* one at a time — but they queue (`:run-all`,
@@ -1368,9 +1507,15 @@ be reachable some other way. Two ways, both in `exec/table.rs`:
   once. A **merge cannot be
   replayed** onto a new parent, so a plan whose replay list contains one is refused
   rather than flattened — the same limit `git rebase` has without `--rebase-merges`.
-  Conflicts stop the run and are resolved in the ordinary editor; the dedicated
-  merge-conflict resolver is the next view on the roadmap (designed in
-  `docs/merge-conflict-plan.md`).
+  Conflicts stop the run and open the resolver (Phase V2 above).
+- The conflict resolver has **no per-line choosing within a section**: a region
+  is taken whole, or hand-edited with `e`.  Git's own three-way merge has
+  already taken every part the two sides agree on, so a region is by
+  construction a place they disagree; splitting one further is what `e` is for.
+  There is also **no rerere** (replaying a remembered resolution silently is the
+  same class of surprise the view exists to remove), no syntax highlighting in
+  the panes, and no word-level intra-line diff — a section that differs by one
+  identifier is shown as two whole lines.
 - A streamed command's transcript is **not** an ANSI terminal: escape sequences
   are stripped, and the colour comes from `git_highlight` reading the text (see
   above).  A tool that draws a box or repositions the cursor will not look like
@@ -1421,6 +1566,9 @@ src/
     buffers.rs        — buffer-list management: special buffers, buffer switch +
                         stashes (plain-file & via notebook), open_as_notebook,
                         new-file/new-notebook, unsaved_buffer_names quit sweep
+    conflict.rs       — merge-conflict resolver: open/close, the async load,
+                        command routing, the switch gestures, the hand-edit
+                        escape hatch, and the one keystroke that writes
     vcs.rs            — version-control view: open/close, the async load and
                         job polling, command routing, the grab gesture, the
                         apply confirmation, the working-tree file list, and
@@ -1564,6 +1712,27 @@ src/
                         an arrow; see the Phase V1 notes above
   vcs_ui.rs           — ratatui renderer for the graph; a Painter writes cells in
                         stack coordinates, clipped to the viewport
+  conflict/           — the merge-conflict resolver: git's three index stages,
+                        made legible
+    mod.rs            — Side/Operation/SideLabel/ConflictFile/Choice: the model,
+                        plus the fold (ConflictFile::merged) that turns the
+                        answers into the file that would be written.
+                        Operation::left_is_yours is THE statement of the
+                        ours/theirs inversion; testrepo is the shared real-git
+                        fixture
+    load.rs           — the git queries + their pure parsers: the unmerged
+                        listing, what operation is in progress, and each side's
+                        label resolved from it (MERGE_HEAD / REBASE_HEAD / …)
+    hunk.rs           — Region/Versions: the three-way diff, run by us over the
+                        three stages (never parsed back out of the working file)
+    state.rs          — ConflictState: which file, which hunk, which pane
+    layout.rs         — THE geometry model: pane rects, region row spans (a
+                        region is as tall as its tallest side, so the panes are
+                        line-aligned), the columns-or-stacked rule, the scroll
+    write.rs          — the only module here that writes: the merged file, then
+                        `git add`.  Refuses an unanswered file
+  conflict_ui.rs      — ratatui renderer for the resolver: two labelled panes,
+                        the ancestor on `3`, and the result strip
   compute/            — the Python engines, owned by App (not by any view)
     mod.rs            — KernelSession: persistent subprocess, request framing + background
                         reader thread streaming KernelMessages (async, non-blocking);
@@ -1613,6 +1782,7 @@ What each owes the new view:
 | `ui::status_ctx` | how the status line names what is open |
 | `config::StatuslineConfig::layout_for` | its `[statusline.*]` module layout |
 | `stash::Stash` | what it leaves behind when navigated away from |
+| `config::StatuslineConfig::layout_for` | its `[statusline.*]` module layout |
 | `keymap::Keymap::default_bindings` | the layer's own bindings |
 | `exec::buffers::teardown_current_buffer` | stashing that state |
 | `exec::buffers::open_path` | routing back to it |
@@ -1641,6 +1811,16 @@ A `debug_assert` at the top of `execute()` pins the second rule: a command
   unknown (retired, or from before a restart) is **dropped**, not applied to what is in view
   now. `:restart-kernel` invalidates every consumer of *that* session — and only that one:
   restarting one notebook's namespace must never destroy another's.
+- **A frame whose placements are identical to the last one touches the graphics
+  protocol not at all** (`GraphicsState.last_placed`, a `PlacementKey` per image:
+  pixel-data pointer + position + size + crop). `flush_images` used to send `a=d`
+  and re-place every image on *every* frame, so each keystroke made the terminal
+  rescale every figure again — which is why paging through a notebook, or holding a
+  `gw` label overlay open over it, got slower the more (and bigger) the plots were.
+  Anything that takes placements down behind the flush's back must clear
+  `last_placed` alongside `image_ids`: the `kitty::clear_images`/`delete_images`
+  call sites in `exec::notebook`, and the `needs_clear` full-repaint path (an
+  external program may have taken the screen with it).
 - **The images a frame draws come from `app.graphics.pending`**, filled by whichever renderer
   drew and flushed by `app::flush_images` after `terminal.draw()` (ratatui owns the screen
   until then). A renderer emits `kitty::ImageRequest`s; it does not talk to the terminal.
@@ -1813,13 +1993,6 @@ Phase 4 list has also shipped: `/`?`/`n`/`N` search, multiple buffers + buffer
 picker, and config-driven keybinding overrides in TOML.
 
 ### Still open
-- A **merge-conflict resolver view** — the natural next view, and what the
-  version-control view currently hands off to the plain editor.  Designed in
-  `docs/merge-conflict-plan.md`: it reads the **index stages** (base / ours /
-  theirs) rather than parsing git's markers back out of the working file,
-  resolves each side to a real label from whatever operation is in progress
-  (and states the ours/theirs **inversion during a replay** in words), and makes
-  each side of a hunk a **switch** rather than a menu item
 - Split panes
 - User-defined named commands in TOML (`[commands]` section)
 - Incremental tree-sitter highlighting (avoid full reparse on every keystroke)

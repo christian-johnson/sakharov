@@ -1192,4 +1192,5 @@ mod tests {
         assert!(!heading.contains('→'), "the heading was drawn as a binding: {heading}");
     }
 
+
 }

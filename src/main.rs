@@ -4,6 +4,8 @@ mod clipboard;
 mod command;
 mod compute;
 mod config;
+mod conflict;
+mod conflict_ui;
 mod exec;
 mod fold;
 mod git;

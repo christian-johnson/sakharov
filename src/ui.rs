@@ -639,6 +639,18 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
             (name, false, None, None)
         }
 
+        // The resolver names the file being resolved: which of several
+        // conflicted files you are in is the thing most easily lost track of,
+        // and it is not "modified" — the answers are in memory until Enter.
+        crate::view::View::Conflict => {
+            let name = app
+                .conflict
+                .as_ref()
+                .and_then(|s| s.current())
+                .map_or_else(|| "conflicts".to_string(), |f| f.path.clone());
+            (name, false, None, None)
+        }
+
         crate::view::View::Table => match app.table.as_ref() {
             // The grid's buffer is detached and has no path, so the name comes
             // from the session.  Read-only, hence never modified.

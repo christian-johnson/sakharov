@@ -274,6 +274,26 @@ commands! {
         VcsFlip => "version-control-flip", aliases: ["vc-flip", "vc-orientation"], palette: "Turn the graph: history across, or down the screen  [o]";
         VcsOutput => "version-control-output", aliases: ["vc-output"], palette: "The last git command's output, as it ran";
 
+        // --- Merge-conflict resolver (see `crate::conflict`) ---
+        ConflictOpen => "conflicts", aliases: ["resolve", "merge-conflicts"], palette: "Resolve the merge conflicts, side by side with labels  [:conflicts]";
+        ConflictClose => "conflict-close", aliases: ["resolve-close"], palette: "Leave the conflict resolver";
+        ConflictRefresh => "conflict-refresh", aliases: ["resolve-refresh"], palette: "Re-read the conflicted files  [r]";
+        ConflictTakeSide => "conflict-take-side", aliases: ["resolve-take"], palette: "Take (or drop) the focused side of this conflict  [Space]";
+        ConflictTakeLeft => "conflict-take-left", aliases: ["resolve-left"], palette: "Take only the left side of this conflict  [a]";
+        ConflictTakeRight => "conflict-take-right", aliases: ["resolve-right"], palette: "Take only the right side of this conflict  [b]";
+        ConflictTakeLeftAll => "conflict-take-left-all", aliases: ["resolve-left-all"], palette: "Take the left side of every unanswered conflict in this file  [A]";
+        ConflictTakeRightAll => "conflict-take-right-all", aliases: ["resolve-right-all"], palette: "Take the right side of every unanswered conflict in this file  [B]";
+        ConflictNextHunk => "conflict-next", aliases: ["resolve-next"], palette: "Next unanswered conflict  [n]";
+        ConflictPrevHunk => "conflict-prev", aliases: ["resolve-prev"], palette: "Previous unanswered conflict  [N]";
+        ConflictNextFile => "conflict-next-file", aliases: ["resolve-next-file"], palette: "Next conflicted file  []]";
+        ConflictPrevFile => "conflict-prev-file", aliases: ["resolve-prev-file"], palette: "Previous conflicted file  [[]";
+        ConflictToggleBase => "conflict-toggle-base", aliases: ["resolve-base"], palette: "Show the common ancestor beside the two versions  [3]";
+        ConflictEditHunk => "conflict-edit", aliases: ["resolve-edit"], palette: "Edit this conflict's merged text by hand  [e]";
+        ConflictWriteFile => "conflict-write", aliases: ["resolve-write"], palette: "Write this file's resolution and stage it  [Enter]";
+        ConflictRevertFile => "conflict-revert", aliases: ["resolve-revert"], palette: "Put this file back the way git left it, markers and all";
+        ConflictDiff => "conflict-diff", aliases: ["resolve-diff"], palette: "This file's two versions against their common ancestor  [d]";
+        ConflictHelp => "conflict-help", aliases: ["resolve-help"], palette: "Every key the conflict resolver binds  [?]";
+
         // --- Toggles / config ---
         ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";
         ToggleLineNumbers => "toggle-line-numbers", aliases: ["line-numbers"], palette: "Toggle line numbers  [:toggle-line-numbers]";

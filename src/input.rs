@@ -44,6 +44,11 @@ pub(crate) fn keymap_layer(app: &App) -> crate::keymap::Layer {
         View::Notebook => Layer::Notebook,
         View::Table => Layer::Table,
         View::Vcs => Layer::Vcs,
+        View::Conflict => Layer::Conflict,
+        // A hand-edited conflict section really is an ordinary text buffer —
+        // that is the point of the escape hatch — so only `q` is overridden,
+        // to take the edited text back to the resolver.
+        View::Text if app.in_conflict_edit_buffer() => Layer::ConflictEdit,
         View::Text if app.in_cell_buffer() => Layer::Cell,
         View::Text if app.in_sql_buffer() => Layer::Sql,
         View::Text if app.in_commit_buffer() || app.in_git_output_buffer() => Layer::Commit,
@@ -632,6 +637,14 @@ pub fn goto_command(view: crate::view::View, c: char) -> Option<Command> {
                 return Some(cmd);
             }
         }
+        // The resolver's own `g` map: `g c` carries on with the operation and
+        // `g a` aborts it, which are the two things you want the moment the
+        // last file is resolved and are meaningless anywhere else.
+        crate::view::View::Conflict => {
+            if let Some(cmd) = crate::exec::conflict::goto_command(c) {
+                return Some(cmd);
+            }
+        }
         // A notebook cell is text, so the text meanings are the right ones.
         crate::view::View::Notebook | crate::view::View::Text => {}
     }
@@ -967,6 +980,13 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
         }
         PopupTarget::Navigate => {
             if let ConfirmPayload::Navigate { path, line, col } = payload {
+                // A conflicted file picked out of the staging view opens in the
+                // resolver, not as raw text with markers in it — that text is
+                // what the resolver exists to replace, and the staging view is
+                // where it is most likely to be reached from.
+                if exec::conflict::open_if_conflicted(app, &path) {
+                    return;
+                }
                 if exec::is_special_path(&path)
                     || path.extension().and_then(|e| e.to_str()) == Some("ipynb")
                     || (app.config.table.auto_open && exec::is_table_path(&path))

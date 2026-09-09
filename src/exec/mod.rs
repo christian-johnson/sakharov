@@ -1,6 +1,7 @@
 mod attach;
 mod bridge;
 mod buffers;
+pub(crate) mod conflict;
 mod doctor;
 mod export;
 mod format;
@@ -111,6 +112,14 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // owns the whole version-control command family, and refuses the rest.
         crate::view::View::Vcs => {
             if vcs::handle(app, cmd) {
+                return;
+            }
+        }
+        // The resolver owns its whole command family and reinterprets the
+        // motions against the two panes, exactly as the grid does against
+        // cells.
+        crate::view::View::Conflict => {
+            if conflict::handle(app, cmd) {
                 return;
             }
         }
@@ -1110,6 +1119,37 @@ pub fn execute(app: &mut App, cmd: &Command) {
             vcs::show_output(app);
             return;
         }
+        // Reachable from anywhere: a conflict is a state the *repository* is
+        // in, not a property of what happens to be open — and the moment you
+        // want the resolver is usually right after opening the file that
+        // conflicted.
+        Command::ConflictOpen => {
+            conflict::open(app);
+            return;
+        }
+        Command::ConflictClose
+        | Command::ConflictRefresh
+        | Command::ConflictTakeSide
+        | Command::ConflictTakeLeft
+        | Command::ConflictTakeRight
+        | Command::ConflictTakeLeftAll
+        | Command::ConflictTakeRightAll
+        | Command::ConflictNextHunk
+        | Command::ConflictPrevHunk
+        | Command::ConflictNextFile
+        | Command::ConflictPrevFile
+        | Command::ConflictToggleBase
+        | Command::ConflictEditHunk
+        | Command::ConflictWriteFile
+        | Command::ConflictRevertFile
+        | Command::ConflictDiff
+        | Command::ConflictHelp => {
+            app.messages.show(format!(
+                "`{}` works in the conflict resolver (`:conflicts` opens it)",
+                cmd.name()
+            ));
+            return;
+        }
         Command::VcsClose
         | Command::VcsRefresh
         | Command::VcsGrab
@@ -1294,6 +1334,7 @@ fn goto_hints(app: &App) -> Vec<(String, String)> {
     // lists its own meanings or explicitly shares the text ones.
     match app.view() {
         crate::view::View::Vcs => return vcs::goto_hints(),
+        crate::view::View::Conflict => return conflict::goto_hints(),
         crate::view::View::Table => return vec![
             hint("g", "first row"),
             hint("e", "last row"),

@@ -49,9 +49,21 @@ const LOG_FORMAT: &str = "--format=%x1e%H%x1f%P%x1f%an%x1f%ct%x1f%s";
 /// creating them in the developer's own repository, alongside re-initialising
 /// it and overwriting its `user.email`.  Clearing them makes `-C` mean what it
 /// reads as.
+///
+/// The identity variables are cleared for the same reason, one family along:
+/// `GIT_AUTHOR_NAME` and its relatives override `user.name` / `user.email` /
+/// the commit date from *config*, and git exports those to hooks too — and to
+/// `$EDITOR`, which is the ordinary way an editor is launched from `git
+/// commit`.  A commit made from the staging view during either would be
+/// stamped with the outer commit's author and its author date rather than the
+/// user's own.  The test fixtures are the visible half of this: they pin
+/// `user.name = Test` in each temp repository's config, which the ambient
+/// variables silently outrank, so under the hook every fixture commit came out
+/// authored by whoever was committing.
 pub(crate) fn git_command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
     for var in [
+        // Repository discovery — these make `-C` mean nothing.
         "GIT_DIR",
         "GIT_INDEX_FILE",
         "GIT_WORK_TREE",
@@ -60,6 +72,13 @@ pub(crate) fn git_command(root: &Path) -> Command {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_NAMESPACE",
         "GIT_PREFIX",
+        // Identity — these outrank `user.name` / `user.email` in config.
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
     ] {
         cmd.env_remove(var);
     }
@@ -313,6 +332,42 @@ pub fn parse_status(out: &str) -> WorkTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every git variable that would make an invocation mean something other
+    /// than what it reads as is cleared — the repository it acts on, and the
+    /// identity it commits under.
+    ///
+    /// Git exports both families to hooks and to `$EDITOR`, and this
+    /// repository runs its whole test suite from `.githooks/pre-commit`, so a
+    /// name missing here does not fail somewhere subtle: it fails only for the
+    /// person committing, which is the worst place to find out.
+    #[test]
+    fn an_inherited_git_environment_cannot_redirect_a_command_or_sign_it() {
+        let cmd = git_command(Path::new("/tmp/somewhere"));
+        let cleared: Vec<&str> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .filter_map(|(k, _)| k.to_str())
+            .collect();
+        for var in [
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE",
+            "GIT_PREFIX",
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_AUTHOR_DATE",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+            "GIT_COMMITTER_DATE",
+        ] {
+            assert!(cleared.contains(&var), "{var} is inherited: {cleared:?}");
+        }
+    }
 
     /// Build the log text git would produce, so the fixtures read as data
     /// rather than as escape sequences.

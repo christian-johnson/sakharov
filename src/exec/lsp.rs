@@ -108,7 +108,9 @@ pub(super) fn lsp_request(app: &mut App, kind: LspRequestKind) {
             };
             let char_idx = app.selection.head;
             let rope = app.buffer.rope.clone();
-            if !app.lsp.request(kind, &lang, &path, &rope, char_idx) {
+            if app.lsp.request(kind, &lang, &path, &rope, char_idx) {
+                app.completion.requested_at = Some(char_idx);
+            } else {
                 show_buffer_completions(app);
             }
         } else {
@@ -158,11 +160,7 @@ fn unrouted_request_msg(app: &App, lang: &str, kind: LspRequestKind) -> String {
 pub(super) fn show_buffer_completions(app: &mut App) {
     let lang = app.current_language().unwrap_or("").to_owned();
     let symbols = crate::symbols::extract_symbols(&app.buffer.rope, &lang);
-    if symbols.is_empty() {
-        return;
-    }
-    let prefix = word_prefix_at_cursor(app);
-    let items: Vec<crate::popup::ListItem> = symbols
+    let mut items: Vec<crate::popup::ListItem> = symbols
         .iter()
         .map(|s| crate::popup::ListItem {
             label: s.name.clone(),
@@ -172,7 +170,46 @@ pub(super) fn show_buffer_completions(app: &mut App) {
             ..Default::default()
         })
         .collect();
+    // The call's own arguments belong here too — this is the path taken when
+    // the language server answered nothing at all.
+    merge_signature_params(app, &mut items);
+    if items.is_empty() {
+        return;
+    }
+    let prefix = word_prefix_at_cursor(app);
     open_completion_popup(app, items, prefix);
+}
+
+/// Put the active call's keyword arguments at the head of a completion list.
+///
+/// A server answers `textDocument/signatureHelp` for calls its completion pass
+/// does not always resolve — which is why `plt.imshow(x, cm` could show
+/// `‹cmap›` in the minibuffer while the popup offered nothing but the buffer's
+/// own names.  The argument list is right there, so it is offered.  Empty
+/// outside a call, since `signature_params` is cleared with the hint.
+fn merge_signature_params(app: &App, items: &mut Vec<crate::popup::ListItem>) {
+    if app.signature_params.is_empty() {
+        return;
+    }
+    let known: std::collections::HashSet<&str> =
+        items.iter().map(|i| i.label.trim_end_matches('=')).collect();
+    let mut params: Vec<crate::popup::ListItem> = app
+        .signature_params
+        .iter()
+        .filter(|name| !known.contains(name.as_str()))
+        .map(|name| crate::popup::ListItem {
+            label: format!("{name}="),
+            detail: Some("keyword argument".into()),
+            kind: Some(symbol_kind_badge("param", &app.config.ui.symbol_icons)),
+            payload: None,
+            ..Default::default()
+        })
+        .collect();
+    if params.is_empty() {
+        return;
+    }
+    params.append(items);
+    *items = params;
 }
 
 /// Minimum interval between signature-help requests (configurable via
@@ -377,6 +414,28 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             // cache. The completion line is logged by `LspManager::poll`.
         }
         LspEvent::CompletionResult { items } => {
+            // A `gk` retry (see `HoverFallback`) owns this reply: it was asked
+            // for from Normal mode and must not open a completion popup.
+            if app.mode != Mode::Insert {
+                if let Some(crate::app::HoverFallback::Completion { word }) =
+                    app.completion.hover_fallback.take()
+                {
+                    resolve_hover_fallback(app, &word, &items);
+                    return;
+                }
+            } else {
+                app.completion.hover_fallback = None;
+            }
+            // Drop a reply about a word the cursor has since left: it is the
+            // previous argument's list, and letting it open would poison the
+            // word being typed now (see `CompletionState::requested_at`).
+            if let Some(at) = app.completion.requested_at.take() {
+                let head = app.selection.head;
+                let start = crate::motion::word_start_at(&app.buffer.rope, head);
+                if at < start || at > head {
+                    return;
+                }
+            }
             if app.mode == Mode::Insert {
                 // Convert LSP items.
                 let mut popup_items: Vec<crate::popup::ListItem> = items
@@ -390,6 +449,8 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                         resolve_data: item.data.clone(),
                     })
                     .collect();
+
+                merge_signature_params(app, &mut popup_items);
 
                 // Merge buffer symbols that aren't already covered by LSP results.
                 let lang = app.current_language().unwrap_or("").to_owned();
@@ -415,6 +476,12 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
             }
         }
         LspEvent::CompletionResolved { documentation, detail } => {
+            if let Some(crate::app::HoverFallback::Resolve { word, detail: from_item }) =
+                app.completion.hover_fallback.take()
+            {
+                show_fallback_doc(app, &word, documentation, detail.or(from_item));
+                return;
+            }
             if let Some(idx) = app.completion.pending_resolve.take() {
                 if let Some(popup) = app.popup.as_mut() {
                     if popup.on_confirm == crate::popup::PopupTarget::InsertText {
@@ -440,14 +507,28 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
         }
         LspEvent::HoverResult { content } => {
             if content.is_empty() {
-                app.messages.show("No documentation available");
+                // Hover said nothing — ask the completion path, which answers
+                // for symbols hover declines (see `HoverFallback`).
+                if !start_hover_fallback(app) {
+                    app.completion.hover_fallback = None;
+                    app.messages.show("No documentation available");
+                }
             } else {
+                app.completion.hover_fallback = None;
                 app.popup = Some(crate::popup::Popup::documentation("hover", &content));
             }
         }
-        LspEvent::SignatureHelpResult { signature } => {
+        LspEvent::SignatureHelpResult { signature, params } => {
             // Only meaningful while typing in Insert mode; the minibuffer shows it.
-            app.signature_help = if app.mode == Mode::Insert { signature } else { None };
+            let inside = app.mode == Mode::Insert;
+            app.signature_help = if inside { signature } else { None };
+            // Kept alongside the hint, and cleared with it: the argument names
+            // only mean anything while the cursor is inside that call.
+            app.signature_params = if inside && app.signature_help.is_some() {
+                params
+            } else {
+                Vec::new()
+            };
         }
         LspEvent::DefinitionResult { location } => {
             if let Some(loc) = location {
@@ -936,6 +1017,104 @@ pub fn refresh_completion_doc(app: &mut App) {
     }
 }
 
+/// The identifier under (or immediately before) the cursor, with the char index
+/// just past its last character — where a completion request has to be made for
+/// the server to complete that whole word.
+fn word_at_cursor(rope: &ropey::Rope, head: usize) -> Option<(String, usize)> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let len = rope.len_chars();
+    let mut start = head.min(len);
+    // The cursor may sit one past the word (end of line, or a trailing `(`).
+    if start >= len || !is_word(rope.char(start)) {
+        if start > 0 && is_word(rope.char(start - 1)) {
+            start -= 1;
+        } else {
+            return None;
+        }
+    }
+    let mut end = start + 1;
+    while start > 0 && is_word(rope.char(start - 1)) {
+        start -= 1;
+    }
+    while end < len && is_word(rope.char(end)) {
+        end += 1;
+    }
+    Some((rope.slice(start..end).to_string(), end))
+}
+
+/// Retry an empty hover as a completion request positioned at the end of the
+/// word under the cursor.  Returns false when there is nothing to retry with —
+/// no identifier, no path, or no completion server — so the caller reports the
+/// plain "no documentation" message instead.
+fn start_hover_fallback(app: &mut App) -> bool {
+    let Some((word, word_end)) = word_at_cursor(&app.buffer.rope, app.selection.head) else {
+        return false;
+    };
+    let Some(lang) = app.current_language().map(str::to_owned) else { return false };
+    let Some(path) = app.buffer.path.clone() else { return false };
+    let rope = app.buffer.rope.clone();
+    if !app.lsp.request(LspRequestKind::Completion, &lang, &path, &rope, word_end) {
+        return false;
+    }
+    app.completion.hover_fallback = Some(crate::app::HoverFallback::Completion { word });
+    true
+}
+
+/// Pick the completion item that *is* the hovered word and show what it knows,
+/// resolving it first when the server can enrich it.
+fn resolve_hover_fallback(
+    app: &mut App,
+    word: &str,
+    items: &[crate::lsp_manager::CompletionItem],
+) {
+    // `label` may carry a signature ("array(...)"); the name is the head of it.
+    let matched = items.iter().find(|it| {
+        it.insert_text.as_deref() == Some(word)
+            || it.label == word
+            || it.label.split('(').next() == Some(word)
+    });
+    let Some(item) = matched else {
+        show_fallback_doc(app, word, None, None);
+        return;
+    };
+    let documentation = item.documentation.clone();
+    let detail = item.detail.clone();
+    let lang = app.current_language().unwrap_or("").to_owned();
+    let can_resolve = documentation.is_none()
+        && item.data.is_some()
+        && !lang.is_empty()
+        && app.lsp.completion_resolve_supported(&lang);
+    if can_resolve {
+        if let Some(json) = item.data.as_deref() {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json) {
+                if app.lsp.request_completion_resolve(&lang, val) {
+                    app.completion.hover_fallback =
+                        Some(crate::app::HoverFallback::Resolve { word: word.to_owned(), detail });
+                    return;
+                }
+            }
+        }
+    }
+    show_fallback_doc(app, word, documentation, detail);
+}
+
+/// Final step of the fallback: float what was found, or say plainly that the
+/// server has nothing for this word.
+fn show_fallback_doc(
+    app: &mut App,
+    word: &str,
+    documentation: Option<String>,
+    detail: Option<String>,
+) {
+    let (lines, _) = build_doc_content(&documentation, &detail, false);
+    if lines.iter().all(|l| l.trim().is_empty() || l == "No documentation available.") {
+        app.messages
+            .show(format!("No documentation available for `{word}`"));
+        return;
+    }
+    app.popup = Some(crate::popup::Popup::documentation("hover", &lines.join("\n")));
+}
+
 /// Build the doc-panel lines for a completion item: its signature (`detail`)
 /// followed by documentation, or a loading/placeholder line.
 fn build_doc_content(
@@ -981,6 +1160,39 @@ fn build_doc_content(
 /// Return the kind badge string for a tree-sitter symbol, using the configured icons map.
 fn symbol_kind_badge(kind: &str, icons: &std::collections::HashMap<String, String>) -> String {
     icons.get(kind).cloned().unwrap_or_else(|| kind.to_owned())
+}
+
+#[cfg(test)]
+mod param_tests {
+    use super::merge_signature_params;
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::popup::ListItem;
+
+    fn item(label: &str) -> ListItem {
+        ListItem { label: label.into(), ..Default::default() }
+    }
+
+    /// The active call's arguments lead the list, and one the server already
+    /// offered is not offered twice — pylsp spells the same thing `cmap=`.
+    #[test]
+    fn the_calls_arguments_lead_and_are_not_duplicated() {
+        let mut app = App::new(None, Config::load()).unwrap();
+        app.signature_params = vec!["cmap".into(), "aspect".into()];
+        let mut items = vec![item("cmap="), item("my_variable")];
+        merge_signature_params(&app, &mut items);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["aspect=", "cmap=", "my_variable"]);
+    }
+
+    /// Outside a call there is no signature, so nothing is added.
+    #[test]
+    fn nothing_is_added_outside_a_call() {
+        let app = App::new(None, Config::load()).unwrap();
+        let mut items = vec![item("my_variable")];
+        merge_signature_params(&app, &mut items);
+        assert_eq!(items.len(), 1);
+    }
 }
 
 #[cfg(test)]

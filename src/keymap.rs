@@ -125,6 +125,12 @@ pub enum Layer {
     /// While the version-control graph is open: `Space` grabs and drops, and
     /// the everyday git actions sit on single letters.
     Vcs,
+    /// The merge-conflict resolver.
+    Conflict,
+    /// A `*conflict …*` buffer — one section being hand-edited.  A buffer
+    /// layer rather than a view one: it really is an ordinary text buffer,
+    /// with `q` overridden to take the text back.
+    ConflictEdit,
 }
 
 pub struct Keymap {
@@ -136,6 +142,8 @@ pub struct Keymap {
     cell: HashMap<KeyBinding, Vec<Command>>,
     sql: HashMap<KeyBinding, Vec<Command>>,
     vcs: HashMap<KeyBinding, Vec<Command>>,
+    conflict: HashMap<KeyBinding, Vec<Command>>,
+    conflict_edit: HashMap<KeyBinding, Vec<Command>>,
 }
 
 impl Keymap {
@@ -150,6 +158,8 @@ impl Keymap {
         let mut sql: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut commit: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
         let mut vcs: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        let mut conflict: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
+        let mut conflict_edit: HashMap<KeyBinding, Vec<Command>> = HashMap::new();
 
         // Helper macro to insert into both maps
         macro_rules! both {
@@ -450,7 +460,51 @@ impl Keymap {
         vcs.insert(KeyBinding::char('J'), vec![Command::PageDown]);
         vcs.insert(KeyBinding::char('K'), vec![Command::PageUp]);
 
-        Self { normal, select, notebook, table, cell, sql, commit, vcs }
+        // --- merge-conflict resolver overrides ---
+        //
+        // Space is the switch, as it is in the staging view and the branch
+        // picker: each side of a hunk is a thing that is either in the next
+        // version of the file or not, and Space is this editor's word for
+        // that.  Four resolutions and a reordering out of one key, with no
+        // menu to read.
+        conflict.insert(KeyBinding::char(' '), vec![Command::ConflictTakeSide]);
+        // `a`/`b` name the two sides, and their capitals do the same to every
+        // conflict still unanswered — the "the rest are all mine" gesture that
+        // is most of the work in a big mechanical conflict.
+        conflict.insert(KeyBinding::char('a'), vec![Command::ConflictTakeLeft]);
+        conflict.insert(KeyBinding::char('b'), vec![Command::ConflictTakeRight]);
+        conflict.insert(KeyBinding::char('A'), vec![Command::ConflictTakeLeftAll]);
+        conflict.insert(KeyBinding::char('B'), vec![Command::ConflictTakeRightAll]);
+        // `n`/`N` tour what is *left*; `j`/`k` (inherited) read the file.  Two
+        // questions, two keys — an `n` that stopped on settled hunks would be
+        // the wrong tour in a file with forty conflicts and two outstanding.
+        conflict.insert(KeyBinding::char('n'), vec![Command::ConflictNextHunk]);
+        conflict.insert(KeyBinding::char('N'), vec![Command::ConflictPrevHunk]);
+        conflict.insert(KeyBinding::char(']'), vec![Command::ConflictNextFile]);
+        conflict.insert(KeyBinding::char('['), vec![Command::ConflictPrevFile]);
+        // `3` for the third pane: the common ancestor, which answers "who
+        // changed what" and is off by default because it costs a third of the
+        // width on every conflict.
+        conflict.insert(KeyBinding::char('3'), vec![Command::ConflictToggleBase]);
+        // `e` is the escape hatch for a section that needs merging rather than
+        // choosing.
+        conflict.insert(KeyBinding::char('e'), vec![Command::ConflictEditHunk]);
+        conflict.insert(KeyBinding::char('d'), vec![Command::ConflictDiff]);
+        conflict.insert(KeyBinding::char('r'), vec![Command::ConflictRefresh]);
+        conflict.insert(KeyBinding::char('?'), vec![Command::ConflictHelp]);
+        // Enter writes.  The one key here that touches the disk, and the same
+        // "act on what is in front of you" Enter means in the graph.
+        conflict.insert(KeyBinding::key(KeyCode::Enter), vec![Command::ConflictWriteFile]);
+        conflict.insert(KeyBinding::char('q'), vec![Command::ConflictClose]);
+
+        // --- hand-edited conflict section ---
+        //
+        // An ordinary text buffer with one key overridden, like a `*cell …*`
+        // buffer: `q` takes the edited text back to the resolver as that
+        // section's answer.
+        conflict_edit.insert(KeyBinding::char('q'), vec![Command::BufferClose]);
+
+        Self { normal, select, notebook, table, cell, sql, commit, vcs, conflict, conflict_edit }
     }
 
     /// Look `kb` up in exactly one layer.
@@ -464,6 +518,8 @@ impl Keymap {
             Layer::Sql => &self.sql,
             Layer::Commit => &self.commit,
             Layer::Vcs => &self.vcs,
+            Layer::Conflict => &self.conflict,
+            Layer::ConflictEdit => &self.conflict_edit,
         };
         map.get(kb).map(Vec::as_slice)
     }

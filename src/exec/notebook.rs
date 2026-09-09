@@ -204,6 +204,7 @@ pub fn stash_current_notebook(app: &mut App) {
     notebook_lsp_close(app);
     let _ = crate::kitty::clear_images();
     app.graphics.image_ids.clear();
+    app.graphics.last_placed.clear();
     if let Some((nb, state)) = app.notebook.take() {
         let key = crate::source::SourceId::of(&nb.path);
         app.stashes.put(key, crate::stash::Stash::Notebook(Box::new((nb, state))));
@@ -422,6 +423,7 @@ pub(super) fn pump_execution_queue(app: &mut App) -> bool {
     // Old output image Arcs were just freed; drop their Kitty cache entries so
     // freshly-streamed images upload cleanly.
     app.graphics.image_ids.clear();
+    app.graphics.last_placed.clear();
     true
 }
 
@@ -512,7 +514,11 @@ pub(super) fn clear_outputs(app: &mut App) {
                         app.graphics.image_ids.remove(&ptr_key)
                     })
                     .collect();
+                // The catch-all `a=d` in `delete_images` takes down every
+                // placement, not just these — so nothing may be assumed still
+                // on screen.
                 let _ = crate::kitty::delete_images(&ids);
+                app.graphics.last_placed.clear();
             }
             nb.cells[idx].outputs.clear();
             nb.modified = true;
@@ -560,6 +566,7 @@ pub(super) fn delete_cell(app: &mut App) {
     }
     let _ = crate::kitty::clear_images();
     app.graphics.image_ids.clear();
+    app.graphics.last_placed.clear();
     after_structural_edit(app);
     if let Some(idx) = deleted {
         app.messages.show(format!("Deleted cell [{}] — :notebook-undo-structural to restore", idx + 1));
@@ -1172,6 +1179,7 @@ pub fn process_kernel_events(app: &mut App) -> bool {
     }
     if refresh_images {
         app.graphics.image_ids.clear();
+        app.graphics.last_placed.clear();
     }
     // The kernel may have just become idle (Ready/Done) — start the next
     // queued cell. Its "Running cell [N]…" takes over the minibuffer.

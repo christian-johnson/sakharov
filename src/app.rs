@@ -305,6 +305,15 @@ pub const CELL_BUFFER_PREFIX: &str = "*cell ";
 /// Prefix of the buffer a commit's diff is read in (`*commit 7e5120c*`).
 pub const COMMIT_BUFFER_PREFIX: &str = "*commit ";
 
+/// The merge-conflict resolver's virtual identity.  Like the graph's, it has
+/// no file behind it: the resolver is a view onto git's index, and the
+/// conflicted files it writes are opened by git, not by the editor.
+pub const CONFLICT_BUFFER: &str = "*conflicts*";
+/// Prefix of the buffer one conflicted section is hand-edited in
+/// (`*conflict 2 src/app.rs*`).  What is in it on the way out becomes that
+/// section's resolution.
+pub const CONFLICT_EDIT_PREFIX: &str = "*conflict ";
+
 /// Terminal-graphics (Kitty/WezTerm) image state.
 pub struct GraphicsState {
     /// Which terminal graphics backend is available (Kitty, WezTerm, or none).
@@ -325,6 +334,14 @@ pub struct GraphicsState {
     pub image_ids: std::collections::HashMap<usize, u32>,
     /// Counter for assigning unique Kitty image IDs (wraps at u32::MAX).
     pub next_id: u32,
+    /// What the terminal is currently showing, as `(image pointer, geometry)`
+    /// per placement.  A frame whose images are identical to this needs no
+    /// protocol traffic at all: re-issuing `a=d` plus one placement per image
+    /// makes the terminal rescale every raster again, which is why a notebook
+    /// full of figures got slower to page through the more figures it held.
+    /// Cleared alongside `image_ids` wherever the pixel data behind a
+    /// placement changes.
+    pub last_placed: Vec<PlacementKey>,
     /// Terminal size at the last frame images were uploaded.  Used to detect
     /// resizes that invalidate Kitty's pixel cache.
     pub last_size: (u16, u16),
@@ -334,6 +351,11 @@ pub struct GraphicsState {
     pub cell_pixel_size: Option<(u16, u16)>,
 }
 
+/// One placement as the terminal currently holds it: which image, where, how
+/// big, and which source band of it.  Compared to decide whether a frame has to
+/// touch the graphics protocol at all.
+pub type PlacementKey = (usize, u16, u16, u16, u16, Option<(u32, u32)>);
+
 impl Default for GraphicsState {
     fn default() -> Self {
         Self {
@@ -342,6 +364,7 @@ impl Default for GraphicsState {
             placed: false,
             image_ids: std::collections::HashMap::new(),
             next_id: 1,
+            last_placed: Vec::new(),
             last_size: (0, 0),
             cell_pixel_size: None,
         }
@@ -360,6 +383,36 @@ pub struct CompletionState {
     /// `completionItem/resolve` reply (for the `K` doc panel). At most one
     /// resolve is in flight; the reply fills this item's documentation.
     pub pending_resolve: Option<usize>,
+    /// Char index the in-flight completion request was made at.
+    ///
+    /// A reply that arrives after the cursor has left that word is about the
+    /// *previous* argument, and opening it hands the next keystrokes a list
+    /// that cannot match — which then dismisses on "no matches" and suppresses
+    /// every further request for that word, so typing `cm` after
+    /// `plt.imshow(x, ` produced no popup at all.
+    pub requested_at: Option<usize>,
+    /// A `gk` documentation request that `textDocument/hover` answered with
+    /// nothing, now being retried through the completion path.  See
+    /// [`HoverFallback`].
+    pub hover_fallback: Option<HoverFallback>,
+}
+
+/// Where a `gk` request is, once hover has come back empty.
+///
+/// pylsp's hover only answers when jedi's inferred definition's *name* is
+/// exactly the word under the cursor, so an attribute whose definition is
+/// named something else (`os.path` → `posixpath`) hovers as nothing at all —
+/// while the very same symbol, asked for as a completion, resolves to a full
+/// docstring.  That is the gap the user sees between `K` in the completion
+/// popup and `gk` on the same identifier, so `gk` asks the second way when the
+/// first says nothing.
+#[derive(Debug, Clone)]
+pub enum HoverFallback {
+    /// A `textDocument/completion` is in flight; `word` is the label to match
+    /// in the result.
+    Completion { word: String },
+    /// The matching item is being enriched by `completionItem/resolve`.
+    Resolve { word: String, detail: Option<String> },
 }
 
 /// `gw` label-jump transient state.
@@ -455,6 +508,23 @@ pub struct App {
     /// back.  Starts from `[vcs] orientation` and is moved by `:vc-flip` and
     /// the branch picker, which say which config key makes them permanent.
     pub vcs_options: crate::vcs::layout::Options,
+    /// The open merge-conflict resolver, when that view owns the screen.
+    pub conflict: Option<crate::conflict::state::ConflictState>,
+    /// An in-flight read of the conflicted index.
+    pub conflict_pending: Option<crate::conflict::load::ConflictLoad>,
+    /// A conflicted file the resolver should land on once its read finishes.
+    ///
+    /// Needed because the read is asynchronous: picking a file out of the
+    /// staging view knows *which* file a frame before there is a snapshot to
+    /// find it in, and dropping that would land the user on whichever file
+    /// happened to be first.
+    pub conflict_want: Option<String>,
+    /// While a `*conflict …*` buffer is open, which `(file, hunk)` the text in
+    /// it is the answer to.  Kept on `App` rather than in the buffer's name
+    /// because the resolver is torn down while the edit buffer is on screen,
+    /// and a `(usize, usize)` parsed back out of a display string is a parser
+    /// nobody should have to write.
+    pub conflict_edit: Option<(usize, usize)>,
     /// Directory a bare filename in a `:sql` query resolves against.
     ///
     /// Captured when the SQL buffer is opened, because switching into it makes
@@ -535,6 +605,12 @@ pub struct App {
     /// Active call signature shown in the minibuffer while typing arguments in
     /// Insert mode (from `textDocument/signatureHelp`). `None` when not in a call.
     pub signature_help: Option<String>,
+    /// The keyword-argument names of that same call, merged into the completion
+    /// popup as `name=` items.  The server answers signature help for calls its
+    /// *completion* pass does not always resolve, so the argument list already
+    /// on screen in the minibuffer is the more reliable source for them.
+    /// Cleared with `signature_help`.
+    pub signature_params: Vec<String>,
     /// When the last signature-help request was sent (throttle anchor).
     pub sig_help_last: Option<std::time::Instant>,
     /// A signature-help refresh arrived inside the throttle window and was
@@ -582,7 +658,9 @@ impl App {
             !(self.vcs.is_some() && (self.table.is_some() || self.notebook.is_some())),
             "the version-control graph must never share the screen with another view"
         );
-        if self.vcs.is_some() || self.vcs_pending.is_some() {
+        if self.conflict.is_some() || self.conflict_pending.is_some() {
+            View::Conflict
+        } else if self.vcs.is_some() || self.vcs_pending.is_some() {
             View::Vcs
         } else if self.table.is_some() {
             View::Table
@@ -607,6 +685,7 @@ impl App {
             // The graph has no file behind it, so it is known by its name —
             // which is what keeps it in the buffer list and reachable by H/L.
             View::Vcs => Some(SourceId::virtual_named(VCS_BUFFER)),
+            View::Conflict => Some(SourceId::virtual_named(CONFLICT_BUFFER)),
             View::Table => self.table.as_ref().map(|s| s.id.clone()),
             View::Notebook => self.notebook.as_ref().map(|(nb, _)| SourceId::of(&nb.path)),
             View::Text => self.buffer.path.as_deref().map(SourceId::of),
@@ -646,6 +725,16 @@ impl App {
     pub fn in_commit_buffer(&self) -> bool {
         self.current_source_id()
             .is_some_and(|id| id.is_virtual_kind(COMMIT_BUFFER_PREFIX))
+    }
+
+    /// True while one conflicted section is being edited by hand.
+    ///
+    /// The view is [`View::Text`] — it really is an ordinary buffer, which is
+    /// the point of the escape hatch — so this is what selects the keymap
+    /// layer whose `q` takes the text back to the resolver.
+    pub fn in_conflict_edit_buffer(&self) -> bool {
+        self.current_source_id()
+            .is_some_and(|id| id.is_virtual_kind(CONFLICT_EDIT_PREFIX))
     }
 
     /// True while the `*git output*` buffer — a streaming git command's
@@ -808,6 +897,10 @@ impl App {
             table_cell_origin: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
             vcs: None,
+            conflict: None,
+            conflict_pending: None,
+            conflict_want: None,
+            conflict_edit: None,
             vcs_pending: None,
             vcs_job: None,
             vcs_stream: None,
@@ -838,6 +931,7 @@ impl App {
             pending_format_save: false,
             completion: CompletionState::default(),
             signature_help: None,
+            signature_params: Vec::new(),
             sig_help_last: None,
             sig_help_deferred: false,
             stashes: crate::stash::Stashes::default(),
@@ -1114,6 +1208,7 @@ fn run_loop(
         needs_redraw |= crate::exec::poll_export(app);
         needs_redraw |= crate::exec::poll_table_load(app);
         needs_redraw |= crate::exec::vcs::poll(app);
+        needs_redraw |= crate::exec::conflict::poll(app);
 
         // Advance the status-bar spinner.  It's "active" whenever a notebook
         // cell is executing or queued, the kernel is booting, an LSP request
@@ -1204,6 +1299,10 @@ fn draw_frame(
         if app.needs_clear {
             app.needs_clear = false;
             let _ = terminal.clear();
+            // An external program may have taken the screen — and with it any
+            // Kitty placements — so the next flush must re-place rather than
+            // recognise its own bookkeeping and skip.
+            app.graphics.last_placed.clear();
         }
 
         // Where the view drew its text cursor, when it draws images and needs it
@@ -1261,6 +1360,23 @@ fn draw_frame(
                         if let Some(chrome) = crate::view::Chrome::split(f.area()) {
                             if let Some(state) = app.vcs.as_ref() {
                                 crate::vcs_ui::render(f, chrome.content, state);
+                            }
+                            ui::render_chrome(f, app, &chrome);
+                        }
+                        if let Some(ref popup) = app.popup {
+                            crate::popup_ui::render(f, popup, None, &app.config.ui);
+                        }
+                    })?;
+                }
+
+                // The merge-conflict resolver.  No text cursor: the cursor is
+                // the focused pane of the focused hunk, drawn by the renderer.
+                View::Conflict => {
+                    terminal.draw(|f| {
+                        crate::theme::fill_background(f);
+                        if let Some(chrome) = crate::view::Chrome::split(f.area()) {
+                            if let Some(state) = app.conflict.as_ref() {
+                                crate::conflict_ui::render(f, chrome.content, state);
                             }
                             ui::render_chrome(f, app, &chrome);
                         }
@@ -1382,19 +1498,48 @@ fn flush_images(app: &mut App, cursor: Option<(u16, u16)>) {
     let cur_size = (app.viewport_width as u16, app.viewport_height as u16);
     if cur_size != app.graphics.last_size {
         app.graphics.image_ids.clear();
+        app.graphics.last_placed.clear();
         app.graphics.last_size = cur_size;
+    }
+
+    let images = std::mem::take(&mut app.graphics.pending);
+    // A popup owns the screen, and a raster is painted over whatever ratatui
+    // drew — so while one is up the images come down and stay down.
+    let images = if app.popup.is_some() { Vec::new() } else { images };
+
+    // What this frame wants on screen.  A frame that wants exactly what is
+    // already there does nothing: the alternative is `a=d` plus one placement
+    // per image on every keystroke, which makes the terminal rescale every
+    // figure again — the cost the user feels as lag in a notebook full of
+    // plots, and it grows with each one.
+    let want: Vec<PlacementKey> = images
+        .iter()
+        .map(|req| {
+            (
+                std::sync::Arc::as_ptr(&req.png_data) as usize,
+                req.col,
+                req.row,
+                req.rows,
+                req.cols,
+                req.crop,
+            )
+        })
+        .collect();
+    if want == app.graphics.last_placed {
+        restore_cursor(cursor);
+        return;
     }
 
     // Clear last frame's placements so images that scrolled off screen, were
     // replaced, or belong to a view we have since left disappear.  Keyed on
     // `placed` rather than on `image_ids` so a command that empties the ID
     // cache (`:clear-outputs`) still gets its placements taken down.
-    if app.graphics.placed || !app.graphics.pending.is_empty() {
+    if app.graphics.placed || !images.is_empty() {
         let _ = kitty::clear_images();
     }
 
-    let images = std::mem::take(&mut app.graphics.pending);
-    if images.is_empty() || app.popup.is_some() {
+    app.graphics.last_placed = want;
+    if images.is_empty() {
         app.graphics.placed = false;
         return;
     }
@@ -1414,9 +1559,13 @@ fn flush_images(app: &mut App, cursor: Option<(u16, u16)>) {
     }
     app.graphics.placed = true;
 
-    // Put the cursor back where the view drew it.  (`None` when the view has no
-    // visible cursor — a rendered markdown cell, the grid — in which case
-    // ratatui already hid it.)
+    restore_cursor(cursor);
+}
+
+/// Put the cursor back where the view drew it.  (`None` when the view has no
+/// visible cursor — a rendered markdown cell, the grid — in which case ratatui
+/// already hid it.)
+fn restore_cursor(cursor: Option<(u16, u16)>) {
     if let Some((cx, cy)) = cursor {
         use std::io::Write;
         let mut out = io::stdout();

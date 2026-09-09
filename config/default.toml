@@ -97,6 +97,7 @@ const  = "# const"
 impl   = "⊕ impl"
 method = "m mth"
 var    = "= var"
+param  = ": arg"
 
 # ─── Status line (modeline) ──────────────────────────────────────────────────
 #

@@ -55,6 +55,10 @@ pub enum View {
     /// The version-control graph (see [`crate::vcs`]): commits as blocks,
     /// parent links as arrows, rearranged by direct manipulation.
     Vcs,
+    /// The merge-conflict resolver (see [`crate::conflict`]): the two
+    /// competing versions of a conflicted file side by side, labelled with
+    /// whose work each one is.
+    Conflict,
 }
 
 impl View {
@@ -69,7 +73,7 @@ impl View {
     pub fn has_text_buffer(self) -> bool {
         match self {
             View::Text | View::Notebook => true,
-            View::Table | View::Vcs => false,
+            View::Table | View::Vcs | View::Conflict => false,
         }
     }
 }

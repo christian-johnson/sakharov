@@ -147,7 +147,12 @@ pub enum LspEvent {
     HoverResult { content: String },
     /// Signature-help response — call-argument hint for the minibuffer.
     /// `None` when the cursor is not inside a call the server recognises.
-    SignatureHelpResult { signature: Option<String> },
+    SignatureHelpResult {
+        signature: Option<String>,
+        /// Keyword-argument names of the active call, in declaration order —
+        /// what `name=` completions inside the parens are built from.
+        params: Vec<String>,
+    },
     /// Definition / type-definition / implementation response.
     DefinitionResult { location: Option<LspLocation> },
     /// References response — may be multiple locations.
@@ -1173,9 +1178,11 @@ fn process_message(
                     Some(LspEvent::HoverResult { content })
                 }
                 PendingKind::SignatureHelp => {
-                    Some(LspEvent::SignatureHelpResult {
-                        signature: parse_signature_help(&result),
-                    })
+                    let (signature, params) = match parse_signature_help(&result) {
+                        Some((label, params)) => (Some(label), params),
+                        None => (None, Vec::new()),
+                    };
+                    Some(LspEvent::SignatureHelpResult { signature, params })
                 }
                 PendingKind::Definition
                 | PendingKind::TypeDefinition
@@ -1303,7 +1310,63 @@ fn parse_documentation(item: &Value) -> Option<String> {
 /// Extract the active signature's label from a `textDocument/signatureHelp`
 /// result, with the active parameter marked. Returns `None` when the cursor is
 /// not inside a recognised call.
-fn parse_signature_help(val: &Value) -> Option<String> {
+/// The text of one `parameters[]` entry: either a literal string, or an
+/// `[start, end]` range into the signature's own label.
+fn parameter_text(param: &Value, label: &str) -> Option<String> {
+    if let Some(s) = param.get("label").and_then(|l| l.as_str()) {
+        return Some(s.to_owned());
+    }
+    let range = param.get("label")?.as_array()?;
+    let s = range.first()?.as_u64()? as usize;
+    let e = range.get(1)?.as_u64()? as usize;
+    // Range is in UTF-16 code units; for ASCII signatures that is byte offsets.
+    if s <= e && e <= label.len() && label.is_char_boundary(s) && label.is_char_boundary(e) {
+        Some(label[s..e].to_owned())
+    } else {
+        None
+    }
+}
+
+/// The names this signature's arguments can be passed by, from its parameter
+/// list: everything up to a `:` annotation or `=` default, minus what cannot
+/// take a keyword — `*`/`**` forms, and anything before a `/` marker.
+///
+/// This is what makes `cmap` completable inside `plt.imshow(x, cm`: the server
+/// answers signature help for the call whether or not its *completion* pass
+/// resolves the same name, so the argument list is the more reliable source.
+fn signature_param_names(sig: &Value, label: &str) -> Vec<String> {
+    let Some(params) = sig.get("parameters").and_then(|p| p.as_array()) else {
+        return Vec::new();
+    };
+    let texts: Vec<String> = params
+        .iter()
+        .filter_map(|p| parameter_text(p, label))
+        .collect();
+    // Everything left of a `/` is positional-only and has no keyword form.
+    let first = texts.iter().position(|t| t.trim() == "/").map_or(0, |i| i + 1);
+    texts[first.min(texts.len())..]
+        .iter()
+        .filter_map(|t| {
+            let name = t
+                .split([':', '='])
+                .next()
+                .unwrap_or("")
+                .trim();
+            let mut chars = name.chars();
+            let head_ok = chars
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_');
+            let rest_ok = chars.all(|c| c.is_alphanumeric() || c == '_');
+            // `self`/`cls` are bound away; `*args`/`**kwargs`/`*` fail head_ok.
+            (head_ok && rest_ok && name != "self" && name != "cls")
+                .then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// The active signature's label (with the current argument marked) and the
+/// names its arguments can be passed by.
+fn parse_signature_help(val: &Value) -> Option<(String, Vec<String>)> {
     let signatures = val.get("signatures")?.as_array()?;
     if signatures.is_empty() {
         return None;
@@ -1311,6 +1374,7 @@ fn parse_signature_help(val: &Value) -> Option<String> {
     let active_sig = val.get("activeSignature").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let sig = signatures.get(active_sig).or_else(|| signatures.first())?;
     let label = sig.get("label")?.as_str()?.to_owned();
+    let params = signature_param_names(sig, &label);
 
     // Mark the active parameter with ‹…› so the user can see which arg they're on.
     let active_param = sig
@@ -1319,8 +1383,8 @@ fn parse_signature_help(val: &Value) -> Option<String> {
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
     if let Some(pidx) = active_param {
-        if let Some(params) = sig.get("parameters").and_then(|p| p.as_array()) {
-            if let Some(param) = params.get(pidx) {
+        if let Some(entries) = sig.get("parameters").and_then(|p| p.as_array()) {
+            if let Some(param) = entries.get(pidx) {
                 // A parameter's `label` is either a string or an [start, end] range
                 // into the signature label.
                 if let Some(plabel) = param.get("label").and_then(|l| l.as_str()) {
@@ -1331,7 +1395,7 @@ fn parse_signature_help(val: &Value) -> Option<String> {
                         marked.push_str(plabel);
                         marked.push('›');
                         marked.push_str(&label[pos + plabel.len()..]);
-                        return Some(marked);
+                        return Some((marked, params));
                     }
                 } else if let Some(range) = param.get("label").and_then(|l| l.as_array()) {
                     if let (Some(s), Some(e)) = (
@@ -1347,14 +1411,14 @@ fn parse_signature_help(val: &Value) -> Option<String> {
                             marked.push_str(&label[s..e]);
                             marked.push('›');
                             marked.push_str(&label[e..]);
-                            return Some(marked);
+                            return Some((marked, params));
                         }
                     }
                 }
             }
         }
     }
-    Some(label)
+    Some((label, params))
 }
 
 fn parse_hover_result(val: &Value) -> Option<String> {
@@ -1725,7 +1789,9 @@ mod tests {
             "activeSignature": 0,
             "activeParameter": 0,
         });
-        assert_eq!(parse_signature_help(&resp).as_deref(), Some("randn(‹d0›, d1, ...)"));
+        let (label, params) = parse_signature_help(&resp).expect("a signature");
+        assert_eq!(label, "randn(‹d0›, d1, ...)");
+        assert_eq!(params, vec!["d0".to_string(), "d1".to_string()]);
     }
 
     #[test]
@@ -1739,7 +1805,31 @@ mod tests {
             "activeSignature": 0,
             "activeParameter": 1,
         });
-        assert_eq!(parse_signature_help(&resp).as_deref(), Some("f(a, ‹b›)"));
+        let (label, params) = parse_signature_help(&resp).expect("a signature");
+        assert_eq!(label, "f(a, ‹b›)");
+        assert_eq!(params, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// Which of a signature's parameters can be passed by name — the source of
+    /// the `name=` completions offered inside a call.  Everything before a `/`
+    /// is positional-only, and a `*`/`**` form has no keyword spelling at all,
+    /// so offering any of them would complete to something that will not run.
+    #[test]
+    fn only_the_arguments_that_take_a_keyword_are_offered() {
+        let resp = json!({
+            "signatures": [{
+                "label": "imshow(X, /, *args, cmap: str | None = None, **kwargs)",
+                "parameters": [
+                    { "label": "X" },
+                    { "label": "/" },
+                    { "label": "*args" },
+                    { "label": "cmap: str | None = None" },
+                    { "label": "**kwargs" },
+                ],
+            }],
+        });
+        let (_, params) = parse_signature_help(&resp).expect("a signature");
+        assert_eq!(params, vec!["cmap".to_string()]);
     }
 
     #[test]
@@ -1751,6 +1841,8 @@ mod tests {
     #[test]
     fn signature_help_without_active_param_returns_bare_label() {
         let resp = json!({ "signatures": [{ "label": "g()" }] });
-        assert_eq!(parse_signature_help(&resp).as_deref(), Some("g()"));
+        let (label, params) = parse_signature_help(&resp).expect("a signature");
+        assert_eq!(label, "g()");
+        assert!(params.is_empty());
     }
 }
