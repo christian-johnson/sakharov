@@ -210,7 +210,7 @@ impl DuckDbSource {
             label: label.into(),
             fetches: std::cell::Cell::new(0),
         };
-        source.fetch(0)?;
+        source.fetch(0..0)?;
         Ok(source)
     }
 
@@ -231,9 +231,11 @@ impl DuckDbSource {
         Self::query(conn, sql, label)
     }
 
-    /// Fetch the window containing `first`.
-    fn fetch(&mut self, first: usize) -> Result<()> {
-        let start = first - (first % WINDOW);
+    /// Fetch a window covering `rows`, centred on them so a scroll either way
+    /// stays inside it.  Aligning to multiples of `WINDOW` instead left any
+    /// screen that straddled a boundary half blank and refetching every frame.
+    fn fetch(&mut self, rows: Range<usize>) -> Result<()> {
+        let start = rows.start.saturating_sub(WINDOW.saturating_sub(rows.len()) / 2);
         // `COLUMNS(*)` applies the cast to every column *positionally*, which is
         // what a query like `SELECT a, a` needs — naming the columns in the
         // projection would read the first one twice.  Casting to VARCHAR gives
@@ -329,7 +331,7 @@ impl TableSource for DuckDbSource {
         // A failed refetch leaves the previous window in place: better a stale
         // screenful than an empty grid, and the error is already surfaced by the
         // load path.
-        let _ = self.fetch(rows.start);
+        let _ = self.fetch(rows);
     }
 
     /// The point of this backend: only the window on screen is ever in memory.
@@ -558,6 +560,23 @@ mod tests {
         src.ensure_rows(4991..5000);
         src.ensure_rows(4990..4999);
         assert_eq!(src.fetch_count(), fetches, "no refetch for a covered window");
+    }
+
+    #[test]
+    fn a_screen_straddling_a_window_boundary_is_fetched_whole_and_once() {
+        // Rows 480..520 cross the 500-row mark.  A window aligned to multiples
+        // of its size covered 0..500, left the bottom of the screen blank, and
+        // refetched on every frame because the request was never covered.
+        let mut src = DuckDbSource::query(mem(), "SELECT i FROM range(0, 5000) t(i)", "range")
+            .unwrap();
+
+        src.ensure_rows(480..520);
+        let fetches = src.fetch_count();
+        src.ensure_rows(480..520);
+
+        assert_eq!(src.cell(480, 0), Some("480"));
+        assert_eq!(src.cell(519, 0), Some("519"));
+        assert_eq!(src.fetch_count(), fetches, "a covered screen must not refetch");
     }
 
     #[test]
