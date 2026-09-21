@@ -297,6 +297,10 @@ impl Keymap {
         // z → enter fold sub-mode
         normal.insert(KeyBinding::char('z'), vec![Command::EnterFoldMode]);
 
+        // m → enter match sub-mode (text objects, matching bracket), in both
+        // Normal and Select: `miw` from a selection replaces it with the word.
+        both!(KeyBinding::char('m'), Command::EnterMatchMode);
+
         // K → lsp-show-documentation (kept for muscle memory; gk is the canonical binding)
         normal.insert(KeyBinding::char('K'), vec![Command::LspShowDocumentation]);
 

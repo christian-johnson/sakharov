@@ -39,6 +39,7 @@ src/
                       table, sql, attach, bridge, export, format, vcs, conflict)
   buffer.rs           rope buffer, undo/redo, atomic file I/O
   motion.rs, indent.rs, fold.rs, jump.rs, selection.rs, mode.rs
+  textobject.rs       `mi`/`mo` text objects (pure: rope + cursor -> char range)
   highlight.rs        tree-sitter highlighting; markdown.rs + sql_highlight.rs are
                       hand-written highlighters producing the same spans
   theme.rs            all renderer colours (theme::active()); config/themes/*.toml

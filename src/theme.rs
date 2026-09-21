@@ -1026,7 +1026,7 @@ pub fn mode_color(mode: &Mode) -> Color {
         Mode::Insert => m.insert,
         Mode::Select => m.select,
         Mode::Command | Mode::Prompt { .. } => m.command,
-        Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. } => m.goto,
+        Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. } | Mode::Match { .. } => m.goto,
         Mode::Jump { .. } => m.jump,
         Mode::Fold => m.fold,
     }

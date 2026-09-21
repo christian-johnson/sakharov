@@ -39,6 +39,8 @@ These commands enter a sub-mode that awaits a second key.
 | Command | Default Key | Description |
 |---------|-------------|-------------|
 | `enter-goto-mode` | `g` | Enter Goto mode; press `g` again to go to file start |
+| `enter-match-mode` | `m` | Enter Match mode; `i`/`o` then an object key selects it (see [Text objects](#text-objects-m)) |
+| `match-bracket` | `mm` | Jump to the bracket matching the one at (or enclosing) the cursor |
 | `enter-jump-mode` | `gw` (via Goto mode) | Overlay 2-char labels on visible word starts; type label to jump |
 | `find-char-forward` | `f` | Enter Find mode; next char moves cursor to that char forward |
 | `till-char-forward` | `t` | Enter Till mode; next char moves cursor before that char forward |
@@ -231,6 +233,55 @@ When you reopen a file (or the editor itself) and a recovery file exists whose
 contents differ from what's on disk, sakharov prompts you to **Restore** the
 unsaved contents or **Discard** them. Disable the whole feature by setting
 `editor.crash_recovery = false` in `config.toml`.
+
+## Text objects (`m`)
+
+Press `m` in Normal or Select mode, then `i` (inside) or `o` (outside, i.e.
+delimiters included), then an object key. Both steps show a which-key popup, and
+the selection lands the editor in Select mode, so the operator you press next
+(`d`, `c`, `y`, `>`) acts on the object: `miw` then `d` deletes the word,
+`mo"d` deletes a string with its quotes.
+
+| Command | Default Key | Description |
+|---------|-------------|-------------|
+| `enter-match-mode` | `m` | Enter Match mode (shows the key hint popup) |
+| `match-bracket` | `mm` | Jump to the matching bracket — or, in Select mode, extend to it |
+| `select-text-object` | `mi<obj>` / `mo<obj>` | Select the object at the cursor |
+
+Object keys, for both `mi` and `mo`:
+
+| Key | Object |
+|-----|--------|
+| `w` | Word (a run of letters, digits and `_` — or of punctuation, when the cursor is on some) |
+| `W` | WORD — everything up to the surrounding whitespace |
+| `m` | The nearest enclosing bracket pair, whichever kind it is |
+| `(` `)` `b` | Parentheses |
+| `[` `]` `r` | Square brackets |
+| `{` `}` `B` | Braces |
+| `<` `>` | Angle brackets |
+| `"` `'` `` ` `` | Quotes of that kind |
+| `p` | Paragraph — the block of lines between blank ones |
+| `f` | Function or method (tree-sitter) |
+| `c` | Class, struct, trait, `impl` or type (tree-sitter) |
+| `a` | One parameter or argument of the enclosing list (tree-sitter) |
+
+Details worth knowing:
+
+- **`i` vs `o`.** For a delimited object `o` adds the delimiters. For a word or
+  paragraph there are none, so `o` takes the whitespace after it instead — the
+  one before it when there is nothing after, so `mod` on the last argument does
+  not leave `f(a,)`.
+- **Words and quotes are line-local.** A quoted string never pairs with a quote
+  on the next line, and an escaped `\"` is a character, not a delimiter.
+- **Brackets nest.** `mo(` from inside `f(a, g(b), c)` takes the pair you are
+  actually in; on a delimiter it takes *that* pair.
+- **`mif` is the body, `mof` the whole definition.** A braced body's braces
+  belong to `mof` (or to `mo{`).
+- **`f`, `c` and `a` need a grammar**, and only appear in the popup for a buffer
+  that has one — the languages listed under [Code Folding](#code-folding-plain-text-editor),
+  minus the data formats. `mia` works in a call as well as a definition.
+- Nothing there says so: `mif` outside any function reports "No function here"
+  and leaves the cursor alone.
 
 ## Code Folding (plain-text editor)
 

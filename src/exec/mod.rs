@@ -479,6 +479,22 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
 
+        // --- Text objects (`m`) ---
+        Command::EnterMatchMode => {
+            let from_select = app.mode == Mode::Select;
+            app.mode = Mode::Match { scope: None, from_select };
+            app.popup = Some(crate::popup::Popup::which_key("m", match_prefix_hints()));
+            return;
+        }
+        Command::SelectTextObject(object, scope) => {
+            select_text_object(app, *object, *scope);
+            return;
+        }
+        Command::MatchBracket => {
+            match_bracket(app);
+            return;
+        }
+
         // --- Code folding ---
         Command::EnterFoldMode => {
             app.mode = crate::mode::Mode::Fold;
@@ -1428,6 +1444,94 @@ fn fold_hints(app: &App) -> Vec<(String, String)> {
     hints
 }
 
+/// The `m` sub-mode's first key.  Kept beside the object list because the two
+/// popups are one gesture, and pinned by `match_hints_only_advertise_real_keys`.
+fn match_prefix_hints() -> Vec<(String, String)> {
+    MATCH_PREFIX_KEYS
+        .iter()
+        .map(|(k, d)| ((*k).to_string(), (*d).to_string()))
+        .collect()
+}
+
+/// Every key `handle_match` answers before a scope is chosen.
+const MATCH_PREFIX_KEYS: &[(&str, &str)] = &[
+    ("i", "select inside an object"),
+    ("o", "select outside an object, delimiters included"),
+    ("m", "jump to the matching bracket"),
+];
+
+/// The object keys, labelled.  Only the objects this buffer can actually
+/// produce: `mif` in a plain text file would have nothing to parse.
+pub(crate) fn match_object_hints(app: &App) -> Vec<(String, String)> {
+    use crate::textobject::TextObject;
+    let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
+    let mut hints = vec![
+        hint("w", "word"),
+        hint("W", "WORD, to the whitespace"),
+        hint("m", "nearest bracket pair"),
+        hint("(", "parentheses  [b, )]"),
+        hint("[", "brackets  [r, ]]"),
+        hint("{", "braces  [B, }]"),
+        hint("<", "angle brackets  [>]"),
+        hint("\"", "double quotes"),
+        hint("'", "single quotes"),
+        hint("`", "backticks"),
+        hint("p", "paragraph"),
+    ];
+    let language = app.highlighter.language;
+    for (key, label, object) in [
+        ("f", "function  [syntax]", TextObject::Function),
+        ("c", "class or type  [syntax]", TextObject::Class),
+        ("a", "parameter or argument  [syntax]", TextObject::Parameter),
+    ] {
+        if crate::textobject::available(language, object) {
+            hints.push(hint(key, label));
+        }
+    }
+    hints
+}
+
+/// Select the object at the cursor, leaving the editor in Select mode so the
+/// usual operators (`d`, `y`, `c`) act on it.
+fn select_text_object(
+    app: &mut App,
+    object: crate::textobject::TextObject,
+    scope: crate::textobject::Scope,
+) {
+    let language = app.highlighter.language;
+    if !crate::textobject::available(language, object) {
+        app.messages.show(format!(
+            "No {} object here — this buffer has no syntax tree",
+            object.describe()
+        ));
+        return;
+    }
+    match crate::textobject::range(&app.buffer.rope, language, app.selection.head, object, scope) {
+        Some((start, end)) => {
+            app.selection = crate::selection::Selection::new(start, end);
+            app.mode = Mode::Select;
+            update_scroll(app);
+        }
+        None => app.messages.show(format!("No {} here", object.describe())),
+    }
+}
+
+/// `mm`: to the other half of the pair at (or around) the cursor, extending the
+/// selection when one is being made.
+fn match_bracket(app: &mut App) {
+    match crate::textobject::matching_bracket(&app.buffer.rope, app.selection.head) {
+        Some(pos) => {
+            app.selection = if app.mode == Mode::Select {
+                crate::selection::Selection::new(app.selection.anchor, pos)
+            } else {
+                crate::selection::Selection::point(pos)
+            };
+            update_scroll(app);
+        }
+        None => app.messages.show("No matching bracket here"),
+    }
+}
+
 /// Fold (or unfold) every block of the same kind, depth and key as the one the
 /// cursor is in — the "collapse all the records that look like this" operation.
 fn fold_by_type(app: &mut App, close: bool) {
@@ -1726,6 +1830,145 @@ mod tests {
         let after = crate::ui::cursor_screen_pos(&app, area).expect("cursor on screen");
         assert_eq!(after.1, before.1 + 1, "one row down");
         assert_eq!(after.0, before.0, "same column");
+    }
+
+    // --- Text objects (`m`) ---------------------------------------------
+
+    fn app_with_source(src: &str, name: &str) -> App {
+        let mut app = App::new(None, Config::load()).unwrap();
+        app.viewport_height = 40;
+        app.viewport_width = 80;
+        app.buffer.rope = Rope::from_str(src);
+        app.highlighter = crate::highlight::Highlighter::new(Some(std::path::Path::new(name)));
+        app
+    }
+
+    fn press(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            crate::input::handle_key(
+                app,
+                crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char(c)),
+            );
+        }
+    }
+
+    fn selected(app: &App) -> String {
+        app.buffer
+            .rope
+            .slice(app.selection.start()..app.selection.end() + 1)
+            .to_string()
+    }
+
+    /// Same contract as the `g` hints: a key in the which-key popup must be a
+    /// key the handler answers, or the popup is advertising nothing.
+    #[test]
+    fn match_hints_only_advertise_real_keys() {
+        let app = app_with_source("x = f(a)\n", "t.py");
+        for (key, label) in match_object_hints(&app) {
+            let c = key.chars().next().expect("hint key is a char");
+            assert!(
+                crate::input::match_object(c).is_some(),
+                "m i{key} is advertised as {label:?} but dispatches nothing"
+            );
+        }
+        // The first key's popup is answered by `handle_match` itself rather than
+        // by a table, so the three keys it handles are pinned here.
+        let prefix: Vec<String> = match_prefix_hints().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(prefix, vec!["i", "o", "m"]);
+    }
+
+    /// A buffer with no grammar has no function object, so `mif` must not be
+    /// offered there — the hint would promise a selection that cannot happen.
+    #[test]
+    fn syntax_objects_are_only_offered_where_there_is_a_grammar() {
+        let py = app_with_source("def f():\n    pass\n", "t.py");
+        let txt = app_with_source("plain prose\n", "notes.txt");
+        for key in ["f", "c", "a"] {
+            assert!(match_object_hints(&py).iter().any(|(k, _)| k == key), "py {key}");
+            assert!(!match_object_hints(&txt).iter().any(|(k, _)| k == key), "txt {key}");
+        }
+        assert!(match_object_hints(&txt).iter().any(|(k, _)| k == "w"));
+    }
+
+    #[test]
+    fn miw_selects_the_word_and_leaves_the_editor_in_select_mode() {
+        let mut app = app_with_source("let total = 3;\n", "t.rs");
+        app.selection = Selection::point(6); // inside `total`
+        press(&mut app, "miw");
+        assert_eq!(selected(&app), "total");
+        assert_eq!(app.mode, Mode::Select);
+        assert!(app.popup.is_none(), "the which-key strip closes with the gesture");
+    }
+
+    /// The point of landing in Select mode: the operators work on the object.
+    #[test]
+    fn an_object_selection_is_what_the_next_operator_acts_on() {
+        let mut app = app_with_source("f(\"keep\", \"drop\")\n", "t.py");
+        app.selection = Selection::point(11); // inside the second string
+        press(&mut app, "mo\"d");
+        assert_eq!(app.buffer.rope.to_string(), "f(\"keep\", )\n");
+    }
+
+    #[test]
+    fn mif_and_mof_select_the_body_and_the_whole_function() {
+        let src = "class C:\n    def f(self, a):\n        return a\n";
+        let mut app = app_with_source(src, "t.py");
+        app.selection = Selection::point(src.find("return").unwrap());
+
+        press(&mut app, "mif");
+        assert_eq!(selected(&app), "return a");
+        press(&mut app, "mof");
+        assert_eq!(selected(&app), "def f(self, a):\n        return a");
+        // And the class around it is a different object.
+        press(&mut app, "moc");
+        assert_eq!(selected(&app), src.trim_end());
+    }
+
+    #[test]
+    fn mm_jumps_between_the_halves_of_the_enclosing_pair() {
+        let mut app = app_with_source("f(a, b)\n", "t.rs");
+        app.selection = Selection::point(3); // inside the call
+        press(&mut app, "mm");
+        assert_eq!(app.selection.head, 6, "to the closing paren");
+        press(&mut app, "mm");
+        assert_eq!(app.selection.head, 1, "and back to the opening one");
+    }
+
+    /// An object that isn't there says so, rather than moving the cursor
+    /// somewhere arbitrary or doing nothing at all.
+    #[test]
+    fn a_missing_object_is_reported() {
+        let mut app = app_with_source("no brackets here\n", "t.rs");
+        app.selection = Selection::point(3);
+        press(&mut app, "mim");
+        assert_eq!(app.messages.current(), Some("No bracket pair here"));
+        assert_eq!(app.selection, Selection::point(3), "the cursor stays put");
+
+        let mut app = app_with_source("prose, no syntax\n", "notes.txt");
+        press(&mut app, "mif");
+        assert!(
+            app.messages.current().unwrap_or_default().contains("no syntax tree"),
+            "a buffer with no grammar says why: {:?}",
+            app.messages.current()
+        );
+    }
+
+    /// Abandoning the gesture halfway must leave the selection alone — `m` is
+    /// reachable from Select mode, where an Esc that collapsed it would be a
+    /// data-losing surprise.
+    #[test]
+    fn escaping_a_half_typed_gesture_keeps_the_selection() {
+        let mut app = app_with_source("let total = 3;\n", "t.rs");
+        app.mode = Mode::Select;
+        app.selection = Selection::new(4, 8); // `total`, selected by hand
+        press(&mut app, "mi");
+        crate::input::handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Esc),
+        );
+        assert_eq!(app.mode, Mode::Select);
+        assert_eq!(app.selection, Selection::new(4, 8));
+        assert!(app.popup.is_none());
     }
 
     #[test]

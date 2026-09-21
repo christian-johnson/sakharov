@@ -49,6 +49,10 @@ pub enum Mode {
     Jump { extend: bool },
     /// Waiting for second key after 'z' (fold operations).
     Fold,
+    /// Waiting for the rest of a `m` text-object gesture.  `scope` is `None`
+    /// until `i` or `o` says whether the delimiters count; `from_select`
+    /// remembers that cancelling should leave the selection alone.
+    Match { scope: Option<crate::textobject::Scope>, from_select: bool },
     /// Minibuffer text prompt — typing builds a filename; Enter confirms, Esc cancels.
     Prompt { kind: PromptKind },
 }
@@ -66,6 +70,7 @@ impl Mode {
             Mode::Search { .. } => "SRC",
             Mode::Jump { .. } => "JMP",
             Mode::Fold => "FLD",
+            Mode::Match { .. } => "MCH",
             Mode::Prompt { .. } => "CMD",
         }
     }

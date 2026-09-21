@@ -41,6 +41,7 @@ mod statusline;
 mod symbols;
 mod table;
 mod table_ui;
+mod textobject;
 mod theme;
 mod ui;
 mod vcs;

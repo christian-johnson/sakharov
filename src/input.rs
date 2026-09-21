@@ -233,6 +233,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Search { forward } => handle_search(app, key, forward),
         Mode::Jump { .. } => handle_jump(app, key),
         Mode::Fold => handle_fold(app, key),
+        Mode::Match { scope, from_select } => handle_match(app, key, scope, from_select),
         Mode::Prompt { kind } => handle_prompt(app, key, kind),
     }
 
@@ -871,6 +872,83 @@ fn handle_fold(app: &mut App, key: KeyEvent) {
     if let KeyCode::Char(c) = key.code {
         if let Some(cmd) = fold_command(c) {
             exec::execute(app, &cmd);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Match mode (after 'm')
+// ---------------------------------------------------------------------------
+
+/// The object half of a `m i` / `m o` gesture, and the single source of truth
+/// for which object keys exist: [`handle_match`] runs them and
+/// `exec::match_object_hints` labels the same keys in the which-key popup (a
+/// test pins the two together, as it does for `g`).
+pub fn match_object(c: char) -> Option<crate::textobject::TextObject> {
+    use crate::textobject::TextObject as T;
+    Some(match c {
+        'w' => T::Word,
+        'W' => T::BigWord,
+        // The vim-surround aliases alongside the delimiters themselves, since
+        // `mi(` and `mib` are the same gesture for different hands.
+        '(' | ')' | 'b' => T::Brackets('(', ')'),
+        '[' | ']' | 'r' => T::Brackets('[', ']'),
+        '{' | '}' | 'B' => T::Brackets('{', '}'),
+        '<' | '>' => T::Brackets('<', '>'),
+        '"' => T::Quotes('"'),
+        '\'' => T::Quotes('\''),
+        '`' => T::Quotes('`'),
+        'm' => T::NearestPair,
+        'f' => T::Function,
+        'c' => T::Class,
+        'a' => T::Parameter,
+        'p' => T::Paragraph,
+        _ => return None,
+    })
+}
+
+/// Abandon the gesture, returning to whichever mode `m` was pressed in — an
+/// existing selection survives an `Esc` halfway through `m o`.
+fn leave_match(app: &mut App, from_select: bool) {
+    app.mode = if from_select { Mode::Select } else { Mode::Normal };
+    app.popup = None;
+}
+
+fn handle_match(
+    app: &mut App,
+    key: KeyEvent,
+    scope: Option<crate::textobject::Scope>,
+    from_select: bool,
+) {
+    use crate::textobject::Scope;
+
+    let KeyCode::Char(c) = key.code else {
+        leave_match(app, from_select);
+        return;
+    };
+    match scope {
+        // First key: which half of the gesture, or `mm` for the bracket jump.
+        None => match c {
+            'i' | 'o' => {
+                let scope = if c == 'i' { Scope::Inside } else { Scope::Outside };
+                app.mode = Mode::Match { scope: Some(scope), from_select };
+                app.popup = Some(crate::popup::Popup::which_key(
+                    if c == 'i' { "m i" } else { "m o" },
+                    exec::match_object_hints(app),
+                ));
+            }
+            'm' => {
+                leave_match(app, from_select);
+                exec::execute(app, &Command::MatchBracket);
+            }
+            _ => leave_match(app, from_select),
+        },
+        // Second key: the object itself.
+        Some(scope) => {
+            leave_match(app, from_select);
+            if let Some(object) = match_object(c) {
+                exec::execute(app, &Command::SelectTextObject(object, scope));
+            }
         }
     }
 }

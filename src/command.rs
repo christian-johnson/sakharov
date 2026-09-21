@@ -137,6 +137,8 @@ commands! {
         TillCharForward => "till-char-forward";
         TillCharBackward => "till-char-backward";
         EnterFoldMode => "enter-fold-mode", aliases: ["fold"];
+        EnterMatchMode => "enter-match-mode", aliases: ["match", "match-mode"], palette: "Select a text object — word, pair, function  [m]";
+        MatchBracket => "match-bracket", palette: "Jump to the matching bracket  [mm]";
 
         // --- Pickers / UI popups ---
         OpenCommandPalette => "open-command-palette", aliases: ["palette", "commands"], palette: "Open fuzzy-searchable command palette  [Space]";
@@ -329,6 +331,8 @@ commands! {
         VcsSetUpstream(String) => "version-control-upstream", palette: "Set the current branch's upstream  [:vc-upstream <remote/branch>]";
         // Switch to a named color theme (`:theme <name>`; bare `:theme` opens the picker).
         SwitchTheme(String) => "theme";
+        // Select the text object at the cursor (`m i w`, `m o f`, ...).
+        SelectTextObject(crate::textobject::TextObject, crate::textobject::Scope) => "select-text-object";
         // A list of commands executed in sequence (composition / scripting).
         Sequence(Vec<Command>) => "sequence";
     }

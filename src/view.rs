@@ -228,6 +228,9 @@ pub fn refusal(cmd: &Command) -> Option<Refusal> {
         | Command::OpenDiagnosticPicker
         | Command::GrepBuffer
         | Command::EnterFoldMode
+        | Command::EnterMatchMode
+        | Command::MatchBracket
+        | Command::SelectTextObject(..)
         | Command::FoldToggle
         | Command::FoldToggleAll
         | Command::ScrollCursorCenter => Refusal::NeedsText,
