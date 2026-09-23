@@ -13,25 +13,10 @@ const TAB_STOP: usize = 8;
 /// columns out, differently on each row.  ratatui's buffer never sees that, so
 /// the damage survives until a full redraw.
 ///
-/// The same failure the minibuffer has (`table::layout::sanitize`), one widget
-/// along.  Tabs are expanded rather than replaced so the alignment they were
-/// written for survives; every other control character becomes a space.
+/// See [`crate::render_util::sanitize_output`] for what is kept.
 pub fn sanitize_lines(raw: &str) -> Vec<String> {
     raw.lines()
-        .map(|line| {
-            let mut out = String::with_capacity(line.len());
-            for c in line.chars() {
-                match c {
-                    '\t' => {
-                        let pad = TAB_STOP - (out.chars().count() % TAB_STOP);
-                        out.push_str(&" ".repeat(pad));
-                    }
-                    c if c.is_control() => out.push(' '),
-                    c => out.push(c),
-                }
-            }
-            out
-        })
+        .map(|line| crate::render_util::sanitize_output(line, TAB_STOP))
         .collect()
 }
 
@@ -756,6 +741,22 @@ impl KeyHint {
         KeyHint { key: key.to_string(), description: description.to_string() }
     }
 
+    /// A key-sheet row for `cmds`, showing the keys they are bound to in
+    /// `layer` — so a rebinding in `[keys]` shows up on the sheet too.
+    pub fn for_commands(
+        keymap: &crate::keymap::Keymap,
+        layer: crate::keymap::Layer,
+        cmds: &[crate::command::Command],
+        description: &str,
+    ) -> Self {
+        let key = cmds
+            .iter()
+            .map(|c| keymap.keys_for(layer, c.name()).unwrap_or_else(|| format!(":{}", c.name())))
+            .collect::<Vec<_>>()
+            .join(" ");
+        KeyHint { key, description: description.to_string() }
+    }
+
     pub fn heading(text: &str) -> Self {
         KeyHint { key: String::new(), description: text.to_string() }
     }
@@ -1073,16 +1074,13 @@ impl Popup {
     }
 
     /// Which-key strip shown at the bottom of the screen.
-    pub fn which_key(prefix: &str, hints: Vec<(String, String)>) -> Self {
+    pub fn which_key(prefix: &str, hints: Vec<KeyHint>) -> Self {
         Self {
             // Title shows the prefix key (e.g. " g " in the border)
             title: Some(format!(" {prefix} ")),
             content: PopupContent::KeyHints(KeyHintsState {
                 prefix: prefix.into(),
-                hints: hints
-                    .into_iter()
-                    .map(|(key, description)| KeyHint { key, description })
-                    .collect(),
+                hints,
                 footer: String::new(),
             }),
             anchor: PopupAnchor::BottomRight,
@@ -1118,15 +1116,18 @@ impl Popup {
 // Static command list
 // ---------------------------------------------------------------------------
 
-/// All palette-eligible editor commands with short descriptions and default key
-/// hints. Sourced from [`crate::command::Command::palette_entries`] so the
-/// palette never drifts from the canonical command table.
-pub fn command_palette_items() -> Vec<ListItem> {
+/// All palette-eligible editor commands with short descriptions and the keys
+/// they are bound to.  Sourced from [`crate::command::Command::palette_entries`]
+/// and the live keymap, so the palette never drifts from either.
+pub fn command_palette_items(keymap: &crate::keymap::Keymap) -> Vec<ListItem> {
     crate::command::Command::palette_entries()
         .into_iter()
         .map(|(label, detail)| ListItem {
             label: label.to_string(),
-            detail: Some(detail.to_string()),
+            detail: Some(match keymap.all_keys_for(label).as_slice() {
+                [] => detail.to_string(),
+                keys => format!("{detail}  [{}]", keys.join(", ")),
+            }),
             kind: None,
             payload: None,
             ..Default::default()

@@ -324,22 +324,27 @@ pub fn assign_depths(ranges: &mut [FoldRange]) {
     }
 }
 
-/// Compute all foldable ranges in `rope` for the given language.
+/// Compute all foldable ranges in `rope` for the given language, parsing it
+/// from scratch.  The editor itself folds from the highlighter's live tree
+/// ([`fold_ranges_in`]); this is for text it has no tree for.
+#[cfg(test)]
 pub fn compute_fold_ranges(rope: &Rope, language: Language) -> Vec<FoldRange> {
-    let text = rope.to_string();
-    let ts_lang = language.ts_language();
+    crate::highlight::Highlighter::new(Some(std::path::Path::new(&format!(
+        "x.{}",
+        match language {
+            Language::Json => "json",
+            Language::Yaml => "yaml",
+            Language::Python => "py",
+            _ => "rs",
+        }
+    ))))
+    .fold_ranges(rope, u64::MAX)
+}
 
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&ts_lang).is_err() {
-        return Vec::new();
-    }
-    let tree = match parser.parse(text.as_bytes(), None) {
-        Some(t) => t,
-        None => return Vec::new(),
-    };
-
+/// All foldable ranges in `tree`, a parse of `rope`.
+pub fn fold_ranges_in(tree: &tree_sitter::Tree, rope: &Rope, language: Language) -> Vec<FoldRange> {
     let mut ranges = Vec::new();
-    walk_tree(&tree, text.as_bytes(), language, &mut ranges);
+    walk_tree(tree, rope, language, &mut ranges);
     ranges.sort_by_key(|r| r.start);
     ranges.dedup_by_key(|r| r.start);
     assign_depths(&mut ranges);
@@ -351,7 +356,7 @@ pub fn compute_fold_ranges(rope: &Rope, language: Language) -> Vec<FoldRange> {
 /// This is what lets `zt` distinguish `"payload": { … }` from the
 /// `"metadata": { … }` sitting next to it at the same depth — the single most
 /// useful discrimination when reading a file of repeated records.
-fn fold_label(node: tree_sitter::Node, src: &[u8], language: Language) -> Option<String> {
+fn fold_label(node: tree_sitter::Node, rope: &Rope, language: Language) -> Option<String> {
     let key_node = match language {
         // A JSON object/array is the value half of a `pair`; the key is its sibling.
         Language::Json => node
@@ -362,14 +367,14 @@ fn fold_label(node: tree_sitter::Node, src: &[u8], language: Language) -> Option
         Language::Yaml => node.child_by_field_name("key"),
         _ => None,
     }?;
-    let text = key_node.utf8_text(src).ok()?.trim();
+    let text = rope.byte_slice(key_node.byte_range()).to_string();
     // JSON keys arrive quoted; the quotes are noise in a status message.
-    Some(text.trim_matches('"').to_string())
+    Some(text.trim().trim_matches('"').to_string())
 }
 
 fn walk_tree(
     tree: &tree_sitter::Tree,
-    src: &[u8],
+    rope: &Rope,
     language: Language,
     ranges: &mut Vec<FoldRange>,
 ) {
@@ -381,7 +386,7 @@ fn walk_tree(
 
         if end_row > start_row && is_foldable_node(node.kind(), language) {
             ranges.push(FoldRange {
-                label: fold_label(node, src, language),
+                label: fold_label(node, rope, language),
                 ..FoldRange::new(start_row, end_row, node.kind())
             });
         }

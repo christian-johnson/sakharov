@@ -73,6 +73,8 @@ pub struct LspClient {
     child: Child,
     next_id: u64,
     pub pending: HashMap<u64, PendingKind>,
+    /// When each pending request was sent, so an unanswered one can expire.
+    sent_at: HashMap<u64, std::time::Instant>,
     pub initialized: bool,
     pub server_capabilities: Value,
     doc_versions: HashMap<String, i32>,
@@ -112,6 +114,7 @@ impl LspClient {
             child,
             next_id: 1,
             pending: HashMap::new(),
+            sent_at: HashMap::new(),
             initialized: false,
             server_capabilities: Value::Null,
             doc_versions: HashMap::new(),
@@ -475,7 +478,35 @@ impl LspClient {
         });
         self.write_message(msg);
         self.pending.insert(id, kind);
+        self.sent_at.insert(id, std::time::Instant::now());
         id
+    }
+
+    /// Remove and return the pending request `id` answers.
+    pub fn take_pending(&mut self, id: u64) -> Option<PendingKind> {
+        self.sent_at.remove(&id);
+        self.pending.remove(&id)
+    }
+
+    /// Give up on requests the server has not answered within `timeout`,
+    /// cancelling them server-side.  `initialize` is exempt: a slow server
+    /// boot is still a boot.  Returns what expired.
+    pub fn expire_pending(&mut self, timeout: std::time::Duration) -> Vec<PendingKind> {
+        let stale: Vec<u64> = self
+            .sent_at
+            .iter()
+            .filter(|(id, at)| {
+                at.elapsed() >= timeout && self.pending.get(id) != Some(&PendingKind::Initialize)
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        stale
+            .into_iter()
+            .filter_map(|id| {
+                self.send_notification("$/cancelRequest", json!({ "id": id }));
+                self.take_pending(id)
+            })
+            .collect()
     }
 
     pub fn send_notification(&mut self, method: &str, params: Value) {
@@ -507,7 +538,7 @@ impl LspClient {
             .map(|(&id, _)| id)
             .collect();
         for id in stale {
-            self.pending.remove(&id);
+            self.take_pending(id);
             self.send_notification("$/cancelRequest", json!({ "id": id }));
         }
     }
@@ -903,6 +934,19 @@ mod tests {
             .collect();
         assert_eq!(completions, vec![second]);
         assert!(!client.pending.contains_key(&first));
+    }
+
+    /// An unanswered request expires; the initialize handshake never does.
+    #[test]
+    fn unanswered_requests_expire_but_initialize_does_not() {
+        let mut client = LspClient::start("cat", &[]).expect("spawn cat");
+        let init = client.send_request("initialize", json!({}), PendingKind::Initialize);
+        client.request_completion("file:///t.py", 0, 0);
+
+        let expired = client.expire_pending(std::time::Duration::ZERO);
+
+        assert_eq!(expired, vec![PendingKind::Completion]);
+        assert_eq!(client.pending.keys().copied().collect::<Vec<_>>(), vec![init]);
     }
 
     #[test]

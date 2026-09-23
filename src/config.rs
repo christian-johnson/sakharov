@@ -1,5 +1,5 @@
 use ratatui::style::Color;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ pub(crate) fn parse_hex_color(s: &str) -> Option<Color> {
 }
 
 /// Top-level configuration structure.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub theme: ThemeConfig,
@@ -33,6 +33,8 @@ pub struct Config {
     pub table: TableConfig,
     #[serde(default)]
     pub vcs: VcsConfig,
+    #[serde(default)]
+    pub conflict: ConflictConfig,
     #[serde(default)]
     pub keys: KeysConfig,
     /// Language server definitions, keyed by language id (e.g. "python", "rust").
@@ -49,17 +51,17 @@ pub struct Config {
 }
 
 /// The version-control graph (`[vcs]`).
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct VcsConfig {
     /// `"vertical"` (top to bottom, newest first) or `"horizontal"` (history
     /// left to right).  A session starts this way; `:vc-flip` turns the graph
     /// over for the rest of it.
     #[serde(default = "default_orientation")]
-    pub orientation: String,
+    pub orientation: crate::vcs::layout::Orientation,
 }
 
-fn default_orientation() -> String {
-    "vertical".to_string()
+fn default_orientation() -> crate::vcs::layout::Orientation {
+    crate::vcs::layout::Orientation::Vertical
 }
 
 impl Default for VcsConfig {
@@ -68,8 +70,16 @@ impl Default for VcsConfig {
     }
 }
 
+/// The merge-conflict resolver (`[conflict]`).
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ConflictConfig {
+    /// Show the common ancestor as a third pane beside the two versions.
+    #[serde(default)]
+    pub show_base: bool,
+}
+
 /// Per-language editor settings (`[languages.<lang>]`).
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LanguageConfig {
     /// Spaces per indent level for this language. Overrides `editor.tab_width`
     /// for auto-indent, Tab, and indent-/dedent-region in buffers of this
@@ -78,19 +88,16 @@ pub struct LanguageConfig {
     pub indent_width: Option<usize>,
 }
 
-/// Custom key bindings config.
-#[derive(Debug, Deserialize, Clone, Default)]
-pub struct KeysConfig {
-    #[serde(default)]
-    pub normal: HashMap<String, String>,
-    #[serde(default)]
-    pub select: HashMap<String, String>,
-}
+/// Custom key bindings: `[keys.<layer>]` tables of `"keys" = "command"`,
+/// e.g. `[keys.normal] "g n" = "goto-file-end"` (see `keymap::Layer::name`).
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(transparent)]
+pub struct KeysConfig(pub HashMap<String, HashMap<String, String>>);
 
 /// Theme color configuration (hex strings).
 /// Per-mode color overrides.  Each field is a `#rrggbb` hex string; an empty
 /// string (the default) falls back to the built-in ANSI color for that mode.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ModeColorsConfig {
     /// Normal / navigation mode.  Default: ANSI Blue.
     #[serde(default)]
@@ -128,7 +135,7 @@ pub struct ModeColorsConfig {
 /// theme-file schema (see `config/themes/example.toml`) and is deep-merged
 /// *over* the chosen theme, so individual colors can be overridden without
 /// editing the theme file.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ThemeConfig {
     /// Theme name; `"default"` is the classic terminal-inherited look.
     #[serde(default = "default_theme_name")]
@@ -148,7 +155,7 @@ impl Default for ThemeConfig {
 }
 
 /// Editor behaviour configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EditorConfig {
     pub tab_width: usize,
     /// When true (default), the Tab key and all auto-indentation insert
@@ -214,7 +221,7 @@ fn default_crash_recovery() -> bool { true }
 fn default_lsp_signature_throttle_ms() -> u64 { 50 }
 
 /// UI / interaction configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UiConfig {
     /// Character alphabet used to generate 2-char jump labels (gw / `EnterJumpMode`).
     /// The first characters are preferred for the closest targets, so put your
@@ -243,29 +250,31 @@ pub struct UiConfig {
     ///   "off"     — no recency weighting; alphabetical-within-tier as before.
     /// Recency only ever breaks ties between matches of equal fuzzy-match
     /// quality, so a better match always still wins.
-    #[serde(default = "default_command_history")]
-    pub command_history: String,
+    #[serde(default)]
+    pub command_history: CommandHistoryMode,
 }
 
-fn default_command_history() -> String { "session".into() }
 
-/// Parsed form of `ui.command_history`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `ui.command_history`: how the palette remembers recently-used commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CommandHistoryMode {
+    #[serde(alias = "none")]
     Off,
+    #[default]
     Session,
+    #[serde(alias = "persist", alias = "persistent")]
     Global,
 }
 
-impl CommandHistoryMode {
-    /// Parse the config string, defaulting to `Session` for unknown values.
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "off" | "false" | "none" => CommandHistoryMode::Off,
-            "global" | "persist" | "persistent" => CommandHistoryMode::Global,
-            _ => CommandHistoryMode::Session,
-        }
-    }
+/// `table.engine`: which reader opens a delimited-text file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TableEngine {
+    #[default]
+    Builtin,
+    #[serde(alias = "duck")]
+    Duckdb,
 }
 
 fn default_jump_keys() -> String {
@@ -294,7 +303,7 @@ impl Default for UiConfig {
             completion_list_height: default_completion_list_height(),
             doc_popup_height: default_doc_popup_height(),
             symbol_icons: default_symbol_icons(),
-            command_history: default_command_history(),
+            command_history: CommandHistoryMode::default(),
         }
     }
 }
@@ -303,7 +312,7 @@ impl Default for UiConfig {
 /// module names; a name that isn't a known module is rendered as literal text
 /// (handy as a custom separator).  Known modules: `mode`, `file`, `git`,
 /// `diagnostics`, `position`, `scroll`, `spinner`, `cell`, `kernel`.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StatuslineConfig {
     #[serde(default = "default_statusline_left")]
     pub left: Vec<String>,
@@ -373,7 +382,7 @@ impl StatuslineConfig {
 /// Both fields default to empty here; the real per-view defaults live in
 /// `config/default.toml` and reach this through the deep merge, so a user who
 /// sets only `left` keeps the default `right`.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct StatuslineLayout {
     #[serde(default)]
     pub left: Vec<String>,
@@ -430,7 +439,7 @@ impl Default for StatuslineConfig {
 }
 
 /// Notebook-specific configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NotebookConfig {
     /// Terminal rows reserved for each image output block (Kitty graphics protocol).
     /// Increase if images are getting clipped; decrease to show more cells on screen.
@@ -459,7 +468,7 @@ impl Default for NotebookConfig {
 }
 
 /// Tabular-data view configuration (`[table]`) — see `src/table/`.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TableConfig {
     /// Open `.csv`/`.tsv` files in the table view instead of as text.
     /// `:table-close` always drops back to the raw text of the same file.
@@ -498,8 +507,8 @@ pub struct TableConfig {
     /// parser, holds every row in memory) or `"duckdb"` (reads a window at a
     /// time, so a file larger than memory opens).  Parquet, ndjson and arrow
     /// always go through DuckDB — the built-in parser cannot read them at all.
-    #[serde(default = "default_table_engine")]
-    pub engine: String,
+    #[serde(default)]
+    pub engine: TableEngine,
     /// Rows scanned when summarising a column (the header sparkline and the
     /// `S` panel).  A summary is a full column scan, and the sparkline needs one
     /// per visible column, so this bounds the cost on a very large table; a
@@ -517,7 +526,6 @@ pub struct TableConfig {
 fn default_table_auto_open() -> bool { true }
 fn default_table_column_sparkline() -> bool { false }
 fn default_table_summary_max_rows() -> usize { 200_000 }
-fn default_table_engine() -> String { "builtin".to_string() }
 fn default_table_max_col_width() -> usize { 32 }
 fn default_table_min_col_width() -> usize { 3 }
 fn default_table_fill_width() -> bool { true }
@@ -539,13 +547,13 @@ impl Default for TableConfig {
             null_display: default_table_null_display(),
             column_sparkline: default_table_column_sparkline(),
             summary_max_rows: default_table_summary_max_rows(),
-            engine: default_table_engine(),
+            engine: TableEngine::default(),
         }
     }
 }
 
 /// Configuration for a shell-based document formatter.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FormatterConfig {
     /// The formatter executable (must be on $PATH or an absolute path).
     pub command: String,
@@ -556,7 +564,7 @@ pub struct FormatterConfig {
 }
 
 /// Configuration for a single language server.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LanguageServerConfig {
     /// The executable to run (must be on $PATH or an absolute path).
     pub command: String,
@@ -594,7 +602,7 @@ pub struct LanguageServerConfig {
 }
 
 /// Configuration for one additional server in a multiplexed setup.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ExtraServerConfig {
     /// The executable to run.
     pub command: String,
@@ -610,11 +618,18 @@ pub struct ExtraServerConfig {
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 impl Config {
+    /// [`load_reporting`](Self::load_reporting) without the warning.
+    #[cfg(test)]
+    pub fn load() -> Self {
+        Self::load_reporting().0
+    }
+
     /// Load config from `~/.config/sakharov/config.toml`, deep-merged over the
     /// compiled-in defaults.  **Never fails**: any problem reading or parsing
-    /// the user file is reported to stderr and the built-in defaults are used
+    /// the user file is returned as a warning (for *Messages* — stderr is
+    /// hidden behind the editor's screen) and the built-in defaults are used
     /// instead, so the editor always starts in a known-good state.
-    pub fn load() -> Self {
+    pub fn load_reporting() -> (Self, Option<String>) {
         // The compiled-in defaults must always be valid — treat any failure as
         // a programming error rather than a runtime error.
         let default_val: toml::Value = toml::from_str(DEFAULT_CONFIG)
@@ -626,18 +641,18 @@ impl Config {
 
         let path = match config_path() {
             Some(p) if p.exists() => p,
-            _ => return default_cfg,
+            _ => return (default_cfg, None),
         };
 
         // Read the file.
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!(
-                    "sv: warning: cannot read config {}: {e} — using built-in defaults",
+                let warning = format!(
+                    "cannot read config {}: {e} — using built-in defaults",
                     path.display()
                 );
-                return default_cfg;
+                return (default_cfg, Some(warning));
             }
         };
 
@@ -645,11 +660,11 @@ impl Config {
         let user_val: toml::Value = match toml::from_str(&text) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!(
-                    "sv: warning: config {}: {e} — using built-in defaults",
+                let warning = format!(
+                    "config {}: {e} — using built-in defaults",
                     path.display()
                 );
-                return default_cfg;
+                return (default_cfg, Some(warning));
             }
         };
 
@@ -659,21 +674,21 @@ impl Config {
         let merged_str = match toml::to_string(&merged_val) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "sv: warning: config {}: serialization error: {e} — using built-in defaults",
+                let warning = format!(
+                    "config {}: serialization error: {e} — using built-in defaults",
                     path.display()
                 );
-                return default_cfg;
+                return (default_cfg, Some(warning));
             }
         };
         match toml::from_str(&merged_str) {
-            Ok(cfg) => cfg,
+            Ok(cfg) => (cfg, None),
             Err(e) => {
-                eprintln!(
-                    "sv: warning: config {}: {e} — using built-in defaults",
+                let warning = format!(
+                    "config {}: {e} — using built-in defaults",
                     path.display()
                 );
-                default_cfg
+                (default_cfg, Some(warning))
             }
         }
     }
@@ -768,6 +783,19 @@ pub fn restrict_dir_permissions(_path: &std::path::Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enum-valued settings accept their names and aliases, and reject a typo
+    /// instead of silently picking some other value.
+    #[test]
+    fn enum_settings_parse_strictly() {
+        let vcs = |v: &str| toml::from_str::<VcsConfig>(&format!("orientation = {v:?}"));
+        assert_eq!(vcs("down").unwrap().orientation, crate::vcs::layout::Orientation::Vertical);
+        assert!(vcs("vertcal").is_err());
+
+        let ui = |v: &str| toml::from_str::<UiConfig>(&format!("command_history = {v:?}"));
+        assert_eq!(ui("persist").unwrap().command_history, CommandHistoryMode::Global);
+        assert!(ui("sesion").is_err());
+    }
 
     /// The compiled-in default config must always parse into `Config`, including
     /// the `[statusline]` section.

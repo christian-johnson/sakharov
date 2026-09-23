@@ -77,26 +77,19 @@ pub const HASH_COLS: u16 = super::SHORT_LEN as u16 + 3;
 /// A preference, not a mode: the two pictures show the same graph and every
 /// gesture means the same thing in both.  `h`/`l` and `j`/`k` follow the
 /// screen, so whichever axis history runs along is the one they travel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Orientation {
     /// History left to right, a branch is a row.
     #[default]
+    #[serde(alias = "h", alias = "right")]
     Horizontal,
     /// History top to bottom, newest first, a branch is a column.
+    #[serde(alias = "v", alias = "down")]
     Vertical,
 }
 
 impl Orientation {
-    /// Parse a config value.  Anything unrecognised is horizontal, which is
-    /// the default rather than an error: a typo in a display preference must
-    /// not stop the view opening.
-    pub fn parse(name: &str) -> Orientation {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "vertical" | "down" | "v" => Orientation::Vertical,
-            _ => Orientation::Horizontal,
-        }
-    }
-
     pub fn name(self) -> &'static str {
         match self {
             Orientation::Horizontal => "horizontal",

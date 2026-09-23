@@ -74,7 +74,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         let kb = crate::keymap::KeyBinding::from(key);
         let preserves = app
             .keymap
-            .lookup_normal(&kb)
+            .lookup_layered(crate::keymap::Layer::Normal, &[kb])
             .is_some_and(|cmds| cmds.iter().any(is_splash_preserving));
         if !preserves {
             app.show_splash = false;
@@ -197,7 +197,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             let in_notebook = app.view() == crate::view::View::Notebook;
             let cmds = app
                 .keymap
-                .lookup_layered(keymap_layer(app), &kb)
+                .lookup_layered(keymap_layer(app), &[kb])
                 .map(|v| v.to_vec());
             if let Some(cmds) = cmds {
                 exec::run_many(app, &cmds);
@@ -222,7 +222,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
         Mode::Select => {
             let kb = KeyBinding::from(key);
-            if let Some(cmds) = app.keymap.lookup_select(&kb).map(|v| v.to_vec()) {
+            let select = crate::keymap::Layer::Select;
+            if let Some(cmds) = app.keymap.lookup_layered(select, &[kb]).map(<[_]>::to_vec) {
                 exec::run_many(app, &cmds);
             }
         }
@@ -243,9 +244,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     // Keep the focused notebook cell's stored source in sync with app.buffer.
-    // Insert mode already calls lsp_did_change on every typed character, so
-    // skip the redundant rope.to_string() + LSP write here.
-    sync_notebook_cell(app, !matches!(app.mode, Mode::Insert));
+    // (The LSP already heard about every edit from `exec::edit`.)
+    sync_notebook_cell(app);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,24 +315,21 @@ pub fn handle_paste(app: &mut App, text: &str) {
             let (start, end) = (app.selection.start(), app.selection.end());
             if end > start {
                 let end = (end + 1).min(app.buffer.rope.len_chars());
-                app.buffer.remove_raw(start, end);
+                exec::edit::remove(app, start, end);
                 app.selection = Selection::point(start.min(app.buffer.rope.len_chars()));
             }
         }
     }
 
     let pos = app.selection.head.min(app.buffer.rope.len_chars());
-    app.buffer.insert_raw(pos, &text);
+    exec::edit::insert(app, pos, &text);
     app.selection = Selection::point(pos + text.chars().count());
     app.clipboard = text.clone();
-    exec::recompute_highlights(app);
-    exec::lsp_did_change(app);
     exec::update_scroll(app);
 
     // Keep the focused notebook cell's stored source in sync (the key path
-    // does this after every keystroke; a paste bypasses it). lsp_did_change
-    // was already called unconditionally above, so don't repeat it here.
-    sync_notebook_cell(app, false);
+    // does this after every keystroke; a paste bypasses it).
+    sync_notebook_cell(app);
 }
 
 /// Collapse a multi-line paste onto one line for single-line inputs.
@@ -365,11 +362,8 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             let pos = app.selection.head;
             if pos > 0 {
                 begin_insert_edit(app);
-                let removed: String = app.buffer.rope.slice(pos - 1..pos).to_string();
-                app.buffer.remove_raw(pos - 1, pos);
+                exec::edit::remove(app, pos - 1, pos);
                 app.selection = Selection::point(pos - 1);
-                exec::recompute_highlights(app);
-                exec::lsp_did_change_remove(app, pos - 1, &removed);
                 // Shorter prefix may now match items, so allow popups again.
                 app.completion.suppressed_prefix = None;
             }
@@ -379,13 +373,10 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             let len = app.buffer.rope.len_chars();
             if pos < len {
                 begin_insert_edit(app);
-                let removed: String = app.buffer.rope.slice(pos..pos + 1).to_string();
-                app.buffer.remove_raw(pos, pos + 1);
+                exec::edit::remove(app, pos, pos + 1);
                 app.selection = Selection::point(
                     pos.min(app.buffer.rope.len_chars().saturating_sub(1)),
                 );
-                exec::recompute_highlights(app);
-                exec::lsp_did_change_remove(app, pos, &removed);
             }
         }
         KeyCode::Enter => {
@@ -399,31 +390,26 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             } else {
                 None
             };
-            let inserted = if let Some(cont) = md_cont {
+            if let Some(cont) = md_cont {
                 let cont_len = cont.chars().count();
                 let to_insert = format!("\n{cont}");
-                app.buffer.insert_raw(pos, &to_insert);
+                exec::edit::insert(app, pos, &to_insert);
                 app.selection = Selection::point(pos + 1 + cont_len);
-                to_insert
             } else if crate::indent::is_bracket_pair(&app.buffer.rope, pos) {
                 // {|} → {\n    |\n} : expand bracket pair onto three lines.
                 let inner = crate::indent::for_new_line(&app.buffer.rope, pos, &unit);
                 let base = crate::indent::for_line_above(&app.buffer.rope, pos);
                 let inner_len = inner.chars().count();
                 let to_insert = format!("\n{inner}\n{base}");
-                app.buffer.insert_raw(pos, &to_insert);
+                exec::edit::insert(app, pos, &to_insert);
                 app.selection = Selection::point(pos + 1 + inner_len);
-                to_insert
             } else {
                 let ind = crate::indent::for_new_line(&app.buffer.rope, pos, &unit);
                 let ind_len = ind.chars().count();
                 let to_insert = format!("\n{ind}");
-                app.buffer.insert_raw(pos, &to_insert);
+                exec::edit::insert(app, pos, &to_insert);
                 app.selection = Selection::point(pos + 1 + ind_len);
-                to_insert
-            };
-            exec::recompute_highlights(app);
-            exec::lsp_did_change_insert(app, pos, &inserted);
+            }
         }
         KeyCode::Left => {
             app.selection = motion::move_left(&app.buffer.rope, app.selection, false);
@@ -443,10 +429,8 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             begin_insert_edit(app);
             let pos = app.selection.head;
             let unit = app.indent_unit();
-            app.buffer.insert_raw(pos, &unit);
+            exec::edit::insert(app, pos, &unit);
             app.selection = Selection::point(pos + unit.chars().count());
-            exec::recompute_highlights(app);
-            exec::lsp_did_change_insert(app, pos, &unit);
         }
         KeyCode::Null => {
             exec::execute(app, &Command::LspRequestCompletion);
@@ -467,10 +451,8 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
                             let text = app.buffer.rope.slice(pos..del_end).to_string();
                             app.clipboard = text.clone();
                             crate::clipboard::write(&text);
-                            app.buffer.remove_raw(pos, del_end);
+                            exec::edit::remove(app, pos, del_end);
                             app.selection = Selection::point(pos);
-                            exec::recompute_highlights(app);
-                            exec::lsp_did_change_remove(app, pos, &text);
                         }
                     }
                     exec::update_scroll(app);
@@ -481,10 +463,8 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             let pos = app.selection.head;
             let mut buf = [0u8; 4];
             let s = c.encode_utf8(&mut buf);
-            app.buffer.insert_raw(pos, s);
+            exec::edit::insert(app, pos, s);
             app.selection = Selection::point(pos + 1);
-            exec::recompute_highlights(app);
-            exec::lsp_did_change_insert(app, pos, s);
             if c == '.' || c == ':' {
                 // Trigger characters always fire a fresh completion request.
                 app.completion.suppressed_prefix = None;
@@ -614,87 +594,6 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
 // Goto mode (after 'g')
 // ---------------------------------------------------------------------------
 
-/// The `g` sub-mode's dispatch table, and the single source of truth for what
-/// `g` does: [`handle_goto`] runs the command, and `exec::goto_hints` labels the
-/// same keys in the which-key popup.  A key that isn't listed here must not
-/// appear in the hints (a test pins that).
-pub fn goto_command(view: crate::view::View, c: char) -> Option<Command> {
-    // The grid's own `g` map, checked first.  `g` is the editor's prefix for
-    // "go somewhere / show me more", and in a table that is a column question:
-    // the analytic commands live here rather than scattered across bare letters,
-    // and a key whose text meaning is meaningless in a grid (`gd` definition,
-    // `gr` references) is free to carry the grid's.
-    match view {
-        crate::view::View::Table => {
-            if let Some(cmd) = table_goto_command(c) {
-                return Some(cmd);
-            }
-        }
-        // The graph's own `g` map, for the same reason: `gd` (definition) and
-        // `gr` (references) mean nothing here and are free to carry the
-        // graph's meanings.
-        crate::view::View::Vcs => {
-            if let Some(cmd) = crate::exec::vcs::goto_command(c) {
-                return Some(cmd);
-            }
-        }
-        // The resolver's own `g` map: `g c` carries on with the operation and
-        // `g a` aborts it, which are the two things you want the moment the
-        // last file is resolved and are meaningless anywhere else.
-        crate::view::View::Conflict => {
-            if let Some(cmd) = crate::exec::conflict::goto_command(c) {
-                return Some(cmd);
-            }
-        }
-        // A notebook cell is text, so the text meanings are the right ones.
-        crate::view::View::Notebook | crate::view::View::Text => {}
-    }
-    Some(match c {
-        'g' => Command::GotoFileStart,
-        'e' => Command::GotoFileEnd,
-        'h' => Command::MoveLineFirstNonWs,
-        'l' => Command::MoveLineEnd,
-        'z' => Command::ScrollCursorCenter,
-        'd' => Command::LspGotoDefinition,
-        'r' => Command::LspGotoReferences,
-        'y' => Command::LspGotoTypeDefinition,
-        'i' => Command::LspGotoImplementation,
-        'w' => Command::EnterJumpMode,
-        'b' => Command::OpenBufferPicker,
-        's' => Command::OpenSymbolPicker,
-        'D' => Command::OpenDiagnosticPicker,
-        'a' => Command::LspCodeActions,
-        'c' => Command::CommentRegion,
-        'k' => Command::LspShowDocumentation,
-        // The kernel's namespace is reachable from every view: the grid you
-        // want to open is often the one the notebook two buffers over built.
-        'v' => Command::KernelVariables,
-        // The repository is reachable from every view, like the kernel's
-        // namespace: the history you want to look at is rarely a property of
-        // whichever file happens to be open.
-        'V' => Command::VcsOpen,
-        _ => return None,
-    })
-}
-
-/// The `g` sub-mode's table-view meanings, which shadow the text ones.
-///
-/// Only the keys whose grid meaning *differs*: `gg`/`ge`/`gh`/`gl`/`gk`/`gb`
-/// fall through to the shared map, where `exec::table::handle` reinterprets them
-/// against the grid (first row, last column, peek the cell…).
-fn table_goto_command(c: char) -> Option<Command> {
-    Some(match c {
-        'd' => Command::TableColumnSummary,
-        'c' => Command::TableColumnFrequency,
-        's' => Command::TableSort,
-        'f' => Command::TableFilter,
-        'r' => Command::TableGroupBy,
-        'x' => Command::TableClearTransforms,
-        't' => Command::SchemaBrowser,
-        _ => return None,
-    })
-}
-
 fn handle_goto(app: &mut App, key: KeyEvent) {
     // Capture whether we entered goto mode from Select (so motions extend).
     let extend = matches!(app.mode, Mode::Goto { extend: true });
@@ -707,11 +606,7 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
     // against the grid, and while browsing a notebook cell's output block the
     // line motions move the output cursor — both of which a direct rope motion
     // silently bypasses (it moved a hidden or empty buffer instead).
-    if let KeyCode::Char(c) = key.code {
-        if let Some(cmd) = goto_command(app.view(), c) {
-            exec::execute(app, &cmd);
-        }
-    }
+    run_prefixed(app, 'g', key);
     exec::update_scroll(app);
 }
 
@@ -813,6 +708,14 @@ fn begin_insert_edit(app: &mut App) {
 // Notebook buffer sync
 // ---------------------------------------------------------------------------
 
+/// Copy `app.buffer` into the focused notebook cell (a no-op outside
+/// notebook-navigation state).
+fn sync_notebook_cell(app: &mut App) {
+    if app.in_notebook_nav() {
+        sync_buffer_to_notebook(app);
+    }
+}
+
 fn sync_buffer_to_notebook(app: &mut App) {
     if let Some((ref mut nb, ref state)) = app.notebook {
         let idx = state.focused_cell;
@@ -825,54 +728,21 @@ fn sync_buffer_to_notebook(app: &mut App) {
     }
 }
 
-/// Sync the focused notebook cell's stored source with `app.buffer` (a no-op
-/// outside notebook-navigation state), optionally also notifying the LSP.
-/// `notify_lsp` should be `false` when the caller already synced the LSP
-/// itself (e.g. a paste, or an Insert-mode keystroke's incremental sync).
-fn sync_notebook_cell(app: &mut App, notify_lsp: bool) {
-    if !app.in_notebook_nav() {
-        return;
-    }
-    sync_buffer_to_notebook(app);
-    if notify_lsp {
-        exec::lsp_did_change(app);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Fold mode (after 'z')
 // ---------------------------------------------------------------------------
 
-/// The single dispatch table for the `z` (fold) sub-mode.
-///
-/// `exec::fold_hints` generates the which-key popup from this, so an advertised
-/// key and the key that actually fires can't drift apart — which is what went
-/// wrong before: `zo`/`zc` were documented as fold open/close but ran the
-/// notebook output-expand command in every view.
-pub fn fold_command(c: char) -> Option<Command> {
-    Some(match c {
-        'a' => Command::FoldToggle,
-        'c' => Command::FoldClose,
-        'o' => Command::FoldOpen,
-        'A' => Command::FoldToggleAll,
-        'M' => Command::FoldCloseAll,
-        'R' => Command::FoldOpenAll,
-        't' => Command::FoldCloseType,
-        'T' => Command::FoldOpenType,
-        // Capitalised: `zo` is fold-open in every view, so the notebook's
-        // output-expand needed a key of its own rather than shadowing it.
-        'O' => Command::NotebookToggleOutputExpand,
-        _ => return None,
-    })
-}
-
 fn handle_fold(app: &mut App, key: KeyEvent) {
     app.mode = Mode::Normal;
     app.popup = None;
-    if let KeyCode::Char(c) = key.code {
-        if let Some(cmd) = fold_command(c) {
-            exec::execute(app, &cmd);
-        }
+    run_prefixed(app, 'z', key);
+}
+
+/// Run what `prefix` then `key` is bound to in the current view's keymap.
+fn run_prefixed(app: &mut App, prefix: char, key: KeyEvent) {
+    let seq = [crate::keymap::KeyBinding::char(prefix), crate::keymap::KeyBinding::from(key)];
+    if let Some(cmds) = app.keymap.lookup_layered(keymap_layer(app), &seq).map(<[_]>::to_vec) {
+        exec::run_many(app, &cmds);
     }
 }
 
@@ -1025,13 +895,10 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
             let text = payload.as_text();
             let pos = app.selection.head;
             let word_start = crate::motion::word_start_at(&app.buffer.rope, pos);
-            if word_start < pos {
-                app.buffer.remove(word_start, pos);
-            }
-            app.buffer.insert(word_start, text);
+            app.buffer.begin_edit_session();
+            exec::edit::remove(app, word_start, pos);
+            exec::edit::insert(app, word_start, text);
             app.selection = Selection::point(word_start + text.chars().count());
-            exec::recompute_highlights(app);
-            exec::lsp_did_change(app);
         }
         PopupTarget::Dismiss => {}
         PopupTarget::ApplyCodeAction => {

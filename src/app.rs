@@ -588,6 +588,9 @@ pub struct App {
     /// True when `buffer.rope` has changed and `highlight_spans` needs recomputing.
     /// The render loop recomputes lazily once per frame instead of once per keystroke.
     pub highlights_dirty: bool,
+    /// Buffer (`Buffer::id`) and lines `highlight_spans` covers; `None` once
+    /// they are stale.
+    pub highlight_window: Option<(u64, std::ops::Range<usize>)>,
     /// Per-line diagnostic ranges for the current file, rebuilt on LSP diagnostics
     /// events and on file switches.  Avoids rebuilding this map every render frame.
     pub diag_by_line: std::collections::HashMap<usize, Vec<(usize, usize, DiagnosticSeverity)>>,
@@ -799,10 +802,7 @@ impl App {
     /// Create a new App, loading `path` if provided.
     pub fn new(path: Option<&str>, config: Config) -> Result<Self> {
         let is_notebook = path.map(|p| p.ends_with(".ipynb")).unwrap_or(false);
-        let vcs_options = crate::vcs::layout::Options {
-            orientation: crate::vcs::layout::Orientation::parse(&config.vcs.orientation),
-            ..Default::default()
-        };
+        let vcs_options = crate::vcs::layout::Options::default();
 
         let notebook = if is_notebook {
             let p = path.expect("checked above");
@@ -841,9 +841,8 @@ impl App {
         };
 
         let mut highlighter = Highlighter::new(buffer.path.as_deref());
-        let highlight_spans = highlighter.highlight(&buffer.rope).unwrap_or_default();
         // Compute fold ranges immediately so folding works before the first edit.
-        let initial_fold_ranges = highlighter.fold_ranges(&buffer.rope);
+        let initial_fold_ranges = highlighter.fold_ranges(&buffer.rope, buffer.id);
 
         let initial_mode = Mode::Normal;
 
@@ -864,15 +863,14 @@ impl App {
             if notebook.is_some() { None } else { buffer.path.clone() },
         ));
 
-        let mut keymap = Keymap::default_bindings();
-        keymap.apply_custom_bindings(&config.keys);
+        // Config-derived state (keymap, recovery, history, …) is filled in by
+        // `apply_config` below, the same path `:config-reload` takes.
+        let keymap = Keymap::default_bindings();
+        let recovery = crate::recovery::Recovery::new(false);
+        let command_history_mode = crate::config::CommandHistoryMode::Off;
+        let command_history = std::collections::VecDeque::new();
 
-        let recovery = crate::recovery::Recovery::new(config.editor.crash_recovery);
-        let command_history_mode =
-            crate::config::CommandHistoryMode::parse(&config.ui.command_history);
-        let command_history = crate::history::load(command_history_mode);
-
-        Ok(Self {
+        let mut app = Self {
             buffer,
             compute: crate::compute::ComputePool::default(),
             selection: Selection::point(0),
@@ -885,7 +883,8 @@ impl App {
             should_quit: false,
             insert_session_active: false,
             highlighter,
-            highlight_spans,
+            highlight_spans: Vec::new(),
+            highlight_window: None,
             config,
             keymap,
             notebook,
@@ -921,7 +920,7 @@ impl App {
             pending_code_actions: Vec::new(),
             jump: JumpState::default(),
             needs_clear: false,
-            highlights_dirty: false,
+            highlights_dirty: true,
             diag_by_line: std::collections::HashMap::new(),
             last_rendered_mode: None,
             fold: FoldState {
@@ -951,7 +950,38 @@ impl App {
                 );
                 m
             },
-        })
+        };
+        for warning in app.apply_config() {
+            app.messages.show(warning);
+        }
+        Ok(app)
+    }
+
+    /// (Re)derive everything built from `self.config` rather than read from it
+    /// on use: theme, undo cap, key bindings, graph orientation, command
+    /// history and crash recovery.  Shared by startup and `:config-reload`, so
+    /// a setting can't work at launch but be ignored by a reload.  Returns
+    /// warnings about values that could not be applied.
+    pub fn apply_config(&mut self) -> Vec<String> {
+        let mut warnings: Vec<String> = crate::theme::init_from_config(&self.config).into_iter().collect();
+        crate::buffer::configure_max_undo(self.config.editor.max_undo);
+
+        let mut keymap = Keymap::default_bindings();
+        warnings.extend(keymap.apply_custom_bindings(&self.config.keys));
+        self.keymap = keymap;
+
+        self.vcs_options.orientation = self.config.vcs.orientation;
+
+        let mode = self.config.ui.command_history;
+        if mode != self.command_history_mode {
+            self.command_history_mode = mode;
+            self.command_history = crate::history::load(mode);
+        }
+
+        if self.recovery.enabled != self.config.editor.crash_recovery {
+            self.recovery = crate::recovery::Recovery::new(self.config.editor.crash_recovery);
+        }
+        warnings
     }
 }
 
@@ -975,12 +1005,11 @@ pub fn run(path: Option<&str>) -> Result<()> {
     // covers the loop leaves that whole window unguarded.
     spawn_watchdog();
 
-    let config = Config::load();
-
-    crate::theme::init_from_config(&config);
-    crate::buffer::configure_max_undo(config.editor.max_undo);
-
+    let (config, config_warning) = Config::load_reporting();
     let mut app = App::new(path, config)?;
+    if let Some(warning) = config_warning {
+        app.messages.show(warning);
+    }
 
     // Start LSP server for the opened file if configured.
     if let Some(ref lang) = app.lsp_language.clone() {
@@ -1212,8 +1241,7 @@ fn run_loop(
 
         // Advance the status-bar spinner.  It's "active" whenever a notebook
         // cell is executing or queued, the kernel is booting, an LSP request
-        // is in flight, or an export is running — and animating it requires a
-        // redraw per tick.
+        // is in flight, or an export is running.
         let background_active = app
             .notebook
             .as_ref()
@@ -1228,8 +1256,8 @@ fn run_loop(
             // A repository read, a fetch, or a replay running its way through
             // a cherry-pick.
             || crate::exec::vcs::busy(app);
-        app.spinner.update(background_active);
-        needs_redraw |= background_active;
+        // Redraw only when the glyph moves, not on every 16 ms turn.
+        needs_redraw |= app.spinner.update(background_active);
 
         // Belt-and-braces: state flagged dirty by any path above.
         needs_redraw |= app.needs_clear || app.highlights_dirty;
@@ -1278,22 +1306,19 @@ fn draw_frame(
         }
         crate::exec::update_scroll(app);
 
-        // Recompute syntax highlights and fold ranges at most once per frame.
-        // Individual edits only set the dirty flag; the cost is paid here.
+        // Recompute fold ranges at most once per frame, and highlights only for
+        // the lines around the screen.  Edits just set the dirty flag (and
+        // record themselves in the highlighter, so re-parsing is incremental).
         if app.highlights_dirty {
             app.highlights_dirty = false;
-            app.highlight_spans = app
-                .highlighter
-                .highlight(&app.buffer.rope)
-                .unwrap_or_default();
-            // Recompute foldable ranges (tree-sitter or markdown) from the update.
-            app.fold.ranges = app.highlighter.fold_ranges(&app.buffer.rope);
+            app.highlight_window = None;
+            app.fold.ranges = app.highlighter.fold_ranges(&app.buffer.rope, app.buffer.id);
             // Discard any stored folds whose start lines no longer exist.
             let valid: std::collections::BTreeSet<usize> =
                 app.fold.ranges.iter().map(|r| r.start).collect();
             app.fold.folded.retain(|s| valid.contains(s));
         }
-
+        refresh_highlight_window(app);
         // After an external program (file picker etc.) suspends and resumes the
         // terminal, ratatui's diffing state is stale — force a full repaint.
         if app.needs_clear {
@@ -1310,159 +1335,19 @@ fn draw_frame(
         // images leave it `None`.
         let mut frame_cursor: Option<(u16, u16)> = None;
 
-        if app.show_splash {
-            terminal.draw(|f| {
-                crate::theme::fill_background(f);
-                let size = f.area();
-                // In command mode the user is typing a command — show the
-                // command input bar at the bottom and shrink the splash area.
-                let in_cmd = matches!(app.mode, crate::mode::Mode::Command);
-                let splash_area = if in_cmd {
-                    ratatui::layout::Rect {
-                        x: size.x,
-                        y: size.y,
-                        width: size.width,
-                        height: size.height.saturating_sub(1),
-                    }
-                } else {
-                    size
-                };
-                crate::splash::render(f, splash_area, app);
-                if in_cmd {
-                    let cmd_area = ratatui::layout::Rect {
-                        x: size.x,
-                        y: size.y + size.height.saturating_sub(1),
-                        width: size.width,
-                        height: 1,
-                    };
-                    crate::ui::render_command(f, app, cmd_area);
-                }
-                // If a popup was opened from the dashboard (e.g. file picker),
-                // render it on top of the splash background.
-                if let Some(ref popup) = app.popup {
-                    crate::popup_ui::render(f, popup, None, &app.config.ui);
-                }
-            })?;
-        } else {
-            // One arm per view.  Exhaustive on purpose (see `crate::view`): a
-            // new view must state how it draws, rather than falling into the
-            // plain-text branch and silently rendering an empty buffer.
-            match app.view() {
-                // Tabular data grid.  No text cursor: the cursor is the
-                // highlighted cell, drawn by the renderer (a terminal cursor in
-                // a grid of cells reads as a text caret inside the value, which
-                // it isn't).
-                // The commit graph.  No text cursor either: the cursor is the
-                // highlighted block or arrow, drawn by the renderer.
-                View::Vcs => {
-                    terminal.draw(|f| {
-                        crate::theme::fill_background(f);
-                        if let Some(chrome) = crate::view::Chrome::split(f.area()) {
-                            if let Some(state) = app.vcs.as_ref() {
-                                crate::vcs_ui::render(f, chrome.content, state);
-                            }
-                            ui::render_chrome(f, app, &chrome);
-                        }
-                        if let Some(ref popup) = app.popup {
-                            crate::popup_ui::render(f, popup, None, &app.config.ui);
-                        }
-                    })?;
-                }
-
-                // The merge-conflict resolver.  No text cursor: the cursor is
-                // the focused pane of the focused hunk, drawn by the renderer.
-                View::Conflict => {
-                    terminal.draw(|f| {
-                        crate::theme::fill_background(f);
-                        if let Some(chrome) = crate::view::Chrome::split(f.area()) {
-                            if let Some(state) = app.conflict.as_ref() {
-                                crate::conflict_ui::render(f, chrome.content, state);
-                            }
-                            ui::render_chrome(f, app, &chrome);
-                        }
-                        if let Some(ref popup) = app.popup {
-                            crate::popup_ui::render(f, popup, None, &app.config.ui);
-                        }
-                    })?;
-                }
-
-                View::Table => {
-                    terminal.draw(|f| {
-                        crate::theme::fill_background(f);
-                        if let (Some(chrome), Some(session)) =
-                            (crate::view::Chrome::split(f.area()), app.table.as_ref())
-                        {
-                            crate::table_ui::render(f, chrome.content, session, &app.config.table);
-                            ui::render_chrome(f, app, &chrome);
-                        }
-                        if let Some(ref popup) = app.popup {
-                            crate::popup_ui::render(f, popup, None, &app.config.ui);
-                        }
-                    })?;
-                }
-
-                // Notebook multi-cell view — the focused cell is in app.buffer.
-                // The cursor is lifted out of the draw closure so it can be
-                // restored *after* the Kitty image flush (which moves the
-                // terminal cursor to each image's origin and would otherwise
-                // leave the block cursor sitting on top of an image).
-                View::Notebook => {
-                    let mut nb_cursor: Option<(u16, u16)> = None;
-                    terminal.draw(|f| {
-                        crate::theme::fill_background(f);
-                        if let (Some(chrome), Some((nb, state))) =
-                            (crate::view::Chrome::split(f.area()), app.notebook.as_ref())
-                        {
-                            let active = crate::notebook_ui::ActiveCellView {
-                                rope: &app.buffer.rope,
-                                cursor: app.selection.head,
-                                sel_anchor: app.selection.anchor,
-                                output_row: state.output_row,
-                                output_col: state.output_col,
-                                output_anchor: state.output_anchor,
-                                mode: &app.mode,
-                                jump_labels: &app.jump.labels,
-                                jump_typed: &app.jump.typed,
-                                word_wrap: app.config.editor.word_wrap,
-                            };
-                            let (images, cursor_pos) = crate::notebook_ui::render(
-                                f,
-                                chrome.content,
-                                state,
-                                nb,
-                                crate::notebook_ui::RenderInputs {
-                                    active: &active,
-                                    diagnostics: &app.lsp.diagnostics,
-                                    nb_config: &app.config.notebook,
-                                    cell_px: app.graphics.cell_pixel_size,
-                                    cache: &mut app.nb_highlight,
-                                },
-                            );
-                            app.graphics.pending = images;
-                            nb_cursor = cursor_pos;
-                            ui::render_chrome(f, app, &chrome);
-                        }
-                        if let Some(ref popup) = app.popup {
-                            crate::popup_ui::render(f, popup, nb_cursor, &app.config.ui);
-                        }
-                    })?;
-                    frame_cursor = nb_cursor;
-                }
-
-                // Plain text editor, and the notebook's full-screen
-                // focused-cell overlay, which is edited exactly like a file.
-                View::Text => {
-                    terminal.draw(|f| {
-                        crate::theme::fill_background(f);
-                        ui::render(f, app);
-                        if let Some(ref popup) = app.popup {
-                            let cursor_pos = ui::cursor_screen_pos(app, f.area());
-                            crate::popup_ui::render(f, popup, cursor_pos, &app.config.ui);
-                        }
-                    })?;
-                }
+        terminal.draw(|f| {
+            crate::theme::fill_background(f);
+            // A popup floats next to the text cursor, in views that have one.
+            let popup_anchor = if app.show_splash {
+                draw_splash(f, app);
+                None
+            } else {
+                draw_view(f, app, &mut frame_cursor)
+            };
+            if let Some(ref popup) = app.popup {
+                crate::popup_ui::render(f, popup, popup_anchor, &app.config.ui);
             }
-        }
+        })?;
 
         // Every view goes through the same flush: ratatui owns the screen during
         // the draw, so pixel data can only be written once it has finished.
@@ -1475,6 +1360,141 @@ fn draw_frame(
         }
     }
     Ok(())
+}
+
+/// Make `app.highlight_spans` cover every line the text view can show,
+/// highlighting a screen of margin either side so scrolling a little doesn't
+/// re-run the query.  Only the text view draws from these spans.
+fn refresh_highlight_window(app: &mut App) {
+    match app.view() {
+        View::Text => {}
+        View::Notebook | View::Table | View::Vcs | View::Conflict => return,
+    }
+    // A screen of lines not hidden in a fold, from the scroll row down
+    // (wrapping can only show fewer).
+    let total = app.buffer.rope.len_lines();
+    let mut line = app.scroll_row;
+    for _ in 0..app.viewport_height {
+        if line >= total {
+            break;
+        }
+        line = app.fold.fold_end_at(line).map_or(line, |end| end) + 1;
+    }
+    let visible = app.scroll_row..line;
+    let covered = app.highlight_window.as_ref().is_some_and(|(id, w)| {
+        *id == app.buffer.id && w.start <= visible.start && visible.end <= w.end
+    });
+    if covered {
+        return;
+    }
+    let margin = app.viewport_height;
+    let window = if app.highlighter.whole_document() {
+        0..usize::MAX
+    } else {
+        visible.start.saturating_sub(margin)..visible.end + margin
+    };
+    app.highlight_spans =
+        app.highlighter.highlight_lines(&app.buffer.rope, app.buffer.id, window.clone());
+    app.highlight_window = Some((app.buffer.id, window));
+}
+
+/// Draw the dashboard, with the command line under it while one is being typed.
+fn draw_splash(f: &mut ratatui::Frame, app: &App) {
+    let size = f.area();
+    if !matches!(app.mode, crate::mode::Mode::Command) {
+        crate::splash::render(f, size, app);
+        return;
+    }
+    let splash_area = ratatui::layout::Rect { height: size.height.saturating_sub(1), ..size };
+    crate::splash::render(f, splash_area, app);
+    let cmd_area = ratatui::layout::Rect {
+        y: size.y + size.height.saturating_sub(1),
+        height: 1,
+        ..size
+    };
+    crate::ui::render_command(f, app, cmd_area);
+}
+
+/// Draw the active view and return where its text cursor is, if it has one.
+///
+/// One arm per view.  Exhaustive on purpose (see `crate::view`): a new view
+/// must state how it draws, rather than falling into the plain-text branch and
+/// silently rendering an empty buffer.  The grid, graph and resolver draw
+/// their own cursor (a highlighted cell, block or pane), so have no text
+/// cursor.  The notebook's cursor is also stored in `frame_cursor` so it can
+/// be restored after the Kitty image flush moves the terminal cursor.
+fn draw_view(
+    f: &mut ratatui::Frame,
+    app: &mut App,
+    frame_cursor: &mut Option<(u16, u16)>,
+) -> Option<(u16, u16)> {
+    let chrome = crate::view::Chrome::split(f.area());
+    match app.view() {
+        View::Vcs => {
+            let chrome = chrome?;
+            if let Some(state) = app.vcs.as_ref() {
+                crate::vcs_ui::render(f, chrome.content, state);
+            }
+            ui::render_chrome(f, app, &chrome);
+            None
+        }
+        View::Conflict => {
+            let chrome = chrome?;
+            if let Some(state) = app.conflict.as_ref() {
+                crate::conflict_ui::render(f, chrome.content, state);
+            }
+            ui::render_chrome(f, app, &chrome);
+            None
+        }
+        View::Table => {
+            let chrome = chrome?;
+            if let Some(session) = app.table.as_ref() {
+                crate::table_ui::render(f, chrome.content, session, &app.config.table);
+            }
+            ui::render_chrome(f, app, &chrome);
+            None
+        }
+        // The focused cell is in app.buffer.
+        View::Notebook => {
+            let chrome = chrome?;
+            let (nb, state) = app.notebook.as_ref()?;
+            let active = crate::notebook_ui::ActiveCellView {
+                rope: &app.buffer.rope,
+                cursor: app.selection.head,
+                sel_anchor: app.selection.anchor,
+                output_row: state.output_row,
+                output_col: state.output_col,
+                output_anchor: state.output_anchor,
+                mode: &app.mode,
+                jump_labels: &app.jump.labels,
+                jump_typed: &app.jump.typed,
+                word_wrap: app.config.editor.word_wrap,
+            };
+            let (images, cursor) = crate::notebook_ui::render(
+                f,
+                chrome.content,
+                state,
+                nb,
+                crate::notebook_ui::RenderInputs {
+                    active: &active,
+                    diagnostics: &app.lsp.diagnostics,
+                    nb_config: &app.config.notebook,
+                    cell_px: app.graphics.cell_pixel_size,
+                    cache: &mut app.nb_highlight,
+                },
+            );
+            app.graphics.pending = images;
+            ui::render_chrome(f, app, &chrome);
+            *frame_cursor = cursor;
+            cursor
+        }
+        // Plain text editor, and the notebook's full-screen focused-cell
+        // overlay, which is edited exactly like a file.
+        View::Text => {
+            ui::render(f, app);
+            ui::cursor_screen_pos(app, f.area())
+        }
+    }
 }
 
 /// Place the images the frame just asked for, and clear the previous frame's.

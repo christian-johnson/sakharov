@@ -280,6 +280,12 @@ column_sparkline = false
 # is what a new session starts as.
 orientation = "vertical"
 
+# The merge-conflict resolver (`:resolve`).
+[conflict]
+# Show the common ancestor as a third pane beside the two versions.  `3`
+# toggles it for the session.
+show_base = false
+
 [languages.javascript]
 indent_width = 2
 [languages.json]

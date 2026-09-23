@@ -57,6 +57,35 @@ pub struct NotebookState {
     /// expanding it makes every row real, so `j`/`k` scroll through the lot.
     /// Session-only; not persisted to .ipynb.
     pub expanded_outputs: BTreeSet<usize>,
+    /// Memoised cell display heights (see `notebook_ui::nb_cell_heights`).
+    /// Heights are needed by the scroll math and the renderer every frame,
+    /// through `&self`, so the cache mutates behind a `RefCell`.
+    pub heights: CellHeightCache,
+}
+
+/// Cell index → (fingerprint of everything the height depends on, height).
+/// A stale fingerprint recomputes, so no invalidation plumbing is needed.
+#[derive(Default)]
+pub struct CellHeightCache(std::cell::RefCell<std::collections::HashMap<usize, (u64, usize)>>);
+
+impl CellHeightCache {
+    /// Cell `idx`'s height, recomputed with `compute` only when `key` changed.
+    pub fn get_or_compute(&self, idx: usize, key: u64, compute: impl FnOnce() -> usize) -> usize {
+        let mut map = self.0.borrow_mut();
+        match map.get(&idx) {
+            Some(&(k, h)) if k == key => h,
+            _ => {
+                let h = compute();
+                map.insert(idx, (key, h));
+                h
+            }
+        }
+    }
+
+    /// Forget cells at or past `len` (the notebook shrank).
+    pub fn truncate(&self, len: usize) {
+        self.0.borrow_mut().retain(|&idx, _| idx < len);
+    }
 }
 
 impl NotebookState {
@@ -75,6 +104,7 @@ impl NotebookState {
             cell_redo: Vec::new(),
             folded_cells: BTreeSet::new(),
             expanded_outputs: BTreeSet::new(),
+            heights: CellHeightCache::default(),
         }
     }
 

@@ -3,6 +3,7 @@ mod bridge;
 mod buffers;
 pub(crate) mod conflict;
 mod doctor;
+pub(crate) mod edit;
 mod export;
 mod format;
 mod lsp;
@@ -10,6 +11,7 @@ pub(crate) mod notebook;
 mod pickers;
 mod scroll;
 mod search;
+pub(crate) mod settings;
 pub(crate) mod sql;
 pub(crate) mod table;
 pub(crate) mod vcs;
@@ -45,6 +47,7 @@ use crate::{
     lsp_manager::LspRequestKind,
     mode::{FindDir, Mode},
     motion,
+    popup::KeyHint,
     selection::Selection,
 };
 
@@ -278,7 +281,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::EnterGotoMode => {
             let extend = app.mode == Mode::Select;
             app.mode = Mode::Goto { extend };
-            app.popup = Some(crate::popup::Popup::which_key("g", goto_hints(app)));
+            app.popup = Some(crate::popup::Popup::which_key("g", prefix_hints(app, 'g')));
             return;
         }
         Command::EnterJumpMode => {
@@ -305,7 +308,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.mode = Mode::FindChar { dir: FindDir::Forward, till: false };
             app.popup = Some(crate::popup::Popup::which_key(
                 "f",
-                vec![("any char".into(), "move cursor to next occurrence".into())],
+                vec![KeyHint::binding("any char", "move cursor to next occurrence")],
             ));
             return;
         }
@@ -313,7 +316,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.mode = Mode::FindChar { dir: FindDir::Forward, till: true };
             app.popup = Some(crate::popup::Popup::which_key(
                 "t",
-                vec![("any char".into(), "move cursor till next occurrence".into())],
+                vec![KeyHint::binding("any char", "move cursor till next occurrence")],
             ));
             return;
         }
@@ -321,7 +324,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.mode = Mode::FindChar { dir: FindDir::Backward, till: false };
             app.popup = Some(crate::popup::Popup::which_key(
                 "F",
-                vec![("any char".into(), "move cursor to previous occurrence".into())],
+                vec![KeyHint::binding("any char", "move cursor to previous occurrence")],
             ));
             return;
         }
@@ -329,7 +332,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.mode = Mode::FindChar { dir: FindDir::Backward, till: true };
             app.popup = Some(crate::popup::Popup::which_key(
                 "T",
-                vec![("any char".into(), "move cursor till previous occurrence".into())],
+                vec![KeyHint::binding("any char", "move cursor till previous occurrence")],
             ));
             return;
         }
@@ -371,13 +374,13 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::Undo => {
             if app.buffer.undo() {
                 text::clamp_selection(app);
-                recompute_highlights(app);
+                edit::replaced(app);
             }
         }
         Command::Redo => {
             if app.buffer.redo() {
                 text::clamp_selection(app);
-                recompute_highlights(app);
+                edit::replaced(app);
             }
         }
         Command::OpenLineBelow => {
@@ -465,17 +468,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         Command::ToggleGitGutter => {
-            app.config.editor.git_gutter = !app.config.editor.git_gutter;
-            if app.config.editor.git_gutter {
-                refresh_git(app);
-            } else {
-                app.git_diff.clear();
-            }
-            app.messages.show(if app.config.editor.git_gutter {
-                "Git gutter on"
-            } else {
-                "Git gutter off"
-            });
+            settings::toggle(app, "editor.git_gutter");
             return;
         }
 
@@ -498,7 +491,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- Code folding ---
         Command::EnterFoldMode => {
             app.mode = crate::mode::Mode::Fold;
-            app.popup = Some(crate::popup::Popup::which_key("z", fold_hints(app)));
+            app.popup = Some(crate::popup::Popup::which_key("z", prefix_hints(app, 'z')));
             return;
         }
         Command::FoldToggle => {
@@ -659,21 +652,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         Command::ToggleLineNumbers => {
-            app.config.editor.line_numbers = !app.config.editor.line_numbers;
-            app.messages.show(if app.config.editor.line_numbers {
-                "Line numbers on"
-            } else {
-                "Line numbers off"
-            });
+            settings::toggle(app, "editor.line_numbers");
             return;
         }
         Command::ToggleRelativeLineNumbers => {
-            app.config.editor.relative_line_numbers = !app.config.editor.relative_line_numbers;
-            app.messages.show(if app.config.editor.relative_line_numbers {
-                "Relative line numbers on"
-            } else {
-                "Relative line numbers off"
-            });
+            settings::toggle(app, "editor.relative_line_numbers");
             return;
         }
 
@@ -991,13 +974,23 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::ReloadConfig => {
-            let config = crate::config::Config::load();
-            let mut keymap = crate::keymap::Keymap::default_bindings();
-            keymap.apply_custom_bindings(&config.keys);
-            crate::theme::init_from_config(&config);
-            app.config = config;
-            app.keymap = keymap;
-            app.messages.show("Config reloaded");
+            let (config, warning) = crate::config::Config::load_reporting();
+            let warnings: Vec<String> =
+                warning.into_iter().chain(settings::replace_config(app, config)).collect();
+            if warnings.is_empty() {
+                app.messages.show("Config reloaded");
+            }
+            for w in warnings {
+                app.messages.show(w);
+            }
+            return;
+        }
+        Command::Set(arg) => {
+            settings::set(app, arg);
+            return;
+        }
+        Command::Toggle(key) => {
+            settings::toggle(app, key);
             return;
         }
 
@@ -1040,16 +1033,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         Command::ToggleWordWrap => {
-            app.config.editor.word_wrap = !app.config.editor.word_wrap;
-            // Disable horizontal scroll when wrapping.
-            if app.config.editor.word_wrap {
-                app.scroll_col = 0;
-            }
-            app.messages.show(if app.config.editor.word_wrap {
-                "Word wrap on"
-            } else {
-                "Word wrap off"
-            });
+            settings::toggle(app, "editor.word_wrap");
             return;
         }
         Command::ShowDashboard => {
@@ -1204,7 +1188,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // A display preference, so it works from anywhere — the grid does not
         // have to be open to set how the next one is drawn.
         Command::TableToggleSparkline => {
-            table::toggle_sparkline(app);
+            settings::toggle(app, "table.column_sparkline");
             return;
         }
         Command::TableSort
@@ -1334,75 +1318,49 @@ fn at_first_visual_row(app: &App) -> bool {
     cursor_visual_row(app).0 == 0
 }
 
-/// The which-key entries for the `g` sub-mode.
-///
-/// Every key listed here must be one `input::goto_command` dispatches (pinned
-/// by `goto_hints_only_advertise_real_bindings`), and the labels describe what
-/// the command does **in the current view** — the same `g h` that goes to the
-/// first non-whitespace character in text goes to the first column in the grid,
-/// and `g k` asks the LSP in a buffer but peeks the cell in a table.  A key that
-/// would do nothing here is left out rather than advertised.
-fn goto_hints(app: &App) -> Vec<(String, String)> {
-    let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
+/// Which-key hints for the `prefix` sub-mode (`g`, `z`), generated from the
+/// keymap: what the current view binds after `prefix`, less what can't run
+/// here right now.  Rebinding a key in `[keys]` changes the popup with it.
+fn prefix_hints(app: &App, prefix: char) -> Vec<KeyHint> {
+    let layer = crate::input::keymap_layer(app);
+    // A bufferless view lists only its own meanings: the text ones it would
+    // inherit are refused there.
+    let text = app.view().has_text_buffer();
+    app.keymap
+        .continuations(layer, &[crate::keymap::KeyBinding::char(prefix)], text)
+        .into_iter()
+        .filter_map(|(key, binding)| {
+            let label = if text { hint_label(app, binding)? } else { binding.describe() };
+            Some(KeyHint::binding(&crate::keymap::format_key_binding(&key), &label))
+        })
+        .collect()
+}
 
-    // Exhaustive on purpose: `g` is the editor's "go somewhere / show me more"
-    // prefix, and what that means is a property of the view.  A new view either
-    // lists its own meanings or explicitly shares the text ones.
-    match app.view() {
-        crate::view::View::Vcs => return vcs::goto_hints(),
-        crate::view::View::Conflict => return conflict::goto_hints(),
-        crate::view::View::Table => return vec![
-            hint("g", "first row"),
-            hint("e", "last row"),
-            hint("h", "first column"),
-            hint("l", "last column"),
-            hint("k", "peek cell text"),
-            hint("d", "describe this column"),
-            hint("c", "count this column's values"),
-            hint("s", "sort by this column"),
-            hint("f", "filter on this column"),
-            hint("r", "group rows by this column"),
-            hint("x", "clear sorts and filters"),
-            hint("t", "browse attached tables"),
-            hint("v", "kernel variables"),
-            hint("V", "version control"),
-            hint("b", "buffer picker"),
-        ],
-        // The notebook edits a cell's text, so the text meanings are the right
-        // ones there.
-        crate::view::View::Notebook | crate::view::View::Text => {}
+/// A text view's popup label for `binding`, or `None` when it can't run now.
+fn hint_label(app: &App, binding: &crate::keymap::Binding) -> Option<String> {
+    let cmd = binding.cmds.first()?;
+    let lsp_ready = || app.current_language().is_some_and(|l| app.lsp.is_ready(l));
+    match cmd {
+        Command::LspCodeActions
+        | Command::LspShowDocumentation
+        | Command::LspGotoDefinition
+        | Command::LspGotoReferences
+        | Command::LspGotoTypeDefinition
+        | Command::LspGotoImplementation
+            if !lsp_ready() =>
+        {
+            None
+        }
+        Command::KernelVariables if app.compute.active_key().is_none() => None,
+        Command::NotebookToggleOutputExpand if app.notebook.is_none() => None,
+        // Only inside a foldable block, named so the effect is unambiguous.
+        Command::FoldCloseType | Command::FoldOpenType => {
+            let what = app.fold.type_at_line(cursor_line(app))?.describe();
+            let verb = if matches!(cmd, Command::FoldCloseType) { "fold" } else { "unfold" };
+            Some(format!("{verb} every {what} block"))
+        }
+        _ => Some(binding.describe()),
     }
-
-    let mut hints = vec![
-        hint("g", "go to file start"),
-        hint("e", "go to file end"),
-        hint("h", "go to line first non-whitespace"),
-        hint("l", "go to line end"),
-        hint("z", "scroll cursor to centre"),
-        hint("w", "jump to label in view"),
-        hint("b", "buffer picker"),
-        hint("s", "symbol picker"),
-        hint("c", "comment/uncomment selection"),
-        hint("D", "diagnostic picker"),
-    ];
-    if app.compute.active_key().is_some() {
-        hints.push(hint("v", "kernel variables"));
-    }
-    // Always: the repository is not a property of what is open.
-    hints.push(hint("V", "version control"));
-    let lsp_active = app
-        .current_language()
-        .map(|l| app.lsp.is_ready(l))
-        .unwrap_or(false);
-    if lsp_active {
-        hints.push(hint("a", "code actions  [LSP]"));
-        hints.push(hint("k", "show documentation  [LSP]"));
-        hints.push(hint("d", "go to definition  [LSP]"));
-        hints.push(hint("r", "go to references  [LSP]"));
-        hints.push(hint("y", "go to type definition  [LSP]"));
-        hints.push(hint("i", "go to implementation  [LSP]"));
-    }
-    hints
 }
 
 /// The buffer line the cursor is on (0 for an empty buffer).
@@ -1414,43 +1372,10 @@ fn cursor_line(app: &App) -> usize {
     rope.char_to_line(app.selection.head.min(rope.len_chars()))
 }
 
-/// Which-key hints for the `z` sub-mode.
-///
-/// Generated from `input::fold_command` the same way `goto_hints` is generated
-/// from `input::goto_command`, and pinned to it by
-/// `fold_hints_only_advertise_real_bindings`.  The `zo`/`zc` bug this replaced
-/// was exactly a hint-vs-dispatch drift: the docs promised fold open/close and
-/// the keys ran a notebook command, so the two are now derived from one table.
-fn fold_hints(app: &App) -> Vec<(String, String)> {
-    let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
-    let mut hints = vec![
-        hint("a", "toggle fold at cursor"),
-        hint("c", "close fold at cursor"),
-        hint("o", "open fold at cursor"),
-        hint("A", "toggle all folds"),
-        hint("M", "close every fold"),
-        hint("R", "open every fold"),
-    ];
-    // Only advertise the type folds when the cursor is actually inside a
-    // foldable block, and name the block so the effect is unambiguous.
-    if let Some(ty) = app.fold.type_at_line(cursor_line(app)) {
-        let what = ty.describe();
-        hints.push(hint("t", &format!("fold every {what} block")));
-        hints.push(hint("T", &format!("unfold every {what} block")));
-    }
-    if app.notebook.is_some() {
-        hints.push(hint("O", "expand/collapse full cell output"));
-    }
-    hints
-}
-
 /// The `m` sub-mode's first key.  Kept beside the object list because the two
 /// popups are one gesture, and pinned by `match_hints_only_advertise_real_keys`.
-fn match_prefix_hints() -> Vec<(String, String)> {
-    MATCH_PREFIX_KEYS
-        .iter()
-        .map(|(k, d)| ((*k).to_string(), (*d).to_string()))
-        .collect()
+fn match_prefix_hints() -> Vec<KeyHint> {
+    MATCH_PREFIX_KEYS.iter().map(|(k, d)| KeyHint::binding(k, d)).collect()
 }
 
 /// Every key `handle_match` answers before a scope is chosen.
@@ -1462,9 +1387,9 @@ const MATCH_PREFIX_KEYS: &[(&str, &str)] = &[
 
 /// The object keys, labelled.  Only the objects this buffer can actually
 /// produce: `mif` in a plain text file would have nothing to parse.
-pub(crate) fn match_object_hints(app: &App) -> Vec<(String, String)> {
+pub(crate) fn match_object_hints(app: &App) -> Vec<KeyHint> {
     use crate::textobject::TextObject;
-    let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
+    let hint = KeyHint::binding;
     let mut hints = vec![
         hint("w", "word"),
         hint("W", "WORD, to the whitespace"),
@@ -1741,23 +1666,29 @@ mod tests {
         assert!(app.fold.folded.is_empty());
     }
 
-    /// Same promise as the `g` which-key popup: every advertised key must be
-    /// one `input::fold_command` really dispatches.  This pairing is what the
-    /// `zo` bug broke, so it is pinned rather than trusted.
+    /// Every key the `z` popup advertises dispatches the command it names.
     #[test]
     fn fold_hints_only_advertise_real_bindings() {
         let mut app = app_with_json(JSON_LOG);
         goto_line(&mut app, 5); // inside a block, so `t`/`T` are offered too
-        let hints = fold_hints(&app);
+        let hints = prefix_hints(&app, 'z');
         assert!(
-            hints.iter().any(|(k, _)| k == "t"),
+            hints.iter().any(|h| h.key == "t"),
             "inside a foldable block the type folds must be offered"
         );
-        for (key, desc) in hints {
-            let c = key.chars().next().expect("non-empty key");
+        assert_hints_dispatch(&app, 'z', &hints);
+    }
+
+    /// Each hint's key must be bound after `prefix` in the view's keymap.
+    fn assert_hints_dispatch(app: &App, prefix: char, hints: &[KeyHint]) {
+        use crate::keymap::KeyBinding;
+        for h in hints {
+            let seq = [KeyBinding::char(prefix), KeyBinding::parse(&h.key).expect("key")];
             assert!(
-                crate::input::fold_command(c).is_some(),
-                "z{key} is advertised as \"{desc}\" but dispatches nothing"
+                app.keymap.lookup_layered(crate::input::keymap_layer(app), &seq).is_some(),
+                "{prefix}{} is advertised as {:?} but dispatches nothing",
+                h.key,
+                h.description
             );
         }
     }
@@ -1768,8 +1699,8 @@ mod tests {
     fn fold_hints_omit_the_type_folds_outside_a_block() {
         let mut app = app_with_json(JSON_LOG);
         app.fold.ranges.clear();
-        let hints = fold_hints(&app);
-        assert!(!hints.iter().any(|(k, _)| k == "t" || k == "T"));
+        let hints = prefix_hints(&app, 'z');
+        assert!(!hints.iter().any(|h| h.key == "t" || h.key == "T"));
     }
 
     /// The which-key popup is a promise about what the next keypress does, so
@@ -1864,16 +1795,18 @@ mod tests {
     #[test]
     fn match_hints_only_advertise_real_keys() {
         let app = app_with_source("x = f(a)\n", "t.py");
-        for (key, label) in match_object_hints(&app) {
-            let c = key.chars().next().expect("hint key is a char");
+        for h in match_object_hints(&app) {
+            let c = h.key.chars().next().expect("hint key is a char");
             assert!(
                 crate::input::match_object(c).is_some(),
-                "m i{key} is advertised as {label:?} but dispatches nothing"
+                "m i{} is advertised as {:?} but dispatches nothing",
+                h.key,
+                h.description
             );
         }
         // The first key's popup is answered by `handle_match` itself rather than
         // by a table, so the three keys it handles are pinned here.
-        let prefix: Vec<String> = match_prefix_hints().into_iter().map(|(k, _)| k).collect();
+        let prefix: Vec<String> = match_prefix_hints().into_iter().map(|h| h.key).collect();
         assert_eq!(prefix, vec!["i", "o", "m"]);
     }
 
@@ -1884,10 +1817,10 @@ mod tests {
         let py = app_with_source("def f():\n    pass\n", "t.py");
         let txt = app_with_source("plain prose\n", "notes.txt");
         for key in ["f", "c", "a"] {
-            assert!(match_object_hints(&py).iter().any(|(k, _)| k == key), "py {key}");
-            assert!(!match_object_hints(&txt).iter().any(|(k, _)| k == key), "txt {key}");
+            assert!(match_object_hints(&py).iter().any(|h| h.key == key), "py {key}");
+            assert!(!match_object_hints(&txt).iter().any(|h| h.key == key), "txt {key}");
         }
-        assert!(match_object_hints(&txt).iter().any(|(k, _)| k == "w"));
+        assert!(match_object_hints(&txt).iter().any(|h| h.key == "w"));
     }
 
     #[test]
@@ -1976,29 +1909,22 @@ mod tests {
         let mut app = App::new(None, Config::load()).unwrap();
         // Both views: the hints are view-aware, and so is the dispatch, so each
         // list has to be checked against the map that will actually answer it.
-        for (view, hints) in [(app.view(), goto_hints(&app)), {
-            app.table = Some(crate::exec::table::Session::new(
-                crate::source::SourceId::of(std::path::Path::new("t.csv")),
-                Box::new(
-                    crate::table::csv::CsvSource::from_reader(
-                        "a,b\n1,2\n".as_bytes(),
-                        b',',
-                        &crate::config::TableConfig::default(),
-                    )
-                    .unwrap(),
-                ),
-            ));
-            (app.view(), goto_hints(&app))
-        }] {
-            assert!(!hints.is_empty());
-            for (key, label) in hints {
-                let c = key.chars().next().expect("hint key is a char");
-                assert!(
-                    crate::input::goto_command(view, c).is_some(),
-                    "g{key} is advertised as {label:?} but dispatches nothing"
-                );
-            }
-        }
+        let text_hints = prefix_hints(&app, 'g');
+        assert_hints_dispatch(&app, 'g', &text_hints);
+        app.table = Some(crate::exec::table::Session::new(
+            crate::source::SourceId::of(std::path::Path::new("t.csv")),
+            Box::new(
+                crate::table::csv::CsvSource::from_reader(
+                    "a,b\n1,2\n".as_bytes(),
+                    b',',
+                    &crate::config::TableConfig::default(),
+                )
+                .unwrap(),
+            ),
+        ));
+        let table_hints = prefix_hints(&app, 'g');
+        assert_hints_dispatch(&app, 'g', &table_hints);
+        assert!(!text_hints.is_empty() && !table_hints.is_empty());
     }
 
     /// `gk` peeks the cell in a table, so it must be listed there — the hint
@@ -2017,13 +1943,13 @@ mod tests {
                 .unwrap(),
             ),
         ));
-        let hints = goto_hints(&app);
-        assert!(hints.iter().any(|(k, d)| k == "k" && d.contains("peek")));
+        let hints = prefix_hints(&app, 'g');
+        assert!(hints.iter().any(|h| h.key == "k" && h.description.contains("peek")));
         // A key whose text meaning is meaningless in a grid either carries the
         // grid's own meaning (`gs` sorts here, it does not pick a symbol) or is
         // left out entirely (`gw` labels word starts in text there aren't any of).
-        assert!(hints.iter().any(|(k, d)| k == "s" && d.contains("sort")));
-        assert!(!hints.iter().any(|(k, _)| k == "w"));
+        assert!(hints.iter().any(|h| h.key == "s" && h.description.contains("sort")));
+        assert!(!hints.iter().any(|h| h.key == "w"));
     }
 
     #[test]
@@ -2224,7 +2150,7 @@ mod tests {
 
         lsp::open_file_at(&mut app, &a, 0, 0);
         // Make an unsaved edit to a.txt.
-        app.buffer.insert(0, "EDIT ");
+        app.buffer.insert_raw(0, "EDIT ");
         assert!(app.buffer.modified);
 
         // Switch to b.txt and back — the edit must survive in memory.
@@ -2311,7 +2237,7 @@ mod tests {
         std::fs::write(&b, "y\n").unwrap();
 
         lsp::open_file_at(&mut app, &a, 0, 0);
-        app.buffer.insert(0, "unsaved ");
+        app.buffer.insert_raw(0, "unsaved ");
         // Stash the dirty buffer by switching away.
         lsp::open_file_at(&mut app, &b, 0, 0);
         assert!(!app.buffer.modified, "active buffer is clean");
@@ -2343,7 +2269,7 @@ mod tests {
         std::fs::write(&f, "original\n").unwrap();
 
         lsp::open_file_at(&mut app, &f, 0, 0);
-        app.buffer.insert(0, "mine ");
+        app.buffer.insert_raw(0, "mine ");
 
         // Simulate an external edit (ensure a different mtime).
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2384,7 +2310,7 @@ mod tests {
         assert!(app.notebook.is_some());
 
         // Type into the focused cell (buffer mirrors the cell).
-        app.buffer.insert(0, "x = 42");
+        app.buffer.insert_raw(0, "x = 42");
         // Leave for a plain file (stashes the notebook), then come back.
         lsp::open_file_at(&mut app, &txt, 0, 0);
         assert!(app.notebook.is_none());
@@ -2412,7 +2338,7 @@ mod tests {
         std::fs::write(&a, "x\n").unwrap();
 
         lsp::open_file_at(&mut app, &a, 0, 0);
-        app.buffer.insert(0, "unsaved ");
+        app.buffer.insert_raw(0, "unsaved ");
         execute(&mut app, &Command::BufferForceClose);
 
         // The closed buffer must be gone from every stash; quit is clean.
@@ -3096,7 +3022,7 @@ mod tests {
         app.buffer.path = Some(dir.join("anchor.txt"));
         create_new_notebook(&mut app, "nbsave");
 
-        app.buffer.insert(0, "x = 1");
+        app.buffer.insert_raw(0, "x = 1");
         assert!(app.buffer.modified);
 
         execute(&mut app, &Command::Write);

@@ -989,13 +989,13 @@ pub fn load_and_set(name: &str, overrides: &toml::map::Map<String, toml::Value>)
 /// Resolve and install the theme chosen by the config (startup / reload).
 /// Any problem is reported on stderr and the default theme is used instead —
 /// like config loading, theming is infallible.
-pub fn init_from_config(config: &crate::config::Config) {
+/// Returns a warning when the named theme could not be loaded.
+pub fn init_from_config(config: &crate::config::Config) -> Option<String> {
     let name = config.theme.name.clone();
-    if let Err(e) = load_and_set(&name, &config.theme.overrides) {
-        eprintln!("sv: warning: {e} — using default theme");
-        // Still apply the [theme] overrides on top of the default look.
-        let _ = load_and_set("default", &config.theme.overrides);
-    }
+    let e = load_and_set(&name, &config.theme.overrides).err()?;
+    // Still apply the [theme] overrides on top of the default look.
+    let _ = load_and_set("default", &config.theme.overrides);
+    Some(format!("{e} — using default theme"))
 }
 
 // ---------------------------------------------------------------------------

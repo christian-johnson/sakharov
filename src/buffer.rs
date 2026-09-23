@@ -18,6 +18,9 @@ fn max_undo() -> usize {
 
 /// A text buffer backed by a `ropey::Rope` with undo/redo support.
 pub struct Buffer {
+    /// Unique per buffer instance, so state derived from a buffer's text (the
+    /// highlighter's parse tree) can tell when it is looking at another one.
+    pub id: u64,
     pub rope: Rope,
     pub path: Option<PathBuf>,
     pub modified: bool,
@@ -36,6 +39,11 @@ pub struct Buffer {
     /// copy is stale and the edit falls back to a full-text resync.
     /// `None` until the first sync.
     pub lsp_synced_chars: Option<usize>,
+}
+
+fn next_buffer_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Read a path's mtime, or `None` when it doesn't exist / can't be statted.
@@ -72,6 +80,7 @@ impl Buffer {
     /// Create an empty scratch buffer.
     pub fn new_empty() -> Self {
         Self {
+            id: next_buffer_id(),
             rope: Rope::new(),
             path: None,
             modified: false,
@@ -92,6 +101,7 @@ impl Buffer {
             .with_context(|| format!("failed to read {}", path.display()))?;
         let disk_mtime = mtime_of(&path);
         Ok(Self {
+            id: next_buffer_id(),
             rope: Rope::from_str(&text),
             path: Some(path),
             modified: false,
@@ -118,26 +128,12 @@ impl Buffer {
         self.redo_stack.clear();
     }
 
-    /// Snapshot current state for undo, then insert `text` at char position `pos`.
-    pub fn insert(&mut self, pos: usize, text: &str) {
-        self.push_undo();
-        self.rope.insert(pos, text);
-        self.modified = true;
-    }
-
-    /// Insert without creating an undo snapshot (use inside an already-open edit session).
+    /// Insert without creating an undo snapshot (open one with
+    /// [`begin_edit_session`](Self::begin_edit_session)).  Editor code edits
+    /// through `exec::edit`, which calls this and keeps highlights and the LSP
+    /// in step.
     pub fn insert_raw(&mut self, pos: usize, text: &str) {
         self.rope.insert(pos, text);
-        self.modified = true;
-    }
-
-    /// Snapshot current state for undo, then remove chars in `[start, end)`.
-    pub fn remove(&mut self, start: usize, end: usize) {
-        if start >= end {
-            return;
-        }
-        self.push_undo();
-        self.rope.remove(start..end);
         self.modified = true;
     }
 

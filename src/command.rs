@@ -16,8 +16,8 @@
 /// Row syntax:
 /// ```ignore
 /// units: {
-///     // VariantName => "canonical-name" [, aliases: ["a", "b"]] [, palette: "Description  [key]"];
-///     MoveLeft => "move-left", palette: "Move cursor left  [h]";
+///     // VariantName => "canonical-name" [, aliases: ["a", "b"]] [, palette: "Description"];
+///     MoveLeft => "move-left", palette: "Move cursor left";
 /// }
 /// data: {
 ///     // VariantName(Type, ...) => "canonical-name" [, palette: "..."];
@@ -64,7 +64,8 @@ macro_rules! commands {
             }
 
             /// `(canonical_name, description)` for every command that opts into the
-            /// command palette, in table order. Drives `command_palette_items()`.
+            /// command palette, in table order. Drives `command_palette_items()`;
+            /// the key labels are added there, from the keymap.
             pub fn palette_entries() -> Vec<(&'static str, &'static str)> {
                 vec![
                     $( $( ($uname, $udesc), )? )*
@@ -78,257 +79,261 @@ macro_rules! commands {
 commands! {
     units: {
         // --- File / application ---
-        Write => "write", aliases: ["save"], palette: "Write file  [ctrl+s, :w]";
-        WriteForce => "write-force", aliases: ["w!"], palette: "Write file, overwriting external changes  [:w!]";
-        Quit => "quit", aliases: ["q"], palette: "Quit  [:q]";
-        ForceQuit => "force-quit", aliases: ["q!"], palette: "Quit without saving  [:q!]";
-        WriteQuit => "write-quit", aliases: ["wq", "x"], palette: "Write and quit  [:wq]";
-        NewFile => "new-file", aliases: ["newfile", "new"], palette: "Create a new file in the current directory (prompts for name)  [:new-file]";
-        NewNotebook => "new-notebook", aliases: ["newnotebook", "new-nb"], palette: "Create a new notebook in the current directory (prompts for name)  [:new-notebook]";
+        Write => "write", aliases: ["save"], palette: "Write file";
+        WriteForce => "write-force", aliases: ["w!"], palette: "Write file, overwriting external changes";
+        Quit => "quit", aliases: ["q"], palette: "Quit";
+        ForceQuit => "force-quit", aliases: ["q!"], palette: "Quit without saving";
+        WriteQuit => "write-quit", aliases: ["wq", "x"], palette: "Write and quit";
+        NewFile => "new-file", aliases: ["newfile", "new"], palette: "Create a new file in the current directory (prompts for name)";
+        NewNotebook => "new-notebook", aliases: ["newnotebook", "new-nb"], palette: "Create a new notebook in the current directory (prompts for name)";
 
         // --- Motions ---
-        MoveLeft => "move-left", palette: "Move cursor left  [h]";
-        MoveRight => "move-right", palette: "Move cursor right  [l]";
-        MoveUp => "move-up", palette: "Move cursor up  [k]";
-        MoveDown => "move-down", palette: "Move cursor down  [j]";
-        MoveWordForward => "move-word-forward", palette: "Next word  [w]";
-        MoveWordBackward => "move-word-backward", palette: "Previous word  [b]";
-        MoveWordEnd => "move-word-end", palette: "End of word  [e]";
+        MoveLeft => "move-left", palette: "Move cursor left";
+        MoveRight => "move-right", palette: "Move cursor right";
+        MoveUp => "move-up", palette: "Move cursor up";
+        MoveDown => "move-down", palette: "Move cursor down";
+        MoveWordForward => "move-word-forward", palette: "Next word";
+        MoveWordBackward => "move-word-backward", palette: "Previous word";
+        MoveWordEnd => "move-word-end", palette: "End of word";
         MoveBigWordForward => "move-big-word-forward";
         MoveBigWordBackward => "move-big-word-backward";
         MoveBigWordEnd => "move-big-word-end";
-        MoveLineStart => "move-line-start", palette: "Start of line  [0]";
+        MoveLineStart => "move-line-start", palette: "Start of line";
         MoveLineFirstNonWs => "move-line-first-non-ws";
-        MoveLineEnd => "move-line-end", palette: "End of line  [$]";
-        GotoFileStart => "goto-file-start", palette: "Go to file start  [gg]";
-        GotoFileEnd => "goto-file-end", palette: "Go to file end  [G]";
-        SelectLine => "select-line", palette: "Select current line  [x]";
-        SelectAll => "select-all", palette: "Select entire file  [%]";
+        MoveLineEnd => "move-line-end", palette: "End of line";
+        GotoFileStart => "goto-file-start", palette: "Go to file start";
+        GotoFileEnd => "goto-file-end", palette: "Go to file end";
+        SelectLine => "select-line", palette: "Select current line";
+        SelectAll => "select-all", palette: "Select entire file";
 
         // --- Editing ---
-        DeleteSelection => "delete-selection", aliases: ["delete"], palette: "Delete selection  [d]";
-        ChangeSelection => "change-selection", aliases: ["change"], palette: "Delete selection and insert  [c]";
-        YankSelection => "yank-selection", aliases: ["yank"], palette: "Yank (copy) selection  [y]";
-        PasteAfter => "paste-after", aliases: ["paste"], palette: "Paste after cursor  [p]";
-        PasteBefore => "paste-before", palette: "Paste before cursor  [P]";
-        Undo => "undo", aliases: ["u"], palette: "Undo  [u]";
-        Redo => "redo", palette: "Redo  [U]";
-        OpenLineBelow => "open-line-below", palette: "New line below  [o]";
-        OpenLineAbove => "open-line-above", palette: "New line above  [O]";
-        CommentRegion => "comment-region", aliases: ["comment"], palette: "Toggle comment/uncomment  [gc]";
+        DeleteSelection => "delete-selection", aliases: ["delete"], palette: "Delete selection";
+        ChangeSelection => "change-selection", aliases: ["change"], palette: "Delete selection and insert";
+        YankSelection => "yank-selection", aliases: ["yank"], palette: "Yank (copy) selection";
+        PasteAfter => "paste-after", aliases: ["paste"], palette: "Paste after cursor";
+        PasteBefore => "paste-before", palette: "Paste before cursor";
+        Undo => "undo", aliases: ["u"], palette: "Undo";
+        Redo => "redo", palette: "Redo";
+        OpenLineBelow => "open-line-below", palette: "New line below";
+        OpenLineAbove => "open-line-above", palette: "New line above";
+        CommentRegion => "comment-region", aliases: ["comment"], palette: "Toggle comment/uncomment";
         IndentRegion => "indent-region", aliases: ["indent"];
         DedentRegion => "dedent-region", aliases: ["dedent"];
-        KillToEndOfLine => "kill-to-end-of-line", aliases: ["kill-line"], palette: "Kill to end of line  [ctrl+k]";
+        KillToEndOfLine => "kill-to-end-of-line", aliases: ["kill-line"], palette: "Kill to end of line";
 
         // --- Mode transitions ---
-        EnterInsert => "enter-insert", palette: "Enter insert mode  [i]";
-        EnterInsertAfter => "enter-insert-after", palette: "Insert after cursor  [a]";
-        EnterInsertAtLineStart => "enter-insert-at-line-start", palette: "Insert at line start  [I]";
-        EnterInsertAtLineEnd => "enter-insert-at-line-end", palette: "Insert at line end  [A]";
-        EnterSelect => "enter-select", palette: "Enter select mode  [v]";
-        EnterNormal => "enter-normal", palette: "Return to normal mode  [Esc]";
-        EnterCommandMode => "enter-command-mode", palette: "Open command line  [:]";
+        EnterInsert => "enter-insert", palette: "Enter insert mode";
+        EnterInsertAfter => "enter-insert-after", palette: "Insert after cursor";
+        EnterInsertAtLineStart => "enter-insert-at-line-start", palette: "Insert at line start";
+        EnterInsertAtLineEnd => "enter-insert-at-line-end", palette: "Insert at line end";
+        EnterSelect => "enter-select", palette: "Enter select mode";
+        EnterNormal => "enter-normal", palette: "Return to normal mode";
+        EnterCommandMode => "enter-command-mode", palette: "Open command line";
 
         // --- Sub-mode entries ---
         EnterGotoMode => "enter-goto-mode";
-        EnterJumpMode => "enter-jump-mode", aliases: ["jump-mode", "jump"], palette: "Jump to label in view  [gw]";
+        EnterJumpMode => "enter-jump-mode", aliases: ["jump-mode", "jump"], palette: "Jump to label in view";
         FindCharForward => "find-char-forward";
         FindCharBackward => "find-char-backward";
         TillCharForward => "till-char-forward";
         TillCharBackward => "till-char-backward";
         EnterFoldMode => "enter-fold-mode", aliases: ["fold"];
-        EnterMatchMode => "enter-match-mode", aliases: ["match", "match-mode"], palette: "Select a text object — word, pair, function  [m]";
-        MatchBracket => "match-bracket", palette: "Jump to the matching bracket  [mm]";
+        EnterMatchMode => "enter-match-mode", aliases: ["match", "match-mode"], palette: "Select a text object — word, pair, function";
+        MatchBracket => "match-bracket", palette: "Jump to the matching bracket";
 
         // --- Pickers / UI popups ---
-        OpenCommandPalette => "open-command-palette", aliases: ["palette", "commands"], palette: "Open fuzzy-searchable command palette  [Space]";
-        OpenFilePicker => "open-file-picker", aliases: ["open-file", "e"], palette: "Open file  [ctrl+o, :e]";
-        OpenBufferPicker => "open-buffer-picker", aliases: ["buffers"], palette: "Switch buffer  [gb]";
-        OpenSymbolPicker => "open-symbol-picker", aliases: ["symbols"], palette: "Jump to symbol in file  [gs]";
-        OpenDiagnosticPicker => "open-diagnostic-picker", aliases: ["diagnostics"], palette: "Jump to diagnostic  [gD]";
+        OpenCommandPalette => "open-command-palette", aliases: ["palette", "commands"], palette: "Open fuzzy-searchable command palette";
+        OpenFilePicker => "open-file-picker", aliases: ["open-file", "e"], palette: "Open file";
+        OpenBufferPicker => "open-buffer-picker", aliases: ["buffers"], palette: "Switch buffer";
+        OpenSymbolPicker => "open-symbol-picker", aliases: ["symbols"], palette: "Jump to symbol in file";
+        OpenDiagnosticPicker => "open-diagnostic-picker", aliases: ["diagnostics"], palette: "Jump to diagnostic";
 
         // --- Buffers ---
-        BufferClose => "buffer-close", aliases: ["bd"], palette: "Close current buffer  [:bd]";
-        BufferForceClose => "buffer-force-close", aliases: ["bd!"], palette: "Force-close current buffer (discard changes)  [:bd!]";
-        BufferNext => "buffer-next", aliases: ["bn"], palette: "Switch to next buffer  [L, :bn]";
-        BufferPrev => "buffer-prev", aliases: ["bp"], palette: "Switch to previous buffer  [H, :bp]";
-        SwitchToScratch => "switch-to-scratch", aliases: ["scratch"], palette: "Switch to *scratch* buffer  [:scratch]";
-        SwitchToMessages => "switch-to-messages", aliases: ["messages"], palette: "Switch to *Messages* log buffer  [:messages]";
+        BufferClose => "buffer-close", aliases: ["bd"], palette: "Close current buffer";
+        BufferForceClose => "buffer-force-close", aliases: ["bd!"], palette: "Force-close current buffer (discard changes)";
+        BufferNext => "buffer-next", aliases: ["bn"], palette: "Switch to next buffer";
+        BufferPrev => "buffer-prev", aliases: ["bp"], palette: "Switch to previous buffer";
+        SwitchToScratch => "switch-to-scratch", aliases: ["scratch"], palette: "Switch to *scratch* buffer";
+        SwitchToMessages => "switch-to-messages", aliases: ["messages"], palette: "Switch to *Messages* log buffer";
 
         // --- Search / grep ---
-        SearchForward => "search-forward", aliases: ["search", "/"], palette: "Search forward  [/]";
-        SearchBackward => "search-backward", aliases: ["?"], palette: "Search backward  [?]";
-        SearchNext => "search-next", aliases: ["n"], palette: "Next match  [n]";
-        SearchPrev => "search-prev", aliases: ["N"], palette: "Previous match  [N]";
-        GrepBuffer => "grep-buffer", palette: "Grep current buffer  [ctrl+f]";
-        GrepProject => "grep-project", aliases: ["grep", "rg"], palette: "Grep project files  [ctrl+g]";
+        SearchForward => "search-forward", aliases: ["search", "/"], palette: "Search forward";
+        SearchBackward => "search-backward", aliases: ["?"], palette: "Search backward";
+        SearchNext => "search-next", aliases: ["n"], palette: "Next match";
+        SearchPrev => "search-prev", aliases: ["N"], palette: "Previous match";
+        GrepBuffer => "grep-buffer", palette: "Grep current buffer";
+        GrepProject => "grep-project", aliases: ["grep", "rg"], palette: "Grep project files";
 
         // --- Scroll / view ---
-        PageDown => "page-down", palette: "Scroll half page down  [ctrl+d, PgDn, J in notebooks]";
-        PageUp => "page-up", palette: "Scroll half page up  [ctrl+u, PgUp, K in notebooks]";
-        ScrollCursorCenter => "scroll-cursor-center", aliases: ["center", "gz"], palette: "Scroll cursor to centre  [gz]";
+        PageDown => "page-down", palette: "Scroll half page down";
+        PageUp => "page-up", palette: "Scroll half page up";
+        ScrollCursorCenter => "scroll-cursor-center", aliases: ["center", "gz"], palette: "Scroll cursor to centre";
 
         // --- LSP ---
-        LspShowDocumentation => "lsp-show-documentation", aliases: ["lsp-hover", "hover", "doc"], palette: "Show hover documentation  [gk, K]";
-        LspCodeActions => "lsp-code-actions", aliases: ["code-actions", "ga"], palette: "Show code actions  [ga]";
-        LspGotoDefinition => "lsp-goto-definition", aliases: ["goto-definition", "gd"], palette: "Go to definition  [gd]";
-        LspGotoReferences => "lsp-goto-references", aliases: ["goto-references", "gr"], palette: "Go to references  [gr]";
-        LspGotoTypeDefinition => "lsp-goto-type-definition", aliases: ["goto-type-definition", "gy"], palette: "Go to type definition  [gy]";
-        LspGotoImplementation => "lsp-goto-implementation", aliases: ["goto-implementation", "gi"], palette: "Go to implementation  [gi]";
-        LspRequestCompletion => "lsp-request-completion", aliases: ["completion"], palette: "Request completions  [ctrl+space]";
-        LspDoctor => "lsp-doctor", aliases: ["doctor", "lsp-status"], palette: "Diagnose the language server setup for this buffer  [:lsp-doctor]";
-        FormatDocument => "format-document", aliases: ["format", "fmt"], palette: "Format buffer via language server  [:fmt]";
+        LspShowDocumentation => "lsp-show-documentation", aliases: ["lsp-hover", "hover", "doc"], palette: "Show hover documentation";
+        LspCodeActions => "lsp-code-actions", aliases: ["code-actions", "ga"], palette: "Show code actions";
+        LspGotoDefinition => "lsp-goto-definition", aliases: ["goto-definition", "gd"], palette: "Go to definition";
+        LspGotoReferences => "lsp-goto-references", aliases: ["goto-references", "gr"], palette: "Go to references";
+        LspGotoTypeDefinition => "lsp-goto-type-definition", aliases: ["goto-type-definition", "gy"], palette: "Go to type definition";
+        LspGotoImplementation => "lsp-goto-implementation", aliases: ["goto-implementation", "gi"], palette: "Go to implementation";
+        LspRequestCompletion => "lsp-request-completion", aliases: ["completion"], palette: "Request completions";
+        LspDoctor => "lsp-doctor", aliases: ["doctor", "lsp-status"], palette: "Diagnose the language server setup for this buffer";
+        FormatDocument => "format-document", aliases: ["format", "fmt"], palette: "Format buffer via language server";
 
         // --- Notebook navigation / editing ---
-        NotebookNextCell => "notebook-next-cell", palette: "Next cell  [N]";
-        NotebookPrevCell => "notebook-prev-cell", palette: "Previous cell  [M]";
+        NotebookNextCell => "notebook-next-cell", palette: "Next cell";
+        NotebookPrevCell => "notebook-prev-cell", palette: "Previous cell";
         NotebookScrollDown => "notebook-scroll-down";
         NotebookScrollUp => "notebook-scroll-up";
-        NotebookExecuteCell => "notebook-execute-cell", aliases: ["run"], palette: "Execute cell  [ctrl+e, shift+enter, :run]";
-        NotebookExecuteAndAdvance => "notebook-execute-and-advance", aliases: ["run-next"], palette: "Execute cell and advance  [:run-next]";
-        NotebookExecuteAllCells => "notebook-execute-all-cells", aliases: ["run-all", "execute-all-cells"], palette: "Execute all cells in order  [:run-all]";
-        NotebookExecuteCellsBelow => "notebook-execute-cells-below", aliases: ["run-all-below", "execute-all-cells-below"], palette: "Execute the focused cell and all below  [:run-all-below]";
-        NotebookNewCellBelow => "notebook-new-cell-below", aliases: ["new-cell"], palette: "New cell below  [:new-cell]";
-        NotebookNewCellAbove => "notebook-new-cell-above", palette: "New cell above  [:notebook-new-cell-above]";
-        NotebookDeleteCell => "notebook-delete-cell", palette: "Delete cell  [:notebook-delete-cell]";
-        NotebookClearOutputs => "notebook-clear-outputs", palette: "Clear cell outputs  [:notebook-clear-outputs]";
-        NotebookCellToMarkdown => "notebook-cell-to-markdown", aliases: ["cell-md", "to-markdown"], palette: "Convert cell to markdown  [:cell-md]";
-        NotebookCellToCode => "notebook-cell-to-code", aliases: ["cell-code", "to-code"], palette: "Convert cell to code  [:cell-code]";
-        NotebookRestartKernel => "notebook-restart-kernel", aliases: ["restart-kernel", "kernel-restart"], palette: "Restart kernel  [:restart-kernel]";
-        NotebookInterruptKernel => "notebook-interrupt-kernel", aliases: ["interrupt-kernel", "kernel-interrupt"], palette: "Interrupt kernel  [:interrupt-kernel]";
+        NotebookExecuteCell => "notebook-execute-cell", aliases: ["run"], palette: "Execute cell";
+        NotebookExecuteAndAdvance => "notebook-execute-and-advance", aliases: ["run-next"], palette: "Execute cell and advance";
+        NotebookExecuteAllCells => "notebook-execute-all-cells", aliases: ["run-all", "execute-all-cells"], palette: "Execute all cells in order";
+        NotebookExecuteCellsBelow => "notebook-execute-cells-below", aliases: ["run-all-below", "execute-all-cells-below"], palette: "Execute the focused cell and all below";
+        NotebookNewCellBelow => "notebook-new-cell-below", aliases: ["new-cell"], palette: "New cell below";
+        NotebookNewCellAbove => "notebook-new-cell-above", palette: "New cell above";
+        NotebookDeleteCell => "notebook-delete-cell", palette: "Delete cell";
+        NotebookClearOutputs => "notebook-clear-outputs", palette: "Clear cell outputs";
+        NotebookCellToMarkdown => "notebook-cell-to-markdown", aliases: ["cell-md", "to-markdown"], palette: "Convert cell to markdown";
+        NotebookCellToCode => "notebook-cell-to-code", aliases: ["cell-code", "to-code"], palette: "Convert cell to code";
+        NotebookRestartKernel => "notebook-restart-kernel", aliases: ["restart-kernel", "kernel-restart"], palette: "Restart kernel";
+        NotebookInterruptKernel => "notebook-interrupt-kernel", aliases: ["interrupt-kernel", "kernel-interrupt"], palette: "Interrupt kernel";
         NotebookUndoStructural => "notebook-undo-structural";
         NotebookRedoStructural => "notebook-redo-structural";
-        NotebookOpenCellEdit => "notebook-open-cell-edit", aliases: ["open-cell", "edit-cell"], palette: "Open cell in full-screen editor  [:open-cell]";
-        NotebookCloseCellEdit => "notebook-close-cell-edit", aliases: ["close-cell", "notebook-discard-cell-edit", "discard-cell"], palette: "Save cell and return  [ctrl+enter, :close-cell]";
-        EnterNotebook => "enter-notebook", aliases: ["nb", "notebook"], palette: "Open the current .ipynb as a notebook  [:nb]";
-        NotebookGotoError => "notebook-goto-error", aliases: ["goto-error", "error"], palette: "Jump to the source line of the focused cell's error  [:goto-error]";
+        NotebookOpenCellEdit => "notebook-open-cell-edit", aliases: ["open-cell", "edit-cell"], palette: "Open cell in full-screen editor";
+        NotebookCloseCellEdit => "notebook-close-cell-edit", aliases: ["close-cell", "notebook-discard-cell-edit", "discard-cell"], palette: "Save cell and return";
+        EnterNotebook => "enter-notebook", aliases: ["nb", "notebook"], palette: "Open the current .ipynb as a notebook";
+        NotebookGotoError => "notebook-goto-error", aliases: ["goto-error", "error"], palette: "Jump to the source line of the focused cell's error";
         NotebookFollowError => "notebook-follow-error";
 
         // --- Code folding ---
-        FoldToggle => "fold-toggle", aliases: ["za"], palette: "Toggle fold at cursor  [za]";
-        FoldToggleAll => "fold-toggle-all", aliases: ["zA"], palette: "Toggle all folds  [zA]";
-        FoldClose => "fold-close", aliases: ["zc"], palette: "Close the fold at the cursor  [zc]";
-        FoldOpen => "fold-open", aliases: ["zo"], palette: "Open the fold at the cursor  [zo]";
-        FoldCloseAll => "fold-close-all", aliases: ["zM"], palette: "Close every fold  [zM]";
-        FoldOpenAll => "fold-open-all", aliases: ["zR"], palette: "Open every fold  [zR]";
-        FoldCloseType => "fold-close-type", aliases: ["zt", "fold-type"], palette: "Fold every block like this one — same kind, depth and key  [zt]";
-        FoldOpenType => "fold-open-type", aliases: ["zT", "unfold-type"], palette: "Unfold every block like this one  [zT]";
-        NotebookToggleFoldCell => "notebook-toggle-fold-cell", aliases: ["fold-cell"], palette: "Toggle cell fold  [:fold-cell]";
-        NotebookToggleOutputExpand => "notebook-toggle-output-expand", aliases: ["expand-output", "output-expand"], palette: "Show full cell output (no line cap)  [zO, :expand-output]";
-        NotebookToggleAllFolds => "notebook-toggle-all-folds", aliases: ["fold-all-cells"], palette: "Toggle all cell folds  [:fold-all-cells]";
+        FoldToggle => "fold-toggle", aliases: ["za"], palette: "Toggle fold at cursor";
+        FoldToggleAll => "fold-toggle-all", aliases: ["zA"], palette: "Toggle all folds";
+        FoldClose => "fold-close", aliases: ["zc"], palette: "Close the fold at the cursor";
+        FoldOpen => "fold-open", aliases: ["zo"], palette: "Open the fold at the cursor";
+        FoldCloseAll => "fold-close-all", aliases: ["zM"], palette: "Close every fold";
+        FoldOpenAll => "fold-open-all", aliases: ["zR"], palette: "Open every fold";
+        FoldCloseType => "fold-close-type", aliases: ["zt", "fold-type"], palette: "Fold every block like this one — same kind, depth and key";
+        FoldOpenType => "fold-open-type", aliases: ["zT", "unfold-type"], palette: "Unfold every block like this one";
+        NotebookToggleFoldCell => "notebook-toggle-fold-cell", aliases: ["fold-cell"], palette: "Toggle cell fold";
+        NotebookToggleOutputExpand => "notebook-toggle-output-expand", aliases: ["expand-output", "output-expand"], palette: "Show full cell output (no line cap)";
+        NotebookToggleAllFolds => "notebook-toggle-all-folds", aliases: ["fold-all-cells"], palette: "Toggle all cell folds";
 
         // --- Tabular data view ---
-        OpenAsTable => "open-as-table", aliases: ["csv", "table"], palette: "View the current file as a data table  [:csv]";
-        TableClose => "table-close", aliases: ["close-table"], palette: "Leave the table view and edit as text  [:table-close]";
-        TableOpenCell => "table-open-cell", aliases: ["read-cell", "cell-buffer"], palette: "Read the cursor cell's full text in its own buffer  [Enter]";
-        TablePeekCell => "table-peek-cell", aliases: ["peek-cell", "peek"], palette: "Peek the cursor cell's full text in a float  [K]";
-        TableYankCell => "table-yank-cell", aliases: ["yank-cell"], palette: "Copy the cursor cell to the clipboard  [y]";
-        TableYankRow => "table-yank-row", aliases: ["yank-row"], palette: "Copy the cursor row to the clipboard as TSV  [x]";
-        TableCloseCell => "table-close-cell", aliases: ["cell-back", "back-to-table"], palette: "Return from a cell buffer to its table  [:bd]";
-        TableColumnSummary => "column-summary", aliases: ["summary", "describe"], palette: "Statistics for the cursor's column  [S]";
-        TableColumnFrequency => "column-frequency", aliases: ["frequency", "value-counts"], palette: "Count the cursor column's values as a new table  [F]";
-        TableToggleSparkline => "toggle-column-sparkline", aliases: ["sparkline", "column-sparkline"], palette: "Show/hide the distribution row under the column names  [s]";
-        TableCloseDerived => "close-derived-table", aliases: ["table-back"], palette: "Leave a computed table and go back to the one it came from  [q]";
-        TableSort => "sort-column", aliases: ["sort"], palette: "Sort by the cursor column — again reverses, again unsorts  [gs]";
-        TableFilter => "filter-column", aliases: ["filter"], palette: "Filter rows on the cursor column  [gf]";
-        TableGroupBy => "group-by-column", aliases: ["group", "groupby"], palette: "Group rows by the cursor column and count them  [gr]";
-        TableUndoTransform => "undo-transform", palette: "Drop the last sort/filter/group  [u]";
-        TableClearTransforms => "clear-transforms", aliases: ["reset-table"], palette: "Drop every sort/filter/group  [gx]";
-        KernelVariables => "kernel-variables", aliases: ["vars", "variables"], palette: "List the kernel's variables; Enter opens a dataframe as a grid  [gv]";
-        SchemaBrowser => "schema", aliases: ["tables", "schema-browser"], palette: "Browse the tables in every attached database  [gt]";
-        SqlBuffer => "sql", aliases: ["query", "sql-buffer"], palette: "Open the SQL scratch buffer  [:sql]";
-        SqlRun => "run-query", aliases: ["sql-run"], palette: "Run the SQL buffer's query and show the result as a grid  [Ctrl+E]";
+        OpenAsTable => "open-as-table", aliases: ["csv", "table"], palette: "View the current file as a data table";
+        TableClose => "table-close", aliases: ["close-table"], palette: "Leave the table view and edit as text";
+        TableOpenCell => "table-open-cell", aliases: ["read-cell", "cell-buffer"], palette: "Read the cursor cell's full text in its own buffer";
+        TablePeekCell => "table-peek-cell", aliases: ["peek-cell", "peek"], palette: "Peek the cursor cell's full text in a float";
+        TableYankCell => "table-yank-cell", aliases: ["yank-cell"], palette: "Copy the cursor cell to the clipboard";
+        TableYankRow => "table-yank-row", aliases: ["yank-row"], palette: "Copy the cursor row to the clipboard as TSV";
+        TableCloseCell => "table-close-cell", aliases: ["cell-back", "back-to-table"], palette: "Return from a cell buffer to its table";
+        TableColumnSummary => "column-summary", aliases: ["summary", "describe"], palette: "Statistics for the cursor's column";
+        TableColumnFrequency => "column-frequency", aliases: ["frequency", "value-counts"], palette: "Count the cursor column's values as a new table";
+        TableToggleSparkline => "toggle-column-sparkline", aliases: ["sparkline", "column-sparkline"], palette: "Show/hide the distribution row under the column names";
+        TableCloseDerived => "close-derived-table", aliases: ["table-back"], palette: "Leave a computed table and go back to the one it came from";
+        TableSort => "sort-column", aliases: ["sort"], palette: "Sort by the cursor column — again reverses, again unsorts";
+        TableFilter => "filter-column", aliases: ["filter"], palette: "Filter rows on the cursor column";
+        TableGroupBy => "group-by-column", aliases: ["group", "groupby"], palette: "Group rows by the cursor column and count them";
+        TableUndoTransform => "undo-transform", palette: "Drop the last sort/filter/group";
+        TableClearTransforms => "clear-transforms", aliases: ["reset-table"], palette: "Drop every sort/filter/group";
+        KernelVariables => "kernel-variables", aliases: ["vars", "variables"], palette: "List the kernel's variables; Enter opens a dataframe as a grid";
+        SchemaBrowser => "schema", aliases: ["tables", "schema-browser"], palette: "Browse the tables in every attached database";
+        SqlBuffer => "sql", aliases: ["query", "sql-buffer"], palette: "Open the SQL scratch buffer";
+        SqlRun => "run-query", aliases: ["sql-run"], palette: "Run the SQL buffer's query and show the result as a grid";
 
         // --- Version control (see `crate::vcs`) ---
         // The graph view itself.
-        VcsOpen => "version-control", aliases: ["vc", "git"], palette: "Open the version-control graph  [gV]";
+        VcsOpen => "version-control", aliases: ["vc", "git"], palette: "Open the version-control graph";
         VcsClose => "version-control-close", aliases: ["vc-close"], palette: "Leave the version-control graph";
-        VcsRefresh => "version-control-refresh", aliases: ["vc-refresh"], palette: "Re-read the repository  [r]";
+        VcsRefresh => "version-control-refresh", aliases: ["vc-refresh"], palette: "Re-read the repository";
         // Direct manipulation.
-        VcsGrab => "version-control-grab", aliases: ["vc-grab"], palette: "Pick up / put down the commit or branch under the cursor  [Space]";
-        VcsDrop => "version-control-drop", aliases: ["vc-drop"], palette: "Remove the selected commit from the planned history  [d]";
-        VcsMerge => "version-control-merge", aliases: ["vc-merge"], palette: "Plan a merge of the selection into the current branch  [m]";
-        VcsUndoEdit => "version-control-undo-edit", aliases: ["vc-undo-edit"], palette: "Take back the last planned change  [u]";
-        VcsReset => "version-control-reset", aliases: ["vc-reset"], palette: "Discard every planned change  [gx]";
+        VcsGrab => "version-control-grab", aliases: ["vc-grab"], palette: "Pick up / put down the commit or branch under the cursor";
+        VcsDrop => "version-control-drop", aliases: ["vc-drop"], palette: "Remove the selected commit from the planned history";
+        VcsMerge => "version-control-merge", aliases: ["vc-merge"], palette: "Plan a merge of the selection into the current branch";
+        VcsUndoEdit => "version-control-undo-edit", aliases: ["vc-undo-edit"], palette: "Take back the last planned change";
+        VcsReset => "version-control-reset", aliases: ["vc-reset"], palette: "Discard every planned change";
         // Committing the plan, and getting back out of it.
         VcsApply => "version-control-apply", aliases: ["vc-apply", "apply"], palette: "Apply the planned history to the repository";
         VcsUndo => "version-control-undo", aliases: ["vc-undo"], palette: "Put the branches back as they were before the last apply";
         VcsAbort => "version-control-abort", aliases: ["vc-abort"], palette: "Abort the cherry-pick / merge left in progress by a conflict";
         VcsContinue => "version-control-continue", aliases: ["vc-continue"], palette: "Resume after resolving a conflict";
         // Everyday actions, which happen immediately — they add rather than rewrite.
-        VcsCheckout => "version-control-checkout", aliases: ["vc-checkout", "checkout"], palette: "Check out the branch or commit under the cursor  [c]";
+        VcsCheckout => "version-control-checkout", aliases: ["vc-checkout", "checkout"], palette: "Check out the branch or commit under the cursor";
         VcsShow => "version-control-show", aliases: ["vc-show"], palette: "Show the selected commit's diff";
-        VcsEnter => "version-control-enter", aliases: ["vc-enter"], palette: "Act on what the cursor is on  [Enter]";
-        VcsStatus => "version-control-status", aliases: ["vc-status", "status"], palette: "The work tree beside each file's diff; Space stages  [w]";
-        VcsGitStatus => "version-control-git-status", aliases: ["vc-git-status", "git-status"], palette: "Show `git status` verbatim in a float  [s]";
-        VcsStage => "version-control-stage", aliases: ["vc-stage", "stage"], palette: "Stage every change in the work tree  [+]";
-        VcsUnstage => "version-control-unstage", aliases: ["vc-unstage", "unstage"], palette: "Unstage everything  [-]";
-        VcsHelp => "version-control-help", aliases: ["vc-help", "vc-keys"], palette: "Every key the version-control graph binds  [?]";
-        VcsGuide => "version-control-guide", aliases: ["vc-guide"], palette: "What the graph's gestures mean, with walkthroughs  [g?]";
+        VcsEnter => "version-control-enter", aliases: ["vc-enter"], palette: "Act on what the cursor is on";
+        VcsStatus => "version-control-status", aliases: ["vc-status", "status"], palette: "The work tree beside each file's diff; Space stages";
+        VcsGitStatus => "version-control-git-status", aliases: ["vc-git-status", "git-status"], palette: "Show `git status` verbatim in a float";
+        VcsStage => "version-control-stage", aliases: ["vc-stage", "stage"], palette: "Stage every change in the work tree";
+        VcsUnstage => "version-control-unstage", aliases: ["vc-unstage", "unstage"], palette: "Unstage everything";
+        VcsHelp => "version-control-help", aliases: ["vc-help", "vc-keys"], palette: "Every key the version-control graph binds";
+        VcsGuide => "version-control-guide", aliases: ["vc-guide"], palette: "What the graph's gestures mean, with walkthroughs";
         VcsFetch => "version-control-fetch", aliases: ["vc-fetch", "fetch"], palette: "Fetch from the remote";
         VcsPull => "version-control-pull", aliases: ["vc-pull", "pull"], palette: "Pull the current branch from its upstream";
         VcsPush => "version-control-push", aliases: ["vc-push", "push"], palette: "Push the current branch to its upstream";
         // Named for what it does — decides what is *shown* — rather than
         // `…-branches`, which sat one letter from `version-control-branch`
         // (which creates one) in a palette that fuzzy-matches.
-        VcsBranches => "version-control-visible-branches", aliases: ["vc-visible", "vc-hidden"], palette: "Which branches the graph draws  [b]";
-        VcsHideBranch => "version-control-hide-branch", aliases: ["vc-hide"], palette: "Take the branch under the cursor out of the graph  [x]";
-        VcsFlip => "version-control-flip", aliases: ["vc-flip", "vc-orientation"], palette: "Turn the graph: history across, or down the screen  [o]";
+        VcsBranches => "version-control-visible-branches", aliases: ["vc-visible", "vc-hidden"], palette: "Which branches the graph draws";
+        VcsHideBranch => "version-control-hide-branch", aliases: ["vc-hide"], palette: "Take the branch under the cursor out of the graph";
+        VcsFlip => "version-control-flip", aliases: ["vc-flip", "vc-orientation"], palette: "Turn the graph: history across, or down the screen";
         VcsOutput => "version-control-output", aliases: ["vc-output"], palette: "The last git command's output, as it ran";
 
         // --- Merge-conflict resolver (see `crate::conflict`) ---
-        ConflictOpen => "conflicts", aliases: ["resolve", "merge-conflicts"], palette: "Resolve the merge conflicts, side by side with labels  [:conflicts]";
+        ConflictOpen => "conflicts", aliases: ["resolve", "merge-conflicts"], palette: "Resolve the merge conflicts, side by side with labels";
         ConflictClose => "conflict-close", aliases: ["resolve-close"], palette: "Leave the conflict resolver";
-        ConflictRefresh => "conflict-refresh", aliases: ["resolve-refresh"], palette: "Re-read the conflicted files  [r]";
-        ConflictTakeSide => "conflict-take-side", aliases: ["resolve-take"], palette: "Take (or drop) the focused side of this conflict  [Space]";
-        ConflictTakeLeft => "conflict-take-left", aliases: ["resolve-left"], palette: "Take only the left side of this conflict  [a]";
-        ConflictTakeRight => "conflict-take-right", aliases: ["resolve-right"], palette: "Take only the right side of this conflict  [b]";
-        ConflictTakeLeftAll => "conflict-take-left-all", aliases: ["resolve-left-all"], palette: "Take the left side of every unanswered conflict in this file  [A]";
-        ConflictTakeRightAll => "conflict-take-right-all", aliases: ["resolve-right-all"], palette: "Take the right side of every unanswered conflict in this file  [B]";
-        ConflictNextHunk => "conflict-next", aliases: ["resolve-next"], palette: "Next unanswered conflict  [n]";
-        ConflictPrevHunk => "conflict-prev", aliases: ["resolve-prev"], palette: "Previous unanswered conflict  [N]";
-        ConflictNextFile => "conflict-next-file", aliases: ["resolve-next-file"], palette: "Next conflicted file  []]";
-        ConflictPrevFile => "conflict-prev-file", aliases: ["resolve-prev-file"], palette: "Previous conflicted file  [[]";
-        ConflictToggleBase => "conflict-toggle-base", aliases: ["resolve-base"], palette: "Show the common ancestor beside the two versions  [3]";
-        ConflictEditHunk => "conflict-edit", aliases: ["resolve-edit"], palette: "Edit this conflict's merged text by hand  [e]";
-        ConflictWriteFile => "conflict-write", aliases: ["resolve-write"], palette: "Write this file's resolution and stage it  [Enter]";
+        ConflictRefresh => "conflict-refresh", aliases: ["resolve-refresh"], palette: "Re-read the conflicted files";
+        ConflictTakeSide => "conflict-take-side", aliases: ["resolve-take"], palette: "Take (or drop) the focused side of this conflict";
+        ConflictTakeLeft => "conflict-take-left", aliases: ["resolve-left"], palette: "Take only the left side of this conflict";
+        ConflictTakeRight => "conflict-take-right", aliases: ["resolve-right"], palette: "Take only the right side of this conflict";
+        ConflictTakeLeftAll => "conflict-take-left-all", aliases: ["resolve-left-all"], palette: "Take the left side of every unanswered conflict in this file";
+        ConflictTakeRightAll => "conflict-take-right-all", aliases: ["resolve-right-all"], palette: "Take the right side of every unanswered conflict in this file";
+        ConflictNextHunk => "conflict-next", aliases: ["resolve-next"], palette: "Next unanswered conflict";
+        ConflictPrevHunk => "conflict-prev", aliases: ["resolve-prev"], palette: "Previous unanswered conflict";
+        ConflictNextFile => "conflict-next-file", aliases: ["resolve-next-file"], palette: "Next conflicted file";
+        ConflictPrevFile => "conflict-prev-file", aliases: ["resolve-prev-file"], palette: "Previous conflicted file";
+        ConflictToggleBase => "conflict-toggle-base", aliases: ["resolve-base"], palette: "Show the common ancestor beside the two versions";
+        ConflictEditHunk => "conflict-edit", aliases: ["resolve-edit"], palette: "Edit this conflict's merged text by hand";
+        ConflictWriteFile => "conflict-write", aliases: ["resolve-write"], palette: "Write this file's resolution and stage it";
         ConflictRevertFile => "conflict-revert", aliases: ["resolve-revert"], palette: "Put this file back the way git left it, markers and all";
-        ConflictDiff => "conflict-diff", aliases: ["resolve-diff"], palette: "This file's two versions against their common ancestor  [d]";
-        ConflictHelp => "conflict-help", aliases: ["resolve-help"], palette: "Every key the conflict resolver binds  [?]";
+        ConflictDiff => "conflict-diff", aliases: ["resolve-diff"], palette: "This file's two versions against their common ancestor";
+        ConflictHelp => "conflict-help", aliases: ["resolve-help"], palette: "Every key the conflict resolver binds";
 
         // --- Toggles / config ---
-        ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators  [:toggle-git-gutter]";
-        ToggleLineNumbers => "toggle-line-numbers", aliases: ["line-numbers"], palette: "Toggle line numbers  [:toggle-line-numbers]";
-        ToggleRelativeLineNumbers => "toggle-relative-line-numbers", aliases: ["relative-line-numbers"], palette: "Toggle relative line numbers  [:toggle-relative-line-numbers]";
-        ToggleWordWrap => "toggle-word-wrap", aliases: ["word-wrap", "wrap"], palette: "Toggle soft word-wrap  [:wrap]";
-        OpenConfig => "open-config", aliases: ["config"], palette: "Open config file in editor  [:config]";
-        ReloadConfig => "reload-config", aliases: ["config-reload"], palette: "Reload config from disk  [:config-reload]";
-        OpenThemePicker => "open-theme-picker", aliases: ["themes"], palette: "Choose color theme  [:theme]";
+        ToggleGitGutter => "toggle-git-gutter", aliases: ["git-gutter", "gutter"], palette: "Toggle git gutter indicators";
+        ToggleLineNumbers => "toggle-line-numbers", aliases: ["line-numbers"], palette: "Toggle line numbers";
+        ToggleRelativeLineNumbers => "toggle-relative-line-numbers", aliases: ["relative-line-numbers"], palette: "Toggle relative line numbers";
+        ToggleWordWrap => "toggle-word-wrap", aliases: ["word-wrap", "wrap"], palette: "Toggle soft word-wrap";
+        OpenConfig => "open-config", aliases: ["config"], palette: "Open config file in editor";
+        ReloadConfig => "reload-config", aliases: ["config-reload"], palette: "Reload config from disk";
+        OpenThemePicker => "open-theme-picker", aliases: ["themes"], palette: "Choose color theme";
 
         // --- Dashboard ---
-        ShowDashboard => "show-dashboard", aliases: ["dashboard", "home", "splash"], palette: "Show the welcome / dashboard screen  [:dashboard]";
+        ShowDashboard => "show-dashboard", aliases: ["dashboard", "home", "splash"], palette: "Show the welcome / dashboard screen";
     }
     data: {
         // Move the cursor to a 1-based line number (also the numeric `:N` form).
         GotoLine(usize) => "goto-line";
         // Write the buffer to a new path.
-        WriteAs(String) => "write-as", palette: "Write to new path  [:w <path>]";
+        WriteAs(String) => "write-as", palette: "Write to new path";
         // Run a shell command.
-        Shell(String) => "shell", palette: "Run a shell command  [:shell <cmd>]";
+        Shell(String) => "shell", palette: "Run a shell command";
         // Render the current notebook / markdown document via Quarto.
-        ExportDocument(String) => "export", palette: "Export via Quarto to pdf/html/docx…  [:export <fmt>]";
+        ExportDocument(String) => "export", palette: "Export via Quarto to pdf/html/docx…";
         // Open a kernel dataframe as a grid (`:view df`).
-        ViewVariable(String) => "view", palette: "Open a kernel dataframe as a grid  [:view <name>]";
+        ViewVariable(String) => "view", palette: "Open a kernel dataframe as a grid";
         // Attach a local database file read-only (`:attach <path> [as <alias>]`).
-        Attach(String) => "attach", palette: "Attach a local database file, read-only  [:attach <path>]";
+        Attach(String) => "attach", palette: "Attach a local database file, read-only";
         // Drop one attachment by alias, or all of them when the argument is empty.
-        Detach(String) => "detach", palette: "Detach an attached database  [:detach <alias>]";
+        Detach(String) => "detach", palette: "Detach an attached database";
         // Create a branch at the cursor (`:vc-branch <name>`).
-        VcsNewBranch(String) => "version-control-branch", palette: "Create a branch at the selected commit  [:vc-branch <name>]";
+        VcsNewBranch(String) => "version-control-branch", palette: "Create a branch at the selected commit";
         // Commit what is staged (`:vc-commit <message>`).
-        VcsCommit(String) => "version-control-commit", palette: "Commit the staged changes  [:vc-commit <message>]";
+        VcsCommit(String) => "version-control-commit", palette: "Commit the staged changes";
         // Set the current branch's upstream (`:vc-upstream origin/main`).
-        VcsSetUpstream(String) => "version-control-upstream", palette: "Set the current branch's upstream  [:vc-upstream <remote/branch>]";
+        VcsSetUpstream(String) => "version-control-upstream", palette: "Set the current branch's upstream";
+        // Change any config value for the session (`:set editor.tab_width 2`).
+        Set(String) => "set", palette: "Change a setting for this session";
+        // Flip an on/off config value for the session (`:toggle word_wrap`).
+        Toggle(String) => "toggle", palette: "Turn a setting on or off for this session";
         // Switch to a named color theme (`:theme <name>`; bare `:theme` opens the picker).
         SwitchTheme(String) => "theme";
         // Select the text object at the cursor (`m i w`, `m o f`, ...).
@@ -336,6 +341,11 @@ commands! {
         // A list of commands executed in sequence (composition / scripting).
         Sequence(Vec<Command>) => "sequence";
     }
+}
+
+/// The palette description of the command named `name`, if it has one.
+pub fn describe(name: &str) -> Option<&'static str> {
+    Command::palette_entries().into_iter().find(|(n, _)| *n == name).map(|(_, d)| d)
 }
 
 impl Command {
@@ -408,6 +418,8 @@ impl Command {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;
                 Some(Command::GotoLine(n))
             }
+            "set" => Some(Command::Set(arg.unwrap_or("").to_string())),
+            "toggle" => Some(Command::Toggle(arg.unwrap_or("").to_string())),
             // `:theme <name>` switches directly; bare `:theme` opens the picker.
             "theme" => match arg {
                 Some(name) if !name.is_empty() => Some(Command::SwitchTheme(name.to_string())),

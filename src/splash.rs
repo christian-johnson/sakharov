@@ -85,7 +85,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
         let hint = app
             .keymap
-            .hint_for_command(action.command_name)
+            .keys_for(crate::keymap::Layer::Normal, action.command_name)
             .unwrap_or_else(|| action.fallback.to_string());
 
         // "  ▸  label ................  hint"

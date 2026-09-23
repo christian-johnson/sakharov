@@ -11,6 +11,9 @@ use crate::{
     },
 };
 
+/// How long a request may go unanswered before it is abandoned.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -911,6 +914,7 @@ impl LspManager {
 
     /// Drain all pending server messages and return semantic events.
     pub fn poll(&mut self) -> Vec<LspEvent> {
+        self.expire_stale_requests();
         let mut events = Vec::new();
         let languages: Vec<String> = self.servers.keys().cloned().collect();
         for lang in languages {
@@ -964,6 +968,24 @@ impl LspManager {
         events
     }
 
+    /// Drop requests a server has left unanswered for `REQUEST_TIMEOUT`, so a
+    /// silent server cannot keep the spinner (and its redraws) running forever.
+    fn expire_stale_requests(&mut self) {
+        let mut expired = Vec::new();
+        for server in self.servers.values_mut().flatten() {
+            for kind in server.client.expire_pending(REQUEST_TIMEOUT) {
+                if kind != PendingKind::Prewarm {
+                    expired.push(format!(
+                        "LSP: '{}' did not answer a {kind:?} request within {}s; gave up",
+                        server.command,
+                        REQUEST_TIMEOUT.as_secs()
+                    ));
+                }
+            }
+        }
+        self.lifecycle_log.extend(expired);
+    }
+
     /// True if any server has an in-flight request awaiting a reply.  Drives the
     /// status-bar spinner; deliberately scoped to pending requests (not the
     /// initialization handshake) so a server that fails to initialize can't pin
@@ -972,7 +994,7 @@ impl LspManager {
         self.servers
             .values()
             .flatten()
-            .any(|s| !s.client.pending.is_empty())
+            .any(|s| s.client.pending.values().any(|k| *k != PendingKind::Initialize))
     }
 
     /// True if any server for `language` is running and initialized.
@@ -1145,7 +1167,7 @@ fn process_message(
 ) -> Option<LspEvent> {
     match msg {
         ServerMessage::Response { id, result, error: _ } => {
-            let kind = client.pending.remove(&id)?;
+            let kind = client.take_pending(id)?;
             let result = result.unwrap_or(Value::Null);
 
             match kind {

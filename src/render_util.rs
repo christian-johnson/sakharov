@@ -20,6 +20,85 @@ pub fn char_display_width(c: char, col: usize, tab_width: usize) -> usize {
     }
 }
 
+/// Make one line of another program's output safe to draw as cell symbols.
+///
+/// A raw control character stored in a cell is emitted verbatim by the
+/// backend and corrupts the screen, so:
+///
+/// * only the text after the last `\r` is kept — a progress bar rewrites its
+///   line that way, and every earlier frame was meant to be overwritten;
+/// * terminal escape sequences (colours, titles) are dropped;
+/// * tabs expand to `tab_stop` columns and any other control char becomes a space.
+///
+/// ```ignore
+/// assert_eq!(sanitize_output("10%\r\u{1b}[32mdone\u{1b}[0m", 4), "done");
+/// ```
+pub fn sanitize_output(line: &str, tab_stop: usize) -> String {
+    let visible = line.trim_end_matches(['\n', '\r']);
+    let visible = visible.rsplit('\r').next().unwrap_or(visible);
+    flatten_controls(visible, tab_stop, true)
+}
+
+/// Make one line of the user's own text safe to draw as cell symbols: tabs
+/// expand to `tab_stop` columns and every other control char becomes a space.
+/// Unlike [`sanitize_output`], nothing is dropped.
+pub fn sanitize_source(line: &str, tab_stop: usize) -> String {
+    flatten_controls(line.trim_end_matches(['\n', '\r']), tab_stop, false)
+}
+
+fn flatten_controls(text: &str, tab_stop: usize, strip_escapes: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut col = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' if strip_escapes => skip_escape(&mut chars),
+            '\t' => {
+                let pad = tab_stop.max(1) - col % tab_stop.max(1);
+                out.extend(std::iter::repeat(' ').take(pad));
+                col += pad;
+            }
+            c if c.is_control() => {
+                out.push(' ');
+                col += 1;
+            }
+            c => {
+                out.push(c);
+                col += c.width().unwrap_or(0);
+            }
+        }
+    }
+    out
+}
+
+/// Consume the rest of an escape sequence, having just read the `ESC`.
+fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars>) {
+    match chars.next() {
+        // CSI: parameters, then one final byte in `@`..=`~`.
+        Some('[') => {
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+        // OSC: runs to a BEL or an ESC-terminated string.
+        Some(']') => {
+            while let Some(c) = chars.next() {
+                if c == '\u{7}' {
+                    break;
+                }
+                if c == '\u{1b}' {
+                    chars.next();
+                    break;
+                }
+            }
+        }
+        // Anything else is a two-character sequence, already consumed.
+        _ => {}
+    }
+}
+
 /// Walk `line`'s soft-wrap breaks, calling `on_row_start` with the char offset
 /// (within the line) at which each visual row begins — starting with 0, so it
 /// fires at least once even for an empty line.
@@ -75,6 +154,10 @@ pub fn wrap_row_starts(line: ropey::RopeSlice<'_>, text_width: usize, tab_width:
 /// cell renderer (the width-1-chars assumption is a known rough edge).
 pub fn wrap_segments(line: &str, width: usize) -> Vec<(usize, &str)> {
     let width = width.max(1);
+    // Bytes bound chars from above: most lines fit without counting them.
+    if line.len() <= width {
+        return vec![(0, line)];
+    }
     let chars: Vec<(usize, char)> = line.char_indices().collect();
     let n = chars.len();
     if n <= width {
@@ -221,6 +304,18 @@ impl Widget for SingleLineWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_output_keeps_only_what_a_terminal_would_show() {
+        assert_eq!(sanitize_output("10%\r50%\r100% done\n", 4), "100% done");
+        assert_eq!(sanitize_output("\u{1b}[32mok\u{1b}[0m \u{1b}]0;t\u{7}x", 4), "ok x");
+        assert_eq!(sanitize_output("ab\tc\u{7}d", 4), "ab  c d");
+    }
+
+    #[test]
+    fn sanitize_source_drops_nothing() {
+        assert_eq!(sanitize_source("a\rb\u{1b}c\td", 4), "a b c   d");
+    }
 
     #[test]
     fn wrap_segments_breaks_at_word_boundaries() {

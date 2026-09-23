@@ -82,10 +82,10 @@ impl Spinner {
     /// `active` reflects whether any background task is currently running; when
     /// it falls to `false` the spinner goes dormant (and `glyph()`/`is_active()`
     /// report inactive).  On the rising edge it reseeds to a non-blank pattern.
-    pub fn update(&mut self, active: bool) {
+    /// Returns true when what the spinner shows changed and needs drawing.
+    pub fn update(&mut self, active: bool) -> bool {
         if !active {
-            self.active = false;
-            return;
+            return std::mem::replace(&mut self.active, false);
         }
         let now = Instant::now();
         if !self.active {
@@ -94,12 +94,14 @@ impl Spinner {
             if self.bits.count_ones() < MIN_DOTS {
                 self.bits = SEED_BITS;
             }
-            return;
+            return true;
         }
         if now.duration_since(self.last_flip) >= FLIP_INTERVAL {
             self.last_flip = now;
             self.flip_one();
+            return true;
         }
+        false
     }
 
     /// The current Braille glyph, or `None` when dormant.

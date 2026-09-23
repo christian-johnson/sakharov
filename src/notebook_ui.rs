@@ -110,8 +110,8 @@ impl CellHighlightCache {
         let stale = self.spans.get(&idx).map(|(h, _)| *h != fp).unwrap_or(true);
         if stale {
             let spans = match kind {
-                CellKind::Code => self.highlighter_for(lang).highlight(rope).unwrap_or_default(),
-                _ => crate::markdown::highlight(rope),
+                CellKind::Code => self.highlighter_for(lang).highlight(rope),
+                _ => highlight::flatten(crate::markdown::highlight(rope)),
             };
             self.spans.insert(idx, (fp, spans));
         }
@@ -978,17 +978,49 @@ pub(crate) fn nb_cell_heights(
     nb_config: &crate::config::NotebookConfig,
     geo: Geometry,
 ) -> Vec<usize> {
+    state.heights.truncate(nb.cells.len());
     nb.cells
         .iter()
         .enumerate()
         .map(|(idx, cell)| {
-            let is_focused = idx == state.focused_cell;
             let folded = state.is_cell_folded(idx);
-            let source = if is_focused { active_rope } else { &cell.source };
+            if folded {
+                return nb_cell_height(cell, true, &cell.source, OutputLimits::new(nb_config, false), geo);
+            }
+            let source = if idx == state.focused_cell { active_rope } else { &cell.source };
             let limits = OutputLimits::new(nb_config, state.is_output_expanded(idx));
-            nb_cell_height(cell, folded, source, limits, geo)
+            let key = height_key(cell, source, limits, geo);
+            state
+                .heights
+                .get_or_compute(idx, key, || nb_cell_height(cell, false, source, limits, geo))
         })
         .collect()
+}
+
+/// Fingerprint of everything an unfolded cell's display height depends on.
+/// Hashing is linear but allocation-free, far cheaper than re-wrapping.
+fn height_key(cell: &Cell, source: &ropey::Rope, limits: OutputLimits, geo: Geometry) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (limits.max_lines, limits.max_traceback, limits.image_rows).hash(&mut h);
+    (geo.cell_px, geo.inner_cols, geo.word_wrap).hash(&mut h);
+    std::mem::discriminant(&cell.cell_type).hash(&mut h);
+    for chunk in source.chunks() {
+        h.write(chunk.as_bytes());
+    }
+    for output in &cell.outputs {
+        std::mem::discriminant(output).hash(&mut h);
+        match output {
+            Output::Stream { text, .. } => text.hash(&mut h),
+            Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
+                data.text_plain.hash(&mut h);
+                // Decoded images are immutable and shared: identity suffices.
+                data.image_png.as_ref().map(std::sync::Arc::as_ptr).hash(&mut h);
+            }
+            Output::Error { ename, evalue, traceback, .. } => (ename, evalue, traceback).hash(&mut h),
+        }
+    }
+    h.finish()
 }
 
 /// Total visual rows of a cell's output block, *excluding* the `── output ──`
@@ -1030,7 +1062,7 @@ fn truncated_rows<S: AsRef<str>>(lines: &[S], max: usize, width: usize) -> usize
     let shown = lines.len().min(max);
     let body: usize = lines[..shown]
         .iter()
-        .map(|l| wrap_segments(l.as_ref(), width).len())
+        .map(|l| wrap_segments(&clean_output_line(l.as_ref()), width).len())
         .sum();
     body + usize::from(lines.len() > max)
 }
@@ -1064,6 +1096,28 @@ fn mime_image_rows(
     })
 }
 
+/// Tab stop for output text, matching what terminal programs assume.
+const OUTPUT_TAB_STOP: usize = 8;
+
+/// Kernel output split into lines.  Each line is cleaned with
+/// [`clean_output_line`] only where it is actually shown, so a huge output
+/// truncated to a few rows costs a few rows.
+fn output_lines(text: &str) -> Vec<&str> {
+    text.lines().collect()
+}
+
+/// One output line made drawable (escape codes, progress-bar `\r` frames and
+/// control chars removed).  Every consumer — height model, output cursor rows
+/// and renderer — cleans through here so they agree row for row.
+fn clean_output_line(line: &str) -> String {
+    crate::render_util::sanitize_output(line, OUTPUT_TAB_STOP)
+}
+
+/// The `ename: evalue` row an error output starts with.
+fn error_headline(ename: &str, evalue: &str) -> String {
+    crate::render_util::sanitize_output(&format!("{ename}: {evalue}"), OUTPUT_TAB_STOP)
+}
+
 fn single_output_height_count(
     output: &Output,
     limits: OutputLimits,
@@ -1072,7 +1126,7 @@ fn single_output_height_count(
     let width = output_text_width(geo.inner_cols);
     match output {
         Output::Stream { text, .. } => {
-            let lines: Vec<&str> = text.lines().collect();
+            let lines = output_lines(text);
             truncated_rows(&lines, limits.max_lines, width) as u16
         }
         Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
@@ -1080,14 +1134,14 @@ fn single_output_height_count(
                 data.text_plain
                     .as_deref()
                     .map(|t| {
-                        let lines: Vec<&str> = t.lines().collect();
+                        let lines = output_lines(t);
                         truncated_rows(&lines, limits.max_lines, width)
                     })
                     .unwrap_or(0) as u16
             })
         }
         Output::Error { ename, evalue, traceback, .. } => {
-            let headline = format!("{ename}: {evalue}");
+            let headline = error_headline(ename, evalue);
             (wrap_segments(&headline, width).len()
                 + truncated_rows(traceback, limits.max_traceback, width)) as u16
         }
@@ -1128,7 +1182,7 @@ pub(crate) fn output_rows_content(
     ) {
         let to_show = lines.len().min(max);
         for line in &lines[..to_show] {
-            rows.extend(wrap_segments(line.as_ref(), width).into_iter().map(|(_, s)| s.to_string()));
+            rows.extend(wrap_segments(&clean_output_line(line.as_ref()), width).into_iter().map(|(_, s)| s.to_string()));
         }
         if lines.len() > max {
             let extra = lines.len() - max;
@@ -1141,7 +1195,7 @@ pub(crate) fn output_rows_content(
     for output in &cell.outputs {
         match output {
             Output::Stream { text, .. } => {
-                let lines: Vec<&str> = text.lines().collect();
+                let lines = output_lines(text);
                 push_truncated_lines(&mut rows, &lines, limits.max_lines, width);
             }
             Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
@@ -1150,12 +1204,12 @@ pub(crate) fn output_rows_content(
                         rows.push(if i == 0 { "[image]".to_string() } else { String::new() });
                     }
                 } else if let Some(t) = &data.text_plain {
-                    let lines: Vec<&str> = t.lines().collect();
+                    let lines = output_lines(t);
                     push_truncated_lines(&mut rows, &lines, limits.max_lines, width);
                 }
             }
             Output::Error { ename, evalue, traceback, .. } => {
-                let headline = format!("{ename}: {evalue}");
+                let headline = error_headline(ename, evalue);
                 rows.extend(wrap_segments(&headline, width).into_iter().map(|(_, s)| s.to_string()));
                 push_truncated_lines(&mut rows, traceback, limits.max_traceback, width);
             }
@@ -1204,10 +1258,10 @@ pub(crate) fn error_frame_at_output_row(
                 // traceback line's own (possibly multi-row) span. A frame's link
                 // covers every row its line wrapped onto.
                 let width = output_text_width(geo.inner_cols);
-                let headline = format!("{ename}: {evalue}");
+                let headline = error_headline(ename, evalue);
                 let mut row = base + wrap_segments(&headline, width).len();
                 for (i, tb_line) in traceback.iter().take(limits.max_traceback).enumerate() {
-                    row += wrap_segments(tb_line, width).len();
+                    row += wrap_segments(&clean_output_line(tb_line), width).len();
                     if output_row < row {
                         return frames.iter().find(|f| f.tb_index == i);
                     }
@@ -1525,12 +1579,12 @@ fn render_output(
             } else {
                 Style::default()
             };
-            let lines: Vec<&str> = text.lines().collect();
+            let lines = output_lines(text);
             let max_lines = octx.limits.max_lines;
             let to_show = lines.len().min(max_lines);
             let width = output_text_width(area.width);
             for line in &lines[..to_show] {
-                for (_, seg) in wrap_segments(line, width) {
+                for (_, seg) in wrap_segments(&clean_output_line(line), width) {
                     if !draw_output_row(frame, area, current_row, octx, seg, style) {
                         return;
                     }
@@ -1545,7 +1599,7 @@ fn render_output(
 
         Output::Error { ename, evalue, traceback, frames } => {
             let width = output_text_width(area.width);
-            let headline = format!("{ename}: {evalue}");
+            let headline = error_headline(ename, evalue);
             for (_, seg) in wrap_segments(&headline, width) {
                 if !draw_output_row(frame, area, current_row, octx, seg, Style::default().fg(th.error)) {
                     return;
@@ -1557,7 +1611,7 @@ fn render_output(
                 // link — Enter on any row this frame wrapped onto jumps the
                 // cursor to that source line.
                 let is_link = frames.iter().any(|f| f.tb_index == i);
-                for (_, seg) in wrap_segments(tb_line, width) {
+                for (_, seg) in wrap_segments(&clean_output_line(tb_line), width) {
                     if !draw_traceback_row(frame, area, current_row, octx, seg, is_link) {
                         return;
                     }
@@ -1715,13 +1769,13 @@ fn render_mime_data(
             *current_row += shown;
         }
     } else if let Some(text) = &data.text_plain {
-        let lines: Vec<&str> = text.lines().collect();
+        let lines = output_lines(text);
         let max_lines = octx.limits.max_lines;
         let to_show = lines.len().min(max_lines);
         let info = Style::default().fg(crate::theme::active().info);
         let width = output_text_width(area.width);
         for line in &lines[..to_show] {
-            for (_, seg) in wrap_segments(line, width) {
+            for (_, seg) in wrap_segments(&clean_output_line(line), width) {
                 if !draw_output_row(frame, area, current_row, octx, seg, info) {
                     return;
                 }
@@ -1905,6 +1959,37 @@ mod tests {
             &nb, &state, &active_rope, &crate::config::NotebookConfig::default(), geo_of(40, false),
         );
         assert_eq!(heights[0], 3, "folded focused cell must collapse to the 3-row summary");
+    }
+
+    /// Cached heights follow the content: new output and a source edit both
+    /// change the height on the very next measurement.
+    #[test]
+    fn cached_cell_heights_follow_content_changes() {
+        use crate::notebook::Output;
+        let mut nb = Notebook {
+            path: std::path::PathBuf::from("/tmp/height-cache.ipynb"),
+            metadata: crate::notebook::NotebookMeta { kernel_language: "python".into() },
+            cells: vec![Cell {
+                id: crate::notebook::new_cell_id(),
+                cell_type: CellType::Code,
+                source: Rope::from_str("x"),
+                outputs: vec![],
+                execution_count: None,
+                rendered: false,
+            }],
+            modified: false,
+        };
+        let state = NotebookState::new();
+        let cfg = crate::config::NotebookConfig::default();
+        let measure = |nb: &Notebook, rope: &Rope| nb_cell_heights(nb, &state, rope, &cfg, geo_of(40, false))[0];
+        let before = measure(&nb, &nb.cells[0].source.clone());
+
+        nb.cells[0].outputs.push(Output::Stream { name: "stdout".into(), text: "a\nb\n".into() });
+        let with_output = measure(&nb, &nb.cells[0].source.clone());
+        let edited = measure(&nb, &Rope::from_str("x\ny"));
+
+        assert_eq!(with_output, before + 3, "divider + two output rows");
+        assert_eq!(edited, with_output + 1, "the live rope's extra line counts");
     }
 
     /// The height model and the renderer must agree row-for-row: the cell's
@@ -2320,6 +2405,37 @@ mod tests {
         assert!(!underlined(width - 2, frame_row), "trailing padding must not be underlined");
         // Column 0 (border) and the left pad before the text are not underlined.
         assert!(!underlined(0, frame_row));
+    }
+
+    /// Colour codes, progress-bar frames and tabs from a kernel never reach
+    /// the screen: the rows the output cursor walks are exactly what's drawn.
+    #[test]
+    fn kernel_output_is_cleaned_before_drawing() {
+        use crate::notebook::Output;
+        let cell = Cell {
+            id: "c".into(),
+            cell_type: CellType::Code,
+            source: Rope::from_str("run()"),
+            outputs: vec![
+                Output::Stream {
+                    name: "stderr".into(),
+                    text: "10%\r50%\r100%\n\u{1b}[31mred\u{1b}[0m\ta\n".into(),
+                },
+                Output::Error {
+                    ename: "\u{1b}[31mValueError\u{1b}[0m".into(),
+                    evalue: "bad".into(),
+                    traceback: vec!["\u{1b}[1mline\u{1b}[0m".into()],
+                    frames: vec![],
+                },
+            ],
+            execution_count: Some(1),
+            rendered: false,
+        };
+        let limits = OutputLimits::new(&crate::config::NotebookConfig::default(), false);
+
+        let rows = output_rows_content(&cell, limits, geo_of(80, false));
+
+        assert_eq!(rows, vec!["100%", "red     a", "ValueError: bad", "line"]);
     }
 
     #[test]

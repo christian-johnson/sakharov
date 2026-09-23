@@ -231,12 +231,12 @@ fn reinstall(app: &mut App, mut set: conflict::ConflictSet) {
     let files = set.files.len();
     let hunks: usize = set.files.iter().map(conflict::ConflictFile::conflict_count).sum();
     let operation = set.operation.describe();
-    let keep = app.conflict.as_ref().map(|s| (s.file, s.nth, s.show_base));
+    let keep = app.conflict.as_ref().map(|s| (s.file, s.nth));
     let mut state = ConflictState::new(set);
-    if let Some((file, nth, show_base)) = keep {
+    state.show_base = app.config.conflict.show_base;
+    if let Some((file, nth)) = keep {
         state.file = file.min(state.set.files.len() - 1);
         state.focus(nth);
-        state.show_base = show_base;
     }
     app.conflict = Some(state);
     // The one warning worth putting in front of somebody before they start.
@@ -311,7 +311,7 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         Command::ConflictHelp => {
             app.popup = Some(Popup::key_sheet(
                 "merge conflicts",
-                key_sheet(),
+                key_sheet(&app.keymap),
                 "nothing is written until Enter · Esc closes",
             ));
         }
@@ -536,9 +536,11 @@ fn undo(app: &mut App) {
 }
 
 fn toggle_base(app: &mut App) {
-    let Some(state) = app.conflict.as_mut() else { return };
-    state.show_base = !state.show_base;
-    let on = state.show_base;
+    let mut config = app.config.clone();
+    config.conflict.show_base = !config.conflict.show_base;
+    let on = config.conflict.show_base;
+    super::settings::replace_config(app, config);
+    let Some(state) = app.conflict.as_ref() else { return };
     let has_base = state
         .current()
         .and_then(|f| f.base.as_ref())
@@ -719,74 +721,43 @@ fn yank_merged(app: &mut App) {
 // Keys
 // ---------------------------------------------------------------------------
 
-/// The `g` sub-mode's meanings here.
-pub fn goto_command(c: char) -> Option<Command> {
-    Some(match c {
-        'c' => Command::VcsContinue,
-        'a' => Command::VcsAbort,
-        'x' => Command::ConflictRevertFile,
-        'r' => Command::ConflictRefresh,
-        'w' => Command::ConflictWriteFile,
-        's' => Command::VcsGitStatus,
-        'V' => Command::VcsOpen,
-        '?' => Command::ConflictHelp,
-        _ => return None,
-    })
-}
-
-/// What the `g` which-key popup advertises here.  Pinned to [`goto_command`]
-/// by a test.
-pub fn goto_hints() -> Vec<(String, String)> {
-    [
-        ("c", "carry on with the operation"),
-        ("a", "abort the whole operation"),
-        ("w", "write this file's resolution"),
-        ("x", "put this file back the way git left it"),
-        ("s", "git status, verbatim"),
-        ("r", "re-read the conflicted files"),
-        ("V", "the commit graph"),
-        ("?", "the keys"),
-        ("b", "buffer picker"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect()
-}
-
 /// Every key the resolver binds.
 ///
 /// Same surface as the commit graph's `?`, for the same reason: the question a
 /// help key is pressed to answer is "which keys does this have", and the
 /// answer has to be complete.  Pinned to the keymap by
 /// `the_key_sheet_only_lists_keys_that_are_bound`.
-pub fn key_sheet() -> Vec<KeyHint> {
-    let key = KeyHint::binding;
+pub fn key_sheet(keymap: &crate::keymap::Keymap) -> Vec<KeyHint> {
+    use Command as C;
+    let key = |cmds: &[Command], d: &str| {
+        KeyHint::for_commands(keymap, crate::keymap::Layer::Conflict, cmds, d)
+    };
     vec![
         KeyHint::heading("MOVING AROUND"),
-        key("h l", "focus the left / right version"),
-        key("j k", "through this file's conflicts"),
-        key("n N", "to the next / previous *unanswered* one"),
-        key("] [", "next / previous conflicted file"),
-        key("3", "show the common ancestor"),
-        key("d", "this file's diff"),
+        key(&[C::MoveLeft, C::MoveRight], "focus the left / right version"),
+        key(&[C::MoveDown, C::MoveUp], "through this file's conflicts"),
+        key(&[C::ConflictNextHunk, C::ConflictPrevHunk], "to the next / previous *unanswered* one"),
+        key(&[C::ConflictNextFile, C::ConflictPrevFile], "next / previous conflicted file"),
+        key(&[C::ConflictToggleBase], "show the common ancestor"),
+        key(&[C::ConflictDiff], "this file's diff"),
         KeyHint::heading("CHOOSING  (nothing is written yet)"),
-        key("Space", "take, or drop, the focused version"),
-        key("a", "take only the left version"),
-        key("b", "take only the right version"),
-        key("A", "take the left for every unanswered conflict"),
-        key("B", "take the right for every unanswered conflict"),
-        key("e", "edit this section by hand"),
-        key("u", "take back the last choice"),
+        key(&[C::ConflictTakeSide], "take, or drop, the focused version"),
+        key(&[C::ConflictTakeLeft], "take only the left version"),
+        key(&[C::ConflictTakeRight], "take only the right version"),
+        key(&[C::ConflictTakeLeftAll], "take the left for every unanswered conflict"),
+        key(&[C::ConflictTakeRightAll], "take the right for every unanswered conflict"),
+        key(&[C::ConflictEditHunk], "edit this section by hand"),
+        key(&[C::Undo], "take back the last choice"),
         KeyHint::heading("FINISHING"),
-        key("Enter", "write this file and stage it"),
-        key("g x", "put this file back, markers and all"),
-        key("g c", "carry on with the merge or rebase"),
-        key("g a", "abort the whole operation"),
-        key("g s", "git status, verbatim"),
-        key("y", "copy this file's resolved text"),
-        key("r", "re-read the conflicted files"),
-        key("?", "this sheet"),
-        key("q", "leave the resolver"),
+        key(&[C::ConflictWriteFile], "write this file and stage it"),
+        key(&[C::ConflictRevertFile], "put this file back, markers and all"),
+        key(&[C::VcsContinue], "carry on with the merge or rebase"),
+        key(&[C::VcsAbort], "abort the whole operation"),
+        key(&[C::VcsGitStatus], "git status, verbatim"),
+        key(&[C::YankSelection], "copy this file's resolved text"),
+        key(&[C::ConflictRefresh], "re-read the conflicted files"),
+        key(&[C::ConflictHelp], "this sheet"),
+        key(&[C::ConflictClose], "leave the resolver"),
     ]
 }
 
@@ -794,7 +765,7 @@ pub fn key_sheet() -> Vec<KeyHint> {
 mod tests {
     use super::*;
     use crate::conflict::testrepo::{diverged, Repo};
-    use crate::keymap::{KeyBinding, Layer};
+    use crate::keymap::Layer;
 
     /// An editor sitting in the resolver over a real conflicted repository.
     fn app_resolving(repo: &Repo) -> Option<App> {
@@ -1032,48 +1003,13 @@ mod tests {
     #[test]
     fn the_key_sheet_only_lists_keys_that_are_bound() {
         let app = App::new(None, crate::config::Config::load()).expect("app");
-        for hint in key_sheet() {
-            if hint.is_heading() {
-                continue;
-            }
-            for token in hint.key.split_whitespace() {
-                if matches!(token, "Enter" | "Esc" | "Space") {
-                    continue;
-                }
-                let bound = |c: char| {
-                    app.keymap
-                        .lookup_layered(Layer::Conflict, &KeyBinding::char(c))
-                        .is_some()
-                };
-                let mut chars = token.chars();
-                let first = chars.next().expect("a non-empty token");
-                match chars.next() {
-                    Some(second) => assert!(
-                        bound(first) && bound(second),
-                        "`{token}` is not bound"
-                    ),
-                    None => assert!(
-                        bound(first)
-                            || goto_command(first).is_some()
-                            || crate::input::goto_command(View::Conflict, first).is_some(),
-                        "the sheet lists `{}` ({}), which is not bound",
-                        hint.key,
-                        hint.description
-                    ),
-                }
-            }
-        }
-    }
-
-    /// …and the `g` popup likewise.
-    #[test]
-    fn goto_hints_only_advertise_real_bindings() {
-        for (key, description) in goto_hints() {
-            let c = key.chars().next().expect("a key");
+        for hint in key_sheet(&app.keymap) {
+            // An unbound command is shown by its `:name` instead of a key.
             assert!(
-                goto_command(c).is_some()
-                    || crate::input::goto_command(View::Conflict, c).is_some(),
-                "g{key} ({description}) is advertised but does nothing"
+                !hint.key.contains(':'),
+                "the sheet lists {:?} ({}), which has no key",
+                hint.key,
+                hint.description
             );
         }
     }

@@ -21,7 +21,7 @@
 //! | `exec::scroll::update_scroll` | a scroll arm |
 //! | `input::keymap_layer` | a keymap override layer |
 //! | `exec::execute` | a `handle` interception |
-//! | `exec::goto_hints` / `input::goto_command` | the `g` sub-mode's meanings |
+//! | `keymap::defaults` | its layer's keys, including the `g` sub-mode's |
 //! | `ui::status_ctx` | how the status line names what is open |
 //! | `exec::buffers` | open / teardown / identity |
 //!

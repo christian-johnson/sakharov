@@ -187,7 +187,9 @@ opened by a relative or absolute path.
 | `open-symbol-picker` | — | Fuzzy picker over tree-sitter symbols in the buffer (`:symbols`) |
 | `open-diagnostic-picker` | — | Fuzzy picker over all LSP diagnostics (`:diagnostics`) |
 | `open-config` | — | Open the user config file for editing (`:config`) |
-| `reload-config` | — | Reload the config from disk without restarting (`:config-reload`) |
+| `reload-config` | — | Reload the config from disk without restarting (`:config-reload`). Every setting takes effect, including ones read once at startup (`vcs.orientation`, `ui.command_history`, `editor.crash_recovery`, `editor.max_undo`, `[keys]`); problems with the file are reported in `*Messages*` |
+| `set <setting> <value>` | — | Change any config value for the session (`:set editor.tab_width 2`, `:set tab_width 2`, `:set theme.name nord`). The name is a dotted path or a name unique across sections; the value is TOML (a bare word is a string). Unknown names and wrong types are refused |
+| `toggle <setting>` | — | Flip an on/off config value for the session (`:toggle word_wrap`, `:toggle conflict.show_base`) |
 | `open-theme-picker` | — | Fuzzy picker over all color themes, built-in + user, with live preview as you scroll — ESC restores the current theme (`:theme`, `:themes`); see [themes.md](themes.md) |
 | `theme <name>` | — | Switch directly to a named color theme for the session (`:theme tokyonight`) |
 | `toggle-git-gutter` | — | Toggle visibility of the git gutter indicator column |
@@ -195,6 +197,31 @@ opened by a relative or absolute path.
 | `toggle-relative-line-numbers` | — | Toggle relative line numbers (shows distance from current line) |
 | `toggle-word-wrap` | — | Toggle soft word-wrap (`:wrap` / `:word-wrap`) |
 
+The dedicated toggles are shorthands for `:toggle <setting>`: they change the
+session's config, so `:set`, the toggles and `:config-reload` always agree.
+
+### Custom key bindings
+
+`[keys.<layer>]` tables in the config bind key sequences to commands, in any
+layer: `normal`, `select`, `notebook`, `table`, `cell`, `sql`, `commit`, `vcs`,
+`conflict`, `conflict-edit`. A view layer falls back to `normal` for keys it
+doesn't bind. Keys are a single character, a name (`Enter`, `Space`, `Esc`,
+`Tab`, `PgUp`, …) or modifiers plus a key (`ctrl+s`, `C-s`, `alt+x`); a
+sequence is keys separated by spaces, so the `g` and `z` sub-modes are
+rebindable too:
+
+```toml
+[keys.normal]
+"g n" = "goto-file-end"
+"ctrl+e" = "toggle word_wrap"
+
+[keys.table]
+"g p" = "table-peek-cell"
+```
+
+The which-key popups, the `?` key sheets and the command palette's key labels
+are generated from the keymap, so they show your bindings. Entries that can't
+be understood are reported in `*Messages*`.
 ### Moving through wrapped text
 
 When soft-wrap is on, `j` / `k` (and the arrow keys, and `Ctrl+d` / `Ctrl+u`,

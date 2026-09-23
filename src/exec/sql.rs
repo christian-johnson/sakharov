@@ -297,7 +297,7 @@ mod tests {
         let mut app = app();
         super::super::execute(&mut app, &Command::SqlBuffer);
         assert!(app.highlighter.sql, "the *sql* buffer highlights as SQL");
-        let spans = app.highlighter.highlight(&app.buffer.rope).expect("highlight runs");
+        let spans = app.highlighter.highlight(&app.buffer.rope);
         assert!(!spans.is_empty(), "the template alone has comments and a keyword");
         // ...and so does an ordinary `.sql` file.
         assert!(crate::highlight::Highlighter::new(Some(std::path::Path::new("q.sql"))).sql);
@@ -319,7 +319,7 @@ mod tests {
         // `q` is bound to BufferClose in the SQL buffer's override map.
         assert!(app
             .keymap
-            .lookup(crate::keymap::Layer::Sql, &crate::keymap::KeyBinding::char('q'))
+            .lookup_layered(crate::keymap::Layer::Sql, &[crate::keymap::KeyBinding::char('q')])
             .is_some_and(|c| matches!(c, [Command::BufferClose])));
 
         app.buffer.rope = ropey::Rope::from_str("SELECT 1\n");

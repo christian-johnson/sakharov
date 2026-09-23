@@ -198,7 +198,11 @@ fn nb_layout(app: &App) -> Option<NbLayout> {
 /// wrap.  The same value the renderer wraps the cell to, so visual `j`/`k`
 /// inside a cell step through the rows actually drawn.
 pub(super) fn focused_cell_wrap_width(app: &App) -> Option<usize> {
-    nb_layout(app)?.wrap_width
+    let (nb, state) = app.notebook.as_ref()?;
+    let cell = nb.cells.get(state.focused_cell.min(nb.cells.len().checked_sub(1)?))?;
+    let geo = super::notebook::geometry(app);
+    crate::notebook_ui::cell_wraps(cell, geo.word_wrap)
+        .then(|| crate::notebook_ui::cell_text_width(geo.inner_cols))
 }
 
 /// Absolute row of cell `idx`'s top border (each cell is `h + 1` rows tall

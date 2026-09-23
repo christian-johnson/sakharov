@@ -1,6 +1,7 @@
-use anyhow::Result;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use ropey::Rope;
-use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter as TsHighlighter};
+use tree_sitter::{InputEdit, Parser, Point, Query, QueryCursor, Tree};
 
 /// Ordered list of highlight names that tree-sitter will resolve.
 /// The index of each name matches what `style_for_highlight` expects.
@@ -84,7 +85,7 @@ pub const GIT_WARNING: usize = 42;
 pub type Span = (usize, usize, usize);
 
 /// Detected language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     Rust,
     Python,
@@ -154,7 +155,49 @@ impl Language {
     }
 }
 
-/// Syntax highlighter wrapping tree-sitter.
+/// A language's compiled highlight query and the `HIGHLIGHT_NAMES` index each
+/// of its captures maps to.  Compiling a query is expensive, so each is built
+/// once per process and shared by every highlighter.
+struct Grammar {
+    query: Query,
+    capture_map: Vec<Option<usize>>,
+}
+
+fn grammar(lang: Language) -> Option<Arc<Grammar>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<Language, Option<Arc<Grammar>>>>> =
+        OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+    cache
+        .entry(lang)
+        .or_insert_with(|| {
+            let query = Query::new(&lang.ts_language(), highlights_query(lang)).ok()?;
+            let capture_map = query.capture_names().iter().map(|c| highlight_index(c)).collect();
+            Some(Arc::new(Grammar { query, capture_map }))
+        })
+        .clone()
+}
+
+/// The `HIGHLIGHT_NAMES` entry a capture name maps to: the one with the most
+/// dot-separated parts, all of which appear in the capture's name (so
+/// `function.method.call` → `function.method`).  Same rule as
+/// `tree_sitter_highlight`, which the highlighter used to be built on.
+fn highlight_index(capture: &str) -> Option<usize> {
+    let parts: Vec<&str> = capture.split('.').collect();
+    HIGHLIGHT_NAMES
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| name.split('.').all(|p| parts.contains(&p)))
+        .max_by_key(|(i, name)| (name.split('.').count(), std::cmp::Reverse(*i)))
+        .map(|(i, _)| i)
+}
+
+/// Syntax highlighter.
+///
+/// Tree-sitter languages keep their parse tree between edits: [`edit`](Self::edit)
+/// records each change, and the next highlight re-parses only what changed,
+/// then runs the highlight query over just the requested lines.  Folds come
+/// from the same tree.  Markdown, SQL and git output use hand-written
+/// highlighters instead.
 pub struct Highlighter {
     pub language: Option<Language>,
     /// True when the open file is Markdown (`.md`/`.qmd`). Markdown is highlighted
@@ -168,148 +211,266 @@ pub struct Highlighter {
     /// `*commit …*`, a `.diff`/`.patch` file), coloured by
     /// `crate::git_highlight`.
     pub git: bool,
-    config: Option<HighlightConfiguration>,
-    /// Reused across calls — avoids allocating a new Parser on every highlight pass.
-    ts_highlighter: TsHighlighter,
+    grammar: Option<Arc<Grammar>>,
+    parser: Parser,
+    tree: Option<ParsedTree>,
+}
+
+/// A parse tree plus what it takes to trust it for an incremental re-parse.
+struct ParsedTree {
+    tree: Tree,
+    /// `Buffer::id` of the text it was parsed from.
+    buffer_id: u64,
+    /// Byte length the text will have once every recorded edit is applied.  A
+    /// mismatch means some change bypassed [`Highlighter::edit`], and the tree
+    /// is rebuilt from scratch rather than trusted.
+    expected_len: usize,
 }
 
 impl Highlighter {
     /// Create a highlighter, detecting language from the optional file path.
     pub fn new(path: Option<&std::path::Path>) -> Self {
         let language = path.and_then(Language::from_path);
-
-        let config = language.and_then(|lang| build_config(lang).ok());
-
+        let grammar = language.and_then(grammar);
+        let mut parser = Parser::new();
+        if let Some(lang) = language.filter(|_| grammar.is_some()) {
+            // Cannot fail: the grammar's query just compiled against it.
+            let _ = parser.set_language(&lang.ts_language());
+        }
         Self {
             language,
             markdown: crate::markdown::is_markdown(path),
             sql: crate::sql_highlight::is_sql(path),
             git: crate::git_highlight::is_git_output(path),
-            config,
-            ts_highlighter: TsHighlighter::new(),
+            grammar,
+            parser,
+            tree: None,
         }
+    }
+
+    /// Record an edit so the next parse can reuse the unchanged parts of the
+    /// tree.  Call after the rope is changed (see `exec::edit`).
+    pub fn edit(&mut self, edit: &InputEdit) {
+        if let Some(parsed) = self.tree.as_mut() {
+            parsed.tree.edit(edit);
+            parsed.expected_len = (parsed.expected_len + edit.new_end_byte)
+                .saturating_sub(edit.old_end_byte);
+        }
+    }
+
+    /// True when highlights always cover the whole document (the hand-written
+    /// highlighters), so scrolling never needs them recomputed.
+    pub fn whole_document(&self) -> bool {
+        self.markdown || self.sql || self.git
+    }
+
+    /// Forget the tree: the text was replaced wholesale (undo, reload, …).
+    pub fn invalidate(&mut self) {
+        self.tree = None;
+    }
+
+    /// Bring the tree up to date with `rope` and return it.
+    fn tree(&mut self, rope: &Rope, buffer_id: u64) -> Option<&Tree> {
+        self.grammar.as_ref()?;
+        let old = self
+            .tree
+            .take()
+            .filter(|t| t.buffer_id == buffer_id && t.expected_len == rope.len_bytes());
+        let tree = self.parser.parse_with(
+            &mut |byte, _| {
+                if byte >= rope.len_bytes() {
+                    return &[][..];
+                }
+                let (chunk, chunk_start, _, _) = rope.chunk_at_byte(byte);
+                &chunk.as_bytes()[byte - chunk_start..]
+            },
+            old.as_ref().map(|t| &t.tree),
+        )?;
+        self.tree = Some(ParsedTree { tree, buffer_id, expected_len: rope.len_bytes() });
+        self.tree.as_ref().map(|t| &t.tree)
     }
 
     /// Compute the foldable line ranges for the current buffer contents.
     /// Routes to the markdown section/fence folder or the tree-sitter folder.
-    pub fn fold_ranges(&self, rope: &Rope) -> Vec<crate::fold::FoldRange> {
+    pub fn fold_ranges(&mut self, rope: &Rope, buffer_id: u64) -> Vec<crate::fold::FoldRange> {
         if self.markdown {
-            crate::markdown::fold_ranges(rope)
-        } else if let Some(lang) = self.language {
-            crate::fold::compute_fold_ranges(rope, lang)
-        } else {
-            Vec::new()
+            return crate::markdown::fold_ranges(rope);
+        }
+        let Some(lang) = self.language else { return Vec::new() };
+        match self.tree(rope, buffer_id) {
+            Some(tree) => crate::fold::fold_ranges_in(tree, rope, lang),
+            None => Vec::new(),
         }
     }
 
-    /// Compute highlight spans for the given rope contents.
-    ///
-    /// Returns a list of `(char_start, char_end, highlight_index)` triples.
-    /// Takes `&mut self` so the internal tree-sitter parser can be reused.
-    pub fn highlight(&mut self, rope: &Rope) -> Result<Vec<Span>> {
+    /// Highlight spans for lines `lines` of the buffer `buffer_id`, re-parsing
+    /// incrementally from the recorded edits.  Spans are [`flatten`]ed.
+    pub fn highlight_lines(
+        &mut self,
+        rope: &Rope,
+        buffer_id: u64,
+        lines: std::ops::Range<usize>,
+    ) -> Vec<Span> {
         if self.markdown {
-            return Ok(crate::markdown::highlight(rope));
+            return flatten(crate::markdown::highlight(rope));
         }
         if self.sql {
-            return Ok(crate::sql_highlight::highlight(rope));
+            return flatten(crate::sql_highlight::highlight(rope));
         }
         if self.git {
-            return Ok(crate::git_highlight::highlight(rope));
+            return flatten(crate::git_highlight::highlight(rope));
         }
-        let config = match &self.config {
-            Some(c) => c,
-            None => return Ok(Vec::new()),
-        };
+        let Some(grammar) = self.grammar.clone() else { return Vec::new() };
+        let Some(tree) = self.tree(rope, buffer_id) else { return Vec::new() };
+        let last = rope.len_lines();
+        let bytes = rope.line_to_byte(lines.start.min(last))..rope.line_to_byte(lines.end.min(last));
+        flatten(query_spans(&grammar, tree, rope, bytes))
+    }
 
-        let text = rope.to_string();
-        let source = text.as_bytes();
+    /// Highlight the whole of `rope` from scratch — for text that isn't the
+    /// tracked buffer (notebook cells, tests).
+    pub fn highlight(&mut self, rope: &Rope) -> Vec<Span> {
+        self.invalidate();
+        let spans = self.highlight_lines(rope, u64::MAX, 0..rope.len_lines());
+        self.invalidate();
+        spans
+    }
+}
 
-        let events =
-            self.ts_highlighter.highlight(config, source, None, |_| None)?;
+/// Run the highlight query over `bytes` of `tree`.
+///
+/// Where several patterns capture the same node, the last one wins — the
+/// highlight queries are written against that rule (general patterns first,
+/// special cases after).
+fn query_spans(grammar: &Grammar, tree: &Tree, rope: &Rope, bytes: std::ops::Range<usize>) -> Vec<Span> {
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(bytes);
+    let text = |node: tree_sitter::Node| {
+        rope.byte_slice(node.byte_range()).chunks().map(str::as_bytes)
+    };
+    let mut spans: Vec<Span> = Vec::new();
+    // The node the previous capture was on, and whether it produced a span.
+    let mut last: Option<(usize, bool)> = None;
+    for (m, idx) in cursor.captures(&grammar.query, tree.root_node(), text) {
+        let capture = m.captures[idx];
+        let node = capture.node;
+        if last == Some((node.id(), true)) {
+            // A later pattern on the same node replaces the earlier one.
+            spans.pop();
+        }
+        let hl = grammar.capture_map[capture.index as usize];
+        let (start, end) = (rope.byte_to_char(node.start_byte()), rope.byte_to_char(node.end_byte()));
+        if let Some(hl) = hl.filter(|_| start < end) {
+            spans.push((start, end, hl));
+        }
+        last = Some((node.id(), hl.is_some() && start < end));
+    }
+    spans
+}
 
-        let mut spans = Vec::new();
-        let mut current_highlight: Option<usize> = None;
+/// The change `rope` is about to undergo, as tree-sitter needs it: replacing
+/// chars `start..old_end` with `new_text`.  Call **before** mutating the rope.
+pub fn input_edit(rope: &Rope, start: usize, old_end: usize, new_text: &str) -> InputEdit {
+    let point_at = |byte: usize| {
+        let line = rope.byte_to_line(byte);
+        Point::new(line, byte - rope.line_to_byte(line))
+    };
+    let start_byte = rope.char_to_byte(start);
+    let old_end_byte = rope.char_to_byte(old_end);
+    let start_position = point_at(start_byte);
+    let new_end_position = match new_text.rfind('\n') {
+        Some(nl) => Point::new(
+            start_position.row + new_text.matches('\n').count(),
+            new_text.len() - nl - 1,
+        ),
+        None => Point::new(start_position.row, start_position.column + new_text.len()),
+    };
+    InputEdit {
+        start_byte,
+        old_end_byte,
+        new_end_byte: start_byte + new_text.len(),
+        start_position,
+        old_end_position: point_at(old_end_byte),
+        new_end_position,
+    }
+}
 
-        for event in events {
-            match event? {
-                HighlightEvent::HighlightStart(h) => {
-                    current_highlight = Some(h.0);
-                }
-                HighlightEvent::Source { start, end } => {
-                    if let Some(hl) = current_highlight {
-                        let char_start = rope.byte_to_char(start);
-                        let char_end = rope.byte_to_char(end);
-                        if char_start < char_end {
-                            spans.push((char_start, char_end, hl));
-                        }
-                    }
-                }
-                HighlightEvent::HighlightEnd => {
-                    current_highlight = None;
-                }
+/// Resolve possibly-overlapping spans into a sorted, non-overlapping list.
+///
+/// Where spans overlap, the later one (after a stable sort by start) wins —
+/// the inner-scope-wins rule the highlighters are written against.  Adjacent
+/// pieces with the same highlight are merged.  Done once per edit so
+/// [`style_at`] can answer with a single binary search.
+pub fn flatten(mut spans: Vec<Span>) -> Vec<Span> {
+    spans.retain(|&(s, e, _)| s < e);
+    spans.sort_by_key(|&(s, _, _)| s);
+    if spans.windows(2).all(|w| w[0].1 <= w[1].0) {
+        return spans;
+    }
+
+    // Sweep the span boundaries; the highest-index open span wins each piece.
+    let mut events: Vec<(usize, usize)> = Vec::with_capacity(spans.len() * 2);
+    for (i, &(s, e, _)) in spans.iter().enumerate() {
+        events.push((s, i));
+        events.push((e, i));
+    }
+    events.sort_unstable_by_key(|&(pos, _)| pos);
+
+    let mut open: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    let mut prev = 0;
+    let mut k = 0;
+    while k < events.len() {
+        let pos = events[k].0;
+        if let Some(&top) = open.last() {
+            let hl = spans[top].2;
+            match out.last_mut() {
+                Some(last) if last.1 == prev && last.2 == hl => last.1 = pos,
+                _ if prev < pos => out.push((prev, pos, hl)),
+                _ => {}
             }
         }
-
-        Ok(spans)
-    }
-}
-
-/// Return the ratatui `Style` for whichever highlight span covers `char_idx`.
-///
-/// Spans may overlap; the last (highest-index) one that contains the index
-/// wins — matching tree-sitter's inner-scope-wins rendering semantic.
-///
-/// Uses binary search on the sorted span list, so O(log n + depth) instead
-/// of the previous O(n) linear scan.
-pub fn style_at(spans: &[Span], char_idx: usize) -> ratatui::style::Style {
-    // Find the first span index whose start > char_idx.
-    let right = spans.partition_point(|&(start, _, _)| start <= char_idx);
-    // Scan backward: the first span we find that covers char_idx is the
-    // last-indexed one (innermost scope), which is the "last wins" winner.
-    for i in (0..right).rev() {
-        let (_, end, hl) = spans[i];
-        if char_idx < end {
-            return crate::theme::style_for_highlight(hl);
+        while k < events.len() && events[k].0 == pos {
+            let i = events[k].1;
+            let (s, _, _) = spans[i];
+            if s == pos {
+                open.insert(i);
+            } else {
+                open.remove(&i);
+            }
+            k += 1;
         }
-        // end <= char_idx: this span finishes before char_idx.
-        // An earlier (longer) span might still cover it, so keep scanning.
+        prev = pos;
     }
-    ratatui::style::Style::default()
+    out
 }
 
-/// Build a `HighlightConfiguration` for the given language.
-fn build_config(lang: Language) -> Result<HighlightConfiguration> {
-    let (highlights_query, injections_query, locals_query) = match lang {
-        Language::Rust => (tree_sitter_rust::HIGHLIGHTS_QUERY, "", ""),
-        Language::Python => (tree_sitter_python::HIGHLIGHTS_QUERY, "", ""),
-        Language::JavaScript => (
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_javascript::INJECTIONS_QUERY,
-            tree_sitter_javascript::LOCALS_QUERY,
-        ),
-        Language::Toml => (tree_sitter_toml_ng::HIGHLIGHTS_QUERY, "", ""),
-        Language::Json => (tree_sitter_json::HIGHLIGHTS_QUERY, "", ""),
-        Language::Yaml => (tree_sitter_yaml::HIGHLIGHTS_QUERY, "", ""),
-        Language::Bash => (tree_sitter_bash::HIGHLIGHT_QUERY, "", ""),
-        Language::Go => (tree_sitter_go::HIGHLIGHTS_QUERY, "", ""),
-        Language::C => (tree_sitter_c::HIGHLIGHT_QUERY, "", ""),
-        Language::Html => (
-            tree_sitter_html::HIGHLIGHTS_QUERY,
-            tree_sitter_html::INJECTIONS_QUERY,
-            "",
-        ),
-        Language::Css => (tree_sitter_css::HIGHLIGHTS_QUERY, "", ""),
-    };
+/// Return the ratatui `Style` for the span covering `char_idx`.
+///
+/// `spans` must be [`flatten`]ed: sorted and non-overlapping.
+pub fn style_at(spans: &[Span], char_idx: usize) -> ratatui::style::Style {
+    let right = spans.partition_point(|&(start, _, _)| start <= char_idx);
+    match right.checked_sub(1).map(|i| spans[i]) {
+        Some((_, end, hl)) if char_idx < end => crate::theme::style_for_highlight(hl),
+        _ => ratatui::style::Style::default(),
+    }
+}
 
-    let mut config = HighlightConfiguration::new(
-        lang.ts_language(),
-        "highlights",
-        highlights_query,
-        injections_query,
-        locals_query,
-    )?;
-    config.configure(HIGHLIGHT_NAMES);
-    Ok(config)
+/// The highlight query shipped with `lang`'s grammar crate.
+fn highlights_query(lang: Language) -> &'static str {
+    match lang {
+        Language::Rust => tree_sitter_rust::HIGHLIGHTS_QUERY,
+        Language::Python => tree_sitter_python::HIGHLIGHTS_QUERY,
+        Language::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
+        Language::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+        Language::Json => tree_sitter_json::HIGHLIGHTS_QUERY,
+        Language::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
+        Language::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
+        Language::Go => tree_sitter_go::HIGHLIGHTS_QUERY,
+        Language::C => tree_sitter_c::HIGHLIGHT_QUERY,
+        Language::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
+        Language::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
+    }
 }
 
 #[cfg(test)]
@@ -337,19 +498,54 @@ mod tests {
         for (ext, src) in samples {
             let lang = Language::from_extension(ext)
                 .unwrap_or_else(|| panic!("no language for extension {ext:?}"));
-            let config = build_config(lang)
-                .unwrap_or_else(|e| panic!("{lang:?}: highlight query failed to compile: {e}"));
-            let mut hl = Highlighter {
-                language: Some(lang),
-                markdown: false,
-                sql: false,
-                git: false,
-                config: Some(config),
-                ts_highlighter: TsHighlighter::new(),
-            };
-            let spans = hl.highlight(&Rope::from_str(src)).expect("highlight runs");
+            assert!(grammar(lang).is_some(), "{lang:?}: highlight query failed to compile");
+            let mut hl = Highlighter::new(Some(std::path::Path::new(&format!("x.{ext}"))));
+            let spans = hl.highlight(&Rope::from_str(src));
             assert!(!spans.is_empty(), "{lang:?}: no highlight spans for {src:?}");
         }
+    }
+
+    /// Edits recorded through `input_edit` + `edit` give the same highlights
+    /// as parsing the new text from scratch.
+    #[test]
+    fn incremental_reparse_matches_a_fresh_parse() {
+        let path = std::path::Path::new("x.rs");
+        let mut rope = Rope::from_str("fn main() {\n    let x = 1;\n}\n");
+        let mut hl = Highlighter::new(Some(path));
+        hl.highlight_lines(&rope, 7, 0..rope.len_lines());
+
+        for (start, end, text) in [(16, 19, "\"a\""), (0, 0, "// c\n"), (5, 9, "")] {
+            let edit = input_edit(&rope, start, end, text);
+            rope.remove(start..end);
+            rope.insert(start, text);
+            hl.edit(&edit);
+        }
+        let incremental = hl.highlight_lines(&rope, 7, 0..rope.len_lines());
+
+        assert_eq!(incremental, Highlighter::new(Some(path)).highlight(&rope));
+    }
+
+    /// Same rule as `tree_sitter_highlight`: the most specific known name.
+    #[test]
+    fn capture_names_map_to_the_most_specific_highlight() {
+        let name = |i: Option<usize>| i.map(|i| HIGHLIGHT_NAMES[i]);
+        assert_eq!(name(highlight_index("function.method.call")), Some("function.method"));
+        assert_eq!(name(highlight_index("string.escape")), Some("string"));
+        assert_eq!(name(highlight_index("unknown")), None);
+    }
+
+    #[test]
+    fn flatten_resolves_overlaps_inner_wins() {
+        // An outer span with an inner one in the middle, plus a later span.
+        let flat = flatten(vec![(0, 10, 1), (3, 5, 2), (12, 14, 3)]);
+        assert_eq!(flat, vec![(0, 3, 1), (3, 5, 2), (5, 10, 1), (12, 14, 3)]);
+    }
+
+    #[test]
+    fn style_at_uncovered_char_is_default() {
+        let flat = flatten(vec![(0, 2, 1), (5, 7, 2)]);
+        assert_eq!(style_at(&flat, 3), ratatui::style::Style::default());
+        assert_eq!(style_at(&flat, 6), crate::theme::style_for_highlight(2));
     }
 
     /// Shell dotfiles like `.zshrc` have no extension `Path::extension()` can

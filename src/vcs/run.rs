@@ -145,54 +145,8 @@ fn pump<R: Read + Send + 'static>(pipe: R, tx: Sender<Event>) -> std::thread::Jo
 /// * **Every remaining control character becomes a space**, for the same
 ///   reason the minibuffer flattens what it prints.
 pub fn clean(line: &str) -> String {
-    let visible = line.trim_end_matches(['\n', '\r']);
-    let visible = visible.rsplit('\r').next().unwrap_or(visible);
-
-    let mut out = String::with_capacity(visible.len());
-    let mut chars = visible.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            skip_escape(&mut chars);
-        } else if c == '\t' {
-            // A tab is the one control character that means something here:
-            // hook output is aligned with them.  Four columns, not eight —
-            // this is program output in a code editor's buffer.
-            out.push_str("    ");
-        } else if c.is_control() {
-            out.push(' ');
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Consume the rest of an escape sequence, having just read the `ESC`.
-fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars>) {
-    match chars.next() {
-        // CSI: parameters, then one final byte in `@`..=`~`.
-        Some('[') => {
-            for c in chars.by_ref() {
-                if ('@'..='~').contains(&c) {
-                    break;
-                }
-            }
-        }
-        // OSC: runs to a BEL or an ESC-terminated string.
-        Some(']') => {
-            while let Some(c) = chars.next() {
-                if c == '\u{7}' {
-                    break;
-                }
-                if c == '\u{1b}' {
-                    chars.next();
-                    break;
-                }
-            }
-        }
-        // Anything else is a two-character sequence, already consumed.
-        _ => {}
-    }
+    // Four columns, not eight: this is program output in a code editor's buffer.
+    crate::render_util::sanitize_output(line, 4)
 }
 
 #[cfg(test)]
@@ -216,7 +170,8 @@ mod tests {
     #[test]
     fn stray_control_characters_become_spaces() {
         assert_eq!(clean("a\u{7}b"), "a b");
-        assert_eq!(clean("a\tb"), "a    b");
+        // Tabs advance to the next 4-column stop, keeping columns aligned.
+        assert_eq!(clean("a\tb"), "a   b");
     }
 
     #[test]

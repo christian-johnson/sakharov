@@ -192,6 +192,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let sel_start = app.selection.start();
     let sel_end = app.selection.end();
     let cursor_pos = app.selection.head;
+    let cursor_line = rope.char_to_line(cursor_pos.min(rope.len_chars()));
 
     // Build the fold+wrap-aware list of visible rows.
     let vis_rows = build_vis_rows(
@@ -247,8 +248,6 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 } else {
                     let line_num_str = if app.config.editor.relative_line_numbers {
-                        let cursor_line = rope
-                            .char_to_line(app.selection.head.min(rope.len_chars()));
                         if line_idx == cursor_line {
                             format!("{:4} ", line_idx + 1)
                         } else {
@@ -320,9 +319,8 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
         cells.clear();
         let mut col_offset = 0usize; // display col from start of line
 
-        for char_off in 0..line_len {
+        for (char_off, c) in line_str.chars().enumerate() {
             let char_idx = line_start_char + char_off;
-            let c = line_str.char(char_off);
 
             if c == '\n' || c == '\r' {
                 if char_idx == cursor_pos && col_offset >= effective_skip && col_offset < effective_skip + content_width {
@@ -396,13 +394,14 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
         {
             // Jump label overlay — only on first sub-row (non-fold) lines.
             // Map char offsets to display columns (tab-aware) before painting.
-            let display_col_of = |char_off: usize| {
-                let mut col = 0usize;
-                for i in 0..char_off {
-                    col += char_display_width(line_str.char(i), col, tab_width);
-                }
-                col
-            };
+            let mut cols = Vec::with_capacity(line_len + 1);
+            let mut col = 0usize;
+            for c in line_str.chars() {
+                cols.push(col);
+                col += char_display_width(c, col, tab_width);
+            }
+            cols.push(col);
+            let display_col_of = |char_off: usize| cols[char_off.min(line_len)];
             for_each_jump_label_char(
                 &app.jump.labels,
                 &app.jump.typed,

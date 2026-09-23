@@ -73,12 +73,16 @@ src/
   in `docs/commands.md`.
 - New view: add the `view::View` variant and follow the compiler errors
   (`App::view`, `current_source_id`, `draw_frame`, `update_scroll`,
-  `input::keymap_layer`, `exec::execute`, `goto_hints` + `goto_command`,
+  `input::keymap_layer`, `exec::execute`, the layer's rows in `keymap::defaults`,
   `ui::status_ctx`, `StatuslineConfig::layout_for`, `stash::Stash`,
   `teardown_current_buffer`, `open_path`). Use `view::Chrome::split` for the
   bottom rows and `view::refusal(cmd)` for commands the view can't do.
-- Which-key hint lists (`goto_hints`, `fold_hints`, vcs `key_sheet`) are
-  pinned by tests to the keys actually dispatched — update both together.
+- Every key (including the `g`/`z` sub-modes) is a row in `keymap::defaults`.
+  Which-key popups, the vcs/conflict `key_sheet`s and the palette's key labels
+  are generated from the keymap — never hand-write a key into a description.
+- Config values changed at runtime go through `exec::settings::replace_config`
+  (`:set`, `:toggle`, the dedicated toggles, `:config-reload`); state derived
+  from config at startup lives in `App::apply_config`.
 
 **Rendering**
 - Every colour comes from `theme::active()`; no colour literals in renderers.
@@ -89,8 +93,9 @@ src/
   `nb_cell_height`/`cell_output_rows`/`OutputLimits` (notebook),
   `table::layout` (grid), `vcs::layout`, `conflict::layout`.
 - Text the editor didn't write must be sanitised before it becomes a cell
-  symbol (`popup::sanitize_lines`, `table::layout::sanitize`) — raw control
-  chars are emitted verbatim by the backend and corrupt the screen.
+  symbol (`render_util::sanitize_output` / `sanitize_source`,
+  `table::layout::sanitize`) — raw control chars are emitted verbatim by the
+  backend and corrupt the screen.
 - Widths are display columns (`unicode_width`), never `str::len`.
 - Renderers emit `kitty::ImageRequest`s into `app.graphics.pending`; only
   `app::flush_images` talks to the terminal. Anything that clears images must
@@ -98,10 +103,14 @@ src/
 - Nothing blocking between entering the alternate screen and the first frame.
 
 **Editing / LSP**
-- Insert-mode edits use `insert_raw`/`remove_raw` (one undo snapshot per
-  Insert session).
-- Insert keystrokes sync LSP incrementally (`lsp_did_change_insert/_remove`);
-  any other edit path should call `exec::lsp_did_change` (full text).
+- Every change to `app.buffer`'s text goes through `exec::edit`
+  (`insert` / `remove`, or `replaced` after swapping the whole rope): it keeps
+  the highlighter's parse tree, the highlights and the LSP in step. Undo
+  grouping is the caller's (`buffer.begin_edit_session()`; one per Insert
+  session).
+- Highlighting keeps a tree-sitter tree per buffer and re-parses
+  incrementally; highlights are computed only for the lines around the screen
+  (`app::refresh_highlight_window`). Folds come from the same tree.
 - Diagnostics lookups key with `lsp::diagnostic_key(path)`. Notebook cells are
   addressed by `notebook::cell_virtual_path` (index-based — resync with
   `notebook_lsp_reopen` after structural edits). Markup cells are never sent
@@ -139,7 +148,6 @@ src/
 - Tests for `vcs/apply.rs` and `conflict/` drive real temp repositories.
 
 ## Known gaps
-No split panes; no user-defined `[commands]`; highlighting reparses the whole
-buffer per edit; table view has no search, no pivot, no column hide/resize;
+No split panes; no user-defined `[commands]`; table view has no search, no pivot, no column hide/resize;
 notebook cells assume width-1 chars and have no horizontal scroll; vcs graph
 and kernel-backed tables are snapshots (refresh manually).

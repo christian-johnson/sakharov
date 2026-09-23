@@ -4,7 +4,7 @@
 
 use crate::app::App;
 
-use super::{is_special_path, lsp, notebook, recompute_highlights, refresh_git};
+use super::{is_special_path, notebook, refresh_git};
 
 /// Run the configured shell formatter for the current buffer's language.
 ///
@@ -68,6 +68,8 @@ pub(super) fn run_shell_formatter(app: &mut App) -> bool {
             // Reload the formatter's output back into the buffer.
             match std::fs::read_to_string(&disk_path) {
                 Ok(content) => {
+                    // One undo step back to the unformatted text.
+                    app.buffer.begin_edit_session();
                     app.buffer.rope = ropey::Rope::from_str(&content);
                     if in_notebook {
                         // No real file to re-stat; the notebook itself is still
@@ -80,8 +82,7 @@ pub(super) fn run_shell_formatter(app: &mut App) -> bool {
                         // external-modification check doesn't false-positive.
                         app.buffer.refresh_disk_mtime();
                     }
-                    recompute_highlights(app);
-                    lsp::lsp_did_change(app);
+                    super::edit::replaced(app);
                     refresh_git(app);
                 }
                 Err(e) => {

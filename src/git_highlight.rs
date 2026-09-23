@@ -364,7 +364,7 @@ mod tests {
         let mut hl = crate::highlight::Highlighter::new(Some(Path::new("*commit 7e5120c*")));
         assert!(hl.git);
         let rope = Rope::from_str("diff --git a/x b/x\n+added\n-removed\n");
-        let spans = hl.highlight(&rope).expect("highlighting runs");
+        let spans = hl.highlight(&rope);
         assert!(spans.iter().any(|(_, _, i)| *i == GIT_ADDED));
         assert!(spans.iter().any(|(_, _, i)| *i == GIT_REMOVED));
     }

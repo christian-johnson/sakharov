@@ -88,6 +88,8 @@ pub struct Recovery {
     last_flush: Option<Instant>,
     /// key → hash of the content last written, to skip redundant disk writes.
     written: HashMap<String, u64>,
+    /// key → (recovery file, JSON) of what was last serialised, for the panic hook.
+    snapshot: HashMap<String, (PathBuf, String)>,
 }
 
 impl Recovery {
@@ -115,6 +117,7 @@ impl Recovery {
             dir,
             last_flush: None,
             written: HashMap::new(),
+            snapshot: HashMap::new(),
         }
     }
 }
@@ -154,110 +157,144 @@ fn flush(app: &mut App, force: bool) {
     }
     app.recovery.last_flush = Some(now);
 
+    let mut written = std::mem::take(&mut app.recovery.written);
+    let mut snapshot = std::mem::take(&mut app.recovery.snapshot);
     let entries = collect_entries(app);
+    let saved_at_unix = now_unix();
 
-    // Mirror the desired on-disk state into the panic snapshot so a panic that
-    // strikes between flushes still persists the latest contents.
-    let snapshot: Vec<(PathBuf, String)> = entries
-        .iter()
-        .filter_map(|e| {
-            serde_json::to_string(&e.record)
-                .ok()
-                .map(|json| (dir.join(format!("{}.json", e.key)), json))
-        })
-        .collect();
-    set_panic_snapshot(snapshot);
-
-    // Write changed entries; remember which keys are currently dirty.
+    // Serialise and write only what changed since the last write: the content
+    // fingerprint is cheap, while encoding a large buffer (or a notebook with
+    // images) every flush was a visible stutter.
     let mut live: HashSet<String> = HashSet::new();
+    let mut changed = false;
     for e in &entries {
         live.insert(e.key.clone());
-        let json = match serde_json::to_string(&e.record) {
-            Ok(j) => j,
-            Err(_) => continue,
-        };
-        let h = hash_str(&json);
-        if app.recovery.written.get(&e.key) == Some(&h) {
-            continue; // unchanged since last write
+        if written.get(&e.key) == Some(&e.fingerprint) {
+            continue;
         }
+        let Some(record) = e.record(saved_at_unix) else { continue };
+        let Ok(json) = serde_json::to_string(&record) else { continue };
         let target = dir.join(format!("{}.json", e.key));
         if write_private(&target, &json).is_ok() {
-            app.recovery.written.insert(e.key.clone(), h);
+            written.insert(e.key.clone(), e.fingerprint);
         }
+        snapshot.insert(e.key.clone(), (target, json));
+        changed = true;
+    }
+    drop(entries);
+    let before = snapshot.len();
+    snapshot.retain(|k, _| live.contains(k));
+    if changed || snapshot.len() != before {
+        // Mirror the desired on-disk state into the panic snapshot so a panic
+        // still persists the latest contents if a write above failed.
+        set_panic_snapshot(snapshot.values().cloned().collect());
     }
 
     // Drop recovery files for buffers this session wrote but that are now clean
     // (saved, or no longer present).  Keeps the directory tidy.
-    let stale: Vec<String> = app
-        .recovery
-        .written
-        .keys()
-        .filter(|k| !live.contains(*k))
-        .cloned()
-        .collect();
-    for k in stale {
-        let _ = std::fs::remove_file(dir.join(format!("{k}.json")));
-        app.recovery.written.remove(&k);
+    written.retain(|k, _| {
+        let keep = live.contains(k);
+        if !keep {
+            let _ = std::fs::remove_file(dir.join(format!("{k}.json")));
+        }
+        keep
+    });
+    app.recovery.written = written;
+    app.recovery.snapshot = snapshot;
+}
+
+/// Where a recovery entry's content comes from; serialised only when written.
+enum Content<'a> {
+    Text(&'a ropey::Rope),
+    Notebook(&'a crate::notebook::Notebook),
+}
+
+/// One buffer with unsaved edits, awaiting a (possibly skipped) write.
+struct Entry<'a> {
+    key: String,
+    kind: &'static str,
+    original_path: Option<String>,
+    /// Hash of the content, compared against the last write.
+    fingerprint: u64,
+    content: Content<'a>,
+}
+
+impl<'a> Entry<'a> {
+    fn new(key: String, kind: &'static str, original_path: Option<String>, content: Content<'a>) -> Self {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match &content {
+            Content::Text(rope) => hash_rope(rope, &mut h),
+            Content::Notebook(nb) => {
+                for cell in &nb.cells {
+                    cell.id.hash(&mut h);
+                    std::mem::discriminant(&cell.cell_type).hash(&mut h);
+                    hash_rope(&cell.source, &mut h);
+                    cell.execution_count.hash(&mut h);
+                    cell.outputs.len().hash(&mut h);
+                }
+            }
+        }
+        Self { key, kind, original_path, fingerprint: h.finish(), content }
+    }
+
+    fn record(&self, saved_at_unix: u64) -> Option<RecoveryRecord> {
+        let content = match self.content {
+            Content::Text(rope) => rope.to_string(),
+            Content::Notebook(nb) => nb.to_nbformat_string().ok()?,
+        };
+        Some(RecoveryRecord {
+            kind: self.kind.into(),
+            original_path: self.original_path.clone(),
+            saved_at_unix,
+            content,
+        })
     }
 }
 
-/// One computed recovery entry awaiting a write.
-struct Entry {
-    key: String,
-    record: RecoveryRecord,
+fn hash_rope(rope: &ropey::Rope, h: &mut impl Hasher) {
+    for chunk in rope.chunks() {
+        h.write(chunk.as_bytes());
+    }
 }
 
 /// Gather all in-memory buffers that currently hold unsaved edits.
-fn collect_entries(app: &App) -> Vec<Entry> {
+fn collect_entries(app: &App) -> Vec<Entry<'_>> {
     let mut entries: Vec<Entry> = Vec::new();
-    let now = now_unix();
 
     // Active buffer: a live notebook, or a plain-text/scratch buffer.
     if let Some((nb, _)) = &app.notebook {
         if nb.modified {
-            if let Ok(content) = nb.to_nbformat_string() {
-                entries.push(Entry {
-                    key: path_key(&nb.path),
-                    record: RecoveryRecord {
-                        kind: "notebook".into(),
-                        original_path: Some(abs_string(&nb.path)),
-                        saved_at_unix: now,
-                        content,
-                    },
-                });
-            }
+            entries.push(Entry::new(
+                path_key(&nb.path),
+                "notebook",
+                Some(abs_string(&nb.path)),
+                Content::Notebook(nb),
+            ));
         }
     } else if let Some(path) = app.buffer.path.as_ref() {
         if path.to_str() == Some(crate::app::SCRATCH_BUFFER) {
-            push_scratch(&mut entries, &app.buffer.rope, now);
+            push_scratch(&mut entries, &app.buffer.rope);
         } else if !crate::exec::is_special_path(path) && app.buffer.modified {
-            entries.push(Entry {
-                key: path_key(path),
-                record: RecoveryRecord {
-                    kind: "file".into(),
-                    original_path: Some(abs_string(path)),
-                    saved_at_unix: now,
-                    content: app.buffer.rope.to_string(),
-                },
-            });
+            entries.push(Entry::new(
+                path_key(path),
+                "file",
+                Some(abs_string(path)),
+                Content::Text(&app.buffer.rope),
+            ));
         }
     }
 
     // Stashed plain-file buffers (navigated away from but still in memory).
     // A virtual source has no file to recover to, so it is skipped.
     for (path, buf) in app.stashes.files().filter_map(|(id, b)| id.as_path().map(|p| (p, b))) {
-        if !buf.modified {
-            continue;
+        if buf.modified {
+            entries.push(Entry::new(
+                path_key(path),
+                "file",
+                Some(abs_string(path)),
+                Content::Text(&buf.rope),
+            ));
         }
-        entries.push(Entry {
-            key: path_key(path),
-            record: RecoveryRecord {
-                kind: "file".into(),
-                original_path: Some(abs_string(path)),
-                saved_at_unix: now,
-                content: buf.rope.to_string(),
-            },
-        });
     }
 
     // Stashed notebooks (navigated away from but still in memory).
@@ -270,19 +307,13 @@ fn collect_entries(app: &App) -> Vec<Entry> {
             .notebook
             .as_ref()
             .is_some_and(|(a, _)| same_path(&a.path, path));
-        if is_active || !nb.modified {
-            continue;
-        }
-        if let Ok(content) = nb.to_nbformat_string() {
-            entries.push(Entry {
-                key: path_key(path),
-                record: RecoveryRecord {
-                    kind: "notebook".into(),
-                    original_path: Some(abs_string(path)),
-                    saved_at_unix: now,
-                    content,
-                },
-            });
+        if !is_active && nb.modified {
+            entries.push(Entry::new(
+                path_key(path),
+                "notebook",
+                Some(abs_string(path)),
+                Content::Notebook(nb),
+            ));
         }
     }
 
@@ -291,28 +322,18 @@ fn collect_entries(app: &App) -> Vec<Entry> {
         app.buffer.path.as_deref().and_then(|p| p.to_str()) == Some(crate::app::SCRATCH_BUFFER);
     if !scratch_active {
         if let Some(rope) = app.special_buffer_ropes.get(crate::app::SCRATCH_BUFFER) {
-            push_scratch(&mut entries, rope, now);
+            push_scratch(&mut entries, rope);
         }
     }
 
     entries
 }
 
-/// Push a scratch entry only if it differs from the default placeholder text.
-fn push_scratch(entries: &mut Vec<Entry>, rope: &ropey::Rope, now: u64) {
-    let content = rope.to_string();
-    if content == crate::exec::SCRATCH_INTRO || content.trim().is_empty() {
+fn push_scratch<'a>(entries: &mut Vec<Entry<'a>>, rope: &'a ropey::Rope) {
+    if *rope == crate::exec::SCRATCH_INTRO || rope.chars().all(char::is_whitespace) {
         return;
     }
-    entries.push(Entry {
-        key: SCRATCH_KEY.to_string(),
-        record: RecoveryRecord {
-            kind: "scratch".into(),
-            original_path: None,
-            saved_at_unix: now,
-            content,
-        },
-    });
+    entries.push(Entry::new(SCRATCH_KEY.to_string(), "scratch", None, Content::Text(rope)));
 }
 
 // ---------------------------------------------------------------------------
@@ -509,11 +530,9 @@ fn apply_restore(app: &mut App, item: &PendingRecovery) {
             if matches_active {
                 app.buffer.begin_edit_session();
                 let end = app.buffer.rope.len_chars();
-                app.buffer.remove_raw(0, end);
-                app.buffer.insert_raw(0, &item.content);
+                crate::exec::edit::remove(app, 0, end);
+                crate::exec::edit::insert(app, 0, &item.content);
                 app.selection = crate::selection::Selection::point(0);
-                crate::exec::recompute_highlights(app);
-                crate::exec::lsp_did_change(app);
                 app.messages.show(format!(
                     "Restored unsaved changes ({})",
                     file_label(item)
@@ -557,7 +576,7 @@ fn apply_restore(app: &mut App, item: &PendingRecovery) {
             if app.buffer.path.as_deref().and_then(|p| p.to_str()) == Some(crate::app::SCRATCH_BUFFER) {
                 app.buffer.rope = rope;
                 app.buffer.modified = true;
-                crate::exec::recompute_highlights(app);
+                crate::exec::edit::replaced(app);
             }
             app.messages.show("Restored scratch buffer (open with :scratch)");
         }
@@ -666,12 +685,6 @@ fn active_buffer_key(app: &App) -> Option<String> {
     Some(path_key(path))
 }
 
-fn hash_str(s: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
-}
-
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -751,6 +764,38 @@ mod tests {
         write_private(&target, "world").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "world");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A buffer whose content hasn't changed since the last flush is not
+    /// re-serialised or rewritten; an edit makes the next flush write again.
+    #[test]
+    fn flush_rewrites_only_changed_buffers() {
+        let dir = std::env::temp_dir().join(format!("sv-rec-flush-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        app.recovery = Recovery {
+            enabled: true,
+            dir: Some(dir.clone()),
+            last_flush: None,
+            written: HashMap::new(),
+            snapshot: HashMap::new(),
+        };
+        let file = dir.join("doc.txt");
+        app.buffer.path = Some(file.clone());
+        app.buffer.insert_raw(0, "hello");
+        let target = dir.join(format!("{}.json", path_key(&file)));
+
+        flush_now(&mut app);
+        assert!(target.exists(), "first flush writes the recovery file");
+        std::fs::remove_file(&target).unwrap();
+        flush_now(&mut app);
+        assert!(!target.exists(), "unchanged content is not rewritten");
+        app.buffer.insert_raw(5, " world");
+        flush_now(&mut app);
+
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert!(written.contains("hello world"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

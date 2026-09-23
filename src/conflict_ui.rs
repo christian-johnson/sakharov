@@ -24,6 +24,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::render_util::sanitize_source;
 use crate::conflict::{
     hunk::{Region, Versions},
     layout::{self, Layout, Span},
@@ -386,7 +387,7 @@ fn draw_row(
             frame.buffer_mut()[(x, body.y + y)].set_char(' ').set_style(style);
         }
     }
-    for (x, c) in (body.left()..body.right()).zip(prefix.chars().chain(sanitized(text))) {
+    for (x, c) in (body.left()..body.right()).zip(prefix.chars().chain(sanitize_source(text, TAB_WIDTH).chars())) {
         frame.buffer_mut()[(x, body.y + y)].set_char(c).set_style(style);
     }
 }
@@ -396,25 +397,9 @@ fn put_line(frame: &mut Frame, rect: Rect, row: u16, indent: u16, text: &str, st
     if row >= rect.height {
         return;
     }
-    for (x, c) in (rect.left() + indent..rect.right()).zip(sanitized(text)) {
+    for (x, c) in (rect.left() + indent..rect.right()).zip(sanitize_source(text, TAB_WIDTH).chars()) {
         frame.buffer_mut()[(x, rect.y + row)].set_char(c).set_style(style);
     }
-}
-
-/// Flatten what a conflicted file may contain.
-///
-/// The text here is **the user's own source**, which may hold a tab or a
-/// control character; a `\t` stored as a cell symbol is emitted verbatim by
-/// the backend and advances the real cursor to the next tab stop mid-flush,
-/// shifting every cell drawn after it on that row.  The same rule the
-/// minibuffer and the popups already follow, one widget along — tabs expanded
-/// so the indentation the code was written with survives.
-fn sanitized(text: &str) -> impl Iterator<Item = char> + '_ {
-    text.chars().flat_map(|c| match c {
-        '\t' => vec![' '; TAB_WIDTH],
-        c if c.is_control() => vec![' '],
-        c => vec![c],
-    })
 }
 
 #[cfg(test)]

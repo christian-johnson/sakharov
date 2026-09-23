@@ -296,9 +296,12 @@ fn install(app: &mut App, root: PathBuf, dag: vcs::Dag) {
 /// Session-only, like `:theme`: the message names the config key that makes it
 /// stick, rather than the editor writing to the user's config behind them.
 fn flip(app: &mut App) {
-    let Some(state) = app.vcs.as_mut() else { return };
-    let orient = state.flip();
-    app.vcs_options = state.options.clone();
+    // Flip what is on screen, which is what the user is looking at.
+    let shown = app.vcs.as_ref().map_or(app.config.vcs.orientation, |s| s.options.orientation);
+    let orient = shown.flipped();
+    let mut config = app.config.clone();
+    config.vcs.orientation = orient;
+    super::settings::replace_config(app, config);
     update_scroll(app);
     app.messages.show(format!(
         "History runs {} — `[vcs] orientation = \"{}\"` to keep it",
@@ -483,7 +486,7 @@ pub fn handle(app: &mut App, cmd: &Command) -> bool {
         Command::VcsHelp => {
             app.popup = Some(Popup::key_sheet(
                 "version control",
-                key_sheet(),
+                key_sheet(&app.keymap),
                 "g? for what the gestures mean · Esc closes",
             ));
         }
@@ -1401,48 +1404,51 @@ fn show_git_status(app: &mut App) {
 /// Pinned to the keymap by `the_key_sheet_only_lists_keys_that_are_bound`, so
 /// it can never advertise a press that does nothing.  What the gestures
 /// *mean* is [`HELP`], one key further along at `g?`.
-pub fn key_sheet() -> Vec<KeyHint> {
-    let key = KeyHint::binding;
+pub fn key_sheet(keymap: &crate::keymap::Keymap) -> Vec<KeyHint> {
+    use Command as C;
+    let key = |cmds: &[Command], d: &str| {
+        KeyHint::for_commands(keymap, crate::keymap::Layer::Vcs, cmds, d)
+    };
     vec![
         KeyHint::heading("MOVING AROUND"),
-        key("h l", "back / forward through history"),
-        key("j k", "between branches"),
-        key("J K", "half a screen"),
-        key("g g", "the top of the graph"),
-        key("g e", "the bottom of the graph"),
-        key("Enter", "branch: go there · commit: read its diff"),
-        key("y", "copy the hash under the cursor"),
-        key("g b", "buffer picker"),
+        key(&[C::MoveLeft, C::MoveRight], "back / forward through history"),
+        key(&[C::MoveDown, C::MoveUp], "between branches"),
+        key(&[C::PageDown, C::PageUp], "half a screen"),
+        key(&[C::GotoFileStart], "the top of the graph"),
+        key(&[C::GotoFileEnd], "the bottom of the graph"),
+        key(&[C::VcsEnter], "branch: go there · commit: read its diff"),
+        key(&[C::YankSelection], "copy the hash under the cursor"),
+        key(&[C::OpenBufferPicker], "buffer picker"),
         KeyHint::heading("REARRANGING  (planned)"),
-        key("Space", "pick up / put down what is under the cursor"),
-        key("Esc", "put down what you are holding"),
-        key("d", "remove the selected commit"),
-        key("m", "merge the selection into this branch"),
-        key("u", "take back the last planned change"),
-        key("g x", "discard the whole plan"),
-        key("g a", "apply the plan — the only step that writes"),
-        key("g U", "put every branch back after an apply"),
-        key("g A", "abort the run a conflict stopped"),
-        key("g C", "carry on after resolving a conflict"),
+        key(&[C::VcsGrab], "pick up / put down what is under the cursor"),
+        key(&[C::EnterNormal], "put down what you are holding"),
+        key(&[C::VcsDrop], "remove the selected commit"),
+        key(&[C::VcsMerge], "merge the selection into this branch"),
+        key(&[C::Undo], "take back the last planned change"),
+        key(&[C::VcsReset], "discard the whole plan"),
+        key(&[C::VcsApply], "apply the plan — the only step that writes"),
+        key(&[C::VcsUndo], "put every branch back after an apply"),
+        key(&[C::VcsAbort], "abort the run a conflict stopped"),
+        key(&[C::VcsContinue], "carry on after resolving a conflict"),
         KeyHint::heading("RIGHT NOW  (these run immediately)"),
-        key("c", "check out the branch or commit"),
-        key("w", "work tree — Space stages, Enter opens"),
-        key("+ -", "stage / unstage everything"),
-        key("C", "commit what is staged"),
-        key("s", "git status, verbatim"),
-        key("f", "fetch from every remote"),
-        key("p", "pull (fast-forward only)"),
-        key("P", "push to the upstream"),
-        key("n", "new branch at the selected commit"),
-        key("g u", "set this branch's upstream"),
-        key("g o", "the last command's output, as it ran"),
+        key(&[C::VcsCheckout], "check out the branch or commit"),
+        key(&[C::VcsStatus], "work tree — Space stages, Enter opens"),
+        key(&[C::VcsStage, C::VcsUnstage], "stage / unstage everything"),
+        key(&[C::VcsCommit(String::new())], "commit what is staged"),
+        key(&[C::VcsGitStatus], "git status, verbatim"),
+        key(&[C::VcsFetch], "fetch from every remote"),
+        key(&[C::VcsPull], "pull (fast-forward only)"),
+        key(&[C::VcsPush], "push to the upstream"),
+        key(&[C::VcsNewBranch(String::new())], "new branch at the selected commit"),
+        key(&[C::VcsSetUpstream(String::new())], "set this branch's upstream"),
+        key(&[C::VcsOutput], "the last command's output, as it ran"),
         KeyHint::heading("THE PICTURE"),
-        key("b", "which branches the graph draws"),
-        key("x", "take the branch under the cursor out"),
-        key("o", "turn the graph a quarter turn"),
-        key("r", "re-read the repository"),
-        key("g ?", "what the gestures mean"),
-        key("q", "leave the graph"),
+        key(&[C::VcsBranches], "which branches the graph draws"),
+        key(&[C::VcsHideBranch], "take the branch under the cursor out"),
+        key(&[C::VcsFlip], "turn the graph a quarter turn"),
+        key(&[C::VcsRefresh], "re-read the repository"),
+        key(&[C::VcsGuide], "what the gestures mean"),
+        key(&[C::VcsClose], "leave the graph"),
     ]
 }
 
@@ -1613,56 +1619,6 @@ fn yank_hash(app: &mut App) {
     };
     crate::clipboard::write(commit.as_str());
     app.messages.show(format!("Yanked {}", commit.as_str()));
-}
-
-/// The `g` sub-mode's meanings here.
-pub fn goto_command(c: char) -> Option<Command> {
-    Some(match c {
-        'x' => Command::VcsReset,
-        'r' => Command::VcsRefresh,
-        'a' => Command::VcsApply,
-        'm' => Command::VcsMerge,
-        'd' => Command::VcsDrop,
-        'c' => Command::VcsCheckout,
-        // The rest of the plan's lifecycle, one key further in than the
-        // gestures that build it: undoing an apply, and the two halves of
-        // getting out of a conflict.  Deliberately not bare keys — each is
-        // something you reach for once, after something went wrong.
-        'U' => Command::VcsUndo,
-        'A' => Command::VcsAbort,
-        'C' => Command::VcsContinue,
-        // The remote's paperwork, and the transcript of whatever last ran.
-        'u' => Command::VcsSetUpstream(String::new()),
-        'o' => Command::VcsOutput,
-        '?' => Command::VcsGuide,
-        _ => return None,
-    })
-}
-
-/// What the `g` which-key popup advertises here.  Pinned to
-/// [`goto_command`] by a test, so the popup can never advertise a key that
-/// does nothing.
-pub fn goto_hints() -> Vec<(String, String)> {
-    [
-        ("g", "first commit"),
-        ("e", "last commit"),
-        ("c", "check out the selection"),
-        ("m", "plan a merge into the current branch"),
-        ("d", "remove the selected commit"),
-        ("a", "apply the planned changes"),
-        ("x", "discard the planned changes"),
-        ("U", "put the branches back after an apply"),
-        ("A", "abort the run a conflict stopped"),
-        ("C", "carry on after resolving a conflict"),
-        ("u", "set this branch's upstream"),
-        ("o", "the last command's output"),
-        ("r", "re-read the repository"),
-        ("?", "what the gestures mean"),
-        ("b", "buffer picker"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect()
 }
 
 #[cfg(test)]
@@ -2315,7 +2271,7 @@ mod tests {
         let mut app = app_in_graph();
         assert!(
             app.keymap
-                .lookup(crate::keymap::Layer::Vcs, &crate::keymap::KeyBinding::char('?'))
+                .lookup_layered(crate::keymap::Layer::Vcs, &[crate::keymap::KeyBinding::char('?')])
                 .is_some_and(|c| matches!(c, [Command::VcsHelp])),
             "? has to be bound in the graph"
         );
@@ -2339,7 +2295,7 @@ mod tests {
     #[test]
     fn g_question_mark_opens_the_prose_guide() {
         let mut app = app_in_graph();
-        assert!(matches!(goto_command('?'), Some(Command::VcsGuide)));
+        assert_eq!(app.keymap.keys_for(crate::keymap::Layer::Vcs, Command::VcsGuide.name()).as_deref(), Some("g ?"));
         super::handle(&mut app, &Command::VcsGuide);
         let popup = app.popup.as_ref().expect("the guide opened");
         let crate::popup::PopupContent::Text(ref text) = popup.content else {
@@ -2353,47 +2309,19 @@ mod tests {
     }
 
     /// Every key the sheet lists has to actually be bound, or it teaches
-    /// presses that do nothing — the same pairing `goto_hints` has with
-    /// `goto_command`.  This is what stops the sheet rotting as bindings move.
+    /// presses that do nothing.  The keys come from the keymap, so this
+    /// catches a listed command that has no key at all.
     #[test]
     fn the_key_sheet_only_lists_keys_that_are_bound() {
-        let app = app_in_graph();
-        for hint in key_sheet() {
-            if hint.is_heading() {
-                continue;
-            }
-            for token in hint.key.split_whitespace() {
-                // A `g`-prefixed row is written "g a": the prefix itself is
-                // bound in Normal mode, and the letter after it is dispatched
-                // by `goto_command`.
-                let bound = |c: char| {
-                    app.keymap
-                        .lookup_layered(
-                            crate::keymap::Layer::Vcs,
-                            &crate::keymap::KeyBinding::char(c),
-                        )
-                        .is_some()
-                };
-                match token {
-                    "Enter" | "Esc" | "Space" => continue,
-                    _ => {}
-                }
-                let mut chars = token.chars();
-                let first = chars.next().expect("a non-empty token");
-                if let Some(second) = chars.next() {
-                    // "h l", "+ -": two alternatives, each bound on its own.
-                    assert!(bound(first) && bound(second), "`{token}` is not bound");
-                } else {
-                    assert!(
-                        bound(first)
-                            || goto_command(first).is_some()
-                            || crate::input::goto_command(View::Vcs, first).is_some(),
-                        "the sheet lists `{}` ({}), which is not bound",
-                        hint.key,
-                        hint.description
-                    );
-                }
-            }
+        let app = App::new(None, crate::config::Config::load()).expect("app");
+        for hint in key_sheet(&app.keymap) {
+            // An unbound command is shown by its `:name` instead of a key.
+            assert!(
+                !hint.key.contains(':'),
+                "the sheet lists {:?} ({}), which has no key",
+                hint.key,
+                hint.description
+            );
         }
     }
 
@@ -2413,7 +2341,7 @@ mod tests {
         ] {
             let bound = app
                 .keymap
-                .lookup(crate::keymap::Layer::Vcs, &crate::keymap::KeyBinding::char(key))
+                .lookup_layered(crate::keymap::Layer::Vcs, &[crate::keymap::KeyBinding::char(key)])
                 .unwrap_or_else(|| panic!("`{key}` is not bound in the graph"));
             assert_eq!(
                 bound.iter().map(Command::name).collect::<Vec<_>>(),
@@ -2492,18 +2420,6 @@ mod tests {
             app.mode,
             crate::mode::Mode::Prompt { kind: crate::mode::PromptKind::VcsCommit }
         );
-    }
-
-    /// The `g` which-key popup must never advertise a key that does nothing —
-    /// the same pairing `goto_hints` has with `input::goto_command` elsewhere.
-    #[test]
-    fn goto_hints_only_advertise_real_bindings() {
-        for (key, description) in goto_hints() {
-            let c = key.chars().next().expect("a key");
-            let handled = goto_command(c).is_some()
-                || crate::input::goto_command(View::Vcs, c).is_some();
-            assert!(handled, "g{key} ({description}) is advertised but does nothing");
-        }
     }
 
     /// `:vc` from an ordinary text buffer has to actually open the view.
@@ -2792,7 +2708,7 @@ mod tests {
         );
         assert!(app
             .keymap
-            .lookup(crate::keymap::Layer::Commit, &crate::keymap::KeyBinding::char('q'))
+            .lookup_layered(crate::keymap::Layer::Commit, &[crate::keymap::KeyBinding::char('q')])
             .is_some_and(|c| matches!(c, [Command::BufferClose])));
 
         super::super::execute(&mut app, &Command::BufferClose);

@@ -556,9 +556,6 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                     let fake_edit = serde_json::json!({ "changes": { uri: edits } });
                     apply_workspace_edit(app, fake_edit);
                 }
-                // Sync the new buffer content back to the server so the next format
-                // request sees the already-formatted text, not the old pre-format version.
-                lsp_did_change(app);
             }
             if app.pending_format_save {
                 app.pending_format_save = false;
@@ -909,14 +906,9 @@ fn apply_workspace_edit(app: &mut App, edit: Value) {
 
     app.buffer.begin_edit_session();
     for (start, end, new_text) in text_edits {
-        if start < end {
-            app.buffer.remove_raw(start, end);
-        }
-        if !new_text.is_empty() {
-            app.buffer.insert_raw(start, &new_text);
-        }
+        super::edit::remove(app, start, end);
+        super::edit::insert(app, start, &new_text);
     }
-    super::recompute_highlights(app);
 }
 
 /// Perform a plain buffer save (no format step) — used by the format-on-save path.

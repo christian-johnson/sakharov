@@ -10,7 +10,7 @@ use crate::{app::App, symbols};
 pub(super) fn command_palette(app: &mut App) {
     let recency = crate::history::recency_map(app);
     app.popup = Some(crate::popup::Popup::command_palette(
-        crate::popup::command_palette_items(),
+        crate::popup::command_palette_items(&app.keymap),
         recency,
     ));
 }

@@ -7,10 +7,10 @@ pub(super) fn delete_selection(app: &mut App) {
     let text = app.buffer.rope.slice(start..del_end).to_string();
     app.clipboard = text.clone();
     crate::clipboard::write(&text);
-    app.buffer.remove(start, del_end);
+    app.buffer.begin_edit_session();
+    super::edit::remove(app, start, del_end);
     let new_pos = start.min(app.buffer.rope.len_chars());
     app.selection = Selection::point(new_pos);
-    super::recompute_highlights(app);
     super::update_scroll(app);
 }
 
@@ -32,9 +32,9 @@ pub(super) fn paste_after(app: &mut App) {
     let pos = app.selection.head;
     let len = app.buffer.rope.len_chars();
     let insert_pos = if len > 0 { (pos + 1).min(len) } else { 0 };
-    app.buffer.insert(insert_pos, &text);
+    app.buffer.begin_edit_session();
+    super::edit::insert(app, insert_pos, &text);
     app.selection = Selection::point(insert_pos);
-    super::recompute_highlights(app);
     super::update_scroll(app);
 }
 
@@ -45,9 +45,9 @@ pub(super) fn paste_before(app: &mut App) {
     }
     app.clipboard = text.clone();
     let pos = app.selection.head;
-    app.buffer.insert(pos, &text);
+    app.buffer.begin_edit_session();
+    super::edit::insert(app, pos, &text);
     app.selection = Selection::point(pos);
-    super::recompute_highlights(app);
     super::update_scroll(app);
 }
 
@@ -84,10 +84,10 @@ pub(super) fn open_line_below(app: &mut App) {
 
     let ind_len = ind.chars().count();
     let to_insert = format!("\n{ind}");
-    app.buffer.insert(le, &to_insert);
+    app.buffer.begin_edit_session();
+    super::edit::insert(app, le, &to_insert);
     app.selection = Selection::point(le + 1 + ind_len);
     app.mode = Mode::Insert;
-    super::recompute_highlights(app);
     super::update_scroll(app);
 }
 
@@ -107,11 +107,11 @@ pub(super) fn open_line_above(app: &mut App) {
 
     let ind_len = ind.chars().count();
     let to_insert = format!("{ind}\n");
-    app.buffer.insert(ls, &to_insert);
+    app.buffer.begin_edit_session();
+    super::edit::insert(app, ls, &to_insert);
     // Cursor after the indentation, on the newline (end of new blank line).
     app.selection = Selection::point(ls + ind_len);
     app.mode = Mode::Insert;
-    super::recompute_highlights(app);
     super::update_scroll(app);
 }
 
@@ -180,9 +180,9 @@ pub(super) fn comment_region(app: &mut App) {
             let after_indent = line_start + indent;
             let trimmed = &content[indent..]; // safe: indent counted in chars above
             if trimmed.starts_with(prefix) {
-                app.buffer.remove_raw(after_indent, after_indent + prefix.chars().count());
+                super::edit::remove(app, after_indent, after_indent + prefix.chars().count());
             } else if trimmed.starts_with(prefix_token) {
-                app.buffer.remove_raw(after_indent, after_indent + prefix_token.chars().count());
+                super::edit::remove(app, after_indent, after_indent + prefix_token.chars().count());
             }
         }
     } else {
@@ -217,12 +217,11 @@ pub(super) fn comment_region(app: &mut App) {
             if content.trim_start().is_empty() {
                 continue;
             }
-            app.buffer.insert_raw(line_start + min_indent, prefix);
+            super::edit::insert(app, line_start + min_indent, prefix);
         }
     }
 
     app.buffer.modified = true;
-    super::recompute_highlights(app);
 }
 
 /// Resolve the inclusive line range spanned by the current selection,
@@ -271,11 +270,10 @@ pub(super) fn indent_region(app: &mut App) {
         if is_blank {
             continue;
         }
-        app.buffer.insert_raw(line_start, &unit);
+        super::edit::insert(app, line_start, &unit);
     }
     app.buffer.modified = true;
     select_lines(app, start_line, end_line);
-    super::recompute_highlights(app);
     super::update_scroll(app);
 }
 
@@ -307,12 +305,11 @@ pub(super) fn dedent_region(app: &mut App) {
             }
         }
         if remove > 0 {
-            app.buffer.remove_raw(line_start, line_start + remove);
+            super::edit::remove(app, line_start, line_start + remove);
         }
     }
     app.buffer.modified = true;
     select_lines(app, start_line, end_line);
-    super::recompute_highlights(app);
     super::update_scroll(app);
 }
 

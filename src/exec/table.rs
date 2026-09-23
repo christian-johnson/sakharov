@@ -367,19 +367,6 @@ fn summary_text(
 
 /// `s` / `:sparkline` — show or hide the distribution row for the session.
 ///
-/// A display preference rather than a table property, so it applies to every
-/// grid and is not persisted; `[table] column_sparkline` is what makes it the
-/// default.  Turning it on computes the summaries it needs on the next frame.
-pub(super) fn toggle_sparkline(app: &mut App) {
-    let on = !app.config.table.column_sparkline;
-    app.config.table.column_sparkline = on;
-    app.messages.show(if on {
-        "Column sparkline on"
-    } else {
-        "Column sparkline off"
-    });
-}
-
 /// `F` / `:column-frequency` — open the cursor column's value counts as a grid
 /// of its own.
 ///
@@ -1041,7 +1028,7 @@ fn load_source(path: &Path, cfg: &crate::config::TableConfig) -> Result<Loaded, 
 /// cannot read at all (parquet, arrow, ndjson) has no choice.
 fn prefers_duckdb(path: &Path, cfg: &crate::config::TableConfig) -> bool {
     if is_delimited_text(path) {
-        return cfg.engine.eq_ignore_ascii_case("duckdb");
+        return cfg.engine == crate::config::TableEngine::Duckdb;
     }
     true
 }
@@ -1208,7 +1195,7 @@ pub(super) fn handle(app: &mut App, cmd: &Command) -> bool {
             return true;
         }
         Command::TableToggleSparkline => {
-            toggle_sparkline(app);
+            super::settings::toggle(app, "table.column_sparkline");
             return true;
         }
         Command::TableCloseDerived => {
@@ -1770,7 +1757,7 @@ mod tests {
         let mut app = App::new(None, crate::config::Config::load()).expect("app");
         app.config.table = TableConfig {
             column_sparkline: false,
-            engine: "duckdb".to_string(),
+            engine: crate::config::TableEngine::Duckdb,
             ..TableConfig::default()
         };
         open_as_table(&mut app, &path);
