@@ -996,7 +996,9 @@ pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str>
 }
 
 /// Set up terminal, run the event loop, then restore terminal.
-pub fn run(path: Option<&str>) -> Result<()> {
+///
+/// `line` is a 1-based line to start on (the `+N` argument), centred on screen.
+pub fn run(path: Option<&str>, line: Option<usize>) -> Result<()> {
     // Before anything else, and in particular before the terminal queries that
     // run during startup.  Losing the terminal is not a run-loop problem that
     // happens to occur elsewhere too: any read of the terminal can wedge, and
@@ -1078,6 +1080,17 @@ pub fn run(path: Option<&str>) -> Result<()> {
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Centring needs the real viewport height, which is only known once the
+    // terminal exists.
+    if let Some(n) = line {
+        if let Ok(size) = terminal.size() {
+            app.viewport_height = size.height.saturating_sub(2) as usize;
+            app.viewport_width = size.width as usize;
+        }
+        crate::exec::execute(&mut app, &crate::command::Command::GotoLine(n));
+        crate::exec::execute(&mut app, &crate::command::Command::ScrollCursorCenter);
+    }
 
     // Paint the file BEFORE negotiating terminal capabilities. The keyboard
     // query below blocks for up to two seconds when nothing answers it (a raw
