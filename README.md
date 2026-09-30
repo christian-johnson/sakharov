@@ -53,14 +53,12 @@ To build and install `sakharov` from source:
    git clone https://github.com/christian-johnson/sakharov.git
    cd sakharov
    ```
-2. Build the release binary:
+2. Build the release binary and install it as `~/.local/bin/sv`:
    ```bash
-   cargo build --release
+   ./install.sh
    ```
-3. Copy the compiled binary to your path:
-   ```bash
-   cp target/release/sv ~/.local/bin/  # Or any directory on your $PATH
-   ```
+   To install somewhere else, run `cargo build --release` and copy
+   `target/release/sv` to any directory on your `$PATH`.
 
 To run `sakharov`, simply pass a file path:
 ```bash
@@ -74,7 +72,7 @@ To completely remove `sakharov` from your system, do the following:
 
 - Remove the binary:
 ```
-rm ~/.local/bin/sv
+./uninstall.sh
 ```
 - Remove the config file:
 ```

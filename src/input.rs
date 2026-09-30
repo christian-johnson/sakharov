@@ -420,10 +420,14 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
             app.selection = Selection::point((pos + 1).min(len));
         }
         KeyCode::Up => {
-            app.selection = motion::move_up(&app.buffer.rope, app.selection, false);
+            if !exec::visual_move(app, false, false) {
+                app.selection = motion::move_up(&app.buffer.rope, app.selection, false);
+            }
         }
         KeyCode::Down => {
-            app.selection = motion::move_down(&app.buffer.rope, app.selection, false);
+            if !exec::visual_move(app, false, true) {
+                app.selection = motion::move_down(&app.buffer.rope, app.selection, false);
+            }
         }
         KeyCode::Tab => {
             begin_insert_edit(app);

@@ -718,9 +718,9 @@ pub(super) fn notebook_move_down(app: &mut App, extend: bool) -> bool {
     }
     // No outputs: cross straight into the next cell (column preserved).
     if focused + 1 < count {
-        let col = motion::col_of(rope, pos);
+        let col = super::cursor_row_col(app);
         switch_focused_cell(app, focused + 1);
-        place_cursor_at_line(app, 0, col);
+        super::place_cursor_on_row(app, 0, false, col);
         super::update_scroll(app);
         return true;
     }
@@ -770,10 +770,10 @@ pub(super) fn notebook_move_up(app: &mut App, extend: bool) -> bool {
     if !on_first_line || !super::at_first_visual_row(app) || focused == 0 {
         return false;
     }
-    let col = motion::col_of(rope, pos);
+    let col = super::cursor_row_col(app);
     switch_focused_cell(app, focused - 1);
     let last_line = app.buffer.rope.len_lines().saturating_sub(1);
-    place_cursor_at_line(app, last_line, col);
+    super::place_cursor_on_row(app, last_line, true, col);
     // Land in the previous cell's output block when it has one.
     let prev_out = nb_output_rows(app, focused - 1);
     if prev_out > 0 {

@@ -17,7 +17,9 @@ pub(crate) mod table;
 pub(crate) mod vcs;
 mod text;
 
-pub use buffers::{is_special_path, open_as_notebook, open_path, switch_to_special_buffer};
+pub use buffers::{
+    is_special_path, open_as_notebook, open_path, poll_disk_change, switch_to_special_buffer,
+};
 pub use export::{poll_export, ExportJob};
 pub(crate) use buffers::{create_new_file, create_new_notebook, SCRATCH_INTRO};
 pub use lsp::{
@@ -624,6 +626,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
             app.should_quit = true;
             return;
         }
+        Command::Reload => {
+            buffers::reload(app);
+            return;
+        }
         Command::WriteQuit => {
             buffers::write_and_quit(app);
             return;
@@ -1029,6 +1035,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             let half = (app.viewport_height / 2).max(1);
             app.scroll_row = cursor_line.saturating_sub(half);
             app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
+            app.scroll_sub = 0;
             return;
         }
 
@@ -1240,36 +1247,39 @@ fn wrap_kind(app: &App) -> Option<WrapKind> {
     }
 }
 
+/// Char offsets within `line` at which each of its visual rows starts, by
+/// the rule the view on screen wraps with.
+fn wrap_row_starts(app: &App, kind: &WrapKind, line: usize) -> Vec<usize> {
+    let rope = &app.buffer.rope;
+    match *kind {
+        WrapKind::Hard { width } => crate::render_util::wrap_row_starts(
+            rope.line(line),
+            width,
+            app.config.editor.tab_width,
+        ),
+        WrapKind::Words { width } => {
+            let text = rope.line(line).to_string();
+            crate::render_util::wrap_segments(text.trim_end_matches(['\n', '\r']), width)
+                .into_iter()
+                .map(|(off, _)| off)
+                .collect()
+        }
+    }
+}
+
 /// Move the cursor one *visual* row when the text is soft-wrapped.  Returns
 /// false when nothing is wrapped, leaving the caller to move by logical lines.
 ///
 /// Without this a wrapped paragraph is a single `j`: the cursor leaves the
 /// three rows it visibly occupies and lands on the next paragraph.
-fn visual_move(app: &mut App, extend: bool, down: bool) -> bool {
+pub(crate) fn visual_move(app: &mut App, extend: bool, down: bool) -> bool {
     let Some(kind) = wrap_kind(app) else {
         return false;
     };
-    let tab_width = app.config.editor.tab_width;
     let new_sel = {
         let rope = &app.buffer.rope;
-        let starts = |line: usize| -> Vec<usize> {
-            match kind {
-                WrapKind::Hard { width } => {
-                    crate::render_util::wrap_row_starts(rope.line(line), width, tab_width)
-                }
-                WrapKind::Words { width } => {
-                    let text = rope.line(line).to_string();
-                    crate::render_util::wrap_segments(
-                        text.trim_end_matches(['\n', '\r']),
-                        width,
-                    )
-                    .into_iter()
-                    .map(|(off, _)| off)
-                    .collect()
-                }
-            }
-        };
-        let wrap = motion::Wrap { row_starts: &starts, tab_width };
+        let starts = |line: usize| wrap_row_starts(app, &kind, line);
+        let wrap = motion::Wrap { row_starts: &starts, tab_width: app.config.editor.tab_width };
         if down {
             motion::move_visual_down(rope, app.selection, extend, &wrap)
         } else {
@@ -1286,24 +1296,45 @@ fn cursor_visual_row(app: &App) -> (usize, usize) {
     let Some(kind) = wrap_kind(app) else {
         return (0, 1);
     };
-    let tab_width = app.config.editor.tab_width;
     let rope = &app.buffer.rope;
-    let starts = |line: usize| -> Vec<usize> {
-        match kind {
-            WrapKind::Hard { width } => {
-                crate::render_util::wrap_row_starts(rope.line(line), width, tab_width)
-            }
-            WrapKind::Words { width } => {
-                let text = rope.line(line).to_string();
-                crate::render_util::wrap_segments(text.trim_end_matches(['\n', '\r']), width)
-                    .into_iter()
-                    .map(|(off, _)| off)
-                    .collect()
-            }
-        }
-    };
-    let wrap = motion::Wrap { row_starts: &starts, tab_width };
+    let starts = |line: usize| wrap_row_starts(app, &kind, line);
+    let wrap = motion::Wrap { row_starts: &starts, tab_width: app.config.editor.tab_width };
     motion::visual_row_of(rope, app.selection.head, &wrap)
+}
+
+/// Chars between the start of the cursor's visual row and the cursor — the
+/// column to keep when `j`/`k` carry it into another notebook cell.
+fn cursor_row_col(app: &App) -> usize {
+    let rope = &app.buffer.rope;
+    let pos = app.selection.head.min(rope.len_chars());
+    let line = rope.char_to_line(pos);
+    let off = pos - rope.line_to_char(line);
+    let row_start = wrap_kind(app)
+        .and_then(|kind| wrap_row_starts(app, &kind, line).into_iter().rfind(|&s| s <= off))
+        .unwrap_or(0);
+    off - row_start
+}
+
+/// Put the cursor `col` chars into the first (or, with `last_row`, the last)
+/// visual row of `line`, clamped to that row.
+fn place_cursor_on_row(app: &mut App, line: usize, last_row: bool, col: usize) {
+    let rope = &app.buffer.rope;
+    if rope.len_chars() == 0 {
+        app.selection = Selection::point(0);
+        return;
+    }
+    let line = line.min(rope.len_lines().saturating_sub(1));
+    let content = rope.line(line).chars().take_while(|c| !matches!(c, '\n' | '\r')).count();
+    let mut starts = match wrap_kind(app) {
+        Some(kind) => wrap_row_starts(app, &kind, line),
+        None => vec![0],
+    };
+    // A line exactly filling its rows has a trailing row with nothing on it.
+    starts.retain(|&s| s == 0 || s < content);
+    let row = if last_row { starts.len() - 1 } else { 0 };
+    let row_end = starts.get(row + 1).copied().unwrap_or(content);
+    let off = (starts[row] + col).min(row_end.saturating_sub(1)).max(starts[row]);
+    app.selection = Selection::point(rope.line_to_char(line) + off);
 }
 
 /// True when the cursor is on the last visual row of its line — the point at
@@ -3173,6 +3204,53 @@ mod tests {
         assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 1);
         assert!(presses > 2, "a wrapped paragraph is more than one row tall");
 
+        // Crossing keeps the column within the *row*: from the start of the
+        // paragraph's last row `j` landed at the start of the next cell, and
+        // `k` comes back to that last row rather than the paragraph's top.
+        assert_eq!(app.selection.head, 0);
+        execute(&mut app, &Command::MoveUp);
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+        assert!(at_last_visual_row(&app) && !at_first_visual_row(&app));
+
         let _ = std::fs::remove_file(&target);
+    }
+
+    /// Soft-wrapped text scrolls by screen rows.  Anchoring the viewport on
+    /// whole lines moved a wrapped paragraph's worth of rows in one keypress.
+    #[test]
+    fn wrapped_text_scrolls_one_row_per_keypress() {
+        let mut app = App::new(None, Config::load()).unwrap();
+        app.config.editor.word_wrap = true;
+        app.viewport_width = 60;
+        app.viewport_height = 12;
+        let text: String = (0..30)
+            .map(|i| if i % 3 == 1 { "word ".repeat(45) + "\n" } else { "short\n".to_string() })
+            .collect();
+        app.buffer.rope = Rope::from_str(&text);
+        app.selection = Selection::point(0);
+
+        let width = crate::ui::text_width(&app);
+        let tab = app.config.editor.tab_width;
+        // Visual rows above the viewport / above the cursor's row.
+        let rows_above = |app: &App, line: usize| -> usize {
+            (0..line).map(|l| crate::ui::visual_line_height(&app.buffer.rope, l, width, tab)).sum()
+        };
+        let top = |app: &App| rows_above(app, app.scroll_row) + app.scroll_sub;
+        let cursor = |app: &App| {
+            let line = app.buffer.rope.char_to_line(app.selection.head);
+            rows_above(app, line) + cursor_visual_row(app).0
+        };
+
+        let mut scrolled = false;
+        for cmd in std::iter::repeat(Command::MoveDown).take(40).chain(std::iter::repeat(Command::MoveUp).take(40)) {
+            let before = top(&app);
+            execute(&mut app, &cmd);
+            let after = top(&app);
+            assert!(after.abs_diff(before) <= 1, "{} scrolled {before} -> {after}", cmd.name());
+            assert!((after..after + app.viewport_height).contains(&cursor(&app)), "cursor off screen");
+            scrolled |= after != before;
+        }
+        assert!(scrolled);
+        assert_eq!(top(&app), 0, "back at the top");
     }
 }

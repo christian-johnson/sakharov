@@ -447,6 +447,7 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
                         payload: None,
                         documentation: item.documentation.clone(),
                         resolve_data: item.data.clone(),
+                        aliases: Vec::new(),
                     })
                     .collect();
 

@@ -97,6 +97,7 @@ pub fn update_scroll(app: &mut App) {
     let rope = &app.buffer.rope;
     if rope.len_chars() == 0 {
         app.scroll_row = 0;
+        app.scroll_sub = 0;
         app.scroll_col = 0;
         return;
     }
@@ -109,40 +110,26 @@ pub fn update_scroll(app: &mut App) {
     let total_lines = rope.len_lines();
     let tab_width = app.config.editor.tab_width;
 
-    {
-        // Normalize scroll_row so it never points inside a hidden fold region.
-        app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
-
-        // Vertical — fold+wrap-aware row count from scroll_row to cursor line.
-        let vdist = if word_wrap {
-            wrap_visible_row_count(app, app.scroll_row, line_idx, visible_cols, tab_width)
-        } else {
-            app.fold.visible_row_count(app.scroll_row, line_idx, total_lines)
-        };
-
-        if vdist < scroll_off || app.scroll_row > line_idx {
-            // Cursor too close to top (or above scroll area): scroll up.
-            let desired = scroll_off.min(line_idx);
-            app.scroll_row = if word_wrap {
-                wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
-            } else {
-                app.fold.scroll_row_for_cursor(line_idx, desired)
-            };
-        } else if vdist + scroll_off >= visible_rows {
-            // Cursor too close to bottom: scroll down.
-            let desired = visible_rows.saturating_sub(scroll_off + 1);
-            app.scroll_row = if word_wrap {
-                wrap_scroll_row_for_cursor(&app.fold, rope, line_idx, desired, visible_cols, tab_width)
-            } else {
-                app.fold.scroll_row_for_cursor(line_idx, desired)
-            };
-        }
-    }
+    // Normalize scroll_row so it never points inside a hidden fold region.
+    app.scroll_row = app.fold.normalize_scroll_row(app.scroll_row);
 
     if word_wrap {
+        wrap_update_scroll(app, visible_rows, scroll_off, visible_cols);
         // No horizontal scrolling when wrapping.
         app.scroll_col = 0;
         return;
+    }
+    app.scroll_sub = 0;
+
+    let vdist = app.fold.visible_row_count(app.scroll_row, line_idx, total_lines);
+    if vdist < scroll_off || app.scroll_row > line_idx {
+        // Cursor too close to top (or above scroll area): scroll up.
+        let desired = scroll_off.min(line_idx);
+        app.scroll_row = app.fold.scroll_row_for_cursor(line_idx, desired);
+    } else if vdist + scroll_off >= visible_rows {
+        // Cursor too close to bottom: scroll down.
+        let desired = visible_rows.saturating_sub(scroll_off + 1);
+        app.scroll_row = app.fold.scroll_row_for_cursor(line_idx, desired);
     }
 
     // Horizontal — accurate display-column calculation (handles tabs)
@@ -387,32 +374,91 @@ fn wrap_visible_row_count(
     count
 }
 
-/// Walk backward from `cursor_line` by `desired_vrows` visual rows (fold+wrap
-/// aware) and return the resulting scroll_row.
-fn wrap_scroll_row_for_cursor(
+/// Rows line `line` occupies on screen: 1 for a fold's summary row.
+fn wrap_line_height(
     fold: &crate::fold::FoldState,
     rope: &ropey::Rope,
-    cursor_line: usize,
-    desired_vrows: usize,
+    line: usize,
     text_width: usize,
     tab_width: usize,
 ) -> usize {
-    let mut line = cursor_line;
-    let mut remaining = desired_vrows;
+    if fold.fold_end_at(line).is_some() {
+        1
+    } else {
+        crate::ui::visual_line_height(rope, line, text_width, tab_width)
+    }
+}
 
-    while remaining > 0 && line > 0 {
+/// The soft-wrap scroll: keep the cursor's *row* inside the scroll-off margin
+/// by moving the `(scroll_row, scroll_sub)` anchor the fewest rows that does.
+///
+/// The anchor is row-granular, like the notebook's — anchoring on whole lines
+/// scrolled a wrapped paragraph's worth of rows at once.
+fn wrap_update_scroll(app: &mut App, visible_rows: usize, scroll_off: usize, text_width: usize) {
+    let tab_width = app.config.editor.tab_width;
+    let rope = &app.buffer.rope;
+    let pos = app.selection.head.min(rope.len_chars());
+    let line = rope.char_to_line(pos);
+
+    let cursor_sub = if app.fold.fold_end_at(line).is_some() {
+        0
+    } else {
+        let off = pos - rope.line_to_char(line);
+        crate::render_util::wrap_row_starts(rope.line(line), text_width, tab_width)
+            .iter()
+            .rposition(|&s| off >= s)
+            .unwrap_or(0)
+    };
+
+    // A resize or an edit can leave the anchor past its line's last row.
+    let top_height = wrap_line_height(&app.fold, rope, app.scroll_row, text_width, tab_width);
+    let scroll_sub = app.scroll_sub.min(top_height - 1);
+
+    let margin = scroll_off.min(visible_rows.saturating_sub(1) / 2);
+    let above = (line, cursor_sub) < (app.scroll_row, scroll_sub);
+    // Rows between the top of the viewport and the cursor's row.
+    let dist = if above {
+        0
+    } else {
+        wrap_visible_row_count(app, app.scroll_row, line, text_width, tab_width) + cursor_sub
+            - scroll_sub
+    };
+    let desired = if above || dist < margin {
+        margin
+    } else if dist + margin >= visible_rows {
+        visible_rows - margin - 1
+    } else {
+        app.scroll_sub = scroll_sub;
+        return;
+    };
+    (app.scroll_row, app.scroll_sub) =
+        wrap_anchor_back(&app.fold, rope, (line, cursor_sub), desired, text_width, tab_width);
+}
+
+/// The anchor `rows` visual rows above row `sub` of `line` (fold+wrap aware),
+/// stopping at the top of the file.
+fn wrap_anchor_back(
+    fold: &crate::fold::FoldState,
+    rope: &ropey::Rope,
+    (mut line, sub): (usize, usize),
+    rows: usize,
+    text_width: usize,
+    tab_width: usize,
+) -> (usize, usize) {
+    if rows <= sub {
+        return (line, sub - rows);
+    }
+    let mut remaining = rows - sub;
+    while line > 0 {
         line -= 1;
         if let Some(start) = fold.fold_start_hiding(line) {
             line = start;
         }
-        let height = if fold.is_hidden(line) {
-            0
-        } else if fold.fold_end_at(line).is_some() {
-            1
-        } else {
-            crate::ui::visual_line_height(rope, line, text_width, tab_width)
-        };
-        remaining = remaining.saturating_sub(height);
+        let height = wrap_line_height(fold, rope, line, text_width, tab_width);
+        if remaining <= height {
+            return (line, height - remaining);
+        }
+        remaining -= height;
     }
-    line
+    (0, 0)
 }

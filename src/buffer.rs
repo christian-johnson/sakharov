@@ -119,6 +119,13 @@ impl Buffer {
         self.disk_mtime = self.path.as_deref().and_then(mtime_of);
     }
 
+    /// The backing file's current mtime when it differs from the one recorded
+    /// at the last load/save — i.e. something else has written the file.
+    pub fn changed_on_disk(&self) -> Option<std::time::SystemTime> {
+        let loaded = self.disk_mtime?;
+        self.path.as_deref().and_then(mtime_of).filter(|now| *now != loaded)
+    }
+
     /// Save the current rope state for undo before making an edit.
     fn push_undo(&mut self) {
         self.undo_stack.push_back(self.rope.clone());

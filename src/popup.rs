@@ -333,6 +333,8 @@ pub struct ListItem {
     pub documentation: Option<String>,
     /// Completion-only: raw LSP completion-item JSON for `completionItem/resolve`.
     pub resolve_data: Option<String>,
+    /// Other names the item answers to exactly (a command's `:` aliases).
+    pub aliases: Vec<&'static str>,
 }
 
 /// The `K` documentation side panel attached to a focused completion popup.
@@ -365,6 +367,7 @@ impl ListItem {
             payload: Some(ConfirmPayload::Choice(value.into())),
             documentation: None,
             resolve_data: None,
+            aliases: Vec::new(),
         }
     }
 
@@ -575,6 +578,12 @@ impl ListState {
 ///    embedded in the detail (e.g. `[:q!]`) be searched without burying label matches.
 fn match_score_item(item: &ListItem, filter: &str) -> Option<u32> {
     let normalized = filter.replace(' ', "-");
+
+    // A typed alias (`q!`, or `:q!` out of habit) is that command, outright.
+    let alias = filter.trim_start_matches(':');
+    if item.aliases.iter().any(|a| a.eq_ignore_ascii_case(alias)) {
+        return Some(0);
+    }
 
     let label_score = match_score(&item.label, &normalized);
 
@@ -1122,15 +1131,21 @@ impl Popup {
 pub fn command_palette_items(keymap: &crate::keymap::Keymap) -> Vec<ListItem> {
     crate::command::Command::palette_entries()
         .into_iter()
-        .map(|(label, detail)| ListItem {
-            label: label.to_string(),
-            detail: Some(match keymap.all_keys_for(label).as_slice() {
-                [] => detail.to_string(),
-                keys => format!("{detail}  [{}]", keys.join(", ")),
-            }),
-            kind: None,
-            payload: None,
-            ..Default::default()
+        .map(|(label, detail)| {
+            let aliases = crate::command::Command::aliases(label);
+            // Keys first, then the `:` aliases, in one bracket.
+            let mut hints = keymap.all_keys_for(label);
+            hints.extend(aliases.iter().map(|a| format!(":{a}")));
+            ListItem {
+                label: label.to_string(),
+                detail: Some(if hints.is_empty() {
+                    detail.to_string()
+                } else {
+                    format!("{detail}  [{}]", hints.join(", "))
+                }),
+                aliases: aliases.to_vec(),
+                ..Default::default()
+            }
         })
         .collect()
 }
@@ -1147,6 +1162,19 @@ mod tests {
     fn space_matches_dash_in_label() {
         // "write quit" should find "write-quit"
         assert!(match_score_item(&item("write-quit", "Write and quit [:wq]"), "write quit").is_some());
+    }
+
+    /// `q!` typed into the palette has to mean force-quit: with `:` bound to
+    /// the palette, this is the only command line there is.
+    #[test]
+    fn a_typed_alias_selects_its_command_first() {
+        let items = command_palette_items(&crate::keymap::Keymap::default_bindings());
+        for (typed, want) in [("q!", "force-quit"), (":q!", "force-quit"), ("wq", "write-quit"), ("q", "quit")] {
+            let mut state = ListState::new(command_palette_items(&crate::keymap::Keymap::default_bindings()));
+            state.filter = typed.to_string();
+            let first = state.filtered_indices()[0];
+            assert_eq!(items[first].label, want, "typed {typed:?}");
+        }
     }
 
     #[test]

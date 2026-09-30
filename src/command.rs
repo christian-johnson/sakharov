@@ -63,6 +63,15 @@ macro_rules! commands {
                 }
             }
 
+            /// The `:` aliases of the unit command named `name` (empty when
+            /// it has none, or is not a unit command).
+            pub fn aliases(name: &str) -> &'static [&'static str] {
+                match name {
+                    $( $uname => &[ $($($ualias),*)? ], )*
+                    _ => &[],
+                }
+            }
+
             /// `(canonical_name, description)` for every command that opts into the
             /// command palette, in table order. Drives `command_palette_items()`;
             /// the key labels are added there, from the keymap.
@@ -83,6 +92,7 @@ commands! {
         WriteForce => "write-force", aliases: ["w!"], palette: "Write file, overwriting external changes";
         Quit => "quit", aliases: ["q"], palette: "Quit";
         ForceQuit => "force-quit", aliases: ["q!"], palette: "Quit without saving";
+        Reload => "reload", aliases: ["e!"], palette: "Reload the file from disk, discarding unsaved changes";
         WriteQuit => "write-quit", aliases: ["wq", "x"], palette: "Write and quit";
         NewFile => "new-file", aliases: ["newfile", "new"], palette: "Create a new file in the current directory (prompts for name)";
         NewNotebook => "new-notebook", aliases: ["newnotebook", "new-nb"], palette: "Create a new notebook in the current directory (prompts for name)";

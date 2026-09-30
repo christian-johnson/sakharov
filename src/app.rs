@@ -1,8 +1,11 @@
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyEventKind},
-    execute,
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    execute, queue,
+    terminal::{
+        self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
@@ -457,12 +460,26 @@ impl Messages {
 // Central application state
 // ---------------------------------------------------------------------------
 
+/// Bookkeeping for `exec::poll_disk_change`.
+#[derive(Default)]
+pub struct DiskPoll {
+    /// Earliest time of the next check (`None` = check now).
+    pub next: Option<std::time::Instant>,
+    /// The on-disk mtime already reported, so a change is announced once.
+    pub warned: Option<std::time::SystemTime>,
+}
+
 /// Central application state.
 pub struct App {
     pub buffer: Buffer,
     pub selection: Selection,
     pub scroll_row: usize,
+    /// Wrapped rows of line `scroll_row` hidden above the viewport, so
+    /// soft-wrapped text scrolls a row at a time (always 0 without wrap).
+    pub scroll_sub: usize,
     pub scroll_col: usize,
+    /// When the open file is next checked for changes made outside the editor.
+    pub disk_poll: DiskPoll,
     pub mode: Mode,
     pub command_buf: String,
     /// Minibuffer message + the *Messages* log (see [`Messages`]).
@@ -875,7 +892,9 @@ impl App {
             compute: crate::compute::ComputePool::default(),
             selection: Selection::point(0),
             scroll_row: 0,
+            scroll_sub: 0,
             scroll_col: 0,
+            disk_poll: DiskPoll::default(),
             mode: initial_mode,
             command_buf: String::new(),
             messages: Messages::default(),
@@ -1247,6 +1266,7 @@ fn run_loop(
         needs_redraw |= crate::exec::process_lsp_events(app);
         needs_redraw |= crate::exec::notebook::process_kernel_events(app);
         needs_redraw |= crate::exec::poll_git(app);
+        needs_redraw |= crate::exec::poll_disk_change(app);
         needs_redraw |= crate::exec::poll_export(app);
         needs_redraw |= crate::exec::poll_table_load(app);
         needs_redraw |= crate::exec::vcs::poll(app);
@@ -1348,7 +1368,11 @@ fn draw_frame(
         // images leave it `None`.
         let mut frame_cursor: Option<(u16, u16)> = None;
 
-        terminal.draw(|f| {
+        // Hold the terminal's repaint until text, images and cursor are all
+        // written: without it a scroll shows the moved text under last
+        // frame's images, then the images vanish, then reappear.
+        let _ = queue!(io::stdout(), BeginSynchronizedUpdate);
+        let drawn = terminal.draw(|f| {
             crate::theme::fill_background(f);
             // A popup floats next to the text cursor, in views that have one.
             let popup_anchor = if app.show_splash {
@@ -1360,17 +1384,22 @@ fn draw_frame(
             if let Some(ref popup) = app.popup {
                 crate::popup_ui::render(f, popup, popup_anchor, &app.config.ui);
             }
-        })?;
+        });
 
-        // Every view goes through the same flush: ratatui owns the screen during
-        // the draw, so pixel data can only be written once it has finished.
-        flush_images(app, frame_cursor);
+        if drawn.is_ok() {
+            // Every view goes through the same flush: ratatui owns the screen
+            // during the draw, so pixel data can only be written once it has
+            // finished.
+            flush_images(app, frame_cursor);
 
-        // Only write cursor-shape OSC sequences when the mode actually changes.
-        if app.last_rendered_mode.as_ref() != Some(&app.mode) {
-            app.last_rendered_mode = Some(app.mode.clone());
-            set_cursor_shape(&app.mode);
+            // Only write cursor-shape OSC sequences when the mode actually changes.
+            if app.last_rendered_mode.as_ref() != Some(&app.mode) {
+                app.last_rendered_mode = Some(app.mode.clone());
+                set_cursor_shape(&app.mode);
+            }
         }
+        let _ = execute!(io::stdout(), EndSynchronizedUpdate);
+        drawn?;
     }
     Ok(())
 }

@@ -88,6 +88,7 @@ These commands enter a sub-mode that awaits a second key.
 | `open-file-picker` | `ctrl+o` | `:e` | Open a file (built-in fuzzy picker, or external via `editor.file_picker` config) |
 | `quit` | — | `:q` | Quit (fails if *any* buffer in the session — active or stashed — has unsaved changes) |
 | `force-quit` | — | `:q!` | Quit without saving |
+| `reload` | — | `:e!` | Replace the buffer with the file's contents on disk, discarding unsaved changes (one undo step). A file that changes on disk reloads by itself when the buffer has no unsaved edits; otherwise the minibuffer says so and leaves the choice (`:reload` or `:w!`) to you |
 | `write-quit` | — | `:wq`, `:x` | Write the active buffer, then quit if no other buffer has unsaved changes |
 | `buffer-close` | — | `:bd` | Close the current buffer; warns if modified |
 | `buffer-force-close` | — | `:bd!` | Close the current buffer, discarding unsaved changes |

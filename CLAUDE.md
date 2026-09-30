@@ -1,6 +1,6 @@
 # sakharov — personal TUI text editor
 
-A from-scratch TUI editor in Rust, for personal use. Invoked as `sv [file]`
+A from-scratch TUI editor in Rust, for personal use. Invoked as `sv [+N] [file]`
 (`target/debug/sv` / `target/release/sv`). Helix-style selection-first modal
 editing, plus views for Jupyter notebooks, tabular data (CSV/parquet/SQL via
 DuckDB), a git commit graph, and a merge-conflict resolver.

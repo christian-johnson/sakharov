@@ -99,7 +99,7 @@ struct VisRow {
 fn build_vis_rows(
     fold: &crate::fold::FoldState,
     rope: &ropey::Rope,
-    scroll_row: usize,
+    (scroll_row, scroll_sub): (usize, usize),
     visible_rows: usize,
     word_wrap: bool,
     text_width: usize,
@@ -108,6 +108,8 @@ fn build_vis_rows(
     let total_lines = rope.len_lines();
     let mut rows: Vec<VisRow> = Vec::with_capacity(visible_rows);
     let mut line = scroll_row;
+    // Wrapped rows of the first line that are scrolled off the top.
+    let mut skip = scroll_sub;
 
     while rows.len() < visible_rows && line < total_lines {
         if fold.is_hidden(line) {
@@ -117,13 +119,14 @@ fn build_vis_rows(
         if let Some(fold_end) = fold.fold_end_at(line) {
             rows.push(VisRow { line_idx: line, fold_end: Some(fold_end), sub_row: 0 });
             line = fold_end + 1;
+            skip = 0;
         } else {
             let height = if word_wrap && text_width > 0 {
                 visual_line_height(rope, line, text_width, tab_width)
             } else {
                 1
             };
-            for sub in 0..height {
+            for sub in std::mem::take(&mut skip).min(height - 1)..height {
                 if rows.len() >= visible_rows {
                     break;
                 }
@@ -196,7 +199,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
     // Build the fold+wrap-aware list of visible rows.
     let vis_rows = build_vis_rows(
-        &app.fold, rope, scroll_row, visible_rows,
+        &app.fold, rope, (scroll_row, app.scroll_sub), visible_rows,
         word_wrap, text_width, tab_width,
     );
 
@@ -389,10 +392,9 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 let style = if i < 4 { arrow_style } else { count_style };
                 cells.push((c, style));
             }
-        } else if !is_continuation
-            && matches!(app.mode, crate::mode::Mode::Jump { .. })
-        {
-            // Jump label overlay — only on first sub-row (non-fold) lines.
+        } else if matches!(app.mode, crate::mode::Mode::Jump { .. }) {
+            // Jump label overlay, on every wrapped row of a (non-fold) line:
+            // each row paints the labels whose column falls in its window.
             // Map char offsets to display columns (tab-aware) before painting.
             let mut cols = Vec::with_capacity(line_len + 1);
             let mut col = 0usize;
@@ -480,7 +482,7 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
     if word_wrap && text_width > 0 {
         // With wrapping: find the screen row by walking the visible entry list.
         let vis_rows = build_vis_rows(
-            &app.fold, rope, app.scroll_row, lines_area.height as usize,
+            &app.fold, rope, (app.scroll_row, app.scroll_sub), lines_area.height as usize,
             true, text_width, tab_width,
         );
         // Which wrapped row the cursor is on comes from the shared wrap rule,
@@ -859,3 +861,37 @@ impl Widget for LineWidget<'_> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// `gw` labels every word on screen — including the ones on the wrapped
+    /// rows of a long line, which used to get none.
+    #[test]
+    fn jump_labels_reach_the_wrapped_rows_of_a_line() {
+        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        app.config.editor.word_wrap = true;
+        app.config.editor.line_numbers = false;
+        app.config.editor.git_gutter = false;
+        app.viewport_width = 12;
+        app.viewport_height = 6;
+        // Rows: "aaaa bbbb cc" / "cc dddd eeee" / " ffff".
+        app.buffer.rope = ropey::Rope::from_str("aaaa bbbb cccc dddd eeee ffff");
+        crate::exec::execute(&mut app, &crate::command::Command::EnterJumpMode);
+        let label_of = |pos: usize| {
+            let (_, label) = app.jump.labels.iter().find(|(p, _)| *p == pos).expect("labelled");
+            label.clone()
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(12, 8)).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let at = |x: u16, y: u16| format!("{}{}", buf[(x, y)].symbol(), buf[(x + 1, y)].symbol());
+
+        assert_eq!(at(5, 0), label_of(5), "bbbb, first row");
+        assert_eq!(at(3, 1), label_of(15), "dddd, second row");
+        assert_eq!(at(1, 2), label_of(25), "ffff, third row");
+    }
+}

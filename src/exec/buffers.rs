@@ -699,3 +699,117 @@ pub(super) fn close_buffer(app: &mut App, force: bool) {
 
         app.messages.show("Buffer closed");
 }
+
+// ---------------------------------------------------------------------------
+// Changes made to the file outside the editor
+// ---------------------------------------------------------------------------
+
+/// `:reload` — replace the buffer's text with the file's, as one undo step.
+pub(super) fn reload(app: &mut App) {
+    if app.notebook.is_some() {
+        app.messages.show("A notebook can't be reloaded in place — close it (:bd!) and reopen");
+        return;
+    }
+    let Some(path) = app.buffer.path.clone().filter(|p| !is_special_path(p)) else {
+        app.messages.show("No file to reload");
+        return;
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            app.buffer.begin_edit_session();
+            app.buffer.rope = Rope::from_str(&content);
+            app.buffer.modified = false;
+            app.buffer.refresh_disk_mtime();
+            super::text::clamp_selection(app);
+            super::edit::replaced(app);
+            super::refresh_git(app);
+            app.messages.show(format!("Reloaded {}", app.buffer.display_name()));
+        }
+        Err(e) => app.messages.show(format!("Could not reload {}: {e}", path.display())),
+    }
+}
+
+/// Once a second, notice the open file changing on disk (see
+/// [`check_disk_change`]).  Returns true when the screen needs redrawing.
+pub fn poll_disk_change(app: &mut App) -> bool {
+    let now = std::time::Instant::now();
+    if app.disk_poll.next.is_some_and(|next| now < next) {
+        return false;
+    }
+    app.disk_poll.next = Some(now + std::time::Duration::from_secs(1));
+    check_disk_change(app)
+}
+
+/// Reload the open file if something else wrote it and the buffer has no
+/// unsaved edits; with edits, say so once and leave the choice to the user.
+fn check_disk_change(app: &mut App) -> bool {
+    use crate::view::View;
+    match app.view() {
+        View::Text => {}
+        // Bufferless views have no file; a notebook's buffer is one cell.
+        View::Notebook | View::Table | View::Vcs | View::Conflict => return false,
+    }
+    if app.notebook.is_some() {
+        return false;
+    }
+    let Some(mtime) = app.buffer.changed_on_disk() else {
+        return false;
+    };
+    if !app.buffer.modified {
+        reload(app);
+        return true;
+    }
+    if app.disk_poll.warned == Some(mtime) {
+        return false;
+    }
+    app.disk_poll.warned = Some(mtime);
+    app.messages.show(format!(
+        "{} changed on disk — :reload to load it (drops your edits), :w! to keep yours",
+        app.buffer.display_name()
+    ));
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rewrite `path` with `text` and an mtime unlike the one it had.
+    fn write_externally(path: &Path, text: &str, secs_ahead: u64) {
+        std::fs::write(path, text).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(secs_ahead);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(later).unwrap();
+    }
+
+    #[test]
+    fn a_file_changed_on_disk_reloads_unless_the_buffer_has_edits() {
+        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        let dir = std::env::temp_dir().join(format!("sv-test-diskchange-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("watched.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        open_path(&mut app, &path);
+        assert!(!check_disk_change(&mut app), "nothing has changed yet");
+
+        // Clean buffer: the new text is simply loaded.
+        write_externally(&path, "two\n", 10);
+        assert!(check_disk_change(&mut app));
+        assert_eq!(app.buffer.rope.to_string(), "two\n");
+        assert!(!app.buffer.modified);
+
+        // Unsaved edits: nothing is touched, and the warning is shown once.
+        app.buffer.insert_raw(0, "mine ");
+        write_externally(&path, "three\n", 20);
+        assert!(check_disk_change(&mut app));
+        assert_eq!(app.buffer.rope.to_string(), "mine two\n");
+        assert!(app.messages.current().unwrap_or("").contains("changed on disk"));
+        assert!(!check_disk_change(&mut app), "the same change is not announced twice");
+
+        // `:reload` takes the file's version.
+        super::super::execute(&mut app, &crate::command::Command::Reload);
+        assert_eq!(app.buffer.rope.to_string(), "three\n");
+        assert!(!app.buffer.modified);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
