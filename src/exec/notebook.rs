@@ -517,7 +517,10 @@ pub(super) fn clear_outputs(app: &mut App) {
                 // The catch-all `a=d` in `delete_images` takes down every
                 // placement, not just these — so nothing may be assumed still
                 // on screen.
-                let _ = crate::kitty::delete_images(&ids);
+                // Placeholder images are not re-placed each frame, so there
+                // the others must be left standing.
+                let catch_all = !app.graphics.terminal.supports_placeholders();
+                let _ = crate::kitty::delete_images(&ids, catch_all);
                 app.graphics.last_placed.clear();
             }
             nb.cells[idx].outputs.clear();

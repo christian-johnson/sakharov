@@ -335,8 +335,13 @@ pub struct GraphicsState {
     /// only once per image.  Must be cleared whenever outputs change or the
     /// terminal is resized (Kitty evicts pixel cache on resize).
     pub image_ids: std::collections::HashMap<usize, u32>,
-    /// Counter for assigning unique Kitty image IDs (wraps at u32::MAX).
+    /// Counter for assigning unique Kitty image IDs (wraps at
+    /// `kitty::MAX_PLACEHOLDER_ID`).
     pub next_id: u32,
+    /// Size in cells of each image's virtual placement, by image ID, on
+    /// terminals that draw images from placeholder cells.  An image wanted
+    /// at another size is uploaded again under a new ID.
+    pub virtual_sizes: std::collections::HashMap<u32, (u16, u16)>,
     /// What the terminal is currently showing, as `(image pointer, geometry)`
     /// per placement.  A frame whose images are identical to this needs no
     /// protocol traffic at all: re-issuing `a=d` plus one placement per image
@@ -354,6 +359,14 @@ pub struct GraphicsState {
     pub cell_pixel_size: Option<(u16, u16)>,
 }
 
+impl GraphicsState {
+    fn fresh_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id = if id >= kitty::MAX_PLACEHOLDER_ID { 1 } else { id + 1 };
+        id
+    }
+}
+
 /// One placement as the terminal currently holds it: which image, where, how
 /// big, and which source band of it.  Compared to decide whether a frame has to
 /// touch the graphics protocol at all.
@@ -367,6 +380,7 @@ impl Default for GraphicsState {
             placed: false,
             image_ids: std::collections::HashMap::new(),
             next_id: 1,
+            virtual_sizes: std::collections::HashMap::new(),
             last_placed: Vec::new(),
             last_size: (0, 0),
             cell_pixel_size: None,
@@ -1381,6 +1395,16 @@ fn draw_frame(
             } else {
                 draw_view(f, app, &mut frame_cursor)
             };
+            // Before the popup, which then simply draws over the image cells.
+            if app.graphics.terminal.supports_placeholders() {
+                let images = std::mem::take(&mut app.graphics.pending);
+                for upload in paint_image_placeholders(&mut app.graphics, &images, f.buffer_mut()) {
+                    if let Some(old) = upload.replaces {
+                        let _ = kitty::free_image(old);
+                    }
+                    let _ = kitty::upload_virtual(upload.id, upload.rows, upload.cols, &upload.png_data);
+                }
+            }
             if let Some(ref popup) = app.popup {
                 crate::popup_ui::render(f, popup, popup_anchor, &app.config.ui);
             }
@@ -1539,6 +1563,76 @@ fn draw_view(
     }
 }
 
+/// An image the terminal must be sent before the frame's cells refer to it.
+struct VirtualUpload {
+    id: u32,
+    rows: u16,
+    cols: u16,
+    png_data: std::sync::Arc<Vec<u8>>,
+    /// The ID this image had at another size, to be freed.
+    replaces: Option<u32>,
+}
+
+/// Write `images` into the frame as Kitty Unicode placeholders: each cell an
+/// image covers names the image (foreground colour) and which cell of it to
+/// show (combining marks).  The terminal draws the picture wherever those
+/// cells are, so scrolling, clipping at the viewport edge and a popup on top
+/// are all ordinary text output — nothing is deleted or re-placed per frame.
+///
+/// Returns the images not yet uploaded at the size this frame shows them.
+fn paint_image_placeholders(
+    graphics: &mut GraphicsState,
+    images: &[ImageRequest],
+    buf: &mut ratatui::buffer::Buffer,
+) -> Vec<VirtualUpload> {
+    let mut uploads = Vec::new();
+    for req in images {
+        let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
+        let size = (req.cols, req.full_rows);
+        let known = graphics.image_ids.get(&ptr_key).copied();
+        let id = match known.filter(|id| graphics.virtual_sizes.get(id) == Some(&size)) {
+            Some(id) => id,
+            None => {
+                let id = graphics.fresh_id();
+                if let Some(old) = known {
+                    graphics.virtual_sizes.remove(&old);
+                }
+                graphics.image_ids.insert(ptr_key, id);
+                graphics.virtual_sizes.insert(id, size);
+                uploads.push(VirtualUpload {
+                    id,
+                    rows: req.full_rows,
+                    cols: req.cols,
+                    png_data: req.png_data.clone(),
+                    replaces: known,
+                });
+                id
+            }
+        };
+
+        let fg = kitty::placeholder_color(id);
+        let area = buf.area;
+        for r in 0..req.rows {
+            for c in 0..req.cols {
+                let (x, y) = (req.col + c, req.row + r);
+                if x >= area.right() || y >= area.bottom() {
+                    continue;
+                }
+                let Some(symbol) = kitty::placeholder_symbol(req.skip_rows + r, c) else {
+                    continue;
+                };
+                // Reset first: a stray underline colour would be read as a
+                // placement id.
+                let cell = &mut buf[(x, y)];
+                let bg = cell.bg;
+                cell.reset();
+                cell.set_symbol(&symbol).set_fg(fg).set_bg(bg);
+            }
+        }
+    }
+    uploads
+}
+
 /// Place the images the frame just asked for, and clear the previous frame's.
 ///
 /// View-agnostic on purpose: a renderer's whole contract is to push
@@ -1550,7 +1644,8 @@ fn draw_view(
 /// Images are suppressed entirely while a popup is open: a float drawn by
 /// ratatui cannot cover a Kitty raster, so the image would sit on top of it.
 fn flush_images(app: &mut App, cursor: Option<(u16, u16)>) {
-    if !app.graphics.terminal.supports_graphics() {
+    // Placeholder terminals got their images as cells, during the draw.
+    if !app.graphics.terminal.supports_graphics() || app.graphics.terminal.supports_placeholders() {
         app.graphics.pending.clear();
         return;
     }
@@ -1613,8 +1708,7 @@ fn flush_images(app: &mut App, cursor: Option<(u16, u16)>) {
             let _ = kitty::place_image(req.col, req.row, kid, req.rows, req.cols, req.crop);
         } else {
             // First time seeing this image — upload pixel data once.
-            let kid = app.graphics.next_id;
-            app.graphics.next_id = if app.graphics.next_id == u32::MAX { 1 } else { app.graphics.next_id + 1 };
+            let kid = app.graphics.fresh_id();
             let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, req.crop, &req.png_data);
             app.graphics.image_ids.insert(ptr_key, kid);
         }
@@ -1664,5 +1758,59 @@ fn set_cursor_shape(mode: &Mode) {
         let mut stdout = io::stdout();
         let _ = write!(stdout, "\x1b]12;{}\x07", color_spec);
         let _ = stdout.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    fn request(png: &std::sync::Arc<Vec<u8>>, row: u16, skip_rows: u16, rows: u16) -> ImageRequest {
+        ImageRequest {
+            col: 2,
+            row,
+            rows,
+            cols: 4,
+            crop: None,
+            skip_rows,
+            full_rows: 5,
+            png_data: png.clone(),
+        }
+    }
+
+    /// An image is uploaded once; after that, moving or clipping it is only a
+    /// matter of which placeholder cells the frame holds.
+    #[test]
+    fn a_scrolled_image_is_repainted_as_cells_without_a_new_upload() {
+        let mut graphics =
+            GraphicsState { terminal: kitty::GraphicsTerminal::Kitty, ..Default::default() };
+        let png = std::sync::Arc::new(vec![0u8; 8]);
+        let area = Rect::new(0, 0, 10, 6);
+
+        // Whole image on screen: uploaded, and drawn from its first row.
+        let mut buf = Buffer::empty(area);
+        let uploads = paint_image_placeholders(&mut graphics, &[request(&png, 1, 0, 5)], &mut buf);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!((uploads[0].rows, uploads[0].cols, uploads[0].replaces), (5, 4, None));
+        let id = uploads[0].id;
+        assert_eq!(buf[(2, 1)].symbol(), kitty::placeholder_symbol(0, 0).unwrap());
+        assert_eq!(buf[(5, 5)].symbol(), kitty::placeholder_symbol(4, 3).unwrap());
+        assert_eq!(buf[(2, 1)].fg, kitty::placeholder_color(id));
+        assert_eq!(buf[(6, 1)].symbol(), " ", "nothing past the image's width");
+
+        // Scrolled two rows off the top: no upload, and the top row of the
+        // screen now shows the image's third row.
+        let mut buf = Buffer::empty(area);
+        let uploads = paint_image_placeholders(&mut graphics, &[request(&png, 0, 2, 3)], &mut buf);
+        assert!(uploads.is_empty());
+        assert_eq!(buf[(2, 0)].symbol(), kitty::placeholder_symbol(2, 0).unwrap());
+        assert_eq!(buf[(2, 3)].symbol(), " ");
+
+        // Wanted at another size: uploaded again, and the old copy is freed.
+        let mut resized = request(&png, 0, 0, 5);
+        resized.cols = 6;
+        let uploads = paint_image_placeholders(&mut graphics, &[resized], &mut Buffer::empty(area));
+        assert_eq!(uploads[0].replaces, Some(id));
     }
 }

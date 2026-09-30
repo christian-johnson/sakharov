@@ -98,8 +98,11 @@ src/
   backend and corrupt the screen.
 - Widths are display columns (`unicode_width`), never `str::len`.
 - Renderers emit `kitty::ImageRequest`s into `app.graphics.pending`; only
-  `app::flush_images` talks to the terminal. Anything that clears images must
-  also clear `last_placed`.
+  `app.rs` turns them into terminal output. Kitty and Ghostty get Unicode
+  placeholder cells written during the draw (`paint_image_placeholders`: one
+  upload per image, then scrolling is text); WezTerm gets per-frame placements
+  from `flush_images`. Anything that clears images must also clear
+  `last_placed`.
 - Nothing blocking between entering the alternate screen and the first frame.
 
 **Editing / LSP**

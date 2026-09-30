@@ -1754,6 +1754,8 @@ fn render_mime_data(
                 rows: shown,
                 cols: placeholder_cols,
                 crop,
+                skip_rows: skip_top,
+                full_rows: natural_rows,
                 png_data: png.clone(),
             });
 
