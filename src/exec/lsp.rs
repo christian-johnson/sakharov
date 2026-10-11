@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::{
-    app::{language_for_path, App},
+    app::App,
     buffer::Buffer,
     highlight::Highlighter,
     lsp::{lsp_pos_to_char, path_to_uri},
@@ -188,13 +188,13 @@ pub(super) fn show_buffer_completions(app: &mut App) {
 /// own names.  The argument list is right there, so it is offered.  Empty
 /// outside a call, since `signature_params` is cleared with the hint.
 fn merge_signature_params(app: &App, items: &mut Vec<crate::popup::ListItem>) {
-    if app.signature_params.is_empty() {
+    if app.signature.params.is_empty() {
         return;
     }
     let known: std::collections::HashSet<&str> =
         items.iter().map(|i| i.label.trim_end_matches('=')).collect();
     let mut params: Vec<crate::popup::ListItem> = app
-        .signature_params
+        .signature.params
         .iter()
         .filter(|name| !known.contains(name.as_str()))
         .map(|name| crate::popup::ListItem {
@@ -225,15 +225,15 @@ fn sig_help_throttle(app: &App) -> std::time::Duration {
 /// the run loop: fires a deferred refresh once the throttle window elapses,
 /// so the active-parameter marker always settles on the latest keystroke.
 pub fn pump_signature_help(app: &mut App) {
-    if !app.sig_help_deferred {
+    if !app.signature.deferred {
         return;
     }
     if app.mode != Mode::Insert {
-        app.sig_help_deferred = false;
+        app.signature.deferred = false;
         return;
     }
     let window_elapsed = app
-        .sig_help_last
+        .signature.last_sent
         .map(|t| t.elapsed() >= sig_help_throttle(app))
         .unwrap_or(true);
     if window_elapsed {
@@ -250,17 +250,17 @@ pub fn pump_signature_help(app: &mut App) {
 pub fn lsp_signature_help(app: &mut App) {
     let throttle = sig_help_throttle(app);
     if !throttle.is_zero()
-        && app.sig_help_last.is_some_and(|t| t.elapsed() < throttle)
+        && app.signature.last_sent.is_some_and(|t| t.elapsed() < throttle)
     {
-        app.sig_help_deferred = true;
+        app.signature.deferred = true;
         return;
     }
-    app.sig_help_last = Some(std::time::Instant::now());
-    app.sig_help_deferred = false;
+    app.signature.last_sent = Some(std::time::Instant::now());
+    app.signature.deferred = false;
 
     let lang = app.current_language().unwrap_or("").to_owned();
     if lang.is_empty() || !app.lsp.is_ready(&lang) {
-        app.signature_help = None;
+        app.signature.text = None;
         return;
     }
     // Notebook: route through the shadow concatenated document so calls to
@@ -522,10 +522,10 @@ fn handle_lsp_event(app: &mut App, event: LspEvent) {
         LspEvent::SignatureHelpResult { signature, params } => {
             // Only meaningful while typing in Insert mode; the minibuffer shows it.
             let inside = app.mode == Mode::Insert;
-            app.signature_help = if inside { signature } else { None };
+            app.signature.text = if inside { signature } else { None };
             // Kept alongside the hint, and cleared with it: the argument names
             // only mean anything while the cursor is inside that call.
-            app.signature_params = if inside && app.signature_help.is_some() {
+            app.signature.params = if inside && app.signature.text.is_some() {
                 params
             } else {
                 Vec::new()
@@ -735,7 +735,7 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     }
 
     // Redirect .ipynb files to the notebook loader.
-    if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+    if crate::lang::is_notebook(path) {
         super::open_as_notebook(app, path);
         return;
     }
@@ -778,7 +778,7 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     app.scroll_col = 0;
     app.insert_session_active = false;
 
-    let new_lang = language_for_path(Some(path)).map(str::to_owned);
+    let new_lang = crate::lang::lang_for_path(path).map(str::to_owned);
     app.lsp_language = new_lang.clone();
     app.highlighter = Highlighter::new(Some(path));
     super::recompute_highlights(app);
@@ -1170,8 +1170,8 @@ mod param_tests {
     /// offered is not offered twice — pylsp spells the same thing `cmap=`.
     #[test]
     fn the_calls_arguments_lead_and_are_not_duplicated() {
-        let mut app = App::new(None, Config::load()).unwrap();
-        app.signature_params = vec!["cmap".into(), "aspect".into()];
+        let mut app = App::new(None, Config::load());
+        app.signature.params = vec!["cmap".into(), "aspect".into()];
         let mut items = vec![item("cmap="), item("my_variable")];
         merge_signature_params(&app, &mut items);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
@@ -1181,7 +1181,7 @@ mod param_tests {
     /// Outside a call there is no signature, so nothing is added.
     #[test]
     fn nothing_is_added_outside_a_call() {
-        let app = App::new(None, Config::load()).unwrap();
+        let app = App::new(None, Config::load());
         let mut items = vec![item("my_variable")];
         merge_signature_params(&app, &mut items);
         assert_eq!(items.len(), 1);

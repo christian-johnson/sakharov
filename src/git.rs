@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,14 +28,20 @@ impl GitRefresh {
 }
 
 /// Start a background refresh of the git branch and (when `path` is given)
-/// the per-line diff marks for that file.  Never blocks: a slow or absent
-/// git simply means the result arrives late or reads as "no repo".
+/// the per-line diff marks for that file — both from the repository holding
+/// `path`, else the working directory's.  Never blocks: a slow or absent git
+/// simply means the result arrives late or reads as "no repo".
 pub fn refresh(path: Option<PathBuf>) -> GitRefresh {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        let dir = path
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
         let info = GitInfo {
-            branch: query_branch(),
-            diff: path.as_deref().map(query_diff_marks).unwrap_or_default(),
+            branch: query_branch(dir),
+            diff: path.as_deref().map(|p| query_diff_marks(dir, p)).unwrap_or_default(),
         };
         let _ = tx.send(info);
     });
@@ -45,8 +51,8 @@ pub fn refresh(path: Option<PathBuf>) -> GitRefresh {
 /// Blocking: current git branch name, or `None` when git is unavailable or
 /// the working directory is not inside a repository.  Run on the refresh
 /// thread only — never call from the UI thread.
-fn query_branch() -> Option<String> {
-    let output = std::process::Command::new("git")
+fn query_branch(dir: &Path) -> Option<String> {
+    let output = crate::vcs::load::git_command(dir)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()?;
@@ -63,12 +69,14 @@ fn query_branch() -> Option<String> {
 
 /// Blocking: per-line git diff marks for `path` (empty when untracked /
 /// unavailable / unchanged).  Run on the refresh thread only.
-fn query_diff_marks(path: &std::path::Path) -> HashMap<usize, GutterMark> {
-    let Some(path_str) = path.to_str() else {
+fn query_diff_marks(dir: &Path, path: &Path) -> HashMap<usize, GutterMark> {
+    // Relative to `dir`, which git runs in.
+    let Some(name) = path.file_name() else {
         return HashMap::new();
     };
-    let output = match std::process::Command::new("git")
-        .args(["diff", "--no-color", "--unified=0", "HEAD", "--", path_str])
+    let output = match crate::vcs::load::git_command(dir)
+        .args(["diff", "--no-color", "--unified=0", "HEAD", "--"])
+        .arg(name)
         .output()
     {
         Ok(o) => o,

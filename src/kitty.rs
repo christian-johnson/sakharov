@@ -1,7 +1,6 @@
 use std::io::Write as _;
 
 use anyhow::Result;
-use base64::Engine as _;
 
 /// Which terminal graphics backend is in use.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,7 +90,7 @@ pub struct ImageRequest {
     /// Rows the whole image occupies when nothing is clipped.
     pub full_rows: u16,
     /// Shared reference to the raw PNG bytes — cloning this is O(1).
-    pub png_data: std::sync::Arc<Vec<u8>>,
+    pub png: crate::notebook::Png,
 }
 
 /// The character a cell holds to show one cell of a virtual placement.
@@ -164,11 +163,11 @@ fn crop_params(crop: Option<ImageCrop>) -> String {
     }
 }
 
-/// Send `png_data` in the protocol's 4096-byte base64 chunks; `params` are
+/// Send `png` in the protocol's 4096-byte base64 chunks; `params` are
 /// the control keys of the first chunk.
-fn transmit(out: &mut impl std::io::Write, params: &str, png_data: &[u8]) -> std::io::Result<()> {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(png_data);
-    let chunks: Vec<&str> = encoded
+fn transmit(out: &mut impl std::io::Write, params: &str, png: &crate::notebook::Png) -> std::io::Result<()> {
+    let chunks: Vec<&str> = png
+        .base64()
         .as_bytes()
         .chunks(4096)
         .map(|c| std::str::from_utf8(c).unwrap_or(""))
@@ -197,13 +196,13 @@ pub fn upload_and_place(
     rows: u16,
     cols: u16,
     crop: Option<ImageCrop>,
-    png_data: &[u8],
+    png: &crate::notebook::Png,
 ) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     write!(stdout, "\x1b[{};{}H", row + 1, col + 1)?;
     // q=2 suppresses all OK/error responses so they don't pollute stdin.
     let params = format!("a=T,f=100,i={id},r={rows},c={cols}{},q=2", crop_params(crop));
-    transmit(&mut stdout, &params, png_data)?;
+    transmit(&mut stdout, &params, png)?;
     stdout.flush()?;
     Ok(())
 }
@@ -211,9 +210,9 @@ pub fn upload_and_place(
 /// Upload PNG as image `id` and give it a *virtual* placement `cols` × `rows`
 /// cells big: nothing is drawn until cells hold its [`placeholder_symbol`]s
 /// in its [`placeholder_color`].  Neither command moves the cursor.
-pub fn upload_virtual(id: u32, rows: u16, cols: u16, png_data: &[u8]) -> Result<()> {
+pub fn upload_virtual(id: u32, rows: u16, cols: u16, png: &crate::notebook::Png) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
-    transmit(&mut stdout, &format!("a=t,f=100,i={id},q=2"), png_data)?;
+    transmit(&mut stdout, &format!("a=t,f=100,i={id},q=2"), png)?;
     write!(stdout, "\x1b_Ga=p,U=1,i={id},r={rows},c={cols},q=2\x1b\\")?;
     Ok(())
 }

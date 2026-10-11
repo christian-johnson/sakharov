@@ -57,7 +57,7 @@ mod tests {
     /// the server with different text from the editor.
     #[test]
     fn command_edits_keep_the_language_server_in_step() {
-        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        let mut app = App::new(None, crate::config::Config::load());
         app.buffer.path = Some(std::path::PathBuf::from("/tmp/sv-edit-test.py"));
         app.lsp_language = Some("python".into());
         app.buffer.rope = ropey::Rope::from_str("abc def\n");

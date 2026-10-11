@@ -62,14 +62,7 @@ const CONSTANTS: &[&str] = &["FALSE", "NULL", "TRUE", "UNKNOWN", "INFINITY", "NA
 /// editor's own query buffer, whose "path" is the virtual name `*sql*`.
 pub fn is_sql(path: Option<&Path>) -> bool {
     let Some(path) = path else { return false };
-    if path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("sql"))
-    {
-        return true;
-    }
-    path.to_str() == Some(crate::app::SQL_BUFFER)
+    path.to_str() == Some(crate::app::SQL_BUFFER) || crate::lang::lang_for_path(path) == Some("sql")
 }
 
 /// Highlight spans for `rope`, as `(char_start, char_end, highlight_index)`.

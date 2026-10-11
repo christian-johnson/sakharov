@@ -510,8 +510,7 @@ pub(super) fn clear_outputs(app: &mut App) {
                             Output::ExecuteResult { data, .. } => data.image_png.as_ref(),
                             _ => None,
                         }?;
-                        let ptr_key = std::sync::Arc::as_ptr(png) as usize;
-                        app.graphics.image_ids.remove(&ptr_key)
+                        app.graphics.image_ids.remove(&png.key())
                     })
                     .collect();
                 // The catch-all `a=d` in `delete_images` takes down every
@@ -1099,7 +1098,7 @@ pub fn process_kernel_events(app: &mut App) -> bool {
                 MessageBody::Image { png } => {
                     if let (Some(idx), Some((nb, _))) = (cell, notebook_for_key(app, &key)) {
                         nb.cells[idx].outputs.push(Output::DisplayData {
-                            data: MimeData { text_plain: None, image_png: Some(std::sync::Arc::new(png)) },
+                            data: MimeData { text_plain: None, image_png: Some(png) },
                         });
                         refresh_images = true;
                     }

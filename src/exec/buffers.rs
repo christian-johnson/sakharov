@@ -76,7 +76,7 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
         // building — and the snapshot it was built against.  Both have to
         // survive a buffer switch, or the view is only usable in one sitting.
         crate::view::View::Vcs => {
-            app.vcs_pending = None;
+            app.jobs.vcs_load = None;
             if let Some(state) = app.vcs.take() {
                 app.stashes.put(
                     crate::source::SourceId::virtual_named(crate::app::VCS_BUFFER),
@@ -90,7 +90,7 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
         // the code.  Coming back to an empty resolver would punish exactly the
         // habit the view is built to support.
         crate::view::View::Conflict => {
-            app.conflict_pending = None;
+            app.jobs.conflict_load = None;
             if let Some(state) = app.conflict.take() {
                 app.stashes.put(
                     crate::source::SourceId::virtual_named(crate::app::CONFLICT_BUFFER),
@@ -127,7 +127,7 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
     }
 
     // An in-flight load has nothing worth keeping, whichever view it was for.
-    app.table_pending = None;
+    app.jobs.table = None;
     // Leaving a `*cell …*` buffer, whichever way: undo the settings it forced.
     super::table::leave_cell_buffer(app);
 }
@@ -214,7 +214,7 @@ pub fn open_path(app: &mut App, path: &std::path::Path) {
         super::table::open_as_table(app, path);
     } else if is_special_path(path) {
         switch_to_special_buffer(app, path.to_str().unwrap_or(SCRATCH_BUFFER));
-    } else if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+    } else if crate::lang::is_notebook(path) {
         open_as_notebook(app, path);
     } else if app.config.table.auto_open && super::table::is_table_path(path) {
         super::table::open_as_table(app, path);
@@ -394,7 +394,7 @@ pub(crate) fn create_new_notebook(app: &mut App, name: &str) {
     }
     // Ensure the file carries the .ipynb extension so it opens as a notebook.
     let mut name = name.to_string();
-    if std::path::Path::new(&name).extension().and_then(|e| e.to_str()) != Some("ipynb") {
+    if !crate::lang::is_notebook(std::path::Path::new(&name)) {
         name.push_str(".ipynb");
     }
     let path = resolve_new_path(app, &name);
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn a_file_changed_on_disk_reloads_unless_the_buffer_has_edits() {
-        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        let mut app = App::new(None, crate::config::Config::load());
         let dir = std::env::temp_dir().join(format!("sv-test-diskchange-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("watched.txt");

@@ -688,7 +688,7 @@ with timings.
 `Ctrl+E` is the portable execute key. `Shift+Enter` / `ctrl+Enter` additionally
 require a terminal that supports keyboard-enhancement reporting (the kitty protocol);
 on terminals that don't, a modified Enter collapses to a bare Enter and won't trigger
-execution. (Set `SV_DEBUG_KEYS=1` to log received key events to `/tmp/sv-keys.log`
+execution. (Set `SV_DEBUG_KEYS=1` to log received key events to `keys.log` in the state dir
 and see what your terminal actually reports.) All notebook commands also work from the
 command palette and `:` line. Normal editing keys, `g`-prefixed LSP bindings (`gd`,
 `gr`, `gk`, `ga`, …), `:`, and `ctrl+s` (save notebook to disk) behave exactly as in a

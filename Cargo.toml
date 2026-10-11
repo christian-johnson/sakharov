@@ -44,6 +44,7 @@ tree-sitter-css = "0.21"
 tree-sitter-html = "0.20"
 tree-sitter-yaml = "0.6"
 csv = "1"
+globset = { version = "0.4", default-features = false }
 
 # Parquet / JSON / SQL, and a windowed source that doesn't hold the file in RAM.
 # `bundled` compiles DuckDB's C++ from source: a long first build and a much

@@ -374,7 +374,8 @@ fn open_file_external_picker(app: &mut App, cmd: &str) {
     // Resume TUI.
     let _ = execute!(stdout, crossterm::terminal::EnterAlternateScreen);
     let _ = terminal::enable_raw_mode();
-    crate::theme::initialize_color_cache();
+    // The picker may have changed the cursor colour; the next frame resets it.
+    app.last_cursor_color = None;
 
     // Determine chosen path: temp file wins over stdout.
     let chosen = if tmp_path.exists() {

@@ -97,12 +97,14 @@ impl Buffer {
     /// Returns an error if the file cannot be read.
     pub fn from_path(path: &str) -> Result<Self> {
         let path = PathBuf::from(path);
-        let text = std::fs::read_to_string(&path)
+        // Streamed into the rope: no intermediate String doubling peak memory.
+        let rope = std::fs::File::open(&path)
+            .and_then(|f| Rope::from_reader(std::io::BufReader::new(f)))
             .with_context(|| format!("failed to read {}", path.display()))?;
         let disk_mtime = mtime_of(&path);
         Ok(Self {
             id: next_buffer_id(),
-            rope: Rope::from_str(&text),
+            rope,
             path: Some(path),
             modified: false,
             undo_stack: VecDeque::new(),

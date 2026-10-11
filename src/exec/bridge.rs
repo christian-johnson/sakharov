@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn viewing_without_a_kernel_says_so_rather_than_hanging() {
-        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        let mut app = App::new(None, crate::config::Config::load());
         view_variable(&mut app, "df");
         assert!(
             app.messages.log.iter().any(|m| m.contains("No kernel")),
@@ -224,7 +224,7 @@ mod tests {
             eprintln!("python3 not available — skipping bridge integration test");
             return;
         }
-        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        let mut app = App::new(None, crate::config::Config::load());
         let dir = std::env::temp_dir().join(format!("sv-test-bridge-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         app.buffer.path = Some(dir.join("anchor.txt"));
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn an_expression_is_refused_before_any_kernel_is_consulted() {
-        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        let mut app = App::new(None, crate::config::Config::load());
         view_variable(&mut app, "os.system('boom')");
         assert!(
             app.messages.log.iter().any(|m| m.contains("is not a variable name")),

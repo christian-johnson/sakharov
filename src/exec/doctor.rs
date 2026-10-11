@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    app::{language_for_path, App},
+    app::App,
     lsp_manager::{FeatureRoute, ServerHealth, FEATURE_NAMES},
 };
 
@@ -127,7 +127,7 @@ fn describe_buffer(app: &App, out: &mut String) -> (Option<String>, Option<PathB
         }
     }
     let _ = writeln!(out, "  view       text");
-    let detected = language_for_path(path.as_deref());
+    let detected = path.as_deref().and_then(crate::lang::lang_for_path);
     let _ = writeln!(
         out,
         "  language   {}  (from the file extension)",
@@ -559,7 +559,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.buffer.path = Some(std::env::temp_dir().join("sv_doctor_test.py"));
         app.lsp_language = Some("python".into());
 
@@ -589,7 +589,7 @@ mod tests {
     /// nothing below the language line can mean anything.
     #[test]
     fn a_buffer_with_no_language_stops_at_the_first_link() {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         let report = build_report(&mut app);
         assert!(report.contains("No language server applies"), "{report}");
         assert!(!report.contains("Feature routing"), "{report}");

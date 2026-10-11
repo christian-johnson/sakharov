@@ -26,7 +26,7 @@ use crate::table::Attachment;
 const CATALOG: &str = "*schema*";
 
 /// The directory a bare filename resolves against: whatever was open when the
-/// command was issued.  `app.sql_dir` is the anchor captured on the way into the
+/// command was issued.  `app.sql.dir` is the anchor captured on the way into the
 /// path-less `*sql*` buffer, so a query and an attach agree on "here".
 pub(super) fn anchor_dir(app: &App) -> Option<PathBuf> {
     // While a *virtual* source is what's open — the `*sql*` buffer, a query
@@ -35,7 +35,7 @@ pub(super) fn anchor_dir(app: &App) -> Option<PathBuf> {
     // captured anchor is the only honest answer there.
     let virtual_source = app.current_source_id().map_or(true, |id| id.is_virtual());
     if virtual_source {
-        if let Some(dir) = app.sql_dir.clone() {
+        if let Some(dir) = app.sql.dir.clone() {
             return Some(dir);
         }
     }
@@ -350,7 +350,7 @@ mod tests {
             .unwrap();
         }
 
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.viewport_height = 20;
         app.viewport_width = 80;
         app.buffer.path = Some(dir.join("notes.md"));

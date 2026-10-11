@@ -348,7 +348,7 @@ fn flatten_lines(text: &str) -> String {
 fn handle_insert(app: &mut App, key: KeyEvent) {
     // Whether a call-signature hint was already showing, so we can keep it live
     // as the user types arguments (see the signature-help block at the end).
-    let sig_was_active = app.signature_help.is_some();
+    let sig_was_active = app.signature.text.is_some();
 
     match key.code {
         KeyCode::Esc => {
@@ -937,7 +937,7 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
                     return;
                 }
                 if exec::is_special_path(&path)
-                    || path.extension().and_then(|e| e.to_str()) == Some("ipynb")
+                    || crate::lang::is_notebook(&path)
                     || (app.config.table.auto_open && exec::is_table_path(&path))
                 {
                     // Whole-file targets (buffer picker, a data file) open in

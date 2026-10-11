@@ -634,7 +634,7 @@ pub fn is_table_path(path: &Path) -> bool {
 /// Delimited text the built-in parser can read (and the text editor can too, so
 /// `:table-close` has somewhere to go).
 fn is_delimited_text(path: &Path) -> bool {
-    matches!(ext(path).as_deref(), Some("csv" | "tsv" | "tab"))
+    matches!(crate::lang::extension(path).as_deref(), Some("csv" | "tsv" | "tab"))
 }
 
 /// A data file that is *only* a table: not text, so there is no meaningful text
@@ -646,15 +646,9 @@ fn is_delimited_text(path: &Path) -> bool {
 /// feature). `:table` opens one in the grid on request.
 fn is_binary_data(path: &Path) -> bool {
     matches!(
-        ext(path).as_deref(),
+        crate::lang::extension(path).as_deref(),
         Some("parquet" | "pq" | "jsonl" | "ndjson" | "arrow" | "feather" | "ipc"),
     )
-}
-
-fn ext(path: &Path) -> Option<String> {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
 }
 
 /// Open `path` in the table view, replacing whatever is currently open.
@@ -994,7 +988,7 @@ fn start_load(app: &mut App, path: &Path) {
     std::thread::spawn(move || {
         let _ = tx.send(load_source(&thread_path, &cfg));
     });
-    app.table_pending = Some(TableLoad { path: owned, rx });
+    app.jobs.table = Some(TableLoad { path: owned, rx });
     app.messages.show(format!("Loading {name}…"));
 }
 
@@ -1035,7 +1029,7 @@ fn prefers_duckdb(path: &Path, cfg: &crate::config::TableConfig) -> bool {
 
 /// Install a finished load, if one is ready.  Returns true when state changed.
 pub fn poll_table_load(app: &mut App) -> bool {
-    let Some(job) = &app.table_pending else {
+    let Some(job) = &app.jobs.table else {
         return false;
     };
     let result = match job.rx.try_recv() {
@@ -1044,7 +1038,7 @@ pub fn poll_table_load(app: &mut App) -> bool {
         Err(TryRecvError::Disconnected) => Err("load worker died".to_string()),
     };
     let path = job.path.clone();
-    app.table_pending = None;
+    app.jobs.table = None;
 
     match result {
         Ok(Loaded { source, truncated }) => {
@@ -1336,7 +1330,7 @@ mod tests {
 
     /// An app in the table view over a `rows × cols` table.
     fn app_with_table(rows: usize, cols: usize) -> App {
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.viewport_height = 11; // 1 header + 10 data rows
         app.viewport_width = 80;
         // Pin the settings the geometry depends on — `Config::load()` picks up
@@ -1357,7 +1351,7 @@ mod tests {
 
     /// An app in the table view over `text`, parsed as CSV.
     fn app_with_csv(text: &str) -> App {
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.viewport_height = 11;
         app.viewport_width = 80;
         app.config.editor.scroll_off = 2;
@@ -1600,14 +1594,14 @@ mod tests {
         let path = dir.join("data.csv");
         std::fs::write(&path, "a,b\n1,x\n2,y\n").unwrap();
 
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
         open_as_table(&mut app, &path);
 
         // The load is off-thread: the view is still Text and the buffer is
         // detached, so nothing here can write over the data file.
         assert_eq!(app.view(), View::Text);
-        assert!(app.table_pending.is_some());
+        assert!(app.jobs.table.is_some());
         assert!(app.buffer.path.is_none());
 
         // Poll like the run loop does until it lands.
@@ -1622,7 +1616,7 @@ mod tests {
         assert_eq!(session.source().cell(1, 1), Some("y"));
         assert_eq!(session.display_name(), "data.csv");
         assert_eq!(app.view(), View::Table);
-        assert!(app.table_pending.is_none());
+        assert!(app.jobs.table.is_none());
 
         // `:table-close` gives back an editable text buffer on the same file.
         close_table(&mut app);
@@ -1650,7 +1644,7 @@ mod tests {
         let path = dir.join("data.csv");
         std::fs::write(&path, "a,b\n1,x\n2,y\n").unwrap();
 
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
         crate::exec::open_path(&mut app, &path);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1681,7 +1675,7 @@ mod tests {
         let path = dir.join("data.csv");
         std::fs::write(&path, "a,b\n1,x\n").unwrap();
 
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
         app.show_splash = true;
 
@@ -1691,7 +1685,7 @@ mod tests {
         // While the parse is in flight the status line names it and the spinner
         // has something to be active about.
         assert_eq!(app.table_load_name(), Some("data.csv"));
-        assert!(app.table_pending.is_some());
+        assert!(app.jobs.table.is_some());
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while app.table.is_none() && std::time::Instant::now() < deadline {
@@ -1707,7 +1701,7 @@ mod tests {
     #[cfg(feature = "dataframe")]
     fn await_load(app: &mut App) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while app.table_pending.is_some() && std::time::Instant::now() < deadline {
+        while app.jobs.table.is_some() && std::time::Instant::now() < deadline {
             poll_table_load(app);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -1730,7 +1724,7 @@ mod tests {
             .expect("write the fixture");
         }
 
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
         // Parquet is not text, so `open_path` — the one "user picked a file"
         // dispatcher — must route it to the grid without being asked.
@@ -1754,7 +1748,7 @@ mod tests {
         let path = dir.join("data.csv");
         std::fs::write(&path, "a,b\n1,x\n2,y\n").unwrap();
 
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.config.table = TableConfig {
             column_sparkline: false,
             engine: crate::config::TableEngine::Duckdb,
@@ -1777,14 +1771,14 @@ mod tests {
 
     #[test]
     fn a_missing_file_reports_the_error_and_does_not_strand_the_view() {
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.config.table = TableConfig { column_sparkline: false, ..TableConfig::default() };
         let path = std::env::temp_dir().join("sv-table-does-not-exist.csv");
         let _ = std::fs::remove_file(&path);
         open_as_table(&mut app, &path);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while app.table_pending.is_some() && std::time::Instant::now() < deadline {
+        while app.jobs.table.is_some() && std::time::Instant::now() < deadline {
             poll_table_load(&mut app);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -1941,7 +1935,7 @@ mod tests {
     fn app_with_long_cell() -> (App, String) {
         let long: String = "lorem ipsum dolor ".repeat(30).trim_end().to_string();
         let text = format!("id,notes\n1,short\n2,\"{long}\"\n");
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.viewport_height = 11;
         app.viewport_width = 80;
         app.config.editor.scroll_off = 2;
@@ -1988,7 +1982,7 @@ mod tests {
         assert_eq!(app.view(), View::Table, "back in the grid");
         assert_eq!(cursor(&app), (1, 1), "on the cell we were reading");
         assert!(
-            app.table_pending.is_none(),
+            app.jobs.table.is_none(),
             "restored from the stash, not re-parsed from disk"
         );
         assert!(!app.config.editor.word_wrap, "wrap setting put back");
@@ -2289,7 +2283,7 @@ mod tests {
     #[test]
     fn q_is_inert_outside_a_cell_buffer() {
         use crossterm::event::{KeyCode, KeyEvent};
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.buffer.rope = ropey::Rope::from_str("hello\n");
         assert!(!app.in_cell_buffer());
         crate::input::handle_key(&mut app, KeyEvent::from(KeyCode::Char('q')));

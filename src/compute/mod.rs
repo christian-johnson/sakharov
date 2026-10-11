@@ -32,7 +32,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 
 use anyhow::{Context, Result};
-use base64::Engine as _;
 use serde_json::Value;
 
 use crate::source::SourceId;
@@ -176,7 +175,7 @@ pub enum MessageBody {
     /// A chunk of stdout/stderr text, emitted as the request produces it.
     Stream { name: String, text: String },
     /// A captured matplotlib figure (decoded PNG bytes).
-    Image { png: Vec<u8> },
+    Image { png: crate::notebook::Png },
     /// An uncaught exception traceback.
     Error { traceback: String },
     /// The namespace's variables, in reply to [`RequestKind::Vars`].
@@ -354,9 +353,7 @@ fn reader_thread(
                 text: v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_owned(),
             },
             Some("image") => {
-                match v.get("data").and_then(|d| d.as_str())
-                    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
-                {
+                match v.get("data").and_then(|d| d.as_str()).and_then(crate::notebook::Png::from_base64) {
                     Some(png) => MessageBody::Image { png },
                     None => continue,
                 }

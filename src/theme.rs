@@ -1222,53 +1222,50 @@ fn parse_all_responses(data: &[u8], cache: &mut HashMap<u8, String>) {
     }
 }
 
-/// Query the terminal theme color palette on startup and cache the values.
-pub fn initialize_color_cache() {
+/// Query the terminal palette for the ANSI colours the active theme's mode
+/// cursors use and cache the answers.  Only uncached indices are asked for, so
+/// an all-RGB theme (or a second call) costs nothing — the query can wait up to
+/// 50 ms on a terminal that never answers, and discards pending keystrokes.
+pub fn query_cursor_colors() {
     #[cfg(unix)]
     {
-        if let Ok(term) = std::env::var("TERM") {
-            if term == "dumb" {
-                return;
-            }
+        if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
+            return;
+        }
+        let m = active().modes;
+        let mut needed: Vec<u8> = [m.normal, m.insert, m.select, m.command, m.goto, m.jump, m.fold]
+            .into_iter()
+            .filter_map(color_to_ansi_index)
+            .collect();
+        needed.sort_unstable();
+        needed.dedup();
+        let Ok(mut guard) = COLOR_CACHE.lock() else { return };
+        let cache = guard.get_or_insert_with(HashMap::new);
+        needed.retain(|i| !cache.contains_key(i));
+        if needed.is_empty() {
+            return;
         }
 
-        // Flush stdin first to clear any pending user keystrokes
+        // Pending keystrokes would be mixed into the replies.
         unsafe {
             libc::tcflush(0, libc::TCIFLUSH);
         }
-
         use std::io::Write;
         let mut stdout = std::io::stdout();
-        // Query green (2), yellow (3), blue (4), magenta (5), cyan (6)
-        let _ = write!(
-            stdout,
-            "\x1b]4;2;?\x07\x1b]4;3;?\x07\x1b]4;4;?\x07\x1b]4;5;?\x07\x1b]4;6;?\x07"
-        );
-        let _ = stdout.flush();
-
-        let data = read_all_stdin(50);
-        if !data.is_empty() {
-            let mut cache = HashMap::new();
-            parse_all_responses(&data, &mut cache);
-            if !cache.is_empty() {
-                if let Ok(mut guard) = COLOR_CACHE.lock() {
-                    *guard = Some(cache);
-                }
-            }
+        for i in &needed {
+            let _ = write!(stdout, "\x1b]4;{i};?\x07");
         }
+        let _ = stdout.flush();
+        parse_all_responses(&read_all_stdin(50), cache);
     }
 }
 
 /// Convert a ratatui color to its OSC-compatible color string.
 pub fn color_to_osc_spec(color: Color) -> Option<String> {
-    if let Some(index) = color_to_ansi_index(color) {
-        if let Ok(guard) = COLOR_CACHE.lock() {
-            if let Some(ref cache) = *guard {
-                if let Some(hex) = cache.get(&index) {
-                    return Some(hex.clone());
-                }
-            }
-        }
+    if let Some(hex) = color_to_ansi_index(color).and_then(|index| {
+        COLOR_CACHE.lock().ok()?.as_ref()?.get(&index).cloned()
+    }) {
+        return Some(hex);
     }
     match color {
         Color::Reset => None,

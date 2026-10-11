@@ -16,7 +16,7 @@ pub struct ExportJob {
 /// Kick off `quarto render <current document> --to <fmt>` in the background.
 /// The document is saved first — quarto reads from disk.
 pub(super) fn start_export(app: &mut App, fmt: &str) {
-    if app.export_pending.is_some() {
+    if app.jobs.export.is_some() {
         app.messages.show("An export is already running");
         return;
     }
@@ -60,7 +60,7 @@ pub(super) fn start_export(app: &mut App, fmt: &str) {
     std::thread::spawn(move || {
         let _ = tx.send(run_quarto(&path, &fmt_owned));
     });
-    app.export_pending = Some(ExportJob { rx });
+    app.jobs.export = Some(ExportJob { rx });
     app.messages.show(format!("Exporting {name} → {fmt} via quarto…"));
 }
 
@@ -112,13 +112,13 @@ fn run_quarto(path: &Path, fmt: &str) -> Result<String, String> {
 /// Apply a finished export, if one is ready. Returns true when state changed
 /// (the caller should redraw).
 pub fn poll_export(app: &mut App) -> bool {
-    let Some(job) = &app.export_pending else { return false };
+    let Some(job) = &app.jobs.export else { return false };
     let result = match job.rx.try_recv() {
         Ok(r) => r,
         Err(TryRecvError::Empty) => return false,
         Err(TryRecvError::Disconnected) => Err("export worker died".to_string()),
     };
-    app.export_pending = None;
+    app.jobs.export = None;
     match result {
         Ok(artifact) if !artifact.is_empty() => {
             app.messages.show(format!("Export complete: {artifact}"));

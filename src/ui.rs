@@ -813,13 +813,13 @@ pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
                         (diag.message.clone(), Style::default().fg(color))
                     }
                     None => (
-                        app.signature_help.clone().unwrap_or_default(),
+                        app.signature.text.clone().unwrap_or_default(),
                         Style::default(),
                     ),
                 }
             } else {
                 (
-                    app.signature_help.clone().unwrap_or_default(),
+                    app.signature.text.clone().unwrap_or_default(),
                     Style::default(),
                 )
             }
@@ -871,7 +871,7 @@ mod tests {
     /// rows of a long line, which used to get none.
     #[test]
     fn jump_labels_reach_the_wrapped_rows_of_a_line() {
-        let mut app = App::new(None, crate::config::Config::load()).unwrap();
+        let mut app = App::new(None, crate::config::Config::load());
         app.config.editor.word_wrap = true;
         app.config.editor.line_numbers = false;
         app.config.editor.git_gutter = false;

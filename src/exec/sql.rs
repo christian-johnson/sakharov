@@ -47,10 +47,10 @@ pub(super) fn open_buffer(app: &mut App) {
     }
     // Anchor relative filenames to what you were last looking at, before the
     // switch replaces `app.buffer` with the path-less SQL buffer.
-    app.sql_dir = super::buffers::sql_working_dir(app);
+    app.sql.dir = super::buffers::sql_working_dir(app);
     // …and where `q` goes back to, for the same reason: once the switch has
     // happened there is nothing left on screen to infer it from.
-    app.sql_origin = app.current_source_id();
+    app.sql.origin = app.current_source_id();
     // Seed the template only the first time; after that the buffer holds
     // whatever the user last typed, which is the point of a scratch buffer.
     app.special_buffer_ropes
@@ -71,7 +71,7 @@ pub(super) fn close_buffer(app: &mut App) -> bool {
         return false;
     }
     let origin = app
-        .sql_origin
+        .sql.origin
         .take()
         .filter(|id| id != &SourceId::virtual_named(SQL_BUFFER))
         .map(|id| id.to_path())
@@ -269,7 +269,7 @@ mod tests {
     use crate::config::Config;
 
     fn app() -> App {
-        let mut app = App::new(None, Config::load()).expect("app");
+        let mut app = App::new(None, Config::load());
         app.viewport_height = 20;
         app.viewport_width = 80;
         app
@@ -342,9 +342,9 @@ mod tests {
     #[test]
     fn q_falls_back_to_scratch_when_there_is_no_origin() {
         let mut app = app();
-        app.sql_origin = None;
+        app.sql.origin = None;
         super::super::execute(&mut app, &Command::SqlBuffer);
-        app.sql_origin = None;
+        app.sql.origin = None;
         super::super::execute(&mut app, &Command::BufferClose);
         assert!(!app.in_sql_buffer());
     }

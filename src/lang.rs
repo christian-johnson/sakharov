@@ -1,3 +1,5 @@
+use std::path::Path;
+
 /// Map a language id to its canonical file extension.
 ///
 /// This is the single source of truth used by the editor, notebook UI, and
@@ -59,8 +61,39 @@ pub const SHELL_DOTFILES: &[&str] = &[
     ".profile",
 ];
 
-/// Map a bare filename (no extension) to an LSP language id, for files like
-/// [`SHELL_DOTFILES`] that `ext_to_lang` can never see.
-pub fn filename_to_lang(filename: &str) -> Option<&'static str> {
-    SHELL_DOTFILES.contains(&filename).then_some("bash")
+/// The lowercased extension of `path`.
+pub fn extension(path: &Path) -> Option<String> {
+    path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
+}
+
+/// The language id of `path`: by extension (any case), falling back to a
+/// filename match for extensionless shell dotfiles like `.zshrc`.  The one
+/// place a file's language is decided — highlighting, folding and the LSP
+/// all start here.
+pub fn lang_for_path(path: &Path) -> Option<&'static str> {
+    if let Some(lang) = extension(path).as_deref().and_then(ext_to_lang) {
+        return Some(lang);
+    }
+    let name = path.file_name()?.to_str()?;
+    SHELL_DOTFILES.contains(&name).then_some("bash")
+}
+
+/// True for a Jupyter notebook (`.ipynb`).
+pub fn is_notebook(path: &Path) -> bool {
+    extension(path).as_deref() == Some("ipynb")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every consumer sees the same answer whatever the extension's case.
+    #[test]
+    fn detection_ignores_extension_case() {
+        assert_eq!(lang_for_path(Path::new("README.MD")), Some("markdown"));
+        assert_eq!(lang_for_path(Path::new("main.RS")), Some("rust"));
+        assert_eq!(lang_for_path(Path::new(".zshrc")), Some("bash"));
+        assert_eq!(lang_for_path(Path::new("data.bin")), None);
+        assert!(is_notebook(Path::new("Analysis.IPYNB")));
+    }
 }

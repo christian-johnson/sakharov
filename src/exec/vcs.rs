@@ -71,7 +71,7 @@ where
     std::thread::spawn(move || {
         let _ = tx.send(work());
     });
-    app.vcs_job = Some(VcsJob { label: label.to_string(), rx });
+    app.jobs.vcs = Some(VcsJob { label: label.to_string(), rx });
     app.messages.show(format!("{label}…"));
 }
 
@@ -118,7 +118,7 @@ fn stream_now(app: &mut App, args: &[&str], label: &str, ok: &str) {
     super::buffers::switch_to_special_buffer(app, crate::app::GIT_OUTPUT_BUFFER);
 
     app.messages.show(format!("{label}…  (q to go back)"));
-    app.vcs_stream = Some(OutputJob { label: label.to_string(), ok: ok.to_string(), stream });
+    app.jobs.vcs_output = Some(OutputJob { label: label.to_string(), ok: ok.to_string(), stream });
 }
 
 /// Append finished lines to the output buffer, wherever it currently lives.
@@ -156,7 +156,7 @@ fn append_output(app: &mut App, lines: &[String]) {
 
 /// Drain the streaming job.  Returns true when the screen changed.
 fn poll_stream(app: &mut App) -> bool {
-    let Some(mut job) = app.vcs_stream.take() else { return false };
+    let Some(mut job) = app.jobs.vcs_output.take() else { return false };
 
     let mut lines = Vec::new();
     let mut verdict = None;
@@ -170,7 +170,7 @@ fn poll_stream(app: &mut App) -> bool {
     append_output(app, &lines);
 
     match verdict {
-        None => app.vcs_stream = Some(job),
+        None => app.jobs.vcs_output = Some(job),
         Some(result) => {
             let report = match result {
                 Ok(()) => job.ok.clone(),
@@ -194,8 +194,8 @@ fn poll_stream(app: &mut App) -> bool {
 pub fn poll(app: &mut App) -> bool {
     let mut changed = poll_stream(app);
 
-    if let Some(result) = app.vcs_pending.as_ref().and_then(RepoLoad::poll) {
-        let load = app.vcs_pending.take().expect("just polled it");
+    if let Some(result) = app.jobs.vcs_load.as_ref().and_then(RepoLoad::poll) {
+        let load = app.jobs.vcs_load.take().expect("just polled it");
         changed = true;
         match result {
             Ok(dag) => install(app, load.root, dag),
@@ -206,8 +206,8 @@ pub fn poll(app: &mut App) -> bool {
         }
     }
 
-    if let Some(result) = app.vcs_job.as_ref().and_then(|j| j.rx.try_recv().ok()) {
-        let job = app.vcs_job.take().expect("just polled it");
+    if let Some(result) = app.jobs.vcs.as_ref().and_then(|j| j.rx.try_recv().ok()) {
+        let job = app.jobs.vcs.take().expect("just polled it");
         changed = true;
         match result {
             Ok(outcome) => {
@@ -222,7 +222,7 @@ pub fn poll(app: &mut App) -> bool {
 
 /// Anything in flight, for the status-line spinner.
 pub fn busy(app: &App) -> bool {
-    app.vcs_pending.is_some() || app.vcs_job.is_some() || app.vcs_stream.is_some()
+    app.jobs.vcs_load.is_some() || app.jobs.vcs.is_some() || app.jobs.vcs_output.is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +254,7 @@ pub fn open(app: &mut App) {
             return;
         }
     }
-    app.vcs_pending = Some(load::start(root, MAX_COMMITS));
+    app.jobs.vcs_load = Some(load::start(root, MAX_COMMITS));
     app.messages.show("Reading the repository…  (? for the keys)");
 }
 
@@ -316,7 +316,7 @@ fn flip(app: &mut App) {
 /// Leave the graph for whatever was open before it.
 pub fn close(app: &mut App) {
     app.vcs = None;
-    app.vcs_pending = None;
+    app.jobs.vcs_load = None;
     app.stashes.discard(&SourceId::virtual_named(VCS_BUFFER));
     app.open_buffers
         .retain(|id| *id != SourceId::virtual_named(VCS_BUFFER));
@@ -331,7 +331,7 @@ fn refresh(app: &mut App) {
     let Some(root) = app.vcs.as_ref().map(|s| s.root.clone()) else {
         return;
     };
-    app.vcs_pending = Some(load::start(root, MAX_COMMITS));
+    app.jobs.vcs_load = Some(load::start(root, MAX_COMMITS));
 }
 
 // ---------------------------------------------------------------------------
@@ -1586,7 +1586,7 @@ pub(super) fn close_transient_buffer(app: &mut App) -> bool {
     if !app.in_commit_buffer() && !app.in_git_output_buffer() {
         return false;
     }
-    if app.vcs_stream.is_none() {
+    if app.jobs.vcs_output.is_none() {
         if let Some(id) = app.current_source_id() {
             app.special_buffer_ropes.remove(id.label());
         }
@@ -1643,7 +1643,7 @@ mod tests {
     /// repository: the command routing is what is under test here, and the
     /// git side is covered end-to-end in `vcs::apply`.
     fn app_in_graph() -> App {
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.viewport_height = 40;
         app.viewport_width = 120;
         let dag = Dag::new(
@@ -1780,7 +1780,7 @@ mod tests {
 
         // Drive the run loop until the job reports.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while app.vcs_stream.is_some() && std::time::Instant::now() < deadline {
+        while app.jobs.vcs_output.is_some() && std::time::Instant::now() < deadline {
             super::poll(&mut app);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -2154,7 +2154,7 @@ mod tests {
         };
         let labels: Vec<String> = list.items.iter().map(|i| i.label.clone()).collect();
         assert!(labels.iter().any(|l| l.contains("cherry-pick")), "{labels:?}");
-        assert!(app.vcs_job.is_none(), "nothing may run before the second confirmation");
+        assert!(app.jobs.vcs.is_none(), "nothing may run before the second confirmation");
     }
 
     /// …and a plan that only rewrites the user's own unpushed work still gets
@@ -2313,7 +2313,7 @@ mod tests {
     /// catches a listed command that has no key at all.
     #[test]
     fn the_key_sheet_only_lists_keys_that_are_bound() {
-        let app = App::new(None, crate::config::Config::load()).expect("app");
+        let app = App::new(None, crate::config::Config::load());
         for hint in key_sheet(&app.keymap) {
             // An unbound command is shown by its `:name` instead of a key.
             assert!(
@@ -2426,7 +2426,7 @@ mod tests {
     /// Nothing else in this module is reachable if the door does not work.
     #[test]
     fn the_open_command_reaches_the_view_from_a_text_buffer() {
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         assert_eq!(app.view(), View::Text);
         crate::exec::execute(&mut app, &Command::VcsOpen);
         assert!(
@@ -2444,7 +2444,7 @@ mod tests {
             return; // not a checkout (a source tarball); nothing to open
         }
         let mut app =
-            App::new(Some("Cargo.toml"), crate::config::Config::load()).expect("app");
+            App::new(Some("Cargo.toml"), crate::config::Config::load());
         crate::exec::execute(&mut app, &Command::VcsOpen);
         assert_eq!(app.view(), View::Vcs, "messages: {:?}", app.messages.log);
     }

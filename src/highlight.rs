@@ -101,39 +101,27 @@ pub enum Language {
 }
 
 impl Language {
-    /// Detect language from a file extension.
-    pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "rs" => Some(Self::Rust),
-            "py" => Some(Self::Python),
-            "js" | "jsx" => Some(Self::JavaScript),
+    /// The grammar for a [`crate::lang`] language id.
+    pub fn from_lang_id(id: &str) -> Option<Self> {
+        match id {
+            "rust" => Some(Self::Rust),
+            "python" => Some(Self::Python),
+            "javascript" => Some(Self::JavaScript),
             "toml" => Some(Self::Toml),
             "json" => Some(Self::Json),
-            "yaml" | "yml" => Some(Self::Yaml),
-            "sh" | "bash" | "zsh" => Some(Self::Bash),
+            "yaml" => Some(Self::Yaml),
+            "bash" => Some(Self::Bash),
             "go" => Some(Self::Go),
-            "c" | "h" => Some(Self::C),
-            "html" | "htm" => Some(Self::Html),
+            "c" => Some(Self::C),
+            "html" => Some(Self::Html),
             "css" => Some(Self::Css),
             _ => None,
         }
     }
 
-    /// Detect language from a full path: extension first, falling back to
-    /// well-known shell dotfiles (`.zshrc`, `.bashrc`, ...) that have no
-    /// extension `Path::extension()` can see at all.
+    /// Detect the language of `path` (see [`crate::lang::lang_for_path`]).
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
-        if let Some(lang) = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .and_then(Self::from_extension)
-        {
-            return Some(lang);
-        }
-        let name = path.file_name()?.to_str()?;
-        crate::lang::SHELL_DOTFILES
-            .contains(&name)
-            .then_some(Self::Bash)
+        crate::lang::lang_for_path(path).and_then(Self::from_lang_id)
     }
 
     /// The raw tree-sitter grammar for this language (shared by the
@@ -496,7 +484,7 @@ mod tests {
             ("css", ".cls { color: red; }"),
         ];
         for (ext, src) in samples {
-            let lang = Language::from_extension(ext)
+            let lang = crate::lang::ext_to_lang(ext).and_then(Language::from_lang_id)
                 .unwrap_or_else(|| panic!("no language for extension {ext:?}"));
             assert!(grammar(lang).is_some(), "{lang:?}: highlight query failed to compile");
             let mut hl = Highlighter::new(Some(std::path::Path::new(&format!("x.{ext}"))));

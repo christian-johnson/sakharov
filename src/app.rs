@@ -194,18 +194,19 @@ fn spawn_watchdog() {
 fn spawn_watchdog() {}
 
 /// Path of the key-event debug log (used only when `SV_DEBUG_KEYS` is set).
+/// In the owner-only state dir: it holds everything typed, secrets included.
 fn key_debug_log_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("sv-keys.log")
+    crate::config::state_dir().unwrap_or_else(std::env::temp_dir).join("keys.log")
 }
 
 /// Append a received key event to the debug log (best-effort).
 fn log_key_event(key: &crossterm::event::KeyEvent) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(key_debug_log_path())
-    {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    if let Ok(mut f) = opts.open(key_debug_log_path()) {
         let _ = writeln!(f, "{key:?}");
     }
 }
@@ -474,6 +475,53 @@ impl Messages {
 // Central application state
 // ---------------------------------------------------------------------------
 
+/// Background work in flight.  Each finishes on its own thread and is applied
+/// by the run loop's poll; none of it ever blocks the UI.
+#[derive(Default)]
+pub struct Jobs {
+    /// A table load.
+    pub table: Option<crate::exec::table::TableLoad>,
+    /// A read of the repository for the graph.
+    pub vcs_load: Option<crate::vcs::load::RepoLoad>,
+    /// A git invocation (a fetch, a push, a replay).
+    pub vcs: Option<crate::exec::vcs::VcsJob>,
+    /// A git command whose output is being streamed into `*git output*`.
+    pub vcs_output: Option<crate::exec::vcs::OutputJob>,
+    /// A read of the conflicted index.
+    pub conflict_load: Option<crate::conflict::load::ConflictLoad>,
+    /// The branch name and gutter diff marks.
+    pub git: Option<crate::git::GitRefresh>,
+    /// An export.
+    pub export: Option<crate::exec::ExportJob>,
+}
+
+/// Context captured when the `*sql*` query buffer is opened: switching into it
+/// makes `app.buffer` that path-less buffer.
+#[derive(Default)]
+pub struct SqlContext {
+    /// Directory a bare filename in a query resolves against.
+    pub dir: Option<std::path::PathBuf>,
+    /// What was on screen before — where `q` goes back to.
+    pub origin: Option<crate::source::SourceId>,
+}
+
+/// The call signature shown in the minibuffer while typing arguments in
+/// Insert mode (`textDocument/signatureHelp`).
+#[derive(Default)]
+pub struct SignatureHelp {
+    /// The signature, or `None` outside a call.
+    pub text: Option<String>,
+    /// That call's keyword-argument names, merged into the completion popup as
+    /// `name=` items (the server resolves these for calls its completion pass
+    /// often does not).  Cleared with `text`.
+    pub params: Vec<String>,
+    /// When the last request was sent (throttle anchor).
+    pub last_sent: Option<std::time::Instant>,
+    /// A refresh arrived inside the throttle window; `exec::pump_signature_help`
+    /// fires it once the window elapses, so the hint settles on the final cursor.
+    pub deferred: bool,
+}
+
 /// Bookkeeping for `exec::poll_disk_change`.
 #[derive(Default)]
 pub struct DiskPoll {
@@ -516,20 +564,18 @@ pub struct App {
     /// including the rule that a view may only *borrow* a session and must
     /// tolerate it being absent, busy or restarted between frames.
     pub compute: crate::compute::ComputePool,
+    /// Background work in flight, each polled once per frame by the run loop.
+    pub jobs: Jobs,
+    /// Where the `*sql*` query buffer resolves files and returns to.
+    pub sql: SqlContext,
+    /// The call-signature hint shown while typing arguments.
+    pub signature: SignatureHelp,
     /// Open tabular data source + cursor state, present in the table view
     /// (`:csv`).  Mutually exclusive with `notebook`; while it is set
     /// `buffer` is a detached empty buffer, so nothing can write the data file.
     pub table: Option<crate::exec::table::Session>,
-    /// In-flight background table load, polled once per frame by the run loop.
-    pub table_pending: Option<crate::exec::table::TableLoad>,
     /// The open version-control graph, when that view owns the screen.
     pub vcs: Option<crate::vcs::state::VcsState>,
-    /// An in-flight read of the repository.
-    pub vcs_pending: Option<crate::vcs::load::RepoLoad>,
-    /// An in-flight git invocation (a fetch, a push, a replay).
-    pub vcs_job: Option<crate::exec::vcs::VcsJob>,
-    /// A git command whose output is being streamed into `*git output*`.
-    pub vcs_stream: Option<crate::exec::vcs::OutputJob>,
     /// How the commit graph is drawn — which way round, and which branches are
     /// in it — for this **session**.
     ///
@@ -541,8 +587,6 @@ pub struct App {
     pub vcs_options: crate::vcs::layout::Options,
     /// The open merge-conflict resolver, when that view owns the screen.
     pub conflict: Option<crate::conflict::state::ConflictState>,
-    /// An in-flight read of the conflicted index.
-    pub conflict_pending: Option<crate::conflict::load::ConflictLoad>,
     /// A conflicted file the resolver should land on once its read finishes.
     ///
     /// Needed because the read is asynchronous: picking a file out of the
@@ -556,16 +600,6 @@ pub struct App {
     /// and a `(usize, usize)` parsed back out of a display string is a parser
     /// nobody should have to write.
     pub conflict_edit: Option<(usize, usize)>,
-    /// Directory a bare filename in a `:sql` query resolves against.
-    ///
-    /// Captured when the SQL buffer is opened, because switching into it makes
-    /// `app.buffer` the `*sql*` buffer — which has no path, and so no idea which
-    /// project's `data.csv` the query means.
-    pub sql_dir: Option<std::path::PathBuf>,
-    /// What was on screen when the SQL buffer was opened — where `q` goes back
-    /// to.  The query buffer is a temporary thing you back out of, like a
-    /// `*cell …*` buffer, and `:bd` refuses to close a `*…*` name outright.
-    pub sql_origin: Option<crate::source::SourceId>,
     /// Local database files attached read-only (`:attach`), replayed onto every
     /// connection the editor opens.  Paths and names only: a remote or
     /// authenticated database is reached in the kernel by the user's own code,
@@ -603,11 +637,6 @@ pub struct App {
     pub git_diff: std::collections::HashMap<usize, GutterMark>,
     /// Current git branch name (refreshed in the background at startup and on write).
     pub git_branch: Option<String>,
-    /// In-flight background git refresh (branch + diff marks), polled once per
-    /// frame by the run loop.  `None` when no refresh is pending.
-    pub git_pending: Option<crate::git::GitRefresh>,
-    /// In-flight background `quarto render` export, polled once per frame.
-    pub export_pending: Option<crate::exec::ExportJob>,
     /// Code actions returned by the last LSP `textDocument/codeAction` request.
     /// Indexed by the popup item's `ConfirmPayload::CodeAction(idx)`.
     pub pending_code_actions: Vec<serde_json::Value>,
@@ -625,9 +654,9 @@ pub struct App {
     /// Per-line diagnostic ranges for the current file, rebuilt on LSP diagnostics
     /// events and on file switches.  Avoids rebuilding this map every render frame.
     pub diag_by_line: std::collections::HashMap<usize, Vec<(usize, usize, DiagnosticSeverity)>>,
-    /// The mode that was active during the last rendered frame.  Used to skip the
-    /// cursor-shape OSC write when the mode hasn't changed.
-    pub last_rendered_mode: Option<Mode>,
+    /// Cursor colour written after the last frame, so the OSC write is skipped
+    /// until the mode or theme changes it.
+    pub last_cursor_color: Option<ratatui::style::Color>,
     /// Code fold state for the plain-text editor (fold ranges + which are closed).
     pub fold: FoldState,
     /// Persisted rope content for special buffers (currently only *scratch*).
@@ -636,21 +665,6 @@ pub struct App {
     pub pending_format_save: bool,
     /// LSP completion-popup bookkeeping (suppression prefix + in-flight resolve).
     pub completion: CompletionState,
-    /// Active call signature shown in the minibuffer while typing arguments in
-    /// Insert mode (from `textDocument/signatureHelp`). `None` when not in a call.
-    pub signature_help: Option<String>,
-    /// The keyword-argument names of that same call, merged into the completion
-    /// popup as `name=` items.  The server answers signature help for calls its
-    /// *completion* pass does not always resolve, so the argument list already
-    /// on screen in the minibuffer is the more reliable source for them.
-    /// Cleared with `signature_help`.
-    pub signature_params: Vec<String>,
-    /// When the last signature-help request was sent (throttle anchor).
-    pub sig_help_last: Option<std::time::Instant>,
-    /// A signature-help refresh arrived inside the throttle window and was
-    /// deferred; `exec::pump_signature_help` fires it once the window elapses
-    /// (trailing edge), so the hint still settles on the final cursor state.
-    pub sig_help_deferred: bool,
     /// What every view left behind when it was navigated away from, keyed by
     /// the source it is a stash of — unsaved cells, unsaved edits and undo
     /// history, a grid's parse and cursor cell.  See [`crate::stash`].
@@ -692,9 +706,9 @@ impl App {
             !(self.vcs.is_some() && (self.table.is_some() || self.notebook.is_some())),
             "the version-control graph must never share the screen with another view"
         );
-        if self.conflict.is_some() || self.conflict_pending.is_some() {
+        if self.conflict.is_some() || self.jobs.conflict_load.is_some() {
             View::Conflict
-        } else if self.vcs.is_some() || self.vcs_pending.is_some() {
+        } else if self.vcs.is_some() || self.jobs.vcs_load.is_some() {
             View::Vcs
         } else if self.table.is_some() {
             View::Table
@@ -728,7 +742,7 @@ impl App {
 
     /// Name of the table file currently loading in the background, if any.
     pub fn table_load_name(&self) -> Option<&str> {
-        self.table_pending.as_ref().map(|l| l.display_name())
+        self.jobs.table.as_ref().map(|l| l.display_name())
     }
 
     /// Returns true when the focused-cell full-screen overlay is active.
@@ -830,151 +844,75 @@ impl App {
         }
     }
 
-    /// Create a new App, loading `path` if provided.
-    pub fn new(path: Option<&str>, config: Config) -> Result<Self> {
-        let is_notebook = path.map(|p| p.ends_with(".ipynb")).unwrap_or(false);
-        let vcs_options = crate::vcs::layout::Options::default();
-
-        let notebook = if is_notebook {
-            let p = path.expect("checked above");
-            match Notebook::from_path(std::path::Path::new(p)) {
-                Ok(nb) => Some((nb, NotebookState::new())),
-                Err(e) => {
-                    eprintln!("sv: failed to load notebook: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // For notebooks, pre-load cell 0 into the buffer so editing works immediately.
-        let (buffer, lsp_language) = if let Some((ref nb, _)) = notebook {
-            let lang = nb.metadata.kernel_language.clone();
-            let vpath = crate::notebook::cell_virtual_path(&nb.path, &lang, 0);
-            let mut buf = Buffer::new_empty();
-            if let Some(cell) = nb.cells.first() {
-                buf.rope = cell.source.clone();
-            }
-            buf.path = Some(vpath);
-            (buf, Some(lang))
-        } else {
-            let buf = match path {
-                Some(p) => Buffer::from_path(p).unwrap_or_else(|_| {
-                    let mut b = Buffer::new_empty();
-                    b.path = Some(std::path::PathBuf::from(p));
-                    b
-                }),
-                None => Buffer::new_empty(),
-            };
-            let lang = language_for_path(buf.path.as_deref()).map(str::to_owned);
-            (buf, lang)
-        };
-
-        let mut highlighter = Highlighter::new(buffer.path.as_deref());
-        // Compute fold ranges immediately so folding works before the first edit.
-        let initial_fold_ranges = highlighter.fold_ranges(&buffer.rope, buffer.id);
-
-        let initial_mode = Mode::Normal;
-
-        // *scratch* and *Messages* are always present at the front of the buffer list.
-        let mut open_buffers: Vec<crate::source::SourceId> = vec![
-            crate::source::SourceId::virtual_named("scratch"),
-            crate::source::SourceId::virtual_named("Messages"),
-        ];
-        if let Some((ref nb, _)) = notebook {
-            // For notebooks, always track the .ipynb file — never the virtual cell paths.
-            open_buffers.push(crate::source::SourceId::of(&nb.path));
-        } else if let Some(p) = buffer.path.as_ref() {
-            open_buffers.push(crate::source::SourceId::of(p));
-        }
-
-        // Branch + diff marks arrive asynchronously; the run loop polls this.
-        let git_pending = Some(crate::git::refresh(
-            if notebook.is_some() { None } else { buffer.path.clone() },
-        ));
-
-        // Config-derived state (keymap, recovery, history, …) is filled in by
-        // `apply_config` below, the same path `:config-reload` takes.
-        let keymap = Keymap::default_bindings();
-        let recovery = crate::recovery::Recovery::new(false);
-        let command_history_mode = crate::config::CommandHistoryMode::Off;
-        let command_history = std::collections::VecDeque::new();
-
+    /// Create a new App, opening `path` (through [`crate::exec::open_path`],
+    /// like any other open) if provided.
+    pub fn new(path: Option<&str>, config: Config) -> Self {
         let mut app = Self {
-            buffer,
+            buffer: Buffer::new_empty(),
             compute: crate::compute::ComputePool::default(),
+            jobs: Jobs::default(),
+            sql: SqlContext::default(),
+            signature: SignatureHelp::default(),
             selection: Selection::point(0),
             scroll_row: 0,
             scroll_sub: 0,
             scroll_col: 0,
             disk_poll: DiskPoll::default(),
-            mode: initial_mode,
+            mode: Mode::Normal,
             command_buf: String::new(),
             messages: Messages::default(),
             clipboard: String::new(),
             should_quit: false,
             insert_session_active: false,
-            highlighter,
+            highlighter: Highlighter::new(None),
             highlight_spans: Vec::new(),
             highlight_window: None,
             config,
-            keymap,
-            notebook,
+            keymap: Keymap::default_bindings(),
+            notebook: None,
             table: None,
-            table_pending: None,
-            sql_dir: None,
-            sql_origin: None,
             attachments: Vec::new(),
             table_cell_origin: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
             vcs: None,
             conflict: None,
-            conflict_pending: None,
             conflict_want: None,
             conflict_edit: None,
-            vcs_pending: None,
-            vcs_job: None,
-            vcs_stream: None,
-            vcs_options,
+            vcs_options: crate::vcs::layout::Options::default(),
             graphics: GraphicsState::default(),
             cell_focused_edit: false,
             popup: None,
             lsp: LspManager::new(),
-            lsp_language,
+            lsp_language: None,
             search: SearchState::default(),
             viewport_height: 24,
             viewport_width: 80,
-            open_buffers,
+            // *scratch* and *Messages* are always present at the front of the buffer list.
+            open_buffers: vec![
+                crate::source::SourceId::virtual_named("scratch"),
+                crate::source::SourceId::virtual_named("Messages"),
+            ],
             git_diff: std::collections::HashMap::new(),
             git_branch: None,
-            git_pending,
-            export_pending: None,
             pending_code_actions: Vec::new(),
             jump: JumpState::default(),
             needs_clear: false,
             highlights_dirty: true,
             diag_by_line: std::collections::HashMap::new(),
-            last_rendered_mode: None,
-            fold: FoldState {
-                ranges: initial_fold_ranges,
-                ..FoldState::default()
-            },
+            last_cursor_color: None,
+            fold: FoldState::default(),
             pending_format_save: false,
             completion: CompletionState::default(),
-            signature_help: None,
-            signature_params: Vec::new(),
-            sig_help_last: None,
-            sig_help_deferred: false,
             stashes: crate::stash::Stashes::default(),
             cursor_positions: std::collections::HashMap::new(),
-            recovery,
+            // Config-derived state is filled in by `apply_config` below.
+            recovery: crate::recovery::Recovery::new(false),
             pending_recoveries: std::collections::VecDeque::new(),
             active_recovery: None,
-            command_history,
-            command_history_mode,
+            command_history: std::collections::VecDeque::new(),
+            command_history_mode: crate::config::CommandHistoryMode::Off,
             spinner: crate::spinner::Spinner::default(),
-            show_splash: path.is_none(),
+            show_splash: true,
             special_buffer_ropes: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
@@ -984,10 +922,20 @@ impl App {
                 m
             },
         };
-        for warning in app.apply_config() {
+        let warnings = app.apply_config();
+        if let Some(p) = path {
+            crate::exec::open_path(&mut app, std::path::Path::new(p));
+        }
+        // Text files start their own refresh; notebooks, tables and the
+        // dashboard still want the branch.
+        if app.jobs.git.is_none() {
+            crate::exec::refresh_git(&mut app);
+        }
+        // After the open, so its "Opened …" doesn't bury a warning.
+        for warning in warnings {
             app.messages.show(warning);
         }
-        Ok(app)
+        app
     }
 
     /// (Re)derive everything built from `self.config` rather than read from it
@@ -1014,18 +962,9 @@ impl App {
         if self.recovery.enabled != self.config.editor.crash_recovery {
             self.recovery = crate::recovery::Recovery::new(self.config.editor.crash_recovery);
         }
+        warnings.extend(self.recovery.set_exclude(&self.config.editor.crash_recovery_exclude));
         warnings
     }
-}
-
-/// Map a file path to an LSP language id via its extension (see [`crate::lang`]),
-/// falling back to a filename match for extensionless shell dotfiles like `.zshrc`.
-pub fn language_for_path(path: Option<&std::path::Path>) -> Option<&'static str> {
-    let path = path?;
-    if let Some(lang) = path.extension().and_then(|e| e.to_str()).and_then(crate::lang::ext_to_lang) {
-        return Some(lang);
-    }
-    crate::lang::filename_to_lang(path.file_name()?.to_str()?)
 }
 
 /// Set up terminal, run the event loop, then restore terminal.
@@ -1035,57 +974,15 @@ pub fn run(path: Option<&str>, line: Option<usize>) -> Result<()> {
     // Before anything else, and in particular before the terminal queries that
     // run during startup.  Losing the terminal is not a run-loop problem that
     // happens to occur elsewhere too: any read of the terminal can wedge, and
-    // the startup colour query (`theme::initialize_color_cache`) has its own
+    // the palette query (`theme::query_cursor_colors`) has its own
     // spin, reached long before the run loop exists.  A watchdog that only
     // covers the loop leaves that whole window unguarded.
     spawn_watchdog();
 
     let (config, config_warning) = Config::load_reporting();
-    let mut app = App::new(path, config)?;
+    let mut app = App::new(path, config);
     if let Some(warning) = config_warning {
         app.messages.show(warning);
-    }
-
-    // Start LSP server for the opened file if configured.
-    if let Some(ref lang) = app.lsp_language.clone() {
-        if let Some(server_config) = app.config.language_servers.get(lang).cloned() {
-            let fallback_root = app.buffer.path.as_ref().and_then(|p| p.parent()).and_then(
-                |p| {
-                    if p.as_os_str().is_empty() {
-                        None
-                    } else {
-                        Some(p.to_path_buf())
-                    }
-                },
-            );
-            app.lsp
-                .ensure_server(lang, &server_config, fallback_root.as_deref());
-        }
-    }
-
-    // Also start the LSP server for the notebook's kernel language.
-    if let Some((ref nb, _)) = app.notebook {
-        let lang = nb.metadata.kernel_language.clone();
-        if !lang.is_empty() {
-            if let Some(server_config) = app.config.language_servers.get(lang.as_str()).cloned() {
-                let nb_dir = nb.path.parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .map(|p| p.to_path_buf());
-                app.lsp.ensure_server(&lang, &server_config, nb_dir.as_deref());
-                if app.lsp_language.is_none() {
-                    app.lsp_language = Some(lang);
-                }
-            }
-        }
-    }
-
-    // A data file opens in the table view.  Done here rather than in
-    // `App::new` because the load runs on a background thread and is applied by
-    // the run loop's poll — `App::new` has no loop to poll it.
-    if let Some(p) = path.map(std::path::PathBuf::from) {
-        if app.config.table.auto_open && crate::exec::is_table_path(&p) {
-            crate::exec::open_as_table(&mut app, &p);
-        }
     }
 
     // Surface any unsaved buffers recoverable from a previous unclean exit.
@@ -1100,7 +997,6 @@ pub fn run(path: Option<&str>, line: Option<usize>) -> Result<()> {
     }));
 
     terminal::enable_raw_mode()?;
-    crate::theme::initialize_color_cache();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
@@ -1298,8 +1194,8 @@ fn run_loop(
             // to a notebook that isn't on screen.
             || app.compute.any_busy()
             || app.lsp.has_pending_requests()
-            || app.export_pending.is_some()
-            || app.table_pending.is_some()
+            || app.jobs.export.is_some()
+            || app.jobs.table.is_some()
             // A repository read, a fetch, or a replay running its way through
             // a cherry-pick.
             || crate::exec::vcs::busy(app);
@@ -1309,8 +1205,9 @@ fn run_loop(
         // Belt-and-braces: state flagged dirty by any path above.
         needs_redraw |= app.needs_clear || app.highlights_dirty;
 
-        // Debounced crash-recovery flush of any unsaved buffers.
-        crate::recovery::tick(app);
+        // Debounced crash-recovery flush of any unsaved buffers; nothing
+        // handled this frame means nothing new to flush.
+        crate::recovery::tick(app, needs_redraw);
 
         // (Messages are appended to the *Messages* log by `Messages::show`
         // at the moment they are shown — no per-frame diffing needed.)
@@ -1353,17 +1250,18 @@ fn draw_frame(
         }
         crate::exec::update_scroll(app);
 
-        // Recompute fold ranges at most once per frame, and highlights only for
-        // the lines around the screen.  Edits just set the dirty flag (and
-        // record themselves in the highlighter, so re-parsing is incremental).
+        // Highlights are recomputed only for the lines around the screen, and
+        // fold ranges only while a fold is closed (fold commands compute them on
+        // demand).  Edits just set the dirty flag (and record themselves in the
+        // highlighter, so re-parsing is incremental).
         if app.highlights_dirty {
             app.highlights_dirty = false;
             app.highlight_window = None;
-            app.fold.ranges = app.highlighter.fold_ranges(&app.buffer.rope, app.buffer.id);
-            // Discard any stored folds whose start lines no longer exist.
-            let valid: std::collections::BTreeSet<usize> =
-                app.fold.ranges.iter().map(|r| r.start).collect();
-            app.fold.folded.retain(|s| valid.contains(s));
+            if app.fold.folded.is_empty() {
+                app.fold.stale = true;
+            } else {
+                crate::exec::refresh_fold_ranges(app);
+            }
         }
         refresh_highlight_window(app);
         // After an external program (file picker etc.) suspends and resumes the
@@ -1402,7 +1300,7 @@ fn draw_frame(
                     if let Some(old) = upload.replaces {
                         let _ = kitty::free_image(old);
                     }
-                    let _ = kitty::upload_virtual(upload.id, upload.rows, upload.cols, &upload.png_data);
+                    let _ = kitty::upload_virtual(upload.id, upload.rows, upload.cols, &upload.png);
                 }
             }
             if let Some(ref popup) = app.popup {
@@ -1415,15 +1313,17 @@ fn draw_frame(
             // during the draw, so pixel data can only be written once it has
             // finished.
             flush_images(app, frame_cursor);
-
-            // Only write cursor-shape OSC sequences when the mode actually changes.
-            if app.last_rendered_mode.as_ref() != Some(&app.mode) {
-                app.last_rendered_mode = Some(app.mode.clone());
-                set_cursor_shape(&app.mode);
-            }
         }
         let _ = execute!(io::stdout(), EndSynchronizedUpdate);
         drawn?;
+
+        // After the frame is shown: the palette query this may need can stall.
+        let color = crate::theme::mode_color(&app.mode);
+        if app.last_cursor_color != Some(color) {
+            app.last_cursor_color = Some(color);
+            crate::theme::query_cursor_colors();
+            set_cursor_shape(color);
+        }
     }
     Ok(())
 }
@@ -1568,7 +1468,7 @@ struct VirtualUpload {
     id: u32,
     rows: u16,
     cols: u16,
-    png_data: std::sync::Arc<Vec<u8>>,
+    png: crate::notebook::Png,
     /// The ID this image had at another size, to be freed.
     replaces: Option<u32>,
 }
@@ -1587,7 +1487,7 @@ fn paint_image_placeholders(
 ) -> Vec<VirtualUpload> {
     let mut uploads = Vec::new();
     for req in images {
-        let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
+        let ptr_key = req.png.key();
         let size = (req.cols, req.full_rows);
         let known = graphics.image_ids.get(&ptr_key).copied();
         let id = match known.filter(|id| graphics.virtual_sizes.get(id) == Some(&size)) {
@@ -1603,7 +1503,7 @@ fn paint_image_placeholders(
                     id,
                     rows: req.full_rows,
                     cols: req.cols,
-                    png_data: req.png_data.clone(),
+                    png: req.png.clone(),
                     replaces: known,
                 });
                 id
@@ -1673,7 +1573,7 @@ fn flush_images(app: &mut App, cursor: Option<(u16, u16)>) {
         .iter()
         .map(|req| {
             (
-                std::sync::Arc::as_ptr(&req.png_data) as usize,
+                req.png.key(),
                 req.col,
                 req.row,
                 req.rows,
@@ -1702,14 +1602,14 @@ fn flush_images(app: &mut App, cursor: Option<(u16, u16)>) {
     }
 
     for req in &images {
-        let ptr_key = std::sync::Arc::as_ptr(&req.png_data) as usize;
+        let ptr_key = req.png.key();
         if let Some(&kid) = app.graphics.image_ids.get(&ptr_key) {
             // Pixel data already cached in the terminal — re-place cheaply.
             let _ = kitty::place_image(req.col, req.row, kid, req.rows, req.cols, req.crop);
         } else {
             // First time seeing this image — upload pixel data once.
             let kid = app.graphics.fresh_id();
-            let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, req.crop, &req.png_data);
+            let _ = kitty::upload_and_place(req.col, req.row, kid, req.rows, req.cols, req.crop, &req.png);
             app.graphics.image_ids.insert(ptr_key, kid);
         }
     }
@@ -1750,11 +1650,11 @@ fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
-fn set_cursor_shape(mode: &Mode) {
+fn set_cursor_shape(color: ratatui::style::Color) {
     use crossterm::cursor::SetCursorStyle;
     use std::io::Write;
     let _ = execute!(io::stdout(), SetCursorStyle::SteadyBlock);
-    if let Some(color_spec) = crate::theme::color_to_osc_spec(crate::theme::mode_color(mode)) {
+    if let Some(color_spec) = crate::theme::color_to_osc_spec(color) {
         let mut stdout = io::stdout();
         let _ = write!(stdout, "\x1b]12;{}\x07", color_spec);
         let _ = stdout.flush();
@@ -1766,7 +1666,7 @@ mod tests {
     use super::*;
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    fn request(png: &std::sync::Arc<Vec<u8>>, row: u16, skip_rows: u16, rows: u16) -> ImageRequest {
+    fn request(png: &crate::notebook::Png, row: u16, skip_rows: u16, rows: u16) -> ImageRequest {
         ImageRequest {
             col: 2,
             row,
@@ -1775,7 +1675,7 @@ mod tests {
             crop: None,
             skip_rows,
             full_rows: 5,
-            png_data: png.clone(),
+            png: png.clone(),
         }
     }
 
@@ -1785,7 +1685,7 @@ mod tests {
     fn a_scrolled_image_is_repainted_as_cells_without_a_new_upload() {
         let mut graphics =
             GraphicsState { terminal: kitty::GraphicsTerminal::Kitty, ..Default::default() };
-        let png = std::sync::Arc::new(vec![0u8; 8]);
+        let png = crate::notebook::Png::from_bytes(&[0u8; 8]);
         let area = Rect::new(0, 0, 10, 6);
 
         // Whole image on screen: uploaded, and drawn from its first row.

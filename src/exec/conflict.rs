@@ -82,7 +82,7 @@ pub fn open(app: &mut App) {
             return;
         }
     }
-    app.conflict_pending = Some(load::start(root));
+    app.jobs.conflict_load = Some(load::start(root));
     app.messages.show("Reading the conflicts…  (? for the keys)");
 }
 
@@ -106,7 +106,7 @@ fn enter(app: &mut App) {
 
 pub fn close(app: &mut App) {
     app.conflict = None;
-    app.conflict_pending = None;
+    app.jobs.conflict_load = None;
     app.stashes.discard(&SourceId::virtual_named(CONFLICT_BUFFER));
     app.open_buffers
         .retain(|id| *id != SourceId::virtual_named(CONFLICT_BUFFER));
@@ -175,15 +175,15 @@ fn land_on_wanted_file(app: &mut App) {
 /// address the same regions — that is checked in [`reinstall`].
 fn refresh(app: &mut App) {
     let Some(root) = app.conflict.as_ref().map(|s| s.set.root.clone()) else { return };
-    app.conflict_pending = Some(load::start(root));
+    app.jobs.conflict_load = Some(load::start(root));
 }
 
 /// Collect a finished read.  Returns true when the screen changed.
 pub fn poll(app: &mut App) -> bool {
-    let Some(result) = app.conflict_pending.as_ref().and_then(ConflictLoad::poll) else {
+    let Some(result) = app.jobs.conflict_load.as_ref().and_then(ConflictLoad::poll) else {
         return false;
     };
-    app.conflict_pending = None;
+    app.jobs.conflict_load = None;
     match result {
         Ok(set) => reinstall(app, set),
         Err(why) => {
@@ -769,7 +769,7 @@ mod tests {
 
     /// An editor sitting in the resolver over a real conflicted repository.
     fn app_resolving(repo: &Repo) -> Option<App> {
-        let mut app = App::new(None, crate::config::Config::load()).ok()?;
+        let mut app = App::new(None, crate::config::Config::load());
         app.viewport_height = 40;
         app.viewport_width = 140;
         app.buffer = crate::buffer::Buffer::new_empty();
@@ -1002,7 +1002,7 @@ mod tests {
     /// do nothing — the same pin the graph's sheet has.
     #[test]
     fn the_key_sheet_only_lists_keys_that_are_bound() {
-        let app = App::new(None, crate::config::Config::load()).expect("app");
+        let app = App::new(None, crate::config::Config::load());
         for hint in key_sheet(&app.keymap) {
             // An unbound command is shown by its `:name` instead of a key.
             assert!(
@@ -1106,7 +1106,7 @@ mod tests {
         repo.commit("g.txt", "right\n", "g on main");
         let _ = git(&repo.root, &["merge", "feature"]);
 
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.viewport_height = 40;
         app.viewport_width = 140;
         app.buffer = crate::buffer::Buffer::new_empty();
@@ -1143,10 +1143,10 @@ mod tests {
     fn picking_an_ordinary_file_is_not_routed_to_the_resolver() {
         let Some(repo) = diverged() else { return };
         let _ = git(&repo.root, &["merge", "feature"]);
-        let mut app = App::new(None, crate::config::Config::load()).expect("app");
+        let mut app = App::new(None, crate::config::Config::load());
         app.buffer = crate::buffer::Buffer::new_empty();
         install_work_tree(&mut app, &repo.root);
         assert!(!open_if_conflicted(&mut app, &repo.root.join("nowhere.txt")));
-        assert!(app.conflict.is_none() && app.conflict_pending.is_none());
+        assert!(app.conflict.is_none() && app.jobs.conflict_load.is_none());
     }
 }

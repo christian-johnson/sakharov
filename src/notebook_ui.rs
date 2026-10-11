@@ -1014,8 +1014,8 @@ fn height_key(cell: &Cell, source: &ropey::Rope, limits: OutputLimits, geo: Geom
             Output::Stream { text, .. } => text.hash(&mut h),
             Output::DisplayData { data } | Output::ExecuteResult { data, .. } => {
                 data.text_plain.hash(&mut h);
-                // Decoded images are immutable and shared: identity suffices.
-                data.image_png.as_ref().map(std::sync::Arc::as_ptr).hash(&mut h);
+                // Images are immutable and shared: identity suffices.
+                data.image_png.as_ref().map(crate::notebook::Png::key).hash(&mut h);
             }
             Output::Error { ename, evalue, traceback, .. } => (ename, evalue, traceback).hash(&mut h),
         }
@@ -1090,7 +1090,7 @@ fn mime_image_rows(
 ) -> Option<u16> {
     let png = data.image_png.as_ref()?;
     let avail = image_available_cols(geo.inner_cols);
-    Some(match png_pixel_size(png) {
+    Some(match png.pixel_size() {
         Some((pw, ph)) => compute_image_rows(pw, ph, avail, geo.cell_px, limits.image_rows),
         None => limits.image_rows,
     })
@@ -1642,17 +1642,6 @@ fn draw_truncation_row(
     draw_output_row(frame, area, current_row, octx, &text, Style::default().fg(crate::theme::active().dim));
 }
 
-/// Read pixel dimensions from a PNG header (bytes 16-23 of the file).
-/// Returns None if the slice is too short or reports zero dimensions.
-fn png_pixel_size(data: &[u8]) -> Option<(u32, u32)> {
-    if data.len() < 24 {
-        return None;
-    }
-    let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
-    let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
-    if w > 0 && h > 0 { Some((w, h)) } else { None }
-}
-
 /// Compute how many terminal columns a `rows`-tall image will occupy.
 ///
 /// Kitty scales the image to exactly `rows` terminal rows in height, then
@@ -1712,7 +1701,7 @@ fn render_mime_data(
 
             // Placeholder width = the same column count Kitty will use so the
             // dark background matches the rendered image footprint exactly.
-            let placeholder_cols = if let Some((pw, ph)) = png_pixel_size(png) {
+            let placeholder_cols = if let Some((pw, ph)) = png.pixel_size() {
                 estimated_image_cols(pw, ph, natural_rows, geo.cell_px).min(image_width)
             } else {
                 image_width
@@ -1738,7 +1727,7 @@ fn render_mime_data(
             }
 
             // Vertical source crop (in image pixels) when clipped at either edge.
-            let crop = png_pixel_size(png).and_then(|(_, ph)| {
+            let crop = png.pixel_size().and_then(|(_, ph)| {
                 if skip_top == 0 && shown == natural_rows {
                     None // whole image visible
                 } else {
@@ -1756,7 +1745,7 @@ fn render_mime_data(
                 crop,
                 skip_rows: skip_top,
                 full_rows: natural_rows,
-                png_data: png.clone(),
+                png: png.clone(),
             });
 
             // The output cursor never sits on top of image pixels — it's
@@ -2190,7 +2179,7 @@ mod tests {
             let mut v = vec![0u8; 24];
             v[16..20].copy_from_slice(&80u32.to_be_bytes());
             v[20..24].copy_from_slice(&600u32.to_be_bytes());
-            std::sync::Arc::new(v)
+            crate::notebook::Png::from_bytes(&v)
         };
         let cell = Cell {
             id: "c".into(),
@@ -2266,7 +2255,7 @@ mod tests {
             let mut v = vec![0u8; 24];
             v[16..20].copy_from_slice(&40u32.to_be_bytes());
             v[20..24].copy_from_slice(&40u32.to_be_bytes());
-            std::sync::Arc::new(v)
+            crate::notebook::Png::from_bytes(&v)
         };
         let cell = Cell {
             id: "c".into(),

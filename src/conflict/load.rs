@@ -407,6 +407,8 @@ mod tests {
         let set = read(&repo.root).expect("the read");
         let file = set.files.iter().find(|f| f.path == "new.txt").expect("new.txt");
         assert_eq!(file.base, None, "there is no common ancestor");
+        // The three-way diff itself ran, rather than the whole-file fallback.
+        assert!(super::hunk::regions_for(&repo.root, file).is_ok());
         assert_eq!(file.conflict_count(), 1);
         assert!(file.left.is_some() && file.right.is_some());
     }

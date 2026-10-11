@@ -80,6 +80,9 @@ pub struct FoldState {
     /// All foldable ranges in the buffer, sorted by start_line.
     /// Recomputed whenever the buffer changes.
     pub ranges: Vec<FoldRange>,
+    /// The buffer changed while nothing was folded and `ranges` was left out
+    /// of date; see `exec::ensure_fold_ranges`.
+    pub stale: bool,
 }
 
 impl FoldState {
@@ -519,7 +522,7 @@ mod tests {
     fn json_state(src: &str) -> FoldState {
         FoldState {
             ranges: compute_fold_ranges(&Rope::from_str(src), Language::Json),
-            folded: BTreeSet::new(),
+            ..FoldState::default()
         }
     }
 

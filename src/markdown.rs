@@ -18,10 +18,7 @@ use crate::highlight::{
 
 /// True if `path` names a Markdown document we should highlight/fold.
 pub fn is_markdown(path: Option<&Path>) -> bool {
-    path.and_then(|p| p.extension())
-        .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "qmd"))
-        .unwrap_or(false)
+    path.and_then(crate::lang::lang_for_path) == Some("markdown")
 }
 
 /// ATX heading level (1–6) if `trimmed` (leading whitespace already removed)

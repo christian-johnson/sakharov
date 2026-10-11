@@ -6,7 +6,9 @@
 //! written atomically (temp + rename).  Files are keyed by a hash of the
 //! buffer's canonical path (or the literal `scratch` for the scratch buffer), so
 //! the recovery directory stays tidy — one file per recoverable buffer, no
-//! sidecars littered next to the user's files.
+//! sidecars littered next to the user's files.  Paths matching
+//! `editor.crash_recovery_exclude` (secrets: `.env`, keys, `~/.ssh`, …) are
+//! never written.
 //!
 //! A recovery file exists *only while there are unsaved edits*: it is removed
 //! once the buffer is saved (the buffer is no longer dirty, so the next flush
@@ -33,7 +35,7 @@ use crate::app::App;
 /// Minimum wall-clock gap between recovery flushes.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(1500);
 /// Recovery files older than this (by mtime) are GC'd at startup.
-const MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60;
+const MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 /// Fixed key for the (path-less) scratch buffer.
 const SCRATCH_KEY: &str = "scratch";
 
@@ -88,8 +90,10 @@ pub struct Recovery {
     last_flush: Option<Instant>,
     /// key → hash of the content last written, to skip redundant disk writes.
     written: HashMap<String, u64>,
-    /// key → (recovery file, JSON) of what was last serialised, for the panic hook.
-    snapshot: HashMap<String, (PathBuf, String)>,
+    /// Something may have changed since the last flush; idle frames skip it.
+    unflushed: bool,
+    /// Paths that are never written (`editor.crash_recovery_exclude`).
+    exclude: globset::GlobSet,
 }
 
 impl Recovery {
@@ -117,8 +121,29 @@ impl Recovery {
             dir,
             last_flush: None,
             written: HashMap::new(),
-            snapshot: HashMap::new(),
+            unflushed: false,
+            exclude: globset::GlobSet::empty(),
         }
+    }
+
+    /// Replace the exclude patterns; returns a warning for each invalid one.
+    pub fn set_exclude(&mut self, patterns: &[String]) -> Vec<String> {
+        let mut builder = globset::GlobSetBuilder::new();
+        let mut warnings = Vec::new();
+        for pattern in patterns {
+            match globset::Glob::new(pattern) {
+                Ok(glob) => {
+                    builder.add(glob);
+                }
+                Err(e) => warnings.push(format!("crash_recovery_exclude: {e}")),
+            }
+        }
+        self.exclude = builder.build().unwrap_or_else(|_| globset::GlobSet::empty());
+        warnings
+    }
+
+    fn excluded(&self, path: &Path) -> bool {
+        self.exclude.is_match(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
     }
 }
 
@@ -128,8 +153,12 @@ impl Recovery {
 
 /// Flush dirty buffers to recovery files, throttled to `FLUSH_INTERVAL`.
 /// Also removes recovery files for buffers that are no longer dirty.
-pub fn tick(app: &mut App) {
-    flush(app, false);
+/// `changed` says whether this frame handled anything that could edit a buffer.
+pub fn tick(app: &mut App, changed: bool) {
+    app.recovery.unflushed |= changed;
+    if app.recovery.unflushed {
+        flush(app, false);
+    }
 }
 
 /// Flush immediately, bypassing the debounce.  Used on signal-driven shutdown
@@ -156,9 +185,9 @@ fn flush(app: &mut App, force: bool) {
         }
     }
     app.recovery.last_flush = Some(now);
+    app.recovery.unflushed = false;
 
     let mut written = std::mem::take(&mut app.recovery.written);
-    let mut snapshot = std::mem::take(&mut app.recovery.snapshot);
     let entries = collect_entries(app);
     let saved_at_unix = now_unix();
 
@@ -166,7 +195,7 @@ fn flush(app: &mut App, force: bool) {
     // fingerprint is cheap, while encoding a large buffer (or a notebook with
     // images) every flush was a visible stutter.
     let mut live: HashSet<String> = HashSet::new();
-    let mut changed = false;
+    let mut snapshot = panic_snapshot().lock().ok();
     for e in &entries {
         live.insert(e.key.clone());
         if written.get(&e.key) == Some(&e.fingerprint) {
@@ -178,17 +207,16 @@ fn flush(app: &mut App, force: bool) {
         if write_private(&target, &json).is_ok() {
             written.insert(e.key.clone(), e.fingerprint);
         }
-        snapshot.insert(e.key.clone(), (target, json));
-        changed = true;
+        // The panic hook rewrites this if a write above failed.
+        if let Some(snapshot) = snapshot.as_mut() {
+            snapshot.insert(e.key.clone(), (target, json));
+        }
     }
     drop(entries);
-    let before = snapshot.len();
-    snapshot.retain(|k, _| live.contains(k));
-    if changed || snapshot.len() != before {
-        // Mirror the desired on-disk state into the panic snapshot so a panic
-        // still persists the latest contents if a write above failed.
-        set_panic_snapshot(snapshot.values().cloned().collect());
+    if let Some(snapshot) = snapshot.as_mut() {
+        snapshot.retain(|k, _| live.contains(k));
     }
+    drop(snapshot);
 
     // Drop recovery files for buffers this session wrote but that are now clean
     // (saved, or no longer present).  Keeps the directory tidy.
@@ -200,7 +228,6 @@ fn flush(app: &mut App, force: bool) {
         keep
     });
     app.recovery.written = written;
-    app.recovery.snapshot = snapshot;
 }
 
 /// Where a recovery entry's content comes from; serialised only when written.
@@ -263,7 +290,7 @@ fn collect_entries(app: &App) -> Vec<Entry<'_>> {
 
     // Active buffer: a live notebook, or a plain-text/scratch buffer.
     if let Some((nb, _)) = &app.notebook {
-        if nb.modified {
+        if nb.modified && !app.recovery.excluded(&nb.path) {
             entries.push(Entry::new(
                 path_key(&nb.path),
                 "notebook",
@@ -274,7 +301,7 @@ fn collect_entries(app: &App) -> Vec<Entry<'_>> {
     } else if let Some(path) = app.buffer.path.as_ref() {
         if path.to_str() == Some(crate::app::SCRATCH_BUFFER) {
             push_scratch(&mut entries, &app.buffer.rope);
-        } else if !crate::exec::is_special_path(path) && app.buffer.modified {
+        } else if !crate::exec::is_special_path(path) && app.buffer.modified && !app.recovery.excluded(path) {
             entries.push(Entry::new(
                 path_key(path),
                 "file",
@@ -287,7 +314,7 @@ fn collect_entries(app: &App) -> Vec<Entry<'_>> {
     // Stashed plain-file buffers (navigated away from but still in memory).
     // A virtual source has no file to recover to, so it is skipped.
     for (path, buf) in app.stashes.files().filter_map(|(id, b)| id.as_path().map(|p| (p, b))) {
-        if buf.modified {
+        if buf.modified && !app.recovery.excluded(path) {
             entries.push(Entry::new(
                 path_key(path),
                 "file",
@@ -307,7 +334,7 @@ fn collect_entries(app: &App) -> Vec<Entry<'_>> {
             .notebook
             .as_ref()
             .is_some_and(|(a, _)| same_path(&a.path, path));
-        if !is_active && nb.modified {
+        if !is_active && nb.modified && !app.recovery.excluded(path) {
             entries.push(Entry::new(
                 path_key(path),
                 "notebook",
@@ -340,106 +367,42 @@ fn push_scratch<'a>(entries: &mut Vec<Entry<'a>>, rope: &'a ropey::Rope) {
 // Startup scan + GC
 // ---------------------------------------------------------------------------
 
-/// At startup: GC stale/orphaned recovery files, and enqueue prompts for the
-/// buffer opened on the command line plus the scratch buffer.  Shows the first
-/// prompt if any were enqueued.
+/// At startup: GC leftover temp files and stale recovery files (by mtime
+/// alone — nothing is parsed), then offer the scratch buffer's recovery.  The
+/// file opened on the command line was already offered by `offer_on_open`.
 pub fn startup_scan(app: &mut App) {
     if !app.recovery.enabled {
         return;
     }
-    let dir = match app.recovery.dir.clone() {
-        Some(d) => d,
-        None => return,
-    };
-
-    // Identity of the buffer opened on the command line, so we only prompt for
-    // it (other orphaned recoveries are left for a later `sv <file>` / on-open).
-    let active_key = active_buffer_key(app);
-
-    let read = match std::fs::read_dir(&dir) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    for ent in read.flatten() {
-        let path = ent.path();
-        let ext = path.extension().and_then(|e| e.to_str());
-        if ext == Some("tmp") {
-            let _ = std::fs::remove_file(&path); // leftover from an interrupted write
-            continue;
-        }
-        if ext != Some("json") {
-            continue;
-        }
-        if older_than(&path, MAX_AGE_SECS) {
-            let _ = std::fs::remove_file(&path);
-            continue;
-        }
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let rec: RecoveryRecord = match serde_json::from_str(&raw) {
-            Ok(r) => r,
-            Err(_) => {
-                let _ = std::fs::remove_file(&path); // corrupt
-                continue;
+    let Some(dir) = app.recovery.dir.clone() else { return };
+    if let Ok(read) = std::fs::read_dir(&dir) {
+        for path in read.flatten().map(|ent| ent.path()) {
+            let ext = path.extension().and_then(|e| e.to_str());
+            // A `.tmp` is left over from an interrupted write.
+            if ext == Some("tmp") || (ext == Some("json") && older_than(&path, MAX_AGE_SECS)) {
+                let _ = std::fs::remove_file(&path);
             }
-        };
-        let key = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-
-        match rec.kind.as_str() {
-            "scratch" => {
-                if rec.content == crate::exec::SCRATCH_INTRO || rec.content.trim().is_empty() {
-                    let _ = std::fs::remove_file(&path);
-                } else {
-                    enqueue(app, PendingRecovery {
-                        key,
-                        kind: RecoveryKind::Scratch,
-                        path: None,
-                        content: rec.content,
-                        saved_at_unix: rec.saved_at_unix,
-                    });
-                }
-            }
-            kind @ ("file" | "notebook") => {
-                let orig = rec.original_path.as_ref().map(PathBuf::from);
-                let Some(orig) = orig else {
-                    let _ = std::fs::remove_file(&path);
-                    continue;
-                };
-                if !orig.exists() {
-                    let _ = std::fs::remove_file(&path); // original is gone
-                    continue;
-                }
-                // Only prompt for the file/notebook opened on the command line.
-                if active_key.as_deref() != Some(key.as_str()) {
-                    continue;
-                }
-                let disk = std::fs::read_to_string(&orig).unwrap_or_default();
-                if disk == rec.content {
-                    let _ = std::fs::remove_file(&path); // nothing new to recover
-                    continue;
-                }
-                enqueue(app, PendingRecovery {
-                    key,
-                    kind: if kind == "notebook" {
-                        RecoveryKind::Notebook
-                    } else {
-                        RecoveryKind::File
-                    },
-                    path: Some(orig),
-                    content: rec.content,
-                    saved_at_unix: rec.saved_at_unix,
-                });
-            }
-            _ => {}
         }
     }
 
+    let file = dir.join(format!("{SCRATCH_KEY}.json"));
+    let Some(rec) = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<RecoveryRecord>(&raw).ok())
+    else {
+        return;
+    };
+    if rec.content == crate::exec::SCRATCH_INTRO || rec.content.trim().is_empty() {
+        let _ = std::fs::remove_file(&file);
+        return;
+    }
+    enqueue(app, PendingRecovery {
+        key: SCRATCH_KEY.to_string(),
+        kind: RecoveryKind::Scratch,
+        path: None,
+        content: rec.content,
+        saved_at_unix: rec.saved_at_unix,
+    });
     show_next_prompt(app);
 }
 
@@ -603,26 +566,23 @@ pub fn cleanup_on_quit(app: &mut App) {
         }
     }
     app.recovery.written.clear();
-    set_panic_snapshot(Vec::new());
-}
-
-static PANIC_SNAPSHOT: OnceLock<Mutex<Vec<(PathBuf, String)>>> = OnceLock::new();
-
-fn panic_snapshot() -> &'static Mutex<Vec<(PathBuf, String)>> {
-    PANIC_SNAPSHOT.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-fn set_panic_snapshot(items: Vec<(PathBuf, String)>) {
-    if let Ok(mut guard) = panic_snapshot().lock() {
-        *guard = items;
+    if let Ok(mut snapshot) = panic_snapshot().lock() {
+        snapshot.clear();
     }
+}
+
+/// key → (recovery file, JSON) of what was last serialised, for the panic hook.
+static PANIC_SNAPSHOT: OnceLock<Mutex<HashMap<String, (PathBuf, String)>>> = OnceLock::new();
+
+fn panic_snapshot() -> &'static Mutex<HashMap<String, (PathBuf, String)>> {
+    PANIC_SNAPSHOT.get_or_init(Default::default)
 }
 
 /// Flush the latest recovery snapshot to disk.  Called from the panic hook, so
 /// it must not panic — every operation is best-effort.
 pub fn flush_panic_snapshot() {
     if let Ok(guard) = panic_snapshot().lock() {
-        for (path, content) in guard.iter() {
+        for (path, content) in guard.values() {
             let _ = write_private(path, content);
         }
     }
@@ -671,18 +631,6 @@ fn same_path(a: &Path, b: &Path) -> bool {
     let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
     let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
     ca == cb
-}
-
-/// The recovery key of the buffer opened on the command line, if any.
-fn active_buffer_key(app: &App) -> Option<String> {
-    if let Some((nb, _)) = &app.notebook {
-        return Some(path_key(&nb.path));
-    }
-    let path = app.buffer.path.as_ref()?;
-    if crate::exec::is_special_path(path) {
-        return None;
-    }
-    Some(path_key(path))
 }
 
 fn now_unix() -> u64 {
@@ -773,14 +721,8 @@ mod tests {
     fn flush_rewrites_only_changed_buffers() {
         let dir = std::env::temp_dir().join(format!("sv-rec-flush-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut app = App::new(None, crate::config::Config::load()).unwrap();
-        app.recovery = Recovery {
-            enabled: true,
-            dir: Some(dir.clone()),
-            last_flush: None,
-            written: HashMap::new(),
-            snapshot: HashMap::new(),
-        };
+        let mut app = App::new(None, crate::config::Config::load());
+        app.recovery = Recovery { enabled: true, dir: Some(dir.clone()), ..Recovery::new(false) };
         let file = dir.join("doc.txt");
         app.buffer.path = Some(file.clone());
         app.buffer.insert_raw(0, "hello");
@@ -796,6 +738,30 @@ mod tests {
 
         let written = std::fs::read_to_string(&target).unwrap();
         assert!(written.contains("hello world"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file matching the default exclude list (a secret) is never written,
+    /// while an ordinary file in the same directory is.
+    #[test]
+    fn excluded_paths_are_never_written() {
+        let dir = std::env::temp_dir().join(format!("sv-rec-exclude-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(None, crate::config::Config::load());
+        app.recovery = Recovery { enabled: true, dir: Some(dir.clone()), ..Recovery::new(false) };
+        let defaults: crate::config::Config =
+            toml::from_str(crate::config::DEFAULT_CONFIG).expect("default.toml parses");
+        assert!(app.recovery.set_exclude(&defaults.editor.crash_recovery_exclude).is_empty());
+
+        for (name, expect_written) in [(".env", false), ("server.pem", false), ("notes.txt", true)] {
+            let file = dir.join(name);
+            app.buffer = crate::buffer::Buffer::new_empty();
+            app.buffer.path = Some(file.clone());
+            app.buffer.insert_raw(0, "API_KEY=hunter2");
+            flush_now(&mut app);
+            let target = dir.join(format!("{}.json", path_key(&file)));
+            assert_eq!(target.exists(), expect_written, "{name}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

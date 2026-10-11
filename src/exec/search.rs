@@ -67,7 +67,7 @@ mod tests {
     use ropey::Rope;
 
     fn app_with_text(src: &str) -> App {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.viewport_height = 40;
         app.viewport_width = 80;
         app.buffer.rope = Rope::from_str(src);

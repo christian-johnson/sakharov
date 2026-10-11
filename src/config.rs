@@ -204,6 +204,10 @@ pub struct EditorConfig {
     /// Set to false to disable recovery entirely (e.g. for sensitive trees).
     #[serde(default = "default_crash_recovery")]
     pub crash_recovery: bool,
+    /// Glob patterns (matched against the absolute path) for files that are
+    /// never written to a recovery file because they are likely to hold secrets.
+    #[serde(default)]
+    pub crash_recovery_exclude: Vec<String>,
     /// Minimum milliseconds between signature-help requests while typing inside
     /// a call (the hint refreshes per keystroke; for notebooks each refresh
     /// retransmits the concatenated shadow document). A deferred trailing
@@ -615,7 +619,7 @@ pub struct ExtraServerConfig {
     pub features: Vec<String>,
 }
 
-const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
+pub(crate) const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 impl Config {
     /// [`load_reporting`](Self::load_reporting) without the warning.

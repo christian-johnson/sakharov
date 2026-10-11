@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        App::new(None, Config::load()).unwrap()
+        App::new(None, Config::load())
     }
 
     #[test]

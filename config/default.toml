@@ -56,6 +56,13 @@ file_picker_max_depth = 10
 # after a crash or kill. The file is removed on a clean save and clean quit, so
 # it only lingers when something went wrong. Set false to disable entirely.
 crash_recovery = true
+# Files never written to a recovery file, matched against the absolute path —
+# anything likely to hold a secret.
+crash_recovery_exclude = [
+    "**/.env", "**/.env.*", "**/.envrc", "**/.netrc", "**/.pgpass",
+    "**/*.pem", "**/*.key", "**/*credentials*", "**/*secret*",
+    "**/.ssh/**", "**/.aws/**", "**/.gnupg/**", "**/.kube/**", "**/.docker/config.json",
+]
 # Minimum milliseconds between signature-help requests while typing inside a
 # call. A deferred trailing refresh always fires after the window, so the hint
 # settles on the final cursor position. 0 disables the throttle.

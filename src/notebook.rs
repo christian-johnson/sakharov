@@ -87,9 +87,53 @@ pub struct ErrorFrame {
 #[derive(Clone)]
 pub struct MimeData {
     pub text_plain: Option<String>,
-    /// Decoded from base64.  Wrapped in Arc so passing it through each render
-    /// frame is O(1) (ref-count bump) rather than O(n) (full copy).
-    pub image_png: Option<std::sync::Arc<Vec<u8>>>,
+    pub image_png: Option<Png>,
+}
+
+/// A PNG kept as the base64 text it arrives in: the terminal upload and the
+/// saved notebook both want base64, so only the size header is ever decoded.
+/// Clones share the data, and [`Png::key`] identifies it.
+#[derive(Clone, Debug)]
+pub struct Png(std::sync::Arc<str>);
+
+impl Png {
+    /// Wrap base64 text, dropping the whitespace notebooks wrap it in.
+    /// `None` when not even the 24-byte header decodes.
+    pub fn from_base64(text: &str) -> Option<Self> {
+        let cleaned: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        let png = Self(cleaned.into());
+        png.header()?;
+        Some(png)
+    }
+
+    /// Encode raw PNG bytes (test fixtures).
+    #[cfg(test)]
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(base64::engine::general_purpose::STANDARD.encode(bytes).into())
+    }
+
+    pub fn base64(&self) -> &str {
+        &self.0
+    }
+
+    /// Identity of the shared data, for caches keyed on "this image".
+    pub fn key(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.0).cast::<u8>() as usize
+    }
+
+    /// Width and height from the IHDR chunk.
+    pub fn pixel_size(&self) -> Option<(u32, u32)> {
+        let h = self.header()?;
+        let w = u32::from_be_bytes([h[16], h[17], h[18], h[19]]);
+        let ht = u32::from_be_bytes([h[20], h[21], h[22], h[23]]);
+        (w > 0 && ht > 0).then_some((w, ht))
+    }
+
+    /// The first 24 bytes: signature, IHDR length/type, width, height.
+    fn header(&self) -> Option<[u8; 24]> {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(self.0.get(..32)?).ok()?;
+        bytes.try_into().ok()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,19 +152,9 @@ fn join_source(v: &Value) -> String {
     }
 }
 
-/// Decode a JSON value that is a base64 string into bytes.
-fn decode_base64(v: &Value) -> Option<Vec<u8>> {
-    let s = v.as_str()?;
-    // Strip whitespace / newlines that sometimes appear in notebook base64 blobs
-    let cleaned: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(cleaned.as_bytes())
-        .ok()
-}
-
 fn parse_mime_data(data: &Value) -> MimeData {
     let text_plain = data.get("text/plain").map(join_source).filter(|s| !s.is_empty());
-    let image_png = data.get("image/png").and_then(decode_base64).map(std::sync::Arc::new);
+    let image_png = data.get("image/png").and_then(|v| Png::from_base64(&join_source(v)));
     MimeData { text_plain, image_png }
 }
 
@@ -556,11 +590,8 @@ impl Notebook {
                     if let Some(t) = &data.text_plain {
                         d.insert("text/plain".into(), Value::String(t.clone()));
                     }
-                    if let Some(bytes) = &data.image_png {
-                        d.insert(
-                            "image/png".into(),
-                            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes.as_slice())),
-                        );
+                    if let Some(png) = &data.image_png {
+                        d.insert("image/png".into(), Value::String(png.base64().to_owned()));
                     }
                     serde_json::json!({ "output_type": "display_data", "data": d, "metadata": {} })
                 }
@@ -569,11 +600,8 @@ impl Notebook {
                     if let Some(t) = &data.text_plain {
                         d.insert("text/plain".into(), Value::String(t.clone()));
                     }
-                    if let Some(bytes) = &data.image_png {
-                        d.insert(
-                            "image/png".into(),
-                            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes.as_slice())),
-                        );
+                    if let Some(png) = &data.image_png {
+                        d.insert("image/png".into(), Value::String(png.base64().to_owned()));
                     }
                     serde_json::json!({
                         "output_type": "execute_result",
@@ -662,6 +690,23 @@ pub fn append_stream(outputs: &mut Vec<Output>, name: &str, chunk: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An image survives load → save as the same base64 text (minus the line
+    /// wrapping), and its size is read from the header alone.
+    #[test]
+    fn png_keeps_its_base64_and_reads_its_size() {
+        let mut bytes = vec![0u8; 64];
+        bytes[16..20].copy_from_slice(&640u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&480u32.to_be_bytes());
+        let encoded = Png::from_bytes(&bytes).base64().to_owned();
+        let wrapped = format!("{}\n{}", &encoded[..40], &encoded[40..]);
+
+        let png = Png::from_base64(&wrapped).expect("valid header");
+
+        assert_eq!(png.base64(), encoded);
+        assert_eq!(png.pixel_size(), Some((640, 480)));
+        assert!(Png::from_base64("not base64!").is_none());
+    }
 
     fn nb_with(cells: Vec<(CellType, &str)>) -> Notebook {
         Notebook {

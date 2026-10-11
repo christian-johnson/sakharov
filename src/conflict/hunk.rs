@@ -154,31 +154,37 @@ pub fn regions_for(
     // A side missing its stage is a modify/delete: the deleted side is an
     // empty file, which makes the whole thing one conflict between the
     // surviving text and nothing.  That is exactly the right shape — "keep it"
-    // and "let the deletion stand" are the two switches.
-    let dir = tempdir(root)?;
-    let write = |name: &str, text: &Option<String>| -> Result<std::path::PathBuf, String> {
-        let path = dir.join(name);
-        std::fs::write(&path, text.as_deref().unwrap_or(""))
-            .map_err(|e| format!("cannot stage the conflict for reading: {e}"))?;
-        Ok(path)
+    // and "let the deletion stand" are the two switches.  The stages are read
+    // straight from the index (`--object-id`, git 2.43+); git knows the empty
+    // blob without it ever being written.
+    let mut empty_blob = None;
+    let mut side = |stage: u8, text: &Option<String>| -> Result<String, String> {
+        if text.is_some() {
+            return Ok(format!(":{stage}:{}", file.path));
+        }
+        if empty_blob.is_none() {
+            let out = crate::vcs::load::git_command(root)
+                .args(["hash-object", "-t", "blob", "--stdin"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .map_err(|e| format!("cannot run git hash-object: {e}"))?;
+            empty_blob = Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        }
+        Ok(empty_blob.clone().unwrap_or_default())
     };
-    let left = write("left", &file.left)?;
-    let base = write("base", &file.base)?;
-    let right = write("right", &file.right)?;
+    let (left, base, right) = (side(2, &file.left)?, side(1, &file.base)?, side(3, &file.right)?);
 
-    let out = std::process::Command::new("git")
+    let out = crate::vcs::load::git_command(root)
         .arg("merge-file")
         .arg("-p")
         .arg("--diff3")
+        .arg("--object-id")
         .arg(format!("--marker-size={MARKER_SIZE}"))
         .args(["-L", LABEL_LEFT])
         .args(["-L", LABEL_BASE])
         .args(["-L", LABEL_RIGHT])
-        .arg(&left)
-        .arg(&base)
-        .arg(&right)
+        .args([&left, &base, &right])
         .output();
-    let _ = std::fs::remove_dir_all(&dir);
 
     let out = out.map_err(|e| format!("cannot run git merge-file: {e}"))?;
     // Exit codes above 1 are real errors; 1 just means "there were conflicts",
@@ -187,22 +193,6 @@ pub fn regions_for(
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(parse_diff3(&String::from_utf8_lossy(&out.stdout)))
-}
-
-/// A private scratch directory under the repository's own `.git`.
-///
-/// Inside `.git` rather than the system temp dir so the blobs never land
-/// somewhere world-readable, and so a crash leaves them where the repository
-/// they came from is.
-fn tempdir(root: &Path) -> Result<std::path::PathBuf, String> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = root.join(".git").join("sakharov-merge").join(stamp.to_string());
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
-    Ok(dir)
 }
 
 /// Give `file` its regions and a fresh, undecided choice per conflict.

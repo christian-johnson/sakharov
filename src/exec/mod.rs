@@ -28,7 +28,7 @@ pub use lsp::{
     refresh_completion_doc,
 };
 pub use scroll::{normalize_cursor_folds, update_scroll};
-pub use table::{is_table_path, open_as_table, poll_table_load};
+pub use table::{is_table_path, poll_table_load};
 // The minibuffer prompts' answers land here (`input::handle_prompt`).
 pub(crate) use table::{apply_filter as table_filter, apply_group as table_group_by};
 pub(crate) use attach::attach as attach_database;
@@ -101,6 +101,20 @@ pub fn revert_theme_preview(app: &mut App) {
 /// Execute a single command against the application state.
 pub fn execute(app: &mut App, cmd: &Command) {
     let extend = app.mode == Mode::Select;
+    if matches!(
+        cmd,
+        Command::EnterFoldMode
+            | Command::FoldToggle
+            | Command::FoldToggleAll
+            | Command::FoldClose
+            | Command::FoldOpen
+            | Command::FoldCloseAll
+            | Command::FoldOpenAll
+            | Command::FoldCloseType
+            | Command::FoldOpenType
+    ) {
+        ensure_fold_ranges(app);
+    }
 
     // One arm per view (see `crate::view`).  A view that owns the screen gets
     // to reinterpret commands against its own data before the text path sees
@@ -442,7 +456,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             app.mode = Mode::Normal;
             // The call-signature hint only makes sense while typing arguments.
-            app.signature_help = None;
+            app.signature.text = None;
             // Collapse (don't end) an active output-text selection: stay on
             // the same output row/col, just drop the anchor — mirrors how
             // Esc collapses `app.selection` above instead of leaving the cell.
@@ -575,7 +589,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     }
                 }
 
-                let new_lang = crate::app::language_for_path(Some(&new_path)).map(str::to_owned);
+                let new_lang = crate::lang::lang_for_path(&new_path).map(str::to_owned);
                 app.lsp_language = new_lang.clone();
                 app.highlighter = crate::highlight::Highlighter::new(Some(&new_path));
                 recompute_highlights(app);
@@ -1536,6 +1550,21 @@ pub fn recompute_highlights(app: &mut App) {
     app.highlights_dirty = true;
 }
 
+/// Recompute the buffer's fold ranges, dropping closed folds that no longer start a range.
+pub fn refresh_fold_ranges(app: &mut App) {
+    app.fold.ranges = app.highlighter.fold_ranges(&app.buffer.rope, app.buffer.id);
+    app.fold.stale = false;
+    let valid: std::collections::BTreeSet<usize> = app.fold.ranges.iter().map(|r| r.start).collect();
+    app.fold.folded.retain(|s| valid.contains(s));
+}
+
+/// Bring fold ranges up to date before a fold command reads them.
+fn ensure_fold_ranges(app: &mut App) {
+    if app.fold.stale {
+        refresh_fold_ranges(app);
+    }
+}
+
 /// Kick off a background git refresh (branch + per-line diff marks for the
 /// current buffer).  The result is applied by the run loop when it arrives —
 /// a slow or absent git can never block the UI.
@@ -1545,7 +1574,7 @@ pub fn refresh_git(app: &mut App) {
     } else {
         app.buffer.path.clone().filter(|p| !is_special_path(p))
     };
-    app.git_pending = Some(crate::git::refresh(path));
+    app.jobs.git = Some(crate::git::refresh(path));
 }
 
 /// Report the outcome of a save: on success runs `on_ok` (typically a
@@ -1571,9 +1600,9 @@ pub(crate) fn report_save<E: std::fmt::Display>(
 /// Apply a finished background git refresh, if one is ready.  Returns true
 /// when state changed (the caller should redraw).
 pub fn poll_git(app: &mut App) -> bool {
-    let Some(pending) = &app.git_pending else { return false };
+    let Some(pending) = &app.jobs.git else { return false };
     let Some(info) = pending.poll() else { return false };
-    app.git_pending = None;
+    app.jobs.git = None;
     app.git_branch = info.branch;
     app.git_diff = if app.config.editor.git_gutter {
         info.diff
@@ -1617,7 +1646,7 @@ mod tests {
     const JSON_LOG: &str = "{\n  \"entries\": [\n    {\n      \"ts\": 1,\n      \"payload\": {\n        \"a\": 1\n      }\n    },\n    {\n      \"ts\": 2,\n      \"payload\": {\n        \"a\": 2\n      }\n    }\n  ]\n}\n";
 
     fn app_with_json(src: &str) -> App {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.viewport_height = 40;
         app.viewport_width = 80;
         app.buffer.rope = Rope::from_str(src);
@@ -1742,7 +1771,7 @@ mod tests {
     /// wrap width from the renderer, geometry choice, scroll — is exercised.
     #[test]
     fn j_and_k_move_by_visual_row_when_wrapping_is_on() {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.viewport_width = 20; // gutter 5 + 1 git → 14 columns of text
         app.viewport_height = 20;
         app.config.editor.line_numbers = true;
@@ -1774,7 +1803,7 @@ mod tests {
     /// places it.
     #[test]
     fn one_j_moves_the_cursor_exactly_one_screen_row() {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.viewport_width = 30;
         app.viewport_height = 20;
         app.config.editor.word_wrap = true;
@@ -1797,7 +1826,7 @@ mod tests {
     // --- Text objects (`m`) ---------------------------------------------
 
     fn app_with_source(src: &str, name: &str) -> App {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.viewport_height = 40;
         app.viewport_width = 80;
         app.buffer.rope = Rope::from_str(src);
@@ -1937,7 +1966,7 @@ mod tests {
 
     #[test]
     fn goto_hints_only_advertise_real_bindings() {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         // Both views: the hints are view-aware, and so is the dispatch, so each
         // list has to be checked against the map that will actually answer it.
         let text_hints = prefix_hints(&app, 'g');
@@ -1962,7 +1991,7 @@ mod tests {
     /// list used to gate `k` on an active LSP, which a table never has.
     #[test]
     fn the_table_views_goto_hints_include_the_cell_peek() {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.table = Some(crate::exec::table::Session::new(
             crate::source::SourceId::of(std::path::Path::new("t.csv")),
             Box::new(
@@ -1986,7 +2015,7 @@ mod tests {
     #[test]
     fn test_exec_clamping_behavior() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         app.buffer.rope = Rope::from_str("hello\nworld\n");
         let len = app.buffer.rope.len_chars();
@@ -2007,7 +2036,7 @@ mod tests {
     #[test]
     fn comment_region_is_indent_aware() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.buffer.path = Some(std::path::PathBuf::from("indent_test.py"));
         app.lsp_language = Some("python".to_string());
         let src = "def f():\n    a = 1\n\n    if a:\n        b = 2\n";
@@ -2035,7 +2064,7 @@ mod tests {
     #[test]
     fn bracketed_paste_inserts_verbatim() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.buffer.path = Some(std::path::PathBuf::from("paste_test.py"));
         app.buffer.rope = Rope::from_str("def f():\n    ");
         app.selection = Selection::point(app.buffer.rope.len_chars());
@@ -2066,7 +2095,7 @@ mod tests {
     #[test]
     fn test_new_file_creates_and_opens() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("newfile");
         let target = dir.join("scratch_test.txt");
@@ -2088,7 +2117,7 @@ mod tests {
     #[test]
     fn test_new_notebook_creates_valid_ipynb() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("newnb");
         let target = dir.join("analysis.ipynb");
@@ -2125,7 +2154,7 @@ mod tests {
                 ],
             },
         );
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("fmt-notebook");
         let nb_path = dir.join("analysis.ipynb");
@@ -2160,7 +2189,7 @@ mod tests {
     #[test]
     fn test_delete_selection_clamping() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.buffer.rope = Rope::from_str("abc");
         app.selection = Selection::new(0, 2);
         text::delete_selection(&mut app);
@@ -2171,7 +2200,7 @@ mod tests {
     #[test]
     fn buffer_switch_preserves_unsaved_edits() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("stash");
         let a = dir.join("a.txt");
@@ -2200,7 +2229,7 @@ mod tests {
     #[test]
     fn buffer_switch_restores_the_cursor_position() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("cursorpos");
         let a = dir.join("a.txt");
@@ -2240,7 +2269,7 @@ mod tests {
     #[test]
     fn bare_attach_asks_for_a_path() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         execute(&mut app, &Command::parse("attach").expect("attach parses"));
         assert_eq!(
@@ -2259,7 +2288,7 @@ mod tests {
     #[test]
     fn quit_blocks_on_stashed_unsaved_buffer() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("quitsweep");
         let a = dir.join("dirty.txt");
@@ -2293,7 +2322,7 @@ mod tests {
     #[test]
     fn save_refuses_external_modification_unless_forced() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("mtime");
         let f = dir.join("conflict.txt");
@@ -2329,7 +2358,7 @@ mod tests {
     #[test]
     fn notebook_stash_round_trip_preserves_cell_edits() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("nbstash");
         let nb_path = dir.join("roundtrip.ipynb");
@@ -2362,7 +2391,7 @@ mod tests {
     #[test]
     fn force_closed_buffer_is_not_resurrected_into_stash() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("bdstash");
         let a = dir.join("doomed.txt");
@@ -2393,7 +2422,7 @@ mod tests {
             return;
         }
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         let dir = unique_tmp_dir("kernelq");
         let target = dir.join("queue.ipynb");
@@ -2475,7 +2504,7 @@ mod tests {
             eprintln!("python3 not available — skipping kernel bridge test");
             return;
         }
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         let dir = unique_tmp_dir("kernelvars");
         app.buffer.path = Some(dir.join("anchor.txt"));
         create_new_notebook(&mut app, "vars");
@@ -2547,7 +2576,7 @@ mod tests {
             return;
         }
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         let dir = unique_tmp_dir("kernelsep");
         app.buffer.path = Some(dir.join("anchor.txt"));
 
@@ -2612,7 +2641,7 @@ mod tests {
             return;
         }
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 20;
         app.viewport_width = 80;
 
@@ -2687,7 +2716,7 @@ mod tests {
     fn notebook_output_block_navigation() {
         use crate::notebook::Output;
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 12;
         app.viewport_width = 80;
 
@@ -2773,7 +2802,7 @@ mod tests {
     fn output_text_supports_char_and_word_motion() {
         use crate::notebook::Output;
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 12;
         app.viewport_width = 80;
 
@@ -2828,7 +2857,7 @@ mod tests {
     fn output_text_selection_yanks_to_clipboard() {
         use crate::notebook::Output;
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 12;
         app.viewport_width = 80;
 
@@ -2873,7 +2902,7 @@ mod tests {
     #[test]
     fn jump_labels_follow_the_visible_slice_of_a_scrolled_cell() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 10;
         app.viewport_width = 80;
         app.config.editor.scroll_off = 2;
@@ -2924,7 +2953,7 @@ mod tests {
     fn expanded_output_exposes_every_row_to_navigation() {
         use crate::notebook::Output;
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 12;
         app.viewport_width = 80;
         let cap = app.config.notebook.max_output_lines;
@@ -2977,7 +3006,7 @@ mod tests {
     #[test]
     fn page_down_crosses_notebook_cells() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 12; // half page = 6 steps
         app.viewport_width = 80;
 
@@ -3014,7 +3043,7 @@ mod tests {
     #[test]
     fn page_scroll_extends_selection_in_select_mode() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 8; // half page = 4 steps
         app.viewport_width = 80;
         app.buffer.rope = Rope::from_str("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\n");
@@ -3043,7 +3072,7 @@ mod tests {
     #[test]
     fn notebook_save_clears_the_modified_indicator() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 24;
         app.viewport_width = 80;
 
@@ -3075,7 +3104,7 @@ mod tests {
     #[test]
     fn notebook_scroll_is_row_granular() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
         app.viewport_height = 8;
         app.viewport_width = 80;
         app.config.editor.scroll_off = 2;
@@ -3114,7 +3143,7 @@ mod tests {
     #[test]
     fn test_notebook_cross_cell_motion() {
         let config = Config::load();
-        let mut app = App::new(None, config).unwrap();
+        let mut app = App::new(None, config);
 
         // Start from a real on-disk notebook (one empty cell), then give the
         // first cell content and append a second cell.
@@ -3161,7 +3190,7 @@ mod tests {
     /// lands in the next cell, which is what "the last line" used to mean.
     #[test]
     fn j_walks_the_wrapped_rows_of_a_cell_before_crossing_into_the_next() {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.viewport_width = 40;
         app.viewport_height = 30;
 
@@ -3219,7 +3248,7 @@ mod tests {
     /// whole lines moved a wrapped paragraph's worth of rows in one keypress.
     #[test]
     fn wrapped_text_scrolls_one_row_per_keypress() {
-        let mut app = App::new(None, Config::load()).unwrap();
+        let mut app = App::new(None, Config::load());
         app.config.editor.word_wrap = true;
         app.viewport_width = 60;
         app.viewport_height = 12;
