@@ -3,7 +3,8 @@
 A from-scratch TUI editor in Rust, for personal use. Invoked as `sv [+N] [file]`
 (`target/debug/sv` / `target/release/sv`). Helix-style selection-first modal
 editing, plus views for Jupyter notebooks, tabular data (CSV/parquet/SQL via
-DuckDB), a git commit graph, and a merge-conflict resolver.
+DuckDB), and version control (changes tree + side-by-side diff + conflict
+resolver, every action planned and applied at once with `:vc-apply`).
 
 Reference docs: `docs/commands.md` (every command + key — keep in sync with
 `command.rs`), `docs/themes.md`, `docs/data-layer-plan.md`,
@@ -36,7 +37,7 @@ src/
   keymap.rs, input.rs key bindings + dispatch (per-view override layers)
   exec/               execute(app, cmd) — the ONLY place App is mutated by commands
                       (buffers, scroll, text, search, lsp, doctor, pickers, notebook,
-                      table, sql, attach, bridge, export, format, vcs, conflict)
+                      table, sql, attach, bridge, export, format, vcs)
   buffer.rs           rope buffer, undo/redo, atomic file I/O
   motion.rs, indent.rs, fold.rs, jump.rs, selection.rs, mode.rs
   textobject.rs       `mi`/`mo` text objects (pure: rope + cursor -> char range)
@@ -50,8 +51,9 @@ src/
   notebook.rs, notebook_state.rs, compute/ (Python kernel + runner.py), kitty.rs
   table/              TableSource trait, layout (geometry), transform, summary,
                       csv, duck/ (DuckDB source, connect, statement gate)
-  vcs/                load → plan → derive → apply (only apply writes)
-  conflict/           load → hunk → choice fold → write (only write writes)
+  vcs/                load → plan (projection) → derive → apply (only apply writes);
+                      store (git reads, unreferenced objects), diff, tree, layout, state
+  conflict/           build (from a vcs::Repo) → hunk → choice fold; never writes
   config.rs, recovery.rs, history.rs, git.rs, git_highlight.rs, clipboard.rs, spinner.rs
 ```
 
@@ -78,7 +80,7 @@ src/
   `teardown_current_buffer`, `open_path`). Use `view::Chrome::split` for the
   bottom rows and `view::refusal(cmd)` for commands the view can't do.
 - Every key (including the `g`/`z` sub-modes) is a row in `keymap::defaults`.
-  Which-key popups, the vcs/conflict `key_sheet`s and the palette's key labels
+  Which-key popups, the vcs `key_sheet` and the palette's key labels
   are generated from the keymap — never hand-write a key into a description.
 - Config values changed at runtime go through `exec::settings::replace_config`
   (`:set`, `:toggle`, the dedicated toggles, `:config-reload`); state derived
@@ -141,16 +143,26 @@ src/
   SQL passes `duck::gate::check`. The editor never runs `INSTALL`/`LOAD`.
 
 **Version control**
-- Only `vcs/apply.rs` and `conflict/write.rs` write to the repository. Every
-  git process is built by `vcs::load::git_command` (clears inherited git env).
-- Shell out to `git`, not libgit2. Apply writes backup refs under
-  `refs/sakharov/undo/` for every local branch first.
-- Conflict regions come from our own `git merge-file --diff3` over the index
-  stages — never parse the working file's markers. The ours/theirs inversion
+- Every key in the view pushes a `plan::Step`; only `vcs/apply.rs` writes refs,
+  the index or the work tree. `vcs/store.rs` may write *unreferenced objects*
+  (to ask `merge-tree` about planned trees) and nothing else. Every git process
+  is built by `vcs::load::git_command` (clears inherited git env).
+- The projection is a `Repo`, the same type `load` returns; renderers draw
+  `VcsState::repo()` and never know whether it is real or planned.
+- A new `Step` variant must extend `plan::apply_step`, `derive::porcelain` (or
+  be a working-tree step), **and** the projection-agrees-with-apply tests in
+  `vcs/apply.rs`.
+- Apply refuses if the repository changed since loading (`Fingerprint`), and
+  backs up branches/HEAD/stashes as refs under `refs/sakharov/undo/<stamp>/`
+  plus the index and changed files under `<git dir>/sakharov/undo/<stamp>/`.
+- Shell out to `git`, not libgit2.
+- Conflict regions come from our own `git merge-file --diff3` over the stage
+  blobs — never parse the working file's markers. The ours/theirs inversion
   is stated only in `Operation::left_is_yours`.
-- Tests for `vcs/apply.rs` and `conflict/` drive real temp repositories.
+- Tests for `vcs/` and `conflict/` drive real temp repositories.
 
 ## Known gaps
 No split panes; no user-defined `[commands]`; table view has no search, no pivot, no column hide/resize;
-notebook cells assume width-1 chars and have no horizontal scroll; vcs graph
-and kernel-backed tables are snapshots (refresh manually).
+notebook cells assume width-1 chars and have no horizontal scroll; the
+version-control view and kernel-backed tables are snapshots (refresh manually);
+no push/pull/fetch, no line-level staging.

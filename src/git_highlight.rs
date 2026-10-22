@@ -44,9 +44,7 @@ pub enum Section {
 pub fn is_git_output(path: Option<&Path>) -> bool {
     let Some(path) = path else { return false };
     if let Some(name) = path.to_str() {
-        if name == crate::app::GIT_OUTPUT_BUFFER
-            || name.starts_with(crate::app::COMMIT_BUFFER_PREFIX)
-        {
+        if name.starts_with(crate::app::COMMIT_BUFFER_PREFIX) {
             return true;
         }
     }
@@ -378,7 +376,6 @@ mod tests {
 
     #[test]
     fn only_the_buffers_git_writes_are_treated_as_git_output() {
-        assert!(is_git_output(Some(Path::new(crate::app::GIT_OUTPUT_BUFFER))));
         assert!(is_git_output(Some(Path::new("*commit 7e5120c*"))));
         assert!(is_git_output(Some(Path::new("fix.patch"))));
         assert!(!is_git_output(Some(Path::new("src/main.rs"))));

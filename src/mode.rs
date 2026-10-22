@@ -18,12 +18,14 @@ pub enum PromptKind {
     TableGroupBy,
     /// Path (and optional alias) of a local database file to attach read-only.
     Attach,
-    /// Message for the commit the version-control view is about to make.
-    VcsCommit,
-    /// Name for a new branch at the selected commit.
+    /// Name for a new branch at HEAD.
     VcsBranch,
-    /// `remote/branch` the current branch should track.
-    VcsUpstream,
+    /// New name for the current branch.
+    VcsRenameBranch,
+    /// Optional message for a stash.
+    VcsStash,
+    /// Name for a tag on the commit just picked.
+    VcsTag,
 }
 
 /// Editor mode.
@@ -53,6 +55,9 @@ pub enum Mode {
     /// until `i` or `o` says whether the delimiters count; `from_select`
     /// remembers that cancelling should leave the selection alone.
     Match { scope: Option<crate::textobject::Scope>, from_select: bool },
+    /// Waiting for the second key of a view's prefix (`b`, `s`, `L` in the
+    /// version-control view).
+    Prefix(char),
     /// Minibuffer text prompt — typing builds a filename; Enter confirms, Esc cancels.
     Prompt { kind: PromptKind },
 }
@@ -71,6 +76,7 @@ impl Mode {
             Mode::Jump { .. } => "JMP",
             Mode::Fold => "FLD",
             Mode::Match { .. } => "MCH",
+            Mode::Prefix(_) => "GTO",
             Mode::Prompt { .. } => "CMD",
         }
     }

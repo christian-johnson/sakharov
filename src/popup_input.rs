@@ -7,11 +7,6 @@ use crate::{
 
 /// Handle a key event when a popup is open.
 /// Returns the action to take; the caller is responsible for acting on it.
-/// Clamp a diff scroll so the pane cannot be scrolled past its last line.
-fn scroll_to(want: usize, stage: &crate::popup::StageState) -> usize {
-    want.min(stage.diff.len().saturating_sub(1))
-}
-
 pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
     // Read before borrowing the popup out of `app`.
     let doc_height = app.config.ui.doc_popup_height as usize;
@@ -91,105 +86,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
                 PopupAction::Continue
             }
             // Focused means focused: don't leak stray keys into the editor.
-            _ => PopupAction::Continue,
-        };
-    }
-
-    // The staging view: a modal reading pane, so it swallows anything it does
-    // not use rather than leaking keys into the graph behind it.  Stage/unstage
-    // and the diff refresh both need git, which there is no `App` to reach from
-    // here — so they are parked on the state and run by
-    // `exec::vcs::pump_stage_popup` on the next `Continue`, the same shape the
-    // theme picker's live preview uses.
-    if let PopupContent::Stage(ref mut stage) = popup.content {
-        let page = (doc_height / 2).max(1);
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let last = stage.entries.len().saturating_sub(1);
-        return match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => PopupAction::Dismiss,
-            KeyCode::Char('j') | KeyCode::Down => {
-                stage.select(stage.selected.saturating_add(1));
-                PopupAction::Continue
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                stage.select(stage.selected.saturating_sub(1));
-                PopupAction::Continue
-            }
-            KeyCode::Char('g') => {
-                stage.select(0);
-                PopupAction::Continue
-            }
-            KeyCode::Char('G') => {
-                stage.select(last);
-                PopupAction::Continue
-            }
-            // The diff pane scrolls on the same keys a focused text float
-            // does, so one file's worth of changes is readable without
-            // leaving the list.
-            KeyCode::Char('d') if ctrl => {
-                stage.diff_scroll = scroll_to(stage.diff_scroll + page, stage);
-                PopupAction::Continue
-            }
-            KeyCode::Char('u') if ctrl => {
-                stage.diff_scroll = stage.diff_scroll.saturating_sub(page);
-                PopupAction::Continue
-            }
-            KeyCode::Char('J') | KeyCode::PageDown => {
-                stage.diff_scroll = scroll_to(stage.diff_scroll + page, stage);
-                PopupAction::Continue
-            }
-            KeyCode::Char('K') | KeyCode::PageUp => {
-                stage.diff_scroll = stage.diff_scroll.saturating_sub(page);
-                PopupAction::Continue
-            }
-            KeyCode::Char(' ') => {
-                stage.toggle = true;
-                PopupAction::Continue
-            }
-            KeyCode::Enter => match stage.selected_entry() {
-                Some(entry) => PopupAction::Confirm(crate::popup::ConfirmPayload::Navigate {
-                    path: entry.file.clone(),
-                    line: 0,
-                    col: 0,
-                }),
-                None => PopupAction::Dismiss,
-            },
-            _ => PopupAction::Continue,
-        };
-    }
-
-    // A list of switches, not of destinations: every key is a verb, and none
-    // of them types into a filter.
-    if let PopupContent::Toggles(ref mut toggles) = popup.content {
-        let last = toggles.items.len().saturating_sub(1);
-        return match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => PopupAction::Dismiss,
-            KeyCode::Char('j') | KeyCode::Down => {
-                toggles.select(toggles.selected.saturating_add(1));
-                PopupAction::Continue
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                toggles.select(toggles.selected.saturating_sub(1));
-                PopupAction::Continue
-            }
-            KeyCode::Char('g') => {
-                toggles.select(0);
-                PopupAction::Continue
-            }
-            KeyCode::Char('G') => {
-                toggles.select(last);
-                PopupAction::Continue
-            }
-            KeyCode::Char(' ') => {
-                toggles.toggled = Some(toggles.selected);
-                PopupAction::Continue
-            }
-            // `a` turns everything back on: the way out of having hidden one
-            // thing too many, without pressing Space down the whole list.
-            KeyCode::Char('a') => {
-                toggles.toggled = Some(usize::MAX);
-                PopupAction::Continue
-            }
             _ => PopupAction::Continue,
         };
     }

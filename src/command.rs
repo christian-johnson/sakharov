@@ -251,46 +251,44 @@ commands! {
         SqlRun => "run-query", aliases: ["sql-run"], palette: "Run the SQL buffer's query and show the result as a grid";
 
         // --- Version control (see `crate::vcs`) ---
-        // The graph view itself.
-        VcsOpen => "version-control", aliases: ["vc", "git"], palette: "Open the version-control graph";
-        VcsClose => "version-control-close", aliases: ["vc-close"], palette: "Leave the version-control graph";
-        VcsRefresh => "version-control-refresh", aliases: ["vc-refresh"], palette: "Re-read the repository";
-        // Direct manipulation.
-        VcsGrab => "version-control-grab", aliases: ["vc-grab"], palette: "Pick up / put down the commit or branch under the cursor";
-        VcsDrop => "version-control-drop", aliases: ["vc-drop"], palette: "Remove the selected commit from the planned history";
-        VcsMerge => "version-control-merge", aliases: ["vc-merge"], palette: "Plan a merge of the selection into the current branch";
-        VcsUndoEdit => "version-control-undo-edit", aliases: ["vc-undo-edit"], palette: "Take back the last planned change";
-        VcsReset => "version-control-reset", aliases: ["vc-reset"], palette: "Discard every planned change";
-        // Committing the plan, and getting back out of it.
-        VcsApply => "version-control-apply", aliases: ["vc-apply", "apply"], palette: "Apply the planned history to the repository";
-        VcsUndo => "version-control-undo", aliases: ["vc-undo"], palette: "Put the branches back as they were before the last apply";
-        VcsAbort => "version-control-abort", aliases: ["vc-abort"], palette: "Abort the cherry-pick / merge left in progress by a conflict";
-        VcsContinue => "version-control-continue", aliases: ["vc-continue"], palette: "Resume after resolving a conflict";
-        // Everyday actions, which happen immediately — they add rather than rewrite.
-        VcsCheckout => "version-control-checkout", aliases: ["vc-checkout", "checkout"], palette: "Check out the branch or commit under the cursor";
-        VcsShow => "version-control-show", aliases: ["vc-show"], palette: "Show the selected commit's diff";
-        VcsEnter => "version-control-enter", aliases: ["vc-enter"], palette: "Act on what the cursor is on";
-        VcsStatus => "version-control-status", aliases: ["vc-status", "status"], palette: "The work tree beside each file's diff; Space stages";
+        // Every action here only adds to the plan; `:vc-apply` is the one that writes.
+        VcsOpen => "version-control", aliases: ["vc", "git"], palette: "Open the version-control view";
+        VcsClose => "version-control-close", aliases: ["vc-close"], palette: "Leave the version-control view";
+        VcsRefresh => "version-control-refresh", aliases: ["vc-refresh"], palette: "Re-read the repository, keeping the plan";
+        VcsEnter => "version-control-enter", aliases: ["vc-enter"], palette: "Open the directory, or move into the file's diff";
+        VcsFocusNext => "version-control-focus-next", aliases: ["vc-focus"], palette: "Cycle the changes tree, the diff and the plan";
+        VcsNextFile => "version-control-next-file", aliases: ["vc-next-file"], palette: "Next changed file";
+        VcsPrevFile => "version-control-prev-file", aliases: ["vc-prev-file"], palette: "Previous changed file";
+        VcsToggleStage => "version-control-toggle-stage", aliases: ["vc-stage"], palette: "Stage or unstage the selected file, directory or change";
+        VcsDiscard => "version-control-discard", aliases: ["vc-discard"], palette: "Discard the selected file, directory or change";
+        VcsStageAll => "version-control-stage-all", aliases: ["vc-stage-all"], palette: "Stage every change";
+        VcsUnstageAll => "version-control-unstage-all", aliases: ["vc-unstage-all"], palette: "Unstage everything";
+        VcsBranchMenu => "version-control-branch-keys", aliases: ["vc-branch-keys"], palette: "The branch keys: switch, new, rename, delete, merge, rebase";
+        VcsStashMenu => "version-control-stash-keys", aliases: ["vc-stash-keys"], palette: "The stash keys: push, pop, apply, drop";
+        VcsLogMenu => "version-control-log-keys", aliases: ["vc-log-keys"], palette: "The history keys: cherry-pick, revert, reset, tag";
+        VcsSwitch => "version-control-switch", aliases: ["vc-switch", "switch"], palette: "Plan switching to another branch";
+        VcsDeleteBranch => "version-control-delete-branch", aliases: ["vc-delete-branch"], palette: "Plan deleting a branch";
+        VcsMerge => "version-control-merge", aliases: ["vc-merge"], palette: "Plan merging a branch into the current one";
+        VcsRebase => "version-control-rebase", aliases: ["vc-rebase"], palette: "Plan rebasing the current branch onto another";
+        VcsStashPop => "version-control-stash-pop", aliases: ["vc-stash-pop"], palette: "Plan popping a stash";
+        VcsStashApply => "version-control-stash-apply", aliases: ["vc-stash-apply"], palette: "Plan applying a stash, keeping it";
+        VcsStashDrop => "version-control-stash-drop", aliases: ["vc-stash-drop"], palette: "Plan dropping a stash";
+        VcsCherryPick => "version-control-cherry-pick", aliases: ["vc-cherry-pick"], palette: "Plan cherry-picking a commit";
+        VcsRevert => "version-control-revert", aliases: ["vc-revert"], palette: "Plan reverting a commit";
+        VcsResetSoft => "version-control-reset-soft", aliases: ["vc-reset-soft"], palette: "Plan moving HEAD to a commit, keeping the index and files";
+        VcsResetMixed => "version-control-reset-mixed", aliases: ["vc-reset-mixed"], palette: "Plan moving HEAD to a commit and unstaging, keeping files";
+        VcsContinue => "version-control-continue", aliases: ["vc-continue"], palette: "Plan continuing the merge / rebase / pick in progress";
+        VcsAbort => "version-control-abort", aliases: ["vc-abort"], palette: "Plan aborting the merge / rebase / pick in progress";
+        VcsUndoEdit => "version-control-undo-step", aliases: ["vc-undo-step"], palette: "Take back the last planned step";
+        VcsRemoveStep => "version-control-remove-step", aliases: ["vc-remove-step"], palette: "Remove the planned step under the cursor";
+        VcsReset => "version-control-clear-plan", aliases: ["vc-clear-plan"], palette: "Discard the whole plan";
+        VcsApply => "version-control-apply", aliases: ["vc-apply", "apply"], palette: "Apply the plan to the repository";
+        VcsUndo => "version-control-undo", aliases: ["vc-undo"], palette: "Put the repository back the way it was before the last apply";
         VcsGitStatus => "version-control-git-status", aliases: ["vc-git-status", "git-status"], palette: "Show `git status` verbatim in a float";
-        VcsStage => "version-control-stage", aliases: ["vc-stage", "stage"], palette: "Stage every change in the work tree";
-        VcsUnstage => "version-control-unstage", aliases: ["vc-unstage", "unstage"], palette: "Unstage everything";
-        VcsHelp => "version-control-help", aliases: ["vc-help", "vc-keys"], palette: "Every key the version-control graph binds";
-        VcsGuide => "version-control-guide", aliases: ["vc-guide"], palette: "What the graph's gestures mean, with walkthroughs";
-        VcsFetch => "version-control-fetch", aliases: ["vc-fetch", "fetch"], palette: "Fetch from the remote";
-        VcsPull => "version-control-pull", aliases: ["vc-pull", "pull"], palette: "Pull the current branch from its upstream";
-        VcsPush => "version-control-push", aliases: ["vc-push", "push"], palette: "Push the current branch to its upstream";
-        // Named for what it does — decides what is *shown* — rather than
-        // `…-branches`, which sat one letter from `version-control-branch`
-        // (which creates one) in a palette that fuzzy-matches.
-        VcsBranches => "version-control-visible-branches", aliases: ["vc-visible", "vc-hidden"], palette: "Which branches the graph draws";
-        VcsHideBranch => "version-control-hide-branch", aliases: ["vc-hide"], palette: "Take the branch under the cursor out of the graph";
-        VcsFlip => "version-control-flip", aliases: ["vc-flip", "vc-orientation"], palette: "Turn the graph: history across, or down the screen";
-        VcsOutput => "version-control-output", aliases: ["vc-output"], palette: "The last git command's output, as it ran";
+        VcsHelp => "version-control-help", aliases: ["vc-help", "vc-keys"], palette: "Every key the version-control view binds";
 
-        // --- Merge-conflict resolver (see `crate::conflict`) ---
+        // --- Merge conflicts, in the version-control view's diff panel ---
         ConflictOpen => "conflicts", aliases: ["resolve", "merge-conflicts"], palette: "Resolve the merge conflicts, side by side with labels";
-        ConflictClose => "conflict-close", aliases: ["resolve-close"], palette: "Leave the conflict resolver";
-        ConflictRefresh => "conflict-refresh", aliases: ["resolve-refresh"], palette: "Re-read the conflicted files";
         ConflictTakeSide => "conflict-take-side", aliases: ["resolve-take"], palette: "Take (or drop) the focused side of this conflict";
         ConflictTakeLeft => "conflict-take-left", aliases: ["resolve-left"], palette: "Take only the left side of this conflict";
         ConflictTakeRight => "conflict-take-right", aliases: ["resolve-right"], palette: "Take only the right side of this conflict";
@@ -298,13 +296,9 @@ commands! {
         ConflictTakeRightAll => "conflict-take-right-all", aliases: ["resolve-right-all"], palette: "Take the right side of every unanswered conflict in this file";
         ConflictNextHunk => "conflict-next", aliases: ["resolve-next"], palette: "Next unanswered conflict";
         ConflictPrevHunk => "conflict-prev", aliases: ["resolve-prev"], palette: "Previous unanswered conflict";
-        ConflictNextFile => "conflict-next-file", aliases: ["resolve-next-file"], palette: "Next conflicted file";
-        ConflictPrevFile => "conflict-prev-file", aliases: ["resolve-prev-file"], palette: "Previous conflicted file";
         ConflictToggleBase => "conflict-toggle-base", aliases: ["resolve-base"], palette: "Show the common ancestor beside the two versions";
         ConflictEditHunk => "conflict-edit", aliases: ["resolve-edit"], palette: "Edit this conflict's merged text by hand";
-        ConflictWriteFile => "conflict-write", aliases: ["resolve-write"], palette: "Write this file's resolution and stage it";
-        ConflictRevertFile => "conflict-revert", aliases: ["resolve-revert"], palette: "Put this file back the way git left it, markers and all";
-        ConflictDiff => "conflict-diff", aliases: ["resolve-diff"], palette: "This file's two versions against their common ancestor";
+        ConflictWriteFile => "conflict-resolve-file", aliases: ["resolve-file"], palette: "Plan this file's resolution";
         ConflictHelp => "conflict-help", aliases: ["resolve-help"], palette: "Every key the conflict resolver binds";
 
         // --- Toggles / config ---
@@ -334,12 +328,18 @@ commands! {
         Attach(String) => "attach", palette: "Attach a local database file, read-only";
         // Drop one attachment by alias, or all of them when the argument is empty.
         Detach(String) => "detach", palette: "Detach an attached database";
-        // Create a branch at the cursor (`:vc-branch <name>`).
-        VcsNewBranch(String) => "version-control-branch", palette: "Create a branch at the selected commit";
-        // Commit what is staged (`:vc-commit <message>`).
-        VcsCommit(String) => "version-control-commit", palette: "Commit the staged changes";
-        // Set the current branch's upstream (`:vc-upstream origin/main`).
-        VcsSetUpstream(String) => "version-control-upstream", palette: "Set the current branch's upstream";
+        // Plan a branch at HEAD and switch to it (`:vc-branch <name>`).
+        VcsNewBranch(String) => "version-control-branch", palette: "Plan a new branch here, and switch to it";
+        // Plan committing what is staged (`:vc-commit <message>`).
+        VcsCommit(String) => "version-control-commit", palette: "Plan committing the staged changes";
+        // Plan amending the last commit (`:vc-amend <message>`).
+        VcsAmend(String) => "version-control-amend", palette: "Plan amending the last commit";
+        // Plan renaming the current branch (`:vc-rename <name>`).
+        VcsRenameBranch(String) => "version-control-rename-branch", palette: "Plan renaming the current branch";
+        // Plan stashing the changes (`:vc-stash [message]`).
+        VcsStashPush(String) => "version-control-stash", palette: "Plan stashing the changes";
+        // Plan a tag (`:vc-tag <name>` tags HEAD; bare picks a commit).
+        VcsTag(String) => "version-control-tag", palette: "Plan tagging a commit";
         // Change any config value for the session (`:set editor.tab_width 2`).
         Set(String) => "set", palette: "Change a setting for this session";
         // Flip an on/off config value for the session (`:toggle word_wrap`).
@@ -407,22 +407,26 @@ impl Command {
                 None => Some(Command::KernelVariables),
             },
             "detach" => Some(Command::Detach(arg.unwrap_or("").trim().to_string())),
-            // A branch needs a name, a commit needs a message and an upstream
-            // needs a target.  They still *parse* bare, because refusing to
-            // meant `:vc-commit` — and every palette entry for them, since the
-            // palette can only ever invoke a command bare — answered "Unknown
-            // command", which says the command does not exist rather than that
-            // it wants an argument.  The empty string reaches `exec::vcs`,
-            // which asks for the missing half in the minibuffer, exactly as
-            // bare `:attach` does.
+            // These want an argument but still parse bare: the palette can
+            // only invoke a command bare, and `exec::vcs` asks for the missing
+            // half (or opens the commit-message buffer) when it is empty.
             "version-control-branch" | "vc-branch" | "branch" => {
                 Some(Command::VcsNewBranch(arg.unwrap_or("").trim().to_string()))
             }
             "version-control-commit" | "vc-commit" | "commit" => {
                 Some(Command::VcsCommit(arg.unwrap_or("").trim().to_string()))
             }
-            "version-control-upstream" | "vc-upstream" | "upstream" => {
-                Some(Command::VcsSetUpstream(arg.unwrap_or("").trim().to_string()))
+            "version-control-amend" | "vc-amend" | "amend" => {
+                Some(Command::VcsAmend(arg.unwrap_or("").trim().to_string()))
+            }
+            "version-control-rename-branch" | "vc-rename" => {
+                Some(Command::VcsRenameBranch(arg.unwrap_or("").trim().to_string()))
+            }
+            "version-control-stash" | "vc-stash" | "stash" => {
+                Some(Command::VcsStashPush(arg.unwrap_or("").trim().to_string()))
+            }
+            "version-control-tag" | "vc-tag" | "tag" => {
+                Some(Command::VcsTag(arg.unwrap_or("").trim().to_string()))
             }
             "goto-line" => {
                 let n = arg.unwrap_or("").trim().parse::<usize>().ok()?;
@@ -458,7 +462,10 @@ mod tests {
             "view",
             "version-control-branch",
             "version-control-commit",
-            "version-control-upstream",
+            "version-control-amend",
+            "version-control-rename-branch",
+            "version-control-stash",
+            "version-control-tag",
         ];
         for (name, _desc) in Command::palette_entries() {
             if ARG_COMMANDS.contains(&name) {
@@ -475,7 +482,7 @@ mod tests {
         for name in ["version-control", "vc", "git"] {
             assert!(
                 matches!(Command::parse(name), Some(Command::VcsOpen)),
-                "{name} should open the graph"
+                "{name} should open the view"
             );
         }
     }

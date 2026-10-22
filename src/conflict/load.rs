@@ -1,64 +1,41 @@
-//! Reading the conflicted index, and working out who each side is.
+//! Building the resolver's view of a repository's conflicts, and working out
+//! who each side is.
 //!
-//! Split the way [`crate::vcs::load`] is: every parser is a pure function of
-//! git's output, and only [`read`] spawns anything.  That split is not
-//! tidiness — the interesting cases here (a rebase stopped halfway, an add/add
-//! conflict with no base, a modify/delete) are impossible to build as fixtures
-//! any other way, and they are exactly the cases a resolver has to get right.
+//! The conflicts come from a [`Repo`] — the real one, or a projection that
+//! stopped at a planned merge — so a conflict the plan will cause is resolved
+//! with the same view as one git already left behind.
 
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::path::Path;
 
 use super::{hunk, Choice, ConflictFile, ConflictSet, Operation, SideLabel};
-use crate::vcs::load::git;
+use crate::vcs::{load::git, store::Store, Blob, Entry, Index, Oid, Repo};
 
-/// An in-flight read, polled once per frame by the run loop.
-pub struct ConflictLoad {
-    rx: Receiver<Result<ConflictSet, String>>,
-}
-
-impl ConflictLoad {
-    pub fn poll(&self) -> Option<Result<ConflictSet, String>> {
-        self.rx.try_recv().ok()
-    }
-}
-
-/// Start reading `root`'s conflicts on a background thread.
-///
-/// Off the UI thread for the same reason the graph's load is: one
-/// `git merge-file` runs per conflicted file, and a merge that went badly can
-/// leave dozens.
-pub fn start(root: PathBuf) -> ConflictLoad {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(read(&root));
-    });
-    ConflictLoad { rx }
-}
-
-/// Blocking read of the whole snapshot.  Loader thread only.
-pub fn read(root: &Path) -> Result<ConflictSet, String> {
-    let operation = detect_operation(root);
-    let (left, right) = resolve_labels(root, operation);
-
-    let listing = git(root, &["ls-files", "-u", "-z"]).unwrap_or_default();
+/// Every conflicted file in `repo`, with its regions and the side labels.
+pub fn build(store: &Store, repo: &Repo) -> ConflictSet {
+    let operation = repo.operation.as_ref().map_or(Operation::Unknown, |o| o.kind);
+    let (left, right) = labels(store, repo);
     let mut files = Vec::new();
-    for path in parse_unmerged(&listing) {
+    for (path, state) in &repo.files {
+        let Index::Conflict(c) = &state.index else { continue };
+        let text = |e: &Option<Entry>| store.text(e.as_ref());
+        let oid = |e: &Option<Entry>| match e {
+            Some(Entry { blob: Blob::Object(oid), .. }) => Some(oid.clone()),
+            _ => None,
+        };
         let mut file = ConflictFile {
-            base: stage(root, 1, &path),
-            left: stage(root, 2, &path),
-            right: stage(root, 3, &path),
-            path,
+            path: path.clone(),
+            base: text(&c.base),
+            left: text(&c.left),
+            right: text(&c.right),
             regions: Vec::new(),
             choices: Vec::new(),
             history: Vec::new(),
-            resolved: false,
         };
-        // A file whose three-way diff cannot be computed is reported as a
-        // single whole-file conflict rather than dropped: a conflicted path
-        // the resolver silently omits is one the user cannot finish the merge
-        // without, and will not know why.
-        if hunk::fill(root, &mut file).is_err() {
+        let stages = (oid(&c.base), oid(&c.left), oid(&c.right));
+        // A file whose three-way diff cannot be computed is one whole-file
+        // conflict rather than dropped: a conflicted path the resolver omits
+        // is one the operation cannot finish without.
+        if hunk::fill(store.root(), &mut file, stages).is_err() {
             file.regions = vec![hunk::Region::Conflict(hunk::Versions {
                 base: file.base.clone().unwrap_or_default(),
                 left: file.left.clone().unwrap_or_default(),
@@ -68,53 +45,16 @@ pub fn read(root: &Path) -> Result<ConflictSet, String> {
         }
         files.push(file);
     }
-
-    Ok(ConflictSet { root: root.to_path_buf(), operation, left, right, files })
+    ConflictSet { operation, left, right, files }
 }
 
-/// One version of a conflicted path, or `None` when that stage is absent.
+/// What git is in the middle of, from the state files in `git_dir`.
 ///
-/// Absent is a real state, not a failure: an add/add conflict has no base and
-/// a modify/delete has no stage on the side that deleted it.
-fn stage(root: &Path, n: u8, path: &str) -> Option<String> {
-    let spec = format!(":{n}:{path}");
-    git(root, &["cat-file", "blob", &spec]).ok()
-}
-
-/// The conflicted paths named by `git ls-files -u -z`.
-///
-/// The listing repeats a path once per stage it has, so the parse is a
-/// de-duplication as much as a split.  NUL-separated because a path may
-/// contain anything, including a newline.
-pub fn parse_unmerged(listing: &str) -> Vec<String> {
-    let mut paths: Vec<String> = Vec::new();
-    for record in listing.split('\0').filter(|r| !r.is_empty()) {
-        // `<mode> <oid> <stage>\t<path>` — the path is everything after the
-        // first tab, so a tab inside it survives.
-        let Some((_, path)) = record.split_once('\t') else { continue };
-        if !paths.iter().any(|p| p == path) {
-            paths.push(path.to_string());
-        }
-    }
-    paths
-}
-
-/// What git is in the middle of.
-///
-/// Read from the state files rather than inferred, because the *only* thing
-/// that distinguishes a merge from a replay is which of these exists — and
-/// that is what decides whether stage 2 is your work or somebody else's.
-pub fn detect_operation(root: &Path) -> Operation {
-    let git_dir = root.join(".git");
-    // Rebase first: a rebase in progress also writes CHERRY_PICK_HEAD in some
-    // git versions, and the rebase is the more specific answer.
-    for (dir, op) in [
-        ("rebase-merge", Operation::Rebase),
-        ("rebase-apply", Operation::Rebase),
-    ] {
-        if git_dir.join(dir).is_dir() {
-            return op;
-        }
+/// Rebase first: some git versions also write `CHERRY_PICK_HEAD` during a
+/// rebase, and the rebase is the more specific answer.
+pub fn detect_operation(git_dir: &Path) -> Operation {
+    if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
+        return Operation::Rebase;
     }
     for (file, op) in [
         ("MERGE_HEAD", Operation::Merge),
@@ -128,87 +68,68 @@ pub fn detect_operation(root: &Path) -> Operation {
     Operation::Unknown
 }
 
-/// What each side *is*, in words and in commits.
-///
-/// The whole point of the view, and the one place the ours/theirs inversion is
-/// turned into language.  During a replay the wording says outright that the
-/// left pane is the branch being landed on and the right is the user's own
-/// commit, because "ours" and "theirs" are the two words that cause the
-/// confusion this is here to remove.
-fn resolve_labels(root: &Path, operation: Operation) -> (SideLabel, SideLabel) {
-    let head_branch = git(root, &["symbolic-ref", "--short", "-q", "HEAD"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let (left_rev, right_rev, left_role, right_role) = match operation {
+/// What each side *is*, in words and in commits — the one place the
+/// ours/theirs inversion becomes language.  Never "ours" or "theirs".
+fn labels(store: &Store, repo: &Repo) -> (SideLabel, SideLabel) {
+    let head = repo.head.commit.as_ref();
+    let Some(op) = repo.operation.as_ref() else {
+        return (
+            describe(store, repo, head, "Index stage 2".to_string()),
+            SideLabel { role: "Index stage 3".to_string(), ..SideLabel::default() },
+        );
+    };
+    let here = repo.head.branch.clone().or_else(|| op.branch.clone());
+    let incoming = op.commit.as_ref();
+    let (left, right) = match op.kind {
         Operation::Merge => (
-            "HEAD".to_string(),
-            "MERGE_HEAD".to_string(),
-            match &head_branch {
+            match &here {
                 Some(b) => format!("On {b} — your branch"),
                 None => "Where you are — your work".to_string(),
             },
-            match merged_name(root) {
-                Some(name) => format!("Merging in {name}"),
-                None => "Coming in".to_string(),
+            match op.label.as_str() {
+                "" => "Coming in".to_string(),
+                name => format!("Merging in {name}"),
             },
         ),
         Operation::Rebase => (
-            rebase_onto(root).unwrap_or_else(|| "HEAD".to_string()),
-            "REBASE_HEAD".to_string(),
-            match rebase_onto_name(root) {
-                Some(name) => format!("On {name} — landing here"),
+            match &op.onto {
+                Some(onto) => format!("On {onto} — landing here"),
                 None => "The branch you are landing on".to_string(),
             },
-            match rebase_branch(root) {
+            match &op.branch {
                 Some(b) => format!("Your commit from {b}, being replayed"),
                 None => "Your commit, being replayed".to_string(),
             },
         ),
         Operation::CherryPick => (
-            "HEAD".to_string(),
-            "CHERRY_PICK_HEAD".to_string(),
-            match &head_branch {
+            match &here {
                 Some(b) => format!("On {b} — landing here"),
                 None => "Where you are — landing here".to_string(),
             },
             "The commit being replayed".to_string(),
         ),
         Operation::Revert => (
-            "HEAD".to_string(),
-            "REVERT_HEAD".to_string(),
-            match &head_branch {
+            match &here {
                 Some(b) => format!("On {b} — your branch"),
                 None => "Where you are".to_string(),
             },
             "The commit being undone".to_string(),
         ),
-        Operation::Unknown => (
-            "HEAD".to_string(),
-            String::new(),
-            "Index stage 2".to_string(),
-            "Index stage 3".to_string(),
-        ),
+        Operation::Unknown => ("Index stage 2".to_string(), "Index stage 3".to_string()),
     };
-
-    (
-        describe(root, &left_rev, left_role),
-        describe(root, &right_rev, right_role),
-    )
+    (describe(store, repo, head, left), describe(store, repo, incoming, right))
 }
 
-/// Fill in a side's commit facts, keeping the role wording whatever happens.
-///
-/// A rev that does not resolve still gets its label: "On main — your branch"
-/// with no hash beside it is a usable header, and a pane with no header at all
-/// is the state this view exists to replace.
-fn describe(root: &Path, rev: &str, role: String) -> SideLabel {
+/// A side's commit facts, keeping the role wording whatever happens.
+fn describe(store: &Store, repo: &Repo, commit: Option<&Oid>, role: String) -> SideLabel {
     let mut label = SideLabel { role, ..SideLabel::default() };
-    if rev.is_empty() {
+    let Some(oid) = commit else { return label };
+    if let Some(p) = oid.pending_index().and_then(|i| repo.pending.get(i)) {
+        label.commit = "planned".to_string();
+        label.summary = p.summary().to_string();
         return label;
     }
-    let Ok(out) = git(root, &["log", "-1", "--format=%h\x1f%an\x1f%ct\x1f%s", rev]) else {
+    let Ok(out) = git(store.root(), &["log", "-1", "--format=%h\x1f%an\x1f%ct\x1f%s", oid.as_str()]) else {
         return label;
     };
     let mut parts = out.trim_end_matches('\n').split('\x1f');
@@ -217,17 +138,6 @@ fn describe(root: &Path, rev: &str, role: String) -> SideLabel {
     label.when = parts.next().unwrap_or_default().parse().unwrap_or(0);
     label.summary = parts.next().unwrap_or_default().to_string();
     label
-}
-
-/// The name of what is being merged in, from `.git/MERGE_MSG`'s first line.
-///
-/// git writes "Merge branch 'feature'" there, which is the only place the
-/// *name* survives — `MERGE_HEAD` is an oid, and a branch tip is not enough to
-/// recover it from unambiguously.
-fn merged_name(root: &Path) -> Option<String> {
-    let msg = std::fs::read_to_string(root.join(".git").join("MERGE_MSG")).ok()?;
-    let first = msg.lines().next()?;
-    parse_merge_msg(first)
 }
 
 /// Pull the branch name out of git's own merge message.
@@ -243,82 +153,16 @@ pub fn parse_merge_msg(line: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-fn rebase_state(root: &Path, file: &str) -> Option<String> {
-    for dir in ["rebase-merge", "rebase-apply"] {
-        let path = root.join(".git").join(dir).join(file);
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let value = text.trim().to_string();
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
-
-/// The commit the rebase is replaying onto — which is what stage 2 holds.
-fn rebase_onto(root: &Path) -> Option<String> {
-    rebase_state(root, "onto")
-}
-
-/// A name for that commit, if a ref points at it.
-fn rebase_onto_name(root: &Path) -> Option<String> {
-    let onto = rebase_onto(root)?;
-    let named = git(root, &["name-rev", "--name-only", "--refs=refs/heads/*", &onto]).ok()?;
-    let named = named.trim();
-    (!named.is_empty() && named != "undefined").then(|| named.to_string())
-}
-
-/// The branch being rebased — `refs/heads/feature` in the state file.
-fn rebase_branch(root: &Path) -> Option<String> {
-    let name = rebase_state(root, "head-name")?;
-    Some(name.trim_start_matches("refs/heads/").to_string())
+/// The conflicts in a real repository, as the view would build them.
+#[cfg(test)]
+pub fn read(root: &Path) -> Result<ConflictSet, String> {
+    let repo = crate::vcs::load::read(root)?;
+    Ok(build(&Store::new(root.to_path_buf()), &repo))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The listing names a path once per stage it has; the resolver wants each
-    /// path once.
-    #[test]
-    fn a_path_with_three_stages_is_listed_once() {
-        let listing = "100644 aaa 1\tf.txt\u{0}100644 bbb 2\tf.txt\u{0}100644 ccc 3\tf.txt\u{0}";
-        assert_eq!(parse_unmerged(listing), vec!["f.txt".to_string()]);
-    }
-
-    /// An add/add conflict has no stage 1 at all.  Two stages is still one
-    /// conflicted file, not a malformed listing.
-    #[test]
-    fn a_path_with_no_base_stage_is_still_one_file() {
-        let listing = "100644 bbb 2\tnew.txt\u{0}100644 ccc 3\tnew.txt\u{0}";
-        assert_eq!(parse_unmerged(listing), vec!["new.txt".to_string()]);
-    }
-
-    /// NUL-separated precisely so a path containing a newline — or a tab —
-    /// survives the parse whole.
-    #[test]
-    fn a_path_containing_a_newline_or_a_tab_survives() {
-        let listing = "100644 aaa 1\tawkward\nname\u{0}100644 bbb 2\ttabbed\tname\u{0}";
-        assert_eq!(
-            parse_unmerged(listing),
-            vec!["awkward\nname".to_string(), "tabbed\tname".to_string()]
-        );
-    }
-
-    #[test]
-    fn an_empty_listing_is_no_conflicts_rather_than_an_error() {
-        assert!(parse_unmerged("").is_empty());
-    }
-
-    // ---------------------------------------------------------------------
-    // Against a real repository
-    // ---------------------------------------------------------------------
-    //
-    // This layer's whole job is reading git's state, and a mock would test the
-    // mock.  The cases below — a rebase stopped halfway, an add/add conflict
-    // with no base — are also impossible to build as fixtures any other way,
-    // which is the reason the parsers above are separated out from the reads.
 
     use super::super::testrepo::{diverged, Repo};
 
@@ -408,8 +252,7 @@ mod tests {
         let file = set.files.iter().find(|f| f.path == "new.txt").expect("new.txt");
         assert_eq!(file.base, None, "there is no common ancestor");
         // The three-way diff itself ran, rather than the whole-file fallback.
-        assert!(super::hunk::regions_for(&repo.root, file).is_ok());
-        assert_eq!(file.conflict_count(), 1);
+                assert_eq!(file.conflict_count(), 1);
         assert!(file.left.is_some() && file.right.is_some());
     }
 
@@ -443,7 +286,7 @@ mod tests {
         let Some(repo) = Repo::new() else { return };
         repo.commit("f.txt", "fine\n", "fine");
         let set = read(&repo.root).expect("the read");
-        assert!(set.is_empty());
+        assert!(set.files.is_empty());
         assert_eq!(set.operation, Operation::Unknown);
     }
 

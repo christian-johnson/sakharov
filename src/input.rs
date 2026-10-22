@@ -43,15 +43,15 @@ pub(crate) fn keymap_layer(app: &App) -> crate::keymap::Layer {
     match app.view() {
         View::Notebook => Layer::Notebook,
         View::Table => Layer::Table,
+        View::Vcs if exec::vcs::in_conflict_panel(app) => Layer::Conflict,
         View::Vcs => Layer::Vcs,
-        View::Conflict => Layer::Conflict,
         // A hand-edited conflict section really is an ordinary text buffer —
         // that is the point of the escape hatch — so only `q` is overridden,
         // to take the edited text back to the resolver.
         View::Text if app.in_conflict_edit_buffer() => Layer::ConflictEdit,
         View::Text if app.in_cell_buffer() => Layer::Cell,
         View::Text if app.in_sql_buffer() => Layer::Sql,
-        View::Text if app.in_commit_buffer() || app.in_git_output_buffer() => Layer::Commit,
+        View::Text if app.in_commit_buffer() => Layer::Commit,
         View::Text => Layer::Normal,
     }
 }
@@ -136,12 +136,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 // Theme picker: live-preview whatever the selection landed on
                 // (j/k navigation, filter edits resetting the selection, …).
                 exec::preview_selected_theme(app);
-                // Staging view: run the stage/unstage the key asked for and
-                // re-read the diff pane.  Key handling has no `App` to reach
-                // git through, so this is where it happens.
-                exec::vcs::pump_stage_popup(app);
-                // Branch picker: apply the show/hide the key asked for.
-                exec::vcs::pump_branch_popup(app);
                 return;
             }
         }
@@ -234,6 +228,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Search { forward } => handle_search(app, key, forward),
         Mode::Jump { .. } => handle_jump(app, key),
         Mode::Fold => handle_fold(app, key),
+        Mode::Prefix(prefix) => {
+            app.mode = Mode::Normal;
+            run_prefixed(app, prefix, key);
+        }
         Mode::Match { scope, from_select } => handle_match(app, key, scope, from_select),
         Mode::Prompt { kind } => handle_prompt(app, key, kind),
     }
@@ -302,14 +300,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
         }
         Mode::Insert => begin_insert_edit(app),
         // Outside Insert a paste behaves like `P`: the text lands at the
-        // cursor, replacing the selection when there is one.  Except in a
-        // read-only transcript, which cannot be entered in Insert mode at all
-        // — this is the one edit path that does not go through a command.
-        _ if app.in_git_output_buffer() => {
-            app.messages
-                .show("This is git's output, read-only (q goes back to the graph)");
-            return;
-        }
+        // cursor, replacing the selection when there is one.
         _ => {
             app.buffer.begin_edit_session();
             let (start, end) = (app.selection.start(), app.selection.end());
@@ -572,7 +563,7 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
             // Empty input cancels quietly rather than erroring — except for the
             // groupby, where "no aggregates" is the answer most of the time and
             // Enter on an empty prompt is how you give it.
-            if name.is_empty() && kind != PromptKind::TableGroupBy {
+            if name.is_empty() && !matches!(kind, PromptKind::TableGroupBy | PromptKind::VcsStash) {
                 return;
             }
             app.show_splash = false;
@@ -582,9 +573,10 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
                 PromptKind::TableFilter => exec::table_filter(app, &name),
                 PromptKind::TableGroupBy => exec::table_group_by(app, &name),
                 PromptKind::Attach => exec::attach_database(app, &name),
-                PromptKind::VcsCommit => exec::vcs::commit(app, &name),
-                PromptKind::VcsBranch => exec::vcs::new_branch(app, &name),
-                PromptKind::VcsUpstream => exec::vcs::set_upstream(app, &name),
+                PromptKind::VcsBranch
+                | PromptKind::VcsRenameBranch
+                | PromptKind::VcsStash
+                | PromptKind::VcsTag => exec::vcs::prompted(app, kind, &name),
             }
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -915,12 +907,9 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
         }
         PopupTarget::ApplyVcsPlan => match payload.as_text() {
             "apply" => exec::vcs::apply_confirmed(app),
-            // The first of two confirmations, when the plan rewrites commits
-            // a remote already carries.  Agreeing here only opens the
-            // ordinary command list; nothing has been written yet.
-            "published" => exec::vcs::confirm_apply_published(app),
             _ => app.messages.show("Nothing applied"),
         },
+        PopupTarget::VcsPick => exec::vcs::picked(app, payload.as_text()),
         PopupTarget::ViewVariable => {
             exec::execute(app, &Command::ViewVariable(payload.as_text().to_string()));
         }
@@ -929,13 +918,6 @@ fn handle_popup_confirm(app: &mut App, target: PopupTarget, payload: ConfirmPayl
         }
         PopupTarget::Navigate => {
             if let ConfirmPayload::Navigate { path, line, col } = payload {
-                // A conflicted file picked out of the staging view opens in the
-                // resolver, not as raw text with markers in it — that text is
-                // what the resolver exists to replace, and the staging view is
-                // where it is most likely to be reached from.
-                if exec::conflict::open_if_conflicted(app, &path) {
-                    return;
-                }
                 if exec::is_special_path(&path)
                     || crate::lang::is_notebook(&path)
                     || (app.config.table.auto_open && exec::is_table_path(&path))

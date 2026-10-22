@@ -1,5 +1,13 @@
 # Merge-conflict resolver — implementation plan
 
+> **Superseded in part** by `docs/version-control-plan.md`: the resolver is no
+> longer a view of its own but the version-control view's diff panel whenever
+> the selected file is conflicted, and it never writes — `Enter` adds a
+> `Resolve` step to the plan, and `:vc-apply` writes it.  `conflict/write.rs`,
+> `d` (diff), `:conflict-revert` and `]`/`[` (now the view's next/previous
+> file) are gone.  The model below — index stages, our own `merge-file
+> --diff3`, sides as switches, labels from the operation — is unchanged.
+
 A view for the one thing git is worst at explaining.
 
 **Status: built.** This is the design record; CLAUDE.md ("Phase V2") describes

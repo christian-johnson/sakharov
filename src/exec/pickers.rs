@@ -43,65 +43,6 @@ pub(super) fn grep_buffer(app: &mut App) {
     ));
 }
 
-/// Project-wide grep (ripgrep when available, otherwise `grep -rn`).
-pub(super) fn grep_project(app: &mut App) {
-    let root = app
-        .buffer
-        .path
-        .as_deref()
-        .and_then(|p| p.parent())
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let output = if rg_is_available() {
-        std::process::Command::new("rg")
-            .args(["--line-number", "--no-heading", "--color=never", "--with-filename", "."])
-            .current_dir(&root)
-            .output()
-    } else {
-        std::process::Command::new("grep")
-            .args(["-rn", "-I", "."])
-            .arg(".")
-            .current_dir(&root)
-            .output()
-    };
-
-    let items: Vec<crate::popup::ListItem> = match output {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.lines()
-                .filter_map(|line| {
-                    // format: file:lineno:content
-                    let mut parts = line.splitn(3, ':');
-                    let file = parts.next()?;
-                    let lineno_str = parts.next()?;
-                    let content = parts.next().unwrap_or("").trim_end_matches(&['\r', '\n'][..]);
-                    let lineno: usize = lineno_str.parse().ok()?;
-                    let path = root.join(file);
-                    Some(crate::popup::ListItem::navigate(
-                        content.to_owned(),
-                        format!("{}:{}", file, lineno),
-                        &path,
-                        lineno.saturating_sub(1),
-                        0,
-                    ))
-                })
-                .collect()
-        }
-        Err(_) => {
-            app.messages.show("grep not available");
-            return;
-        }
-    };
-
-    app.popup = Some(crate::popup::Popup::grep(
-        "grep project",
-        items,
-        app.search.query.clone(),
-    ));
-}
-
 /// Fuzzy picker over the open-buffers list (pre-selects the current buffer).
 pub(super) fn buffer_picker(app: &mut App) {
     let current = app.buffer.path.clone();
@@ -246,17 +187,6 @@ pub(super) fn file_picker(app: &mut App) {
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
-
-fn rg_is_available() -> bool {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::process::Command::new("rg")
-            .arg("--version")
-            .output()
-            .is_ok()
-    })
-}
 
 /// Open a fuzzy-filterable file list popup from the project root.
 fn open_file_picker_popup(app: &mut App) {

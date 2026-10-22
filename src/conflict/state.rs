@@ -101,23 +101,6 @@ impl ConflictState {
         }
     }
 
-    /// Switch to another conflicted file.  Returns false when there is none
-    /// that way, so the view can say so rather than appearing to ignore the
-    /// key.
-    pub fn step_file(&mut self, forward: bool) -> bool {
-        let n = self.set.files.len();
-        if n <= 1 {
-            return false;
-        }
-        self.file = match forward {
-            true => (self.file + 1) % n,
-            false => (self.file + n - 1) % n,
-        };
-        self.nth = self.first_undecided().unwrap_or(0);
-        self.scroll = 0;
-        self.side = Side::Left;
-        true
-    }
 
     /// Follow the cursor: the focused region has to be on screen.
     ///
@@ -134,7 +117,6 @@ impl ConflictState {
 mod tests {
     use super::super::{hunk::{Region, Versions}, Operation, SideLabel};
     use super::*;
-    use std::path::PathBuf;
 
     fn state(decided: &[bool]) -> ConflictState {
         let regions: Vec<Region> = decided
@@ -162,10 +144,8 @@ mod tests {
             regions,
             choices,
             history: Vec::new(),
-            resolved: false,
         };
         ConflictState::new(ConflictSet {
-            root: PathBuf::from("/tmp"),
             operation: Operation::Merge,
             left: SideLabel::default(),
             right: SideLabel::default(),
@@ -196,8 +176,7 @@ mod tests {
     }
 
     /// With everything answered there is nowhere to step, and the view has to
-    /// be told so it can say the file is finished rather than appear wedged —
-    /// the same failure the graph's motion refusal was fixing.
+    /// be told so it can say the file is finished rather than appear wedged.
     #[test]
     fn stepping_in_a_finished_file_reports_that_it_moved_nowhere() {
         let mut s = state(&[true, true]);
@@ -205,11 +184,4 @@ mod tests {
         assert!(!s.step(false));
     }
 
-    /// A single conflicted file has nowhere to page to, and must say so
-    /// rather than silently reopening itself.
-    #[test]
-    fn there_is_no_next_file_when_there_is_only_one() {
-        let mut s = state(&[false]);
-        assert!(!s.step_file(true));
-    }
 }

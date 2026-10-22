@@ -223,7 +223,6 @@ mod tests {
             regions,
             choices: vec![Choice::default(); conflicts],
             history: Vec::new(),
-            resolved: false,
         }
     }
 

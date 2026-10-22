@@ -292,27 +292,17 @@ pub const MESSAGES_BUFFER: &str = "*Messages*";
 
 /// The SQL query buffer.  A `*…*` name, so nothing tries to save it.
 pub const SQL_BUFFER: &str = "*sql*";
-/// The version-control graph's virtual identity.  It has no file behind it —
+/// The version-control view's virtual identity.  It has no file behind it —
 /// the repository is not a document — so it lives in the buffer list under a
 /// name, like the scratch buffer.
 pub const VCS_BUFFER: &str = "*git*";
-
-/// Where a streaming git command's output is read (see `crate::vcs::run`).
-/// One name rather than a family: there is one such command at a time, and
-/// what you want when a hook fails is *the* output, not a list of them.
-pub const GIT_OUTPUT_BUFFER: &str = "*git output*";
 
 /// Name prefix of the `*cell …*` buffers — a grid cell's full text opened for
 /// reading (`*cell 3:price*`).  A family rather than one name, so it is matched
 /// by prefix through `SourceId::is_virtual_kind`.
 pub const CELL_BUFFER_PREFIX: &str = "*cell ";
-/// Prefix of the buffer a commit's diff is read in (`*commit 7e5120c*`).
+/// Prefix of the buffers a commit message is written in (`*commit message*`).
 pub const COMMIT_BUFFER_PREFIX: &str = "*commit ";
-
-/// The merge-conflict resolver's virtual identity.  Like the graph's, it has
-/// no file behind it: the resolver is a view onto git's index, and the
-/// conflicted files it writes are opened by git, not by the editor.
-pub const CONFLICT_BUFFER: &str = "*conflicts*";
 /// Prefix of the buffer one conflicted section is hand-edited in
 /// (`*conflict 2 src/app.rs*`).  What is in it on the way out becomes that
 /// section's resolution.
@@ -481,18 +471,16 @@ impl Messages {
 pub struct Jobs {
     /// A table load.
     pub table: Option<crate::exec::table::TableLoad>,
-    /// A read of the repository for the graph.
+    /// A read of the repository for the version-control view.
     pub vcs_load: Option<crate::vcs::load::RepoLoad>,
-    /// A git invocation (a fetch, a push, a replay).
+    /// A plan being applied.
     pub vcs: Option<crate::exec::vcs::VcsJob>,
-    /// A git command whose output is being streamed into `*git output*`.
-    pub vcs_output: Option<crate::exec::vcs::OutputJob>,
-    /// A read of the conflicted index.
-    pub conflict_load: Option<crate::conflict::load::ConflictLoad>,
     /// The branch name and gutter diff marks.
     pub git: Option<crate::git::GitRefresh>,
     /// An export.
     pub export: Option<crate::exec::ExportJob>,
+    /// The live project grep, while its popup is open.
+    pub grep: Option<crate::exec::grep::LiveGrep>,
 }
 
 /// Context captured when the `*sql*` query buffer is opened: switching into it
@@ -574,31 +562,13 @@ pub struct App {
     /// (`:csv`).  Mutually exclusive with `notebook`; while it is set
     /// `buffer` is a detached empty buffer, so nothing can write the data file.
     pub table: Option<crate::exec::table::Session>,
-    /// The open version-control graph, when that view owns the screen.
+    /// The open version-control view, when it owns the screen.
     pub vcs: Option<crate::vcs::state::VcsState>,
-    /// How the commit graph is drawn — which way round, and which branches are
-    /// in it — for this **session**.
-    ///
-    /// Kept here rather than only in the open `VcsState` because the state does
-    /// not survive `q`: closing the view discards its stash, so a preference
-    /// living only there was forgotten the moment you looked at a file and came
-    /// back.  Starts from `[vcs] orientation` and is moved by `:vc-flip` and
-    /// the branch picker, which say which config key makes them permanent.
-    pub vcs_options: crate::vcs::layout::Options,
-    /// The open merge-conflict resolver, when that view owns the screen.
-    pub conflict: Option<crate::conflict::state::ConflictState>,
-    /// A conflicted file the resolver should land on once its read finishes.
-    ///
-    /// Needed because the read is asynchronous: picking a file out of the
-    /// staging view knows *which* file a frame before there is a snapshot to
-    /// find it in, and dropping that would land the user on whichever file
-    /// happened to be first.
-    pub conflict_want: Option<String>,
-    /// While a `*conflict …*` buffer is open, which `(file, hunk)` the text in
-    /// it is the answer to.  Kept on `App` rather than in the buffer's name
-    /// because the resolver is torn down while the edit buffer is on screen,
-    /// and a `(usize, usize)` parsed back out of a display string is a parser
-    /// nobody should have to write.
+    /// Land on the first conflicted file once the repository has been read
+    /// (`:conflicts`, or an apply that stopped on a conflict).
+    pub vcs_want_conflict: bool,
+    /// While a `*conflict …*` buffer is open, which `(file, section)` of the
+    /// resolver the text in it answers.
     pub conflict_edit: Option<(usize, usize)>,
     /// Local database files attached read-only (`:attach`), replayed onto every
     /// connection the editor opens.  Paths and names only: a remote or
@@ -704,11 +674,9 @@ impl App {
         );
         debug_assert!(
             !(self.vcs.is_some() && (self.table.is_some() || self.notebook.is_some())),
-            "the version-control graph must never share the screen with another view"
+            "the version-control view must never share the screen with another view"
         );
-        if self.conflict.is_some() || self.jobs.conflict_load.is_some() {
-            View::Conflict
-        } else if self.vcs.is_some() || self.jobs.vcs_load.is_some() {
+        if self.vcs.is_some() || self.jobs.vcs_load.is_some() {
             View::Vcs
         } else if self.table.is_some() {
             View::Table
@@ -730,10 +698,9 @@ impl App {
     pub fn current_source_id(&self) -> Option<crate::source::SourceId> {
         use crate::source::SourceId;
         match self.view() {
-            // The graph has no file behind it, so it is known by its name —
+            // The view has no file behind it, so it is known by its name —
             // which is what keeps it in the buffer list and reachable by H/L.
             View::Vcs => Some(SourceId::virtual_named(VCS_BUFFER)),
-            View::Conflict => Some(SourceId::virtual_named(CONFLICT_BUFFER)),
             View::Table => self.table.as_ref().map(|s| s.id.clone()),
             View::Notebook => self.notebook.as_ref().map(|(nb, _)| SourceId::of(&nb.path)),
             View::Text => self.buffer.path.as_deref().map(SourceId::of),
@@ -767,9 +734,8 @@ impl App {
                 .is_some_and(|id| id.is_virtual_kind(CELL_BUFFER_PREFIX))
     }
 
-    /// True while a `*commit …*` buffer — one commit's diff, opened for
-    /// reading from the graph — is the current buffer.  The view is
-    /// [`View::Text`]; this only selects the `q`-goes-back keymap override.
+    /// True while a commit message is being written.  The view is
+    /// [`View::Text`]; this only selects the `q`-plans-it keymap override.
     pub fn in_commit_buffer(&self) -> bool {
         self.current_source_id()
             .is_some_and(|id| id.is_virtual_kind(COMMIT_BUFFER_PREFIX))
@@ -783,15 +749,6 @@ impl App {
     pub fn in_conflict_edit_buffer(&self) -> bool {
         self.current_source_id()
             .is_some_and(|id| id.is_virtual_kind(CONFLICT_EDIT_PREFIX))
-    }
-
-    /// True while the `*git output*` buffer — a streaming git command's
-    /// output, opened from the graph — is the current buffer.  Like
-    /// [`App::in_commit_buffer`] the view is [`View::Text`]; this selects the
-    /// `q`-goes-back keymap override, and marks the buffer read-only (it is a
-    /// transcript of something that happened, not a document).
-    pub fn in_git_output_buffer(&self) -> bool {
-        self.current_source_id() == Some(crate::source::SourceId::virtual_named(GIT_OUTPUT_BUFFER))
     }
 
     /// True while the `*sql*` query buffer is the active buffer.
@@ -875,10 +832,8 @@ impl App {
             table_cell_origin: None,
             nb_highlight: crate::notebook_ui::CellHighlightCache::default(),
             vcs: None,
-            conflict: None,
-            conflict_want: None,
+            vcs_want_conflict: false,
             conflict_edit: None,
-            vcs_options: crate::vcs::layout::Options::default(),
             graphics: GraphicsState::default(),
             cell_focused_edit: false,
             popup: None,
@@ -939,7 +894,7 @@ impl App {
     }
 
     /// (Re)derive everything built from `self.config` rather than read from it
-    /// on use: theme, undo cap, key bindings, graph orientation, command
+    /// on use: theme, undo cap, key bindings, command
     /// history and crash recovery.  Shared by startup and `:config-reload`, so
     /// a setting can't work at launch but be ignored by a reload.  Returns
     /// warnings about values that could not be applied.
@@ -950,8 +905,6 @@ impl App {
         let mut keymap = Keymap::default_bindings();
         warnings.extend(keymap.apply_custom_bindings(&self.config.keys));
         self.keymap = keymap;
-
-        self.vcs_options.orientation = self.config.vcs.orientation;
 
         let mode = self.config.ui.command_history;
         if mode != self.command_history_mode {
@@ -1178,9 +1131,9 @@ fn run_loop(
         needs_redraw |= crate::exec::poll_git(app);
         needs_redraw |= crate::exec::poll_disk_change(app);
         needs_redraw |= crate::exec::poll_export(app);
+        needs_redraw |= crate::exec::grep::poll(app);
         needs_redraw |= crate::exec::poll_table_load(app);
         needs_redraw |= crate::exec::vcs::poll(app);
-        needs_redraw |= crate::exec::conflict::poll(app);
 
         // Advance the status-bar spinner.  It's "active" whenever a notebook
         // cell is executing or queued, the kernel is booting, an LSP request
@@ -1196,6 +1149,7 @@ fn run_loop(
             || app.lsp.has_pending_requests()
             || app.jobs.export.is_some()
             || app.jobs.table.is_some()
+            || crate::exec::grep::busy(app)
             // A repository read, a fetch, or a replay running its way through
             // a cherry-pick.
             || crate::exec::vcs::busy(app);
@@ -1334,7 +1288,7 @@ fn draw_frame(
 fn refresh_highlight_window(app: &mut App) {
     match app.view() {
         View::Text => {}
-        View::Notebook | View::Table | View::Vcs | View::Conflict => return,
+        View::Notebook | View::Table | View::Vcs => return,
     }
     // A screen of lines not hidden in a fold, from the scroll row down
     // (wrapping can only show fewer).
@@ -1400,14 +1354,6 @@ fn draw_view(
             let chrome = chrome?;
             if let Some(state) = app.vcs.as_ref() {
                 crate::vcs_ui::render(f, chrome.content, state);
-            }
-            ui::render_chrome(f, app, &chrome);
-            None
-        }
-        View::Conflict => {
-            let chrome = chrome?;
-            if let Some(state) = app.conflict.as_ref() {
-                crate::conflict_ui::render(f, chrome.content, state);
             }
             ui::render_chrome(f, app, &chrome);
             None

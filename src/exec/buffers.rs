@@ -71,30 +71,15 @@ pub(super) fn teardown_current_buffer(app: &mut App) {
             }
         }
 
-        // The graph holds no unsaved *file* state, but it does hold a plan —
-        // an unapplied rewrite the user may have spent several gestures
-        // building — and the snapshot it was built against.  Both have to
-        // survive a buffer switch, or the view is only usable in one sitting.
+        // The view holds no unsaved *file* state, but it does hold a plan
+        // and the snapshot it was built against.  Both have to survive a
+        // buffer switch, or the view is only usable in one sitting.
         crate::view::View::Vcs => {
             app.jobs.vcs_load = None;
             if let Some(state) = app.vcs.take() {
                 app.stashes.put(
                     crate::source::SourceId::virtual_named(crate::app::VCS_BUFFER),
                     Stash::Vcs(Box::new(state)),
-                );
-            }
-        }
-
-        // The resolver holds the answers given so far — which is work, and
-        // the natural thing to do halfway through a conflict is leave to read
-        // the code.  Coming back to an empty resolver would punish exactly the
-        // habit the view is built to support.
-        crate::view::View::Conflict => {
-            app.jobs.conflict_load = None;
-            if let Some(state) = app.conflict.take() {
-                app.stashes.put(
-                    crate::source::SourceId::virtual_named(crate::app::CONFLICT_BUFFER),
-                    Stash::Conflict(Box::new(state)),
                 );
             }
         }
@@ -203,7 +188,7 @@ pub fn open_path(app: &mut App, path: &std::path::Path) {
     remember_cursor(app);
 
     if path.to_str() == Some(crate::app::VCS_BUFFER) {
-        // The graph is addressed by name like any other virtual source, so
+        // The view is addressed by name like any other virtual source, so
         // `H`/`L` and the buffer picker land back on it rather than opening an
         // empty text buffer called `*git*`.
         super::vcs::open(app);
@@ -608,18 +593,16 @@ pub(super) fn write_and_quit(app: &mut App) {
 /// was invoked, and a file to its neighbour in the buffer list.
 pub(super) fn close_buffer(app: &mut App, force: bool) {
 
-        // A `*cell …*` buffer, a computed table, the `*sql*` query buffer and
-        // a `*commit …*` diff or `*git output*` transcript are *backed out
-        // of* rather than closed: each was
-        // opened from
-        // somewhere, and that somewhere is the only place it makes sense to
-        // return to.  Without this they hit the refusal below and there is
+        // A `*cell …*` buffer, a computed table, the `*sql*` query buffer, a
+        // commit message and a hand-edited conflict section are *backed out
+        // of* rather than closed: each was opened from somewhere, and that
+        // somewhere is the only place it makes sense to return to.  Without this they hit the refusal below and there is
         // no way out of them at all.
         if super::table::close_cell_buffer(app)
             || super::table::close_derived_table(app)
             || super::sql::close_buffer(app)
             || super::vcs::close_transient_buffer(app)
-            || super::conflict::close_edit_buffer(app)
+            || super::vcs::close_edit_buffer(app)
         {
             return;
         }
@@ -747,7 +730,7 @@ fn check_disk_change(app: &mut App) -> bool {
     match app.view() {
         View::Text => {}
         // Bufferless views have no file; a notebook's buffer is one cell.
-        View::Notebook | View::Table | View::Vcs | View::Conflict => return false,
+        View::Notebook | View::Table | View::Vcs => return false,
     }
     if app.notebook.is_some() {
         return false;

@@ -111,12 +111,13 @@ pub enum Layer {
     Cell,
     /// In the `*sql*` buffer: `q` leaves for wherever `:sql` was invoked from.
     Sql,
-    /// In a `*commit …*` buffer: `q` returns to the graph it was read from.
+    /// In a `*commit message*` buffer: `q` plans the commit and goes back.
     Commit,
-    /// While the version-control graph is open: `Space` grabs and drops, and
-    /// the everyday git actions sit on single letters.
+    /// The version-control view: the everyday git actions on single letters,
+    /// and `b`/`s`/`L` prefixes for branches, stash and history.
     Vcs,
-    /// The merge-conflict resolver.
+    /// The version-control view while its diff panel shows a conflict.
+    /// Falls back to [`Layer::Vcs`].
     Conflict,
     /// A `*conflict …*` buffer — one section being hand-edited.  A buffer
     /// layer rather than a view one: it really is an ordinary text buffer,
@@ -162,8 +163,14 @@ impl Layer {
     fn parent(self) -> Option<Layer> {
         match self {
             Layer::Normal | Layer::Select => None,
+            Layer::Conflict => Some(Layer::Vcs),
             _ => Some(Layer::Normal),
         }
+    }
+
+    /// This layer, then each layer it falls back to.
+    fn chain(self) -> impl Iterator<Item = Layer> {
+        std::iter::successors(Some(self), |l| l.parent())
     }
 }
 
@@ -369,79 +376,67 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         (&[Commit], "q", C::BufferClose, None),
         // Takes the hand-edited section back to the resolver.
         (&[ConflictEdit], "q", C::BufferClose, None),
-        // --- Version-control graph ---
-        // Space is the grab, the gesture the whole view is built around.
-        (&[Vcs], "Space", C::VcsGrab, None),
-        // A branch is checked out; anything else shows its commit's diff.
+        // --- Version-control view ---
+        // Every key adds to the plan; only `g a` writes to the repository.
+        (&[Vcs], "Space", C::VcsToggleStage, None),
+        (&[Vcs], "d", C::VcsDiscard, None),
+        (&[Vcs], "a", C::VcsStageAll, None),
+        (&[Vcs], "A", C::VcsUnstageAll, None),
+        (&[Vcs], "c", C::VcsCommit(String::new()), None),
+        (&[Vcs], "C", C::VcsAmend(String::new()), None),
         (&[Vcs], "Enter", C::VcsEnter, None),
-        (&[Vcs], "c", C::VcsCheckout, None),
-        (&[Vcs], "d", C::VcsDrop, None),
-        (&[Vcs], "m", C::VcsMerge, None),
+        (&[Vcs], "Tab", C::VcsFocusNext, None),
+        (&[Vcs], "]", C::VcsNextFile, None),
+        (&[Vcs], "[", C::VcsPrevFile, None),
+        (&[Vcs], "u", C::VcsUndoEdit, None),
+        (&[Vcs], "x", C::VcsRemoveStep, None),
         (&[Vcs], "r", C::VcsRefresh, None),
-        // `git status`, verbatim; staging is on `+`/`-`.
-        (&[Vcs], "s", C::VcsGitStatus, None),
-        (&[Vcs], "+", C::VcsStage, None),
-        (&[Vcs], "-", C::VcsUnstage, None),
-        (&[Vcs], "w", C::VcsStatus, None),
         (&[Vcs], "?", C::VcsHelp, None),
-        (&[Vcs], "b", C::VcsBranches, None),
-        (&[Vcs], "x", C::VcsHideBranch, None),
-        (&[Vcs], "o", C::VcsFlip, None),
-        (&[Vcs], "f", C::VcsFetch, None),
-        (&[Vcs], "p", C::VcsPull, None),
-        (&[Vcs], "P", C::VcsPush, None),
-        // Both prompt for the word they need.
-        (&[Vcs], "C", C::VcsCommit(String::new()), None),
-        (&[Vcs], "n", C::VcsNewBranch(String::new()), None),
         (&[Vcs], "q", C::VcsClose, None),
         (&[Vcs], "J", C::PageDown, None),
         (&[Vcs], "K", C::PageUp, None),
-        (&[Vcs], "g g", C::GotoFileStart, Some("first commit")),
-        (&[Vcs], "g e", C::GotoFileEnd, Some("last commit")),
-        (&[Vcs], "g c", C::VcsCheckout, Some("check out the selection")),
-        (&[Vcs], "g m", C::VcsMerge, Some("plan a merge into the current branch")),
-        (&[Vcs], "g d", C::VcsDrop, Some("remove the selected commit")),
-        (&[Vcs], "g a", C::VcsApply, Some("apply the planned changes")),
-        (&[Vcs], "g x", C::VcsReset, Some("discard the planned changes")),
-        // Once-after-something-went-wrong actions, deliberately not bare keys.
-        (&[Vcs], "g U", C::VcsUndo, Some("put the branches back after an apply")),
-        (&[Vcs], "g A", C::VcsAbort, Some("abort the run a conflict stopped")),
-        (&[Vcs], "g C", C::VcsContinue, Some("carry on after resolving a conflict")),
-        (&[Vcs], "g u", C::VcsSetUpstream(String::new()), Some("set this branch's upstream")),
-        (&[Vcs], "g o", C::VcsOutput, Some("the last command's output")),
+        (&[Vcs], "b", C::VcsBranchMenu, None),
+        (&[Vcs], "b b", C::VcsSwitch, Some("switch to a branch")),
+        (&[Vcs], "b n", C::VcsNewBranch(String::new()), Some("new branch here")),
+        (&[Vcs], "b r", C::VcsRenameBranch(String::new()), Some("rename this branch")),
+        (&[Vcs], "b d", C::VcsDeleteBranch, Some("delete a branch")),
+        (&[Vcs], "b m", C::VcsMerge, Some("merge a branch into this one")),
+        (&[Vcs], "b R", C::VcsRebase, Some("rebase this branch onto another")),
+        (&[Vcs], "s", C::VcsStashMenu, None),
+        (&[Vcs], "s s", C::VcsStashPush(String::new()), Some("stash the changes")),
+        (&[Vcs], "s p", C::VcsStashPop, Some("pop a stash")),
+        (&[Vcs], "s a", C::VcsStashApply, Some("apply a stash, keeping it")),
+        (&[Vcs], "s d", C::VcsStashDrop, Some("drop a stash")),
+        (&[Vcs], "L", C::VcsLogMenu, None),
+        (&[Vcs], "L p", C::VcsCherryPick, Some("cherry-pick a commit")),
+        (&[Vcs], "L v", C::VcsRevert, Some("revert a commit")),
+        (&[Vcs], "L r", C::VcsResetSoft, Some("reset (soft) to a commit")),
+        (&[Vcs], "L R", C::VcsResetMixed, Some("reset (mixed) to a commit")),
+        (&[Vcs], "L t", C::VcsTag(String::new()), Some("tag a commit")),
+        (&[Vcs], "g g", C::GotoFileStart, Some("first row")),
+        (&[Vcs], "g e", C::GotoFileEnd, Some("last row")),
+        (&[Vcs], "g a", C::VcsApply, Some("apply the plan")),
+        (&[Vcs], "g x", C::VcsReset, Some("discard the whole plan")),
+        // After-the-fact actions, deliberately not bare keys.
+        (&[Vcs], "g U", C::VcsUndo, Some("undo the last apply")),
+        (&[Vcs], "g C", C::VcsContinue, Some("continue the operation in progress")),
+        (&[Vcs], "g A", C::VcsAbort, Some("abort the operation in progress")),
+        (&[Vcs], "g s", C::VcsGitStatus, Some("git status, verbatim")),
         (&[Vcs], "g r", C::VcsRefresh, Some("re-read the repository")),
-        (&[Vcs], "g ?", C::VcsGuide, Some("what the gestures mean")),
         (&[Vcs], "g b", C::OpenBufferPicker, Some("buffer picker")),
-        // --- Merge-conflict resolver ---
-        // Space takes or drops the focused side; `a`/`b` name the sides and
-        // their capitals answer every conflict still open.
+        // --- Merge conflicts, while the diff panel shows one ---
+        // Falls back to the view's keys for everything not here.
         (&[Conflict], "Space", C::ConflictTakeSide, None),
         (&[Conflict], "a", C::ConflictTakeLeft, None),
         (&[Conflict], "b", C::ConflictTakeRight, None),
         (&[Conflict], "A", C::ConflictTakeLeftAll, None),
         (&[Conflict], "B", C::ConflictTakeRightAll, None),
-        // `n`/`N` tour what is *left*; `j`/`k` (inherited) read the file.
+        // `n`/`N` tour what is *left*; `j`/`k` read the file.
         (&[Conflict], "n", C::ConflictNextHunk, None),
         (&[Conflict], "N", C::ConflictPrevHunk, None),
-        (&[Conflict], "]", C::ConflictNextFile, None),
-        (&[Conflict], "[", C::ConflictPrevFile, None),
         (&[Conflict], "3", C::ConflictToggleBase, None),
         (&[Conflict], "e", C::ConflictEditHunk, None),
-        (&[Conflict], "d", C::ConflictDiff, None),
-        (&[Conflict], "r", C::ConflictRefresh, None),
-        (&[Conflict], "?", C::ConflictHelp, None),
-        // The one key here that touches the disk.
         (&[Conflict], "Enter", C::ConflictWriteFile, None),
-        (&[Conflict], "q", C::ConflictClose, None),
-        (&[Conflict], "g c", C::VcsContinue, Some("carry on with the operation")),
-        (&[Conflict], "g a", C::VcsAbort, Some("abort the whole operation")),
-        (&[Conflict], "g w", C::ConflictWriteFile, Some("write this file's resolution")),
-        (&[Conflict], "g x", C::ConflictRevertFile, Some("put this file back the way git left it")),
-        (&[Conflict], "g s", C::VcsGitStatus, Some("git status, verbatim")),
-        (&[Conflict], "g r", C::ConflictRefresh, Some("re-read the conflicted files")),
-        (&[Conflict], "g V", C::VcsOpen, Some("the commit graph")),
-        (&[Conflict], "g ?", C::ConflictHelp, Some("the keys")),
-        (&[Conflict], "g b", C::OpenBufferPicker, Some("buffer picker")),
     ]
 }
 
@@ -478,14 +473,12 @@ impl Keymap {
     /// palette and buffer switching keep working without every layer having to
     /// restate them.
     pub fn lookup_layered(&self, layer: Layer, seq: &[KeyBinding]) -> Option<&[Command]> {
-        self.get(layer, seq)
-            .or_else(|| layer.parent().and_then(|p| self.get(p, seq)))
-            .map(|b| b.cmds.as_slice())
+        layer.chain().find_map(|l| self.get(l, seq)).map(|b| b.cmds.as_slice())
     }
 
     /// What can follow `prefix` in `layer`: `(next key, binding)` in table
-    /// order.  With `inherit`, keys the layer doesn't bind itself come from
-    /// its parent layer too.
+    /// order.  Keys a layer doesn't bind come from the layers it falls back
+    /// to — but from `Normal` only with `inherit`.
     pub fn continuations(
         &self,
         layer: Layer,
@@ -493,8 +486,7 @@ impl Keymap {
         inherit: bool,
     ) -> Vec<(KeyBinding, &Binding)> {
         let mut out: Vec<(KeyBinding, &Binding)> = Vec::new();
-        let parent = layer.parent().filter(|_| inherit);
-        for l in std::iter::once(layer).chain(parent) {
+        for l in layer.chain().filter(|l| inherit || *l == layer || *l != Layer::Normal) {
             let Some(map) = self.layers.get(&l) else { continue };
             for (seq, binding) in map.iter() {
                 if seq.len() == prefix.len() + 1 && seq.starts_with(prefix) {
@@ -511,7 +503,7 @@ impl Keymap {
     /// The first key sequence that runs `cmd_name` in `layer` (or, failing
     /// that, its parent), formatted for display — e.g. `"g x"`, `"C-s"`.
     pub fn keys_for(&self, layer: Layer, cmd_name: &str) -> Option<String> {
-        std::iter::once(layer).chain(layer.parent()).find_map(|l| {
+        layer.chain().find_map(|l| {
             let map = self.layers.get(&l)?;
             map.iter()
                 .find(|(_, b)| b.cmds.len() == 1 && b.cmds[0].name() == cmd_name)
@@ -662,7 +654,12 @@ mod tests {
 
         assert_eq!(keymap.lookup_layered(Layer::Table, &gd).unwrap()[0].name(), "column-summary");
         assert_eq!(keymap.lookup_layered(Layer::Table, &gz).unwrap()[0].name(), "scroll-cursor-center");
-        assert_eq!(keymap.keys_for(Layer::Vcs, "version-control-reset").as_deref(), Some("g x"));
+        assert_eq!(keymap.keys_for(Layer::Vcs, "version-control-clear-plan").as_deref(), Some("g x"));
+        // The conflict layer falls back to the view's own keys, then Normal's.
+        assert_eq!(keymap.keys_for(Layer::Conflict, "version-control-apply").as_deref(), Some("g a"));
+        let space = [KeyBinding::char(' ')];
+        assert_eq!(keymap.lookup_layered(Layer::Conflict, &space).unwrap()[0].name(), "conflict-take-side");
+        assert_eq!(keymap.lookup_layered(Layer::Vcs, &space).unwrap()[0].name(), "version-control-toggle-stage");
     }
 
     #[test]

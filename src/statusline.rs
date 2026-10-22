@@ -58,36 +58,21 @@ pub struct Ctx {
     pub vcs: Option<VcsView>,
 }
 
-/// What the version-control graph is showing — graph view only.
+/// What the version-control view is showing.
 #[derive(Clone)]
 pub struct VcsView {
-    /// The branch HEAD is on, or `detached at <hash>`.
+    /// The branch HEAD will be on once the plan is applied, or where it is
+    /// detached.
     pub head: String,
-    /// True when HEAD is not on a branch, so the chip can say so in a colour
-    /// that reads as a warning rather than as a branch name.
+    /// True when HEAD is not on a branch.
     pub detached: bool,
-    /// How many planned changes are stacked up.
-    ///
-    /// The single most important thing this status line carries: a graph with
-    /// unapplied edits looks exactly like the repository until you notice
-    /// this, which is the one way this view could mislead.
+    /// How many steps are planned.  A view with unapplied steps looks like
+    /// the repository until you notice this.
     pub planned: usize,
-    /// Uncommitted work: `(staged, unstaged, conflicted)`.
+    /// `(staged, unstaged, conflicted)`, as the plan leaves them.
     pub work: (usize, usize, usize),
-    /// How many branches have been hidden from the graph.
-    ///
-    /// Here for the same reason `planned` is: a graph with a branch missing
-    /// looks exactly like a repository without that branch, and the setting
-    /// that did it is not visible anywhere else.
-    pub hidden: usize,
-    /// What the cursor is on.
+    /// The path under the cursor and its state.
     pub selection: String,
-    /// What is being dragged, if anything.
-    ///
-    /// Separate from `selection` because during a drag they are two different
-    /// things — the held object and the destination under the cursor — and
-    /// showing the cursor labelled "holding" says the wrong one.
-    pub holding: Option<String>,
 }
 
 /// Cursor position and shape of the open table — table view only.
@@ -296,19 +281,12 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
             None => vec![],
         },
         "vcs_plan" | "vcs_planned" => match &ctx.vcs {
-            // Hidden at zero, like the diagnostics module: an untouched graph
+            // Hidden at zero, like the diagnostics module: an untouched plan
             // has nothing to say here, and a permanent "0 planned" trains the
             // eye to skip the place the warning will appear.
             Some(v) if v.planned > 0 => vec![Segment::new(
                 format!("✎{} planned", v.planned),
                 base.fg(th.vcs_pending).add_modifier(Modifier::BOLD),
-            )],
-            _ => vec![],
-        },
-        "vcs_hidden" => match &ctx.vcs {
-            Some(v) if v.hidden > 0 => vec![Segment::new(
-                format!("◌{} hidden", v.hidden),
-                base.fg(th.dim),
             )],
             _ => vec![],
         },
@@ -330,15 +308,7 @@ fn expand(name: &str, ctx: &Ctx) -> Vec<Segment> {
             None => vec![],
         },
         "vcs_selection" | "vcs_cursor" => match &ctx.vcs {
-            Some(v) => match &v.holding {
-                // Held thing first, then where it would land: that is the
-                // sentence the gesture is making.
-                Some(held) => vec![Segment::new(
-                    format!("{held} → {}", v.selection),
-                    base.fg(th.vcs_grabbed).add_modifier(Modifier::BOLD),
-                )],
-                None => vec![Segment::new(v.selection.clone(), dim_style())],
-            },
+            Some(v) => vec![Segment::new(v.selection.clone(), dim_style())],
             None => vec![],
         },
 

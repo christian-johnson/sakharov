@@ -50,6 +50,9 @@ globset = { version = "0.4", default-features = false }
 # `bundled` compiles DuckDB's C++ from source: a long first build and a much
 # larger binary, which is why it is a feature at all — see [features].
 duckdb = { version = "1", features = ["bundled"], optional = true }
+# Line diffs for the version-control view, which diffs plan-produced text git
+# has never seen.
+similar = { version = "2", default-features = false, features = ["text"] }
 
 [features]
 default = ["dataframe"]

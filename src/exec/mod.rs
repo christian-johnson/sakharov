@@ -1,11 +1,11 @@
 mod attach;
 mod bridge;
 mod buffers;
-pub(crate) mod conflict;
 mod doctor;
 pub(crate) mod edit;
 mod export;
 mod format;
+pub(crate) mod grep;
 mod lsp;
 pub(crate) mod notebook;
 mod pickers;
@@ -127,18 +127,11 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 return;
             }
         }
-        // The commit graph reinterprets the motions against blocks and arrows,
-        // owns the whole version-control command family, and refuses the rest.
+        // The version-control view reinterprets the motions against its
+        // panels, owns the version-control and conflict commands, and refuses
+        // the rest.
         crate::view::View::Vcs => {
             if vcs::handle(app, cmd) {
-                return;
-            }
-        }
-        // The resolver owns its whole command family and reinterprets the
-        // motions against the two panes, exactly as the grid does against
-        // cells.
-        crate::view::View::Conflict => {
-            if conflict::handle(app, cmd) {
                 return;
             }
         }
@@ -159,20 +152,6 @@ pub fn execute(app: &mut App, cmd: &Command) {
         "{} needs a text buffer but reached the text path in a bufferless view",
         cmd.name()
     );
-
-    // The `*git output*` transcript is a text buffer — search, motions and
-    // wrap all work in it, which is the point of putting a hook's output in
-    // one — but it is a record of something that happened, not a document.
-    // The same classification the bufferless views use, applied to a buffer
-    // that is real: nothing here would be saved anywhere, so an edit is only
-    // ever a typo in the evidence you opened it to read.
-    if app.in_git_output_buffer()
-        && crate::view::refusal(cmd) == Some(crate::view::Refusal::ReadOnly)
-    {
-        app.messages
-            .show("This is git's output, read-only (q goes back to the graph)");
-        return;
-    }
 
     // Capture cursor line before the command so we can detect movement direction.
     let pre_exec_line: usize = {
@@ -285,7 +264,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         // --- Popup / UI ---
         Command::OpenCommandPalette  => { pickers::command_palette(app);  return; }
         Command::GrepBuffer          => { pickers::grep_buffer(app);      return; }
-        Command::GrepProject         => { pickers::grep_project(app);     return; }
+        Command::GrepProject         => { grep::grep_project(app);        return; }
         Command::OpenBufferPicker    => { pickers::buffer_picker(app);    return; }
         Command::OpenSymbolPicker    => { pickers::symbol_picker(app);    return; }
         Command::OpenFilePicker      => { pickers::file_picker(app);      return; }
@@ -1124,82 +1103,70 @@ pub fn execute(app: &mut App, cmd: &Command) {
 
         // --- Version control ---
         //
-        // Only `version-control` is reachable from outside the graph: it is
-        // the door in.  Everything else needs a cursor sitting on a commit, an
-        // arrow or a branch, so it is handled by `vcs::handle` above and only
-        // reaches here when the graph is *not* open — which is worth saying
-        // rather than silently ignoring.
+        // `version-control` and `conflicts` are the doors in.  Everything else
+        // acts on the view's selection, so it is handled by `vcs::handle`
+        // above and only reaches here when the view is *not* open — which is
+        // worth saying rather than silently ignoring.
         Command::VcsOpen => {
             vcs::open(app);
             return;
         }
-        // Reachable from anywhere, like `:vc` itself: the transcript is read
-        // in a text buffer, so by the time you want it back the graph is not
-        // what is on screen and `vcs::handle` never sees the command.
-        Command::VcsOutput => {
-            vcs::show_output(app);
-            return;
-        }
         // Reachable from anywhere: a conflict is a state the *repository* is
-        // in, not a property of what happens to be open — and the moment you
-        // want the resolver is usually right after opening the file that
-        // conflicted.
+        // in, not a property of what happens to be open.
         Command::ConflictOpen => {
-            conflict::open(app);
+            vcs::open_conflicts(app);
             return;
         }
-        Command::ConflictClose
-        | Command::ConflictRefresh
-        | Command::ConflictTakeSide
+        Command::ConflictTakeSide
         | Command::ConflictTakeLeft
         | Command::ConflictTakeRight
         | Command::ConflictTakeLeftAll
         | Command::ConflictTakeRightAll
         | Command::ConflictNextHunk
         | Command::ConflictPrevHunk
-        | Command::ConflictNextFile
-        | Command::ConflictPrevFile
         | Command::ConflictToggleBase
         | Command::ConflictEditHunk
         | Command::ConflictWriteFile
-        | Command::ConflictRevertFile
-        | Command::ConflictDiff
-        | Command::ConflictHelp => {
-            app.messages.show(format!(
-                "`{}` works in the conflict resolver (`:conflicts` opens it)",
-                cmd.name()
-            ));
-            return;
-        }
-        Command::VcsClose
+        | Command::ConflictHelp
+        | Command::VcsClose
         | Command::VcsRefresh
-        | Command::VcsGrab
-        | Command::VcsDrop
+        | Command::VcsEnter
+        | Command::VcsFocusNext
+        | Command::VcsNextFile
+        | Command::VcsPrevFile
+        | Command::VcsToggleStage
+        | Command::VcsDiscard
+        | Command::VcsStageAll
+        | Command::VcsUnstageAll
+        | Command::VcsBranchMenu
+        | Command::VcsStashMenu
+        | Command::VcsLogMenu
+        | Command::VcsSwitch
+        | Command::VcsDeleteBranch
         | Command::VcsMerge
+        | Command::VcsRebase
+        | Command::VcsStashPop
+        | Command::VcsStashApply
+        | Command::VcsStashDrop
+        | Command::VcsCherryPick
+        | Command::VcsRevert
+        | Command::VcsResetSoft
+        | Command::VcsResetMixed
+        | Command::VcsContinue
+        | Command::VcsAbort
         | Command::VcsUndoEdit
+        | Command::VcsRemoveStep
         | Command::VcsReset
         | Command::VcsApply
         | Command::VcsUndo
-        | Command::VcsAbort
-        | Command::VcsContinue
-        | Command::VcsCheckout
-        | Command::VcsShow
-        | Command::VcsEnter
-        | Command::VcsStatus
         | Command::VcsGitStatus
         | Command::VcsHelp
-        | Command::VcsGuide
-        | Command::VcsStage
-        | Command::VcsUnstage
-        | Command::VcsBranches
-        | Command::VcsHideBranch
-        | Command::VcsFlip
-        | Command::VcsFetch
-        | Command::VcsPull
-        | Command::VcsPush
         | Command::VcsNewBranch(_)
         | Command::VcsCommit(_)
-        | Command::VcsSetUpstream(_) => {
+        | Command::VcsAmend(_)
+        | Command::VcsRenameBranch(_)
+        | Command::VcsStashPush(_)
+        | Command::VcsTag(_) => {
             app.messages.show(format!(
                 "`{}` works in the version-control view (`:vc` opens it)",
                 cmd.name()
@@ -1366,7 +1333,7 @@ fn at_first_visual_row(app: &App) -> bool {
 /// Which-key hints for the `prefix` sub-mode (`g`, `z`), generated from the
 /// keymap: what the current view binds after `prefix`, less what can't run
 /// here right now.  Rebinding a key in `[keys]` changes the popup with it.
-fn prefix_hints(app: &App, prefix: char) -> Vec<KeyHint> {
+pub(crate) fn prefix_hints(app: &App, prefix: char) -> Vec<KeyHint> {
     let layer = crate::input::keymap_layer(app);
     // A bufferless view lists only its own meanings: the text ones it would
     // inherit are refused there.

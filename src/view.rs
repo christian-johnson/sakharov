@@ -52,13 +52,9 @@ pub enum View {
     Notebook,
     /// Tabular data grid (CSV/TSV/parquet — see [`crate::table`]).
     Table,
-    /// The version-control graph (see [`crate::vcs`]): commits as blocks,
-    /// parent links as arrows, rearranged by direct manipulation.
+    /// The version-control view (see [`crate::vcs`]): the changes tree, the
+    /// selected file's diff or conflicts, and the plan.
     Vcs,
-    /// The merge-conflict resolver (see [`crate::conflict`]): the two
-    /// competing versions of a conflicted file side by side, labelled with
-    /// whose work each one is.
-    Conflict,
 }
 
 impl View {
@@ -73,7 +69,7 @@ impl View {
     pub fn has_text_buffer(self) -> bool {
         match self {
             View::Text | View::Notebook => true,
-            View::Table | View::Vcs | View::Conflict => false,
+            View::Table | View::Vcs => false,
         }
     }
 }
@@ -138,7 +134,7 @@ impl Chrome {
 /// Why a command doesn't run in a view that has no text buffer behind it.
 ///
 /// A view whose [`View::has_text_buffer`] is false is a window onto data that
-/// isn't a rope: a grid over a parquet file, a commit graph.  The editing and
+/// isn't a rope: a grid over a parquet file, a repository.  The editing and
 /// text-structure commands still *arrive* — they are bound to the same keys —
 /// and the buffer behind the view is empty and path-less, so running them
 /// answers nothing at best and writes over the wrong thing at worst.

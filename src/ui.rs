@@ -628,7 +628,7 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
     // back on, so one that skipped this would read "[No Name]" over a full
     // screen of its own content.
     let (filename, modified, cell, kernel) = match app.view() {
-        // The graph's buffer is detached: the name comes from the repository
+        // The view's buffer is detached: the name comes from the repository
         // it is showing, and it is never "modified" — a plan is not an edit to
         // a file, and nothing here is saved with `:w`.
         crate::view::View::Vcs => {
@@ -637,18 +637,6 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
                 .as_ref()
                 .and_then(|s| s.root.file_name())
                 .map_or_else(|| "git".to_string(), |n| n.to_string_lossy().into_owned());
-            (name, false, None, None)
-        }
-
-        // The resolver names the file being resolved: which of several
-        // conflicted files you are in is the thing most easily lost track of,
-        // and it is not "modified" — the answers are in memory until Enter.
-        crate::view::View::Conflict => {
-            let name = app
-                .conflict
-                .as_ref()
-                .and_then(|s| s.current())
-                .map_or_else(|| "conflicts".to_string(), |f| f.path.clone());
             (name, false, None, None)
         }
 
@@ -698,24 +686,11 @@ pub fn status_ctx(app: &App) -> crate::statusline::Ctx {
         cell,
         kernel,
         vcs: app.vcs.as_ref().map(|s| crate::statusline::VcsView {
-            head: match (&s.dag.head.branch, &s.dag.head.target) {
-                (Some(branch), _) => branch.clone(),
-                (None, Some(oid)) => format!("detached at {}", oid.short()),
-                (None, None) => "no commits".to_string(),
-            },
-            detached: s.dag.head.detached(),
-            planned: s.plan.edits().len(),
-            hidden: s.options.hidden.len(),
-            work: (s.dag.work.staged(), s.dag.work.unstaged(), s.dag.work.conflicted()),
-            selection: s
-                .focus
-                .as_ref()
-                .map(|f| crate::vcs_ui::describe_focus(&s.dag, f))
-                .unwrap_or_default(),
-            holding: s
-                .grabbed
-                .as_ref()
-                .map(|f| crate::vcs_ui::describe_focus(&s.dag, f)),
+            head: s.repo().head_label(),
+            detached: s.repo().head.branch.is_none() && s.repo().head.commit.is_some(),
+            planned: s.plan.len(),
+            work: s.counts(),
+            selection: crate::vcs_ui::describe_selection(s),
         }),
         table: app.table.as_ref().map(|s| {
             let st = &s.state;
@@ -764,17 +739,16 @@ pub fn render_command(frame: &mut Frame, app: &App, area: Rect) {
                         .collect::<Vec<_>>().join(", ")
                 ),
                 PromptKind::Attach => "Attach database, read-only (path [as alias])".to_string(),
-                // Both name what they will act on, because both act on the
-                // commit under the cursor rather than on "the repository".
-                PromptKind::VcsCommit => match app.vcs.as_ref() {
-                    Some(state) => format!("Commit {} staged change(s), message", state.dag.work.staged()),
-                    None => "Commit message".to_string(),
+                PromptKind::VcsBranch => "New branch here, named".to_string(),
+                PromptKind::VcsRenameBranch => match app.vcs.as_ref().and_then(|s| s.repo().head.branch.clone()) {
+                    Some(branch) => format!("Rename {branch} to"),
+                    None => "Rename the branch to".to_string(),
                 },
-                PromptKind::VcsBranch => match app.vcs.as_ref().and_then(crate::vcs::state::VcsState::focused_commit) {
-                    Some(at) => format!("New branch at {}", at.short()),
-                    None => "New branch".to_string(),
+                PromptKind::VcsStash => "Stash message (optional)".to_string(),
+                PromptKind::VcsTag => match app.vcs.as_ref().and_then(|s| s.tag_target.as_ref()) {
+                    Some(target) => format!("Tag {} as", target.name()),
+                    None => "Tag name".to_string(),
                 },
-                PromptKind::VcsUpstream => "Track (remote/branch)".to_string(),
             };
             (format!("{label}: {}_", app.command_buf), Style::default())
         }

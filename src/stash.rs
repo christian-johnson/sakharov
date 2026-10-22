@@ -39,16 +39,11 @@ pub enum Stash {
     Notebook(Box<(Notebook, NotebookState)>),
     /// A tabular data session: the parsed source, transform stack and cursor.
     Table(Box<crate::exec::table::Session>),
-    /// A version-control session: the snapshot, the plan built on it, and the
-    /// cursor.  Stashed like the rest because a half-built plan is work, and
-    /// losing it to a buffer switch would make the view unusable for anything
-    /// taking more than one gesture.
+    /// A version-control session: the snapshot, the plan built on it, the
+    /// conflict answers given so far, and the cursors.  A half-built plan is
+    /// work, and losing it to a buffer switch would make the view unusable
+    /// for anything taking more than one gesture.
     Vcs(Box<crate::vcs::state::VcsState>),
-    /// A merge-conflict session: the snapshot of the conflicted index and the
-    /// answers given so far.  Stashed for the reason the view exists — the
-    /// natural thing to do halfway through a conflict is go and read the code,
-    /// and coming back to an empty resolver would punish exactly that.
-    Conflict(Box<crate::conflict::state::ConflictState>),
 }
 
 impl Stash {
@@ -60,7 +55,6 @@ impl Stash {
             Stash::Notebook(_) => View::Notebook,
             Stash::Table(_) => View::Table,
             Stash::Vcs(_) => View::Vcs,
-            Stash::Conflict(_) => View::Conflict,
         }
     }
 

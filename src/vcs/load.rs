@@ -1,69 +1,36 @@
-//! Reading the repository into a [`Dag`].
+//! Reading a repository into a [`Repo`].
 //!
-//! Everything here shells out to `git`.  See `docs/version-control-plan.md`
-//! for why: applying a plan has to run the user's own git (hooks, config,
-//! credential helper, reflog), and once apply does, having the *reads* go
-//! through a linked library too would mean two different implementations of
-//! "what does this repository look like" that could disagree.
-//!
-//! The parsing is deliberately split from the running.  A repository is
-//! awkward to construct in a unit test and impossible to construct for the
-//! interesting cases (an octopus merge, a detached HEAD, a ref past the
-//! horizon), so every parser here is a pure function from git's output, and
-//! that is what the tests exercise.
+//! Everything here shells out to `git` (see `docs/version-control-plan.md`).
+//! The parsers are pure functions of git's output so the tests can exercise
+//! them without a repository; [`read`] is the only part that runs anything.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 
-use super::{Change, Commit, Dag, Head, Oid, Ref, RefKind, WorkTree};
+use super::{
+    Conflict, Entry, FileState, Head, InProgress, Index, Oid, Repo, StashEntry, MODE_EXEC,
+    MODE_FILE, MODE_LINK,
+};
+use crate::conflict::Operation;
 
-/// ASCII record / field separators.  Used rather than a printable delimiter
-/// because a commit summary can contain anything a human can type — including
-/// every punctuation character anyone would otherwise reach for.
-const RS: char = '\x1e';
+/// Field separator for the `--format` strings below.
 const FS: char = '\x1f';
 
-/// The `--format` string the log walk uses.  Field order must match
-/// [`parse_log`]; the summary is last so a stray separator inside it cannot
-/// shift the other fields.
-const LOG_FORMAT: &str = "--format=%x1e%H%x1f%P%x1f%an%x1f%ct%x1f%s";
-
-// ---------------------------------------------------------------------------
-// Running git
-// ---------------------------------------------------------------------------
-
-/// Run `git` in `root` and return its stdout, or its stderr as the error.
-///
-/// Blocking.  Every caller in this module runs on the loader thread.
 /// A `git` invocation anchored at `root` and insulated from an inherited git
 /// environment.
 ///
-/// `-C` sets the working directory, which is *not* enough: `GIT_DIR`,
-/// `GIT_INDEX_FILE` and their relatives override repository discovery
-/// outright, so with them set `git -C <somewhere>` operates on whatever they
-/// name and ignores `<somewhere>` entirely.  Git exports exactly those
-/// variables to hooks, and this repository runs its whole test suite from
-/// `.githooks/pre-commit` — so under that hook the `apply.rs` fixtures stopped
-/// creating branches and commits in their temp directories and started
-/// creating them in the developer's own repository, alongside re-initialising
-/// it and overwriting its `user.email`.  Clearing them makes `-C` mean what it
-/// reads as.
-///
-/// The identity variables are cleared for the same reason, one family along:
-/// `GIT_AUTHOR_NAME` and its relatives override `user.name` / `user.email` /
-/// the commit date from *config*, and git exports those to hooks too — and to
-/// `$EDITOR`, which is the ordinary way an editor is launched from `git
-/// commit`.  A commit made from the staging view during either would be
-/// stamped with the outer commit's author and its author date rather than the
-/// user's own.  The test fixtures are the visible half of this: they pin
-/// `user.name = Test` in each temp repository's config, which the ambient
-/// variables silently outrank, so under the hook every fixture commit came out
-/// authored by whoever was committing.
+/// `GIT_DIR`, `GIT_INDEX_FILE` and their relatives override `-C` outright, and
+/// git exports them to hooks — this repository runs its test suite from
+/// `.githooks/pre-commit`, where an inherited `GIT_DIR` once sent the test
+/// fixtures' commits into the developer's own repository.  The identity
+/// variables are cleared for the same reason: they outrank `user.name` in
+/// config, so a commit made from inside a hook would be stamped with the outer
+/// commit's author.
 pub(crate) fn git_command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
     for var in [
-        // Repository discovery — these make `-C` mean nothing.
         "GIT_DIR",
         "GIT_INDEX_FILE",
         "GIT_WORK_TREE",
@@ -72,7 +39,6 @@ pub(crate) fn git_command(root: &Path) -> Command {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_NAMESPACE",
         "GIT_PREFIX",
-        // Identity — these outrank `user.name` / `user.email` in config.
         "GIT_AUTHOR_NAME",
         "GIT_AUTHOR_EMAIL",
         "GIT_AUTHOR_DATE",
@@ -86,34 +52,25 @@ pub(crate) fn git_command(root: &Path) -> Command {
     cmd
 }
 
+/// Run `git` in `root` and return its stdout, or its stderr as the error.
 pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = git_command(root)
         .args(args)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| format!("could not run git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-        Err(if err.is_empty() {
-            format!("git {} failed", args.join(" "))
-        } else {
-            err
-        })
+        Err(if err.is_empty() { format!("git {} failed", args.join(" ")) } else { err })
     }
 }
 
-/// The work tree containing `from`, or `None` when it is not in a repository.
-///
-/// Takes a directory hint rather than using the process working directory so
-/// the view opens on the repository of the *file being edited*, which is not
-/// always the one the editor was launched in.
+/// The work tree containing `from`, or `None` outside a repository.
 pub fn discover_root(from: &Path) -> Option<PathBuf> {
     let dir = if from.is_dir() { from } else { from.parent()? };
-    let out = git_command(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
+    let out = git_command(dir).args(["rev-parse", "--show-toplevel"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -121,226 +78,334 @@ pub fn discover_root(from: &Path) -> Option<PathBuf> {
     (!root.is_empty()).then(|| PathBuf::from(root))
 }
 
-// ---------------------------------------------------------------------------
-// The background load
-// ---------------------------------------------------------------------------
+/// The repository's git directory (`.git`, or a worktree's own).
+pub fn git_dir(root: &Path) -> PathBuf {
+    match git(root, &["rev-parse", "--absolute-git-dir"]) {
+        Ok(dir) => PathBuf::from(dir.trim()),
+        Err(_) => root.join(".git"),
+    }
+}
 
-/// An in-flight repository read, polled once per frame by the run loop.
+/// Everything about a loaded repository that would change if something other
+/// than this view touched it.  Compared again just before applying.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fingerprint {
+    pub head: Head,
+    pub branches: BTreeMap<String, Oid>,
+    pub stashes: Vec<Oid>,
+    pub operation: Option<Operation>,
+    /// `git status --porcelain=v2` verbatim: covers HEAD and the index.
+    pub status: String,
+    /// Size and modification time of every changed work-tree file, since a
+    /// modified file edited again does not change its status line.
+    pub stats: BTreeMap<String, (u64, i128)>,
+}
+
+/// An in-flight read, polled once per frame by the run loop.
 pub struct RepoLoad {
     pub root: PathBuf,
-    rx: Receiver<Result<Dag, String>>,
+    rx: Receiver<Result<Repo, String>>,
 }
 
 impl RepoLoad {
-    /// Non-blocking: `Some` once the background git commands finish.
-    pub fn poll(&self) -> Option<Result<Dag, String>> {
+    pub fn poll(&self) -> Option<Result<Repo, String>> {
         self.rx.try_recv().ok()
     }
 }
 
-/// Start reading `root` into a [`Dag`] on a background thread.
-///
-/// Never blocks the UI: a repository with a hundred thousand commits, or one
-/// on a cold network filesystem, would otherwise stall a frame for as long as
-/// the walk takes.
-pub fn start(root: PathBuf, max_commits: usize) -> RepoLoad {
+/// Start reading `root` on a background thread.
+pub fn start(root: PathBuf) -> RepoLoad {
     let (tx, rx) = mpsc::channel();
     let thread_root = root.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(read(&thread_root, max_commits));
+        let _ = tx.send(read(&thread_root));
     });
     RepoLoad { root, rx }
 }
 
-/// Blocking read of the whole snapshot.  Loader thread only.
-pub(super) fn read(root: &Path, max_commits: usize) -> Result<Dag, String> {
-    let refs = parse_refs(&git(
+/// Blocking read of the whole snapshot.
+pub fn read(root: &Path) -> Result<Repo, String> {
+    let status = git(
         root,
-        &[
-            "for-each-ref",
-            "--format=%(refname)\x1f%(objectname)\x1f%(*objectname)\x1f%(upstream:short)",
-            "refs/heads",
-            "refs/remotes",
-            "refs/tags",
-        ],
-    )?);
-    let head = read_head(root);
-    let work = parse_status(&git(root, &["status", "--porcelain"]).unwrap_or_default());
-
-    // Roots: every local branch, plus HEAD (which covers a detached one), plus
-    // the upstream of each local branch.  The upstreams are what make an
-    // ahead/behind readable at all — a dim `origin/main` label pointing at a
-    // commit that was never loaded says nothing about how far ahead it is.
-    let mut roots: Vec<String> = vec!["--branches".to_string(), "HEAD".to_string()];
-    roots.extend(
-        refs.iter()
-            .filter(|r| r.kind == RefKind::Local)
-            .filter_map(|r| r.upstream.clone()),
-    );
-
-    let limit = format!("-{}", max_commits.max(1));
-    let mut args: Vec<&str> = vec!["log", "--topo-order", "--numstat", &limit, LOG_FORMAT];
-    args.extend(roots.iter().map(String::as_str));
-    // A repository with no commits yet makes `git log` fail; that is an empty
-    // graph, not an error the user needs to see.
-    let log = git(root, &args).unwrap_or_default();
-
-    let commits = parse_log(&log);
-    let truncated = commits.len() >= max_commits.max(1);
-    Ok(Dag::new(commits, refs, head, work, truncated))
+        &["status", "--porcelain=v2", "-z", "--no-renames", "--untracked-files=all"],
+    )?;
+    let (refs, head) = (read_refs(root), read_head(root));
+    let mut files = parse_status(&status);
+    fill_conflict_heads(root, &mut files, head.commit.is_some());
+    let stashes = read_stashes(root);
+    let operation = read_operation(root, files.values().any(|f| f.index.is_conflict()));
+    let fingerprint = Fingerprint {
+        head: head.clone(),
+        branches: refs.0.clone(),
+        stashes: stashes.iter().map(|s| s.commit.clone()).collect(),
+        operation: operation.as_ref().map(|o| o.kind),
+        stats: stats(root, files.keys()),
+        status,
+    };
+    Ok(Repo {
+        head,
+        branches: refs.0,
+        tags: refs.1,
+        stashes,
+        operation,
+        files,
+        pending: Vec::new(),
+        fingerprint,
+    })
 }
 
-/// HEAD's branch and commit.  Both queries are allowed to fail: a detached
-/// HEAD has no branch, and a fresh repository has no commit.
+/// What the repository looks like now, for the staleness check.
+pub fn fingerprint(root: &Path) -> Result<Fingerprint, String> {
+    read(root).map(|repo| repo.fingerprint)
+}
+
+fn stats<'a>(root: &Path, paths: impl Iterator<Item = &'a String>) -> BTreeMap<String, (u64, i128)> {
+    paths
+        .filter_map(|p| {
+            let meta = std::fs::symlink_metadata(root.join(p)).ok()?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos() as i128);
+            Some((p.clone(), (meta.len(), mtime)))
+        })
+        .collect()
+}
+
 fn read_head(root: &Path) -> Head {
     let branch = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
-    let target = git(root, &["rev-parse", "--verify", "--quiet", "HEAD"])
+    let commit = git(root, &["rev-parse", "--verify", "--quiet", "HEAD"])
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .map(Oid::new);
-    Head { branch, target }
+    Head { branch, commit }
 }
 
-// ---------------------------------------------------------------------------
-// Parsing
-// ---------------------------------------------------------------------------
+type Refs = (BTreeMap<String, Oid>, BTreeMap<String, Oid>);
 
-/// Parse `git log --numstat` output in [`LOG_FORMAT`].
-///
-/// Each record starts with the record separator, so the header line and the
-/// numstat lines that follow it belong together without having to track state
-/// across a blank line.
-pub(super) fn parse_log(out: &str) -> Vec<Commit> {
-    out.split(RS)
-        .filter(|record| !record.trim().is_empty())
-        .filter_map(parse_log_record)
-        .collect()
+fn read_refs(root: &Path) -> Refs {
+    let out = git(
+        root,
+        &["for-each-ref", "--format=%(refname)\x1f%(objectname)\x1f%(*objectname)", "refs/heads", "refs/tags"],
+    )
+    .unwrap_or_default();
+    parse_refs(&out)
 }
 
-fn parse_log_record(record: &str) -> Option<Commit> {
-    let mut lines = record.lines();
-    let header = lines.next()?;
-    // The summary is last and takes everything remaining, so a separator
-    // character inside a commit message cannot shift the fields before it.
-    let mut fields = header.splitn(5, FS);
-    let id = Oid::new(fields.next()?.trim());
-    let parents = fields
-        .next()?
-        .split_whitespace()
-        .map(Oid::new)
-        .collect::<Vec<_>>();
-    let author = fields.next()?.to_owned();
-    let when = fields.next()?.trim().parse().unwrap_or(0);
-    let summary = fields.next().unwrap_or("").to_owned();
-
-    if id.as_str().is_empty() {
-        return None;
+/// `for-each-ref` output → `(branches, tags)`.  An annotated tag resolves to
+/// the commit it labels.
+pub fn parse_refs(out: &str) -> Refs {
+    let (mut branches, mut tags) = (BTreeMap::new(), BTreeMap::new());
+    for line in out.lines() {
+        let mut fields = line.split(FS);
+        let (Some(name), Some(object)) = (fields.next(), fields.next()) else { continue };
+        let deref = fields.next().unwrap_or("").trim();
+        let target = Oid::new(if deref.is_empty() { object.trim() } else { deref });
+        if let Some(b) = name.strip_prefix("refs/heads/") {
+            branches.insert(b.to_string(), target);
+        } else if let Some(t) = name.strip_prefix("refs/tags/") {
+            tags.insert(t.to_string(), target);
+        }
     }
-
-    // Remaining lines are `added\tremoved\tpath`.  A binary file reports `-`
-    // for both counts, which contributes nothing rather than failing the parse.
-    let (mut insertions, mut deletions) = (0u32, 0u32);
-    for line in lines {
-        let mut cols = line.split('\t');
-        let (Some(add), Some(del)) = (cols.next(), cols.next()) else {
-            continue;
-        };
-        insertions += add.trim().parse::<u32>().unwrap_or(0);
-        deletions += del.trim().parse::<u32>().unwrap_or(0);
-    }
-
-    Some(Commit { id, parents, summary, author, when, insertions, deletions })
+    (branches, tags)
 }
 
-/// Parse `git for-each-ref` output: full refname, object, dereferenced object,
-/// upstream.
-pub(super) fn parse_refs(out: &str) -> Vec<Ref> {
-    out.lines()
-        .filter(|l| !l.trim().is_empty())
+fn read_stashes(root: &Path) -> Vec<StashEntry> {
+    git(root, &["stash", "list", "--format=%H\x1f%gs"])
+        .unwrap_or_default()
+        .lines()
         .filter_map(|line| {
-            let mut fields = line.split(FS);
-            let refname = fields.next()?;
-            let object = fields.next().unwrap_or("").trim();
-            let deref = fields.next().unwrap_or("").trim();
-            let upstream = fields.next().unwrap_or("").trim();
-
-            let (kind, name) = classify_ref(refname)?;
-            // An annotated tag's own object is the tag, not the commit it
-            // labels; `*objectname` dereferences it and is empty otherwise.
-            let target = if deref.is_empty() { object } else { deref };
-            if target.is_empty() {
-                return None;
-            }
-            Some(Ref {
-                name: name.to_owned(),
-                kind,
-                target: Oid::new(target),
-                upstream: (!upstream.is_empty()).then(|| upstream.to_owned()),
-            })
+            let (oid, msg) = line.split_once(FS)?;
+            Some(StashEntry { commit: Oid::new(oid), message: msg.to_string(), saved: None })
         })
         .collect()
 }
 
-/// Full refname → what kind of ref it is and its short name.
+/// Parse `git status --porcelain=v2 -z --no-renames` into per-path states.
 ///
-/// `refs/remotes/<remote>/HEAD` is skipped: it is a symbolic ref that
-/// duplicates whichever branch it points at, and drawing both puts two labels
-/// on one commit that always move together.
-fn classify_ref(refname: &str) -> Option<(RefKind, &str)> {
-    if let Some(name) = refname.strip_prefix("refs/heads/") {
-        Some((RefKind::Local, name))
-    } else if let Some(name) = refname.strip_prefix("refs/remotes/") {
-        (!name.ends_with("/HEAD")).then_some((RefKind::Remote, name))
-    } else if let Some(name) = refname.strip_prefix("refs/tags/") {
-        Some((RefKind::Tag, name))
-    } else {
-        None
+/// A column of `.` means that version equals the one before it, so the object
+/// id is reused rather than pointing at the work-tree file.
+pub fn parse_status(out: &str) -> BTreeMap<String, FileState> {
+    let mut files = BTreeMap::new();
+    for record in out.split('\0').filter(|r| !r.is_empty()) {
+        let fields: Vec<&str> = record.splitn(11, ' ').collect();
+        match fields.first().copied() {
+            Some("1") if fields.len() >= 9 => {
+                let path = record.splitn(9, ' ').nth(8).unwrap_or_default().to_string();
+                let xy = fields[1].as_bytes();
+                let (mh, mi, mw) = (mode(fields[3]), mode(fields[4]), mode(fields[5]));
+                let head = mh.map(|m| Entry::object(m, Oid::new(fields[6])));
+                let index = mi.map(|m| Entry::object(m, Oid::new(fields[7])));
+                let work = match (mw, xy.get(1)) {
+                    (None, _) => None,
+                    (Some(_), Some(b'.')) => index.clone(),
+                    (Some(m), _) => Some(Entry { mode: m, blob: super::Blob::File(path.clone()) }),
+                };
+                files.insert(path, FileState { head, index: Index::Entry(index), work });
+            }
+            Some("u") if fields.len() >= 11 => {
+                let path = fields[10].to_string();
+                let stage = |m: &str, h: &str| mode(m).map(|m| Entry::object(m, Oid::new(h)));
+                let conflict = Conflict {
+                    base: stage(fields[3], fields[7]),
+                    left: stage(fields[4], fields[8]),
+                    right: stage(fields[5], fields[9]),
+                };
+                let work = mode(fields[6]).map(|m| Entry { mode: m, blob: super::Blob::File(path.clone()) });
+                // HEAD's version is filled in by `fill_conflict_heads`.
+                files.insert(path, FileState { head: None, index: Index::Conflict(Box::new(conflict)), work });
+            }
+            Some("?") => {
+                let path = record.get(2..).unwrap_or_default().to_string();
+                let work = Some(Entry { mode: MODE_FILE, blob: super::Blob::File(path.clone()) });
+                files.insert(path, FileState { head: None, index: Index::Entry(None), work });
+            }
+            _ => {}
+        }
+    }
+    files
+}
+
+/// Octal mode → `None` for git's "absent" (`000000`).
+fn mode(field: &str) -> Option<u32> {
+    u32::from_str_radix(field, 8).ok().filter(|m| *m != 0)
+}
+
+/// Fix up untracked files' modes from disk, and read HEAD's version of every
+/// conflicted path (`status` does not report it for unmerged entries).
+fn fill_conflict_heads(root: &Path, files: &mut BTreeMap<String, FileState>, has_head: bool) {
+    for (path, state) in files.iter_mut() {
+        if !matches!(state.index, Index::Entry(None)) || state.head.is_some() {
+            continue;
+        }
+        if let (Some(work), Ok(meta)) = (state.work.as_mut(), std::fs::symlink_metadata(root.join(path))) {
+            work.mode = file_mode(&meta);
+        }
+    }
+    let conflicted: Vec<String> =
+        files.iter().filter(|(_, f)| f.index.is_conflict()).map(|(p, _)| p.clone()).collect();
+    if conflicted.is_empty() || !has_head {
+        return;
+    }
+    let mut args = vec!["ls-tree", "-z", "HEAD", "--"];
+    args.extend(conflicted.iter().map(String::as_str));
+    for (path, entry) in parse_ls_tree(&git(root, &args).unwrap_or_default()) {
+        if let Some(state) = files.get_mut(&path) {
+            state.head = Some(entry);
+        }
     }
 }
 
-/// Parse `git status --porcelain` into the list of changed paths.
-///
-/// A rename reports `old -> new`; the new path is the one that exists, and is
-/// the one worth opening.  Paths git quoted (because they contain something
-/// unusual) keep their quotes stripped rather than being dropped — a file you
-/// cannot see is exactly the file that surprises you.
-pub fn parse_status(out: &str) -> WorkTree {
-    let mut entries = Vec::new();
-    for line in out.lines() {
-        let mut chars = line.chars();
-        let (Some(index), Some(work)) = (chars.next(), chars.next()) else {
-            continue;
-        };
-        let rest = line.get(3..).unwrap_or("").trim();
-        if rest.is_empty() {
-            continue;
-        }
-        let path = rest.rsplit(" -> ").next().unwrap_or(rest);
-        entries.push(Change {
-            path: path.trim_matches('"').to_string(),
-            index,
-            work,
-        });
+/// The git mode a file on disk would be added with.
+pub fn file_mode(meta: &std::fs::Metadata) -> u32 {
+    if meta.file_type().is_symlink() {
+        return MODE_LINK;
     }
-    WorkTree::new(entries)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 != 0 {
+            return MODE_EXEC;
+        }
+    }
+    MODE_FILE
+}
+
+/// `git ls-tree -z` output → `(path, entry)` for every blob or gitlink.
+pub fn parse_ls_tree(out: &str) -> Vec<(String, Entry)> {
+    out.split('\0')
+        .filter_map(|record| {
+            let (meta, path) = record.split_once('\t')?;
+            let mut parts = meta.split(' ');
+            let mode = mode(parts.next()?)?;
+            let kind = parts.next()?;
+            let oid = parts.next()?;
+            (kind != "tree").then(|| (path.to_string(), Entry::object(mode, Oid::new(oid))))
+        })
+        .collect()
+}
+
+/// The operation git is in the middle of, if any.
+fn read_operation(root: &Path, conflicted: bool) -> Option<InProgress> {
+    let dir = git_dir(root);
+    let kind = crate::conflict::load::detect_operation(&dir);
+    let text = |rel: &str| std::fs::read_to_string(dir.join(rel)).ok().map(|s| s.trim().to_string());
+    let rev = |name: &str| {
+        git(root, &["rev-parse", "--verify", "--quiet", name]).ok().map(|s| Oid::new(s.trim()))
+    };
+    let message_of = |oid: &Option<Oid>| {
+        oid.as_ref()
+            .and_then(|o| git(root, &["log", "-1", "--format=%B", o.as_str()]).ok())
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
+    };
+    let subject = |msg: &str| msg.lines().next().unwrap_or("").to_string();
+    let mut op = InProgress {
+        kind,
+        commit: None,
+        label: String::new(),
+        message: String::new(),
+        rest: Vec::new(),
+        branch: None,
+        onto: None,
+    };
+    match kind {
+        Operation::Merge => {
+            op.commit = rev("MERGE_HEAD");
+            op.message = text("MERGE_MSG").unwrap_or_default();
+            op.label = op
+                .message
+                .lines()
+                .next()
+                .and_then(crate::conflict::load::parse_merge_msg)
+                .unwrap_or_else(|| op.commit.as_ref().map_or_else(String::new, |c| c.short().to_string()));
+        }
+        Operation::CherryPick | Operation::Revert => {
+            op.commit = rev(if kind == Operation::CherryPick { "CHERRY_PICK_HEAD" } else { "REVERT_HEAD" });
+            op.message = text("MERGE_MSG").unwrap_or_else(|| message_of(&op.commit));
+            op.label = subject(&message_of(&op.commit));
+            op.rest = parse_todo(&text("sequencer/todo").unwrap_or_default());
+        }
+        Operation::Rebase => {
+            op.commit = rev("REBASE_HEAD");
+            op.message = text("rebase-merge/message").unwrap_or_else(|| message_of(&op.commit));
+            op.label = subject(&message_of(&op.commit));
+            op.rest = parse_todo(&text("rebase-merge/git-rebase-todo").unwrap_or_default());
+            op.branch = text("rebase-merge/head-name").map(|b| b.trim_start_matches("refs/heads/").to_string());
+            op.onto = text("rebase-merge/onto").map(|o| Oid::new(o).short().to_string());
+        }
+        Operation::Unknown if conflicted => op.label = "the conflicted index".to_string(),
+        Operation::Unknown => return None,
+    }
+    Some(op)
+}
+
+/// The commits a sequencer todo list will still pick, oldest first.  Stops at
+/// the first line that is not a plain pick, since nothing past it can be
+/// predicted.
+pub fn parse_todo(todo: &str) -> Vec<Oid> {
+    let mut out = Vec::new();
+    for line in todo.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("pick" | "p"), Some(oid)) => out.push(Oid::new(oid)),
+            _ => break,
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vcs::{testrepo::TestRepo, Blob};
 
-    /// Every git variable that would make an invocation mean something other
-    /// than what it reads as is cleared — the repository it acts on, and the
-    /// identity it commits under.
-    ///
-    /// Git exports both families to hooks and to `$EDITOR`, and this
-    /// repository runs its whole test suite from `.githooks/pre-commit`, so a
-    /// name missing here does not fail somewhere subtle: it fails only for the
-    /// person committing, which is the worst place to find out.
     #[test]
     fn an_inherited_git_environment_cannot_redirect_a_command_or_sign_it() {
         let cmd = git_command(Path::new("/tmp/somewhere"));
@@ -349,169 +414,63 @@ mod tests {
             .filter(|(_, v)| v.is_none())
             .filter_map(|(k, _)| k.to_str())
             .collect();
-        for var in [
-            "GIT_DIR",
-            "GIT_INDEX_FILE",
-            "GIT_WORK_TREE",
-            "GIT_COMMON_DIR",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_NAMESPACE",
-            "GIT_PREFIX",
-            "GIT_AUTHOR_NAME",
-            "GIT_AUTHOR_EMAIL",
-            "GIT_AUTHOR_DATE",
-            "GIT_COMMITTER_NAME",
-            "GIT_COMMITTER_EMAIL",
-            "GIT_COMMITTER_DATE",
-        ] {
+        for var in ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_AUTHOR_NAME", "GIT_COMMITTER_DATE"] {
             assert!(cleared.contains(&var), "{var} is inherited: {cleared:?}");
         }
     }
 
-    /// Build the log text git would produce, so the fixtures read as data
-    /// rather than as escape sequences.
-    fn record(header: &str, numstat: &[&str]) -> String {
-        let mut s = format!("{RS}{header}\n");
-        for line in numstat {
-            s.push_str(line);
-            s.push('\n');
-        }
-        s
-    }
-
     #[test]
-    fn a_log_record_carries_its_fields_and_its_line_counts() {
-        let out = record(
-            &format!("aaaa1{FS}bbbb2 cccc3{FS}Christian{FS}1700000000{FS}Fix the thing"),
-            &["10\t2\tsrc/a.rs", "3\t0\tsrc/b.rs"],
-        );
-        let commits = parse_log(&out);
-        assert_eq!(commits.len(), 1);
-        let c = &commits[0];
-        assert_eq!(c.id, Oid::new("aaaa1"));
-        assert_eq!(c.parents, vec![Oid::new("bbbb2"), Oid::new("cccc3")]);
-        assert_eq!(c.author, "Christian");
-        assert_eq!(c.when, 1_700_000_000);
-        assert_eq!(c.summary, "Fix the thing");
-        assert_eq!((c.insertions, c.deletions), (13, 2));
-    }
-
-    /// The summary is the last field precisely so this cannot shift the
-    /// fields before it — a commit message can contain anything.
-    #[test]
-    fn a_separator_inside_a_commit_message_does_not_shift_the_fields() {
-        let header = format!("aaaa{FS}{FS}A{FS}5{FS}subject with {FS} and {RS} inside");
-        // The record separator really does split, so only test the field one.
-        let header = header.replace(RS, "~");
-        let commits = parse_log(&record(&header, &[]));
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].author, "A");
-        assert_eq!(commits[0].when, 5);
-        assert!(commits[0].summary.starts_with("subject with"));
-    }
-
-    #[test]
-    fn a_root_commit_has_no_parents_and_a_binary_diff_counts_nothing() {
-        let out = record(
-            &format!("aaaa{FS}{FS}A{FS}1{FS}Initial"),
-            &["-\t-\timage.png", "4\t1\tREADME"],
-        );
-        let commits = parse_log(&out);
-        assert!(commits[0].parents.is_empty());
-        assert_eq!((commits[0].insertions, commits[0].deletions), (4, 1));
-    }
-
-    /// A merge commit gets no numstat from `git log` without `-m`, which is
-    /// why the block reports `+0 -0` for one rather than a number taken from
-    /// whichever side happened to be diffed.
-    #[test]
-    fn a_merge_with_no_diff_lines_reports_no_change_rather_than_failing() {
-        let out = record(&format!("mmmm{FS}aaaa bbbb{FS}A{FS}1{FS}Merge"), &[]);
-        let commits = parse_log(&out);
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].parents.len(), 2);
-        assert_eq!((commits[0].insertions, commits[0].deletions), (0, 0));
-    }
-
-    #[test]
-    fn an_empty_log_is_an_empty_graph_not_a_failure() {
-        assert!(parse_log("").is_empty());
-        assert!(parse_log("\n\n").is_empty());
-    }
-
-    #[test]
-    fn refs_are_classified_by_their_full_name_and_shortened() {
+    fn status_records_become_three_versions_per_path() {
         let out = [
-            format!("refs/heads/main{FS}aaaa{FS}{FS}origin/main"),
-            format!("refs/remotes/origin/main{FS}bbbb{FS}{FS}"),
-            format!("refs/tags/v1.0{FS}tagobj{FS}cccc{FS}"),
-            format!("refs/tags/light{FS}dddd{FS}{FS}"),
+            "1 M. N... 100644 100644 100644 aaaa bbbb staged.rs",
+            "1 .M N... 100644 100644 100644 aaaa aaaa edited.rs",
+            "1 A. N... 000000 100644 100644 0000 cccc new file.rs",
+            "1 .D N... 100644 100644 000000 aaaa aaaa gone.rs",
+            "u UU N... 100644 100644 100644 100644 b1 b2 b3 both.rs",
+            "? scratch.txt",
+            "",
         ]
-        .join("\n");
-        let refs = parse_refs(&out);
-        assert_eq!(refs.len(), 4);
+        .join("\0");
+        let files = parse_status(&out);
 
-        assert_eq!(refs[0].name, "main");
-        assert_eq!(refs[0].kind, RefKind::Local);
-        assert_eq!(refs[0].upstream.as_deref(), Some("origin/main"));
+        let staged = &files["staged.rs"];
+        assert_eq!(staged.index.entry().map(|e| &e.blob), Some(&Blob::Object(Oid::new("bbbb"))));
+        assert_eq!(staged.work, staged.index.entry().cloned(), "`.` reuses the index object");
 
-        assert_eq!(refs[1].name, "origin/main");
-        assert_eq!(refs[1].kind, RefKind::Remote);
-        assert!(refs[1].upstream.is_none());
+        let edited = &files["edited.rs"];
+        assert_eq!(edited.work.as_ref().map(|e| &e.blob), Some(&Blob::File("edited.rs".into())));
 
-        // An annotated tag resolves to the commit it labels, not to the tag
-        // object — otherwise it points at an oid no commit block carries.
-        assert_eq!(refs[2].target, Oid::new("cccc"));
-        // A lightweight tag has no dereferenced object and keeps its own.
-        assert_eq!(refs[3].target, Oid::new("dddd"));
-    }
-
-    /// `refs/remotes/origin/HEAD` is symbolic: it always sits on whichever
-    /// branch it points at, so drawing it puts two labels on one commit that
-    /// can never be moved apart.
-    #[test]
-    fn the_remote_head_symlink_is_not_a_ref_of_its_own() {
-        let out = format!("refs/remotes/origin/HEAD{FS}aaaa{FS}{FS}");
-        assert!(parse_refs(&out).is_empty());
-        // A branch actually named HEAD-something is not skipped.
-        let out = format!("refs/remotes/origin/HEADROOM{FS}aaaa{FS}{FS}");
-        assert_eq!(parse_refs(&out).len(), 1);
+        assert!(files["new file.rs"].head.is_none(), "a path with a space survives");
+        assert!(files["gone.rs"].work.is_none());
+        assert!(files["both.rs"].index.is_conflict());
+        assert!(matches!(files["scratch.txt"].index, Index::Entry(None)));
     }
 
     #[test]
-    fn status_counts_the_index_and_the_worktree_separately() {
-        let work = parse_status(
-            "M  staged.rs\n\
-             \x20M unstaged.rs\n\
-             MM both.rs\n\
-             ?? new.rs\n\
-             A  added.rs\n",
-        );
-        // `MM` is one file counted in both columns: staged, then edited again.
-        assert_eq!(work.staged(), 3);
-        assert_eq!(work.unstaged(), 2);
-        assert_eq!(work.untracked(), 1);
-        assert_eq!(work.conflicted(), 0);
-        assert!(work.is_dirty());
-    }
-
-    /// `AA` and `DD` look like ordinary staged changes but are unmerged
-    /// states — counting them as staged would let an apply start on top of a
-    /// conflicted tree.
-    #[test]
-    fn every_unmerged_state_counts_as_a_conflict() {
-        for code in ["DD", "AU", "UD", "UA", "DU", "AA", "UU"] {
-            let work = parse_status(&format!("{code} f.rs\n"));
-            assert_eq!(work.conflicted(), 1, "{code} should be a conflict");
-            assert_eq!(work.staged(), 0, "{code} must not read as merely staged");
-        }
+    fn a_todo_list_is_read_up_to_the_first_step_that_is_not_a_pick() {
+        let todo = "# comment\npick aaa one\np bbb two\nedit ccc three\npick ddd four\n";
+        assert_eq!(parse_todo(todo), vec![Oid::new("aaa"), Oid::new("bbb")]);
     }
 
     #[test]
-    fn a_clean_tree_is_not_dirty() {
-        let work = parse_status("");
-        assert_eq!(work, WorkTree::default());
-        assert!(!work.is_dirty());
+    fn reading_a_real_repository_finds_branches_changes_and_stashes() {
+        let Some(repo) = TestRepo::new() else { return };
+        repo.commit("a.txt", "one\n", "first");
+        repo.write("a.txt", "two\n");
+        repo.git(&["stash"]).unwrap();
+        repo.git(&["branch", "side"]).unwrap();
+        repo.write("a.txt", "three\n");
+        repo.write("dir/new.txt", "new\n");
+
+        let snap = read(repo.path()).unwrap();
+        assert_eq!(snap.head.branch.as_deref(), Some("main"));
+        assert_eq!(snap.branches.keys().collect::<Vec<_>>(), vec!["main", "side"]);
+        assert_eq!(snap.stashes.len(), 1);
+        assert_eq!(snap.files.keys().collect::<Vec<_>>(), vec!["a.txt", "dir/new.txt"]);
+        assert!(snap.operation.is_none());
+        assert_eq!(fingerprint(repo.path()).unwrap(), snap.fingerprint, "nothing moved");
+
+        repo.write("a.txt", "four, and longer\n");
+        assert_ne!(fingerprint(repo.path()).unwrap(), snap.fingerprint, "an edit to a modified file shows");
     }
 }

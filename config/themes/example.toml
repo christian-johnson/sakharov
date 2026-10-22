@@ -156,23 +156,9 @@ null              = "#565f89"  # the empty-cell stand-in    (← ui.dim)
 sparkline         = "#89ddff"  # header distribution glyphs (← table.numeric)
 
 # ---------------------------------------------------------------------------
-# Version-control graph (`:vc`)
+# Version-control view (`:vc`)
 # ---------------------------------------------------------------------------
-# Every key falls back to a colour the theme already defines: a commit graph
-# introduces no new *kind* of meaning, only new places to put branch-green,
-# hash-blue and warning-amber.
 [vcs]
-palette = ["#7aa2f7", "#9ece6a", "#89ddff", "#f7768e"]
-                     # one colour per branch, cycled — commits take the
-                     # colour of the branch they are on.  Keep
-                     # `grabbed` and `head` out of this list — they mean
-                     # "held" and "where you are", not "which branch"
-grabbed = "#e0af68"  # border of whatever is being dragged  (← ui.warning)
 hash    = "#89ddff"  # abbreviated commit hashes      (← ui.info)
-branch  = "#9ece6a"  # local branch labels            (← ui.success)
-remote  = "#565f89"  # remote-tracking branch labels  (← ui.dim)
-tag     = "#e0af68"  # tag labels                     (← ui.warning)
-head    = "#b4a0e8"  # the HEAD block — lavender, and used nowhere else,
-                     # so "where you are" is findable at a glance
-edge    = "#3b4261"  # the arrows between blocks      (← ui.line_numbers)
-pending = "#e0af68"  # a commit the plan would create (← ui.warning)
+branch  = "#9ece6a"  # the branch in the status line  (← ui.success)
+pending = "#e0af68"  # planned, not yet applied       (← ui.warning)

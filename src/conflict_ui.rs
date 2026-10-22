@@ -11,7 +11,7 @@
 //!   both, and the eye compares across rather than counting.
 //! - A side that is **switched on** is drawn in the git-added colour with a
 //!   filled mark; one switched off is dim with a hollow one.  The same switch
-//!   language the staging view and the branch picker use, so "what is going
+//!   language the changes tree uses, so "what is going
 //!   in" reads down the column at a glance.
 //!
 //! Geometry comes from [`crate::conflict::layout`] and nowhere else, so what
@@ -109,7 +109,7 @@ fn pane(
     };
     // The focused pane is marked by **weight**, not by hue: recolouring it
     // would collide with the on/off colour, which is the one thing the pane's
-    // colour already carries.  Same rule the commit graph's cursor follows.
+    // colour already carries.
     let mut border = Style::default().fg(match focused {
         true => th.popup_border_focus,
         false => th.popup_border,
@@ -294,7 +294,7 @@ fn result(frame: &mut Frame, state: &ConflictState, file: &ConflictFile, l: &Lay
     let th = crate::theme::active();
     let left = file.undecided_count();
     let title = match left {
-        0 => format!(" result — every conflict answered, Enter writes {} ", file.path),
+        0 => format!(" result — every conflict answered, Enter plans the resolution of {} ", file.path),
         n => format!(" result — {n} still unanswered "),
     };
     let block = Block::default()
@@ -499,7 +499,7 @@ mod tests {
         let start = rows.iter().position(|r| r.contains("result —")).expect("the strip");
         let strip = rows[start..].join("\n");
         assert!(strip.contains("timeout = 45") && strip.contains("timeout = 60"));
-        assert!(strip.contains("Enter writes"), "it has to say what to press");
+        assert!(strip.contains("Enter plans"), "it has to say what to press");
     }
 
     /// The ancestor is a third pane, and it is never one of the things that

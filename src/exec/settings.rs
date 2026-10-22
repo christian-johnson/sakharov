@@ -50,13 +50,8 @@ pub fn replace_config(app: &mut App, config: Config) -> Vec<String> {
     if app.config.editor.word_wrap {
         app.scroll_col = 0;
     }
-    if let Some(state) = app.vcs.as_mut() {
-        if state.options.orientation != app.config.vcs.orientation {
-            state.flip();
-        }
-    }
-    if let Some(state) = app.conflict.as_mut() {
-        state.show_base = app.config.conflict.show_base;
+    if let Some(conflicts) = app.vcs.as_mut().and_then(|s| s.conflicts.as_mut()) {
+        conflicts.show_base = app.config.conflict.show_base;
     }
     warnings
 }

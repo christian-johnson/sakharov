@@ -12,8 +12,8 @@
 //!    branch name, an author, a date and a summary, resolved from whatever
 //!    operation is in progress.
 //! 2. **Ours and theirs invert during a replay, silently.**  In a merge,
-//!    stage 2 is your branch.  In a rebase or a cherry-pick — which is what
-//!    this editor's own `g a` runs — git checks out the base and replays your
+//!    stage 2 is your branch.  In a rebase or a cherry-pick git checks out
+//!    the base and replays your
 //!    commits onto it, so stage 2 is **the branch you are landing on** and
 //!    stage 3 is **your own commit**.  [`Operation`] knows which, and the
 //!    labels say so in words rather than using "ours" and "theirs" at all.
@@ -34,14 +34,15 @@
 //! ## Layers
 //!
 //! ```text
-//! load.rs     ConflictSet — an immutable snapshot: the files, their stages,
-//!                           the resolved labels, the operation in progress
+//! load.rs     ConflictSet — built from a [`crate::vcs::Repo`] (real or
+//!                           projected): the files, their stages, the labels
 //! hunk.rs     Region      — the three-way diff: agreed text, and conflicted
 //!                           text with its three versions
 //! mod.rs      Resolution  — a stack of choices; folds into the merged text
-//! write.rs                — writes the file and stages it.  The only module
-//!                           here that can lose anything
 //! ```
+//!
+//! Nothing here writes.  Finishing a file pushes a `Resolve` step onto the
+//! version-control plan, which `:vc-apply` carries out.
 //!
 //! See `docs/merge-conflict-plan.md` for the design record.
 
@@ -49,9 +50,6 @@ pub mod hunk;
 pub mod layout;
 pub mod load;
 pub mod state;
-pub mod write;
-
-use std::path::PathBuf;
 
 /// Which of a conflict's two competing versions.
 ///
@@ -166,12 +164,9 @@ pub struct ConflictFile {
     /// `regions.iter().filter(Region::is_conflict)`.
     pub choices: Vec<Choice>,
     /// What has been chosen, in order, so `u` can take the last one back.
-    /// A stack rather than a mutated buffer, for the same reason
-    /// [`crate::vcs::plan::Plan`] is one: the merged text is always a fold
+    /// A stack rather than a mutated buffer: the merged text is always a fold
     /// from scratch, so it cannot drift out of step with what is drawn.
     pub history: Vec<(usize, Choice)>,
-    /// True once the file has been written and staged.
-    pub resolved: bool,
 }
 
 /// What a conflicted region resolves to.
@@ -307,15 +302,9 @@ impl ConflictFile {
     }
 }
 
-/// Every conflicted file in the repository, as one immutable read.
-///
-/// Immutable in the same sense [`crate::vcs::Dag`] is: nothing here talks to
-/// git after the load, and nothing here can write.  The *choices* on each file
-/// are the mutable part, and they reach the repository in exactly one place
-/// ([`write`]).
+/// Every conflicted file in a repository, with the choices made so far.
 #[derive(Debug, Clone)]
 pub struct ConflictSet {
-    pub root: PathBuf,
     pub operation: Operation,
     /// What each side is, in words and in commits.  Resolved once at load,
     /// since it is a property of the operation rather than of the file.
@@ -332,14 +321,6 @@ impl ConflictSet {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.files.is_empty()
-    }
-
-    /// Files still holding an undecided region.
-    pub fn unresolved(&self) -> usize {
-        self.files.iter().filter(|f| !f.resolved).count()
-    }
 }
 
 /// A throwaway repository on disk, for the tests in this module's submodules.
@@ -436,7 +417,6 @@ mod tests {
             regions,
             choices: vec![Choice::default(); conflicts],
             history: Vec::new(),
-            resolved: false,
         }
     }
 

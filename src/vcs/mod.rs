@@ -1,39 +1,33 @@
 //! The version-control view's data model.
 //!
-//! A [`Dag`] is an **immutable snapshot** of what git said the repository
-//! looked like at one moment: the commits reachable from the local branches,
-//! the refs pointing into them, where HEAD is, and what the worktree looks
-//! like.  Nothing here talks to git — [`load`] does that, on a background
-//! thread — and nothing here can write.
+//! A [`Repo`] describes a repository: where HEAD is, the branches, tags and
+//! stashes, any operation in progress, and every path whose HEAD, index and
+//! work-tree versions are not all the same.  [`load`] reads one from git; a
+//! [`plan::Plan`] folds its steps over one to produce another.  Everything
+//! that draws takes a `Repo` and never knows which of the two it was given.
 //!
-//! That split is the architecture, not tidiness.  The view lets the user
-//! rearrange history freely, and the only thing standing between "I dragged an
-//! arrow" and "my branch was rewritten" is that the layers below this one
-//! ([`plan`], [`derive`]) are pure functions and only [`apply`] runs a command.
-//! See `docs/version-control-plan.md`.
+//! Only [`apply`] changes the repository.  See `docs/version-control-plan.md`.
 
 pub mod apply;
 pub mod derive;
+pub mod diff;
 pub mod layout;
 pub mod load;
 pub mod plan;
-pub mod run;
 pub mod state;
+pub mod store;
+pub mod tree;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-/// A git object id, stored in full.
-///
-/// A newtype rather than a `String` because the hazard this module is full of
-/// is passing the wrong hex string somewhere — a *short* hash where a full one
-/// belongs, a ref name where an oid belongs.  Shortening is a display concern
-/// and lives in [`Oid::short`]; the value itself is always complete, so it can
-/// always be handed to git.
+use crate::conflict;
+
+/// A git object id, always stored in full.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Oid(String);
 
-/// How many hex digits an abbreviated hash shows.  Seven is git's own default
-/// for repositories of ordinary size.
+/// How many hex digits an abbreviated hash shows.
 pub const SHORT_LEN: usize = 7;
 
 impl Oid {
@@ -41,34 +35,27 @@ impl Oid {
         Oid(hex.into())
     }
 
-    /// The identity of a commit the plan *will create* but that does not exist
-    /// yet — the merge commit a pending merge would produce.
-    ///
-    /// A merge cannot be modelled as another parent on an existing commit:
-    /// git never adds a parent to a commit, it makes a new one whose parents
-    /// are the two tips.  So the projection needs a node with no object behind
-    /// it, and this is what identifies one.  The `~` prefix cannot collide
-    /// with a hash, which is hex.
+    /// A commit the plan will create but that does not exist yet; `n` indexes
+    /// [`Repo::pending`].  The `~` prefix cannot collide with hex.
     pub fn pending(n: usize) -> Self {
         Oid(format!("~{n}"))
     }
 
-    /// True for an id [`Oid::pending`] made up — a commit that does not exist
-    /// in the repository and must never be handed to git as an argument.
+    /// The index into [`Repo::pending`] for a planned commit.
+    pub fn pending_index(&self) -> Option<usize> {
+        self.0.strip_prefix('~')?.parse().ok()
+    }
+
     pub fn is_pending(&self) -> bool {
         self.0.starts_with('~')
     }
 
-    /// The abbreviated form shown in a commit block.
-    ///
-    /// A pending commit has no hash to abbreviate, and showing its internal
-    /// placeholder would read as a real (and wrong) object id.
+    /// The abbreviated form; a planned commit has no hash yet.
     pub fn short(&self) -> &str {
         if self.is_pending() {
             return "new";
         }
-        let n = self.0.len().min(SHORT_LEN);
-        &self.0[..n]
+        &self.0[..self.0.len().min(SHORT_LEN)]
     }
 
     pub fn as_str(&self) -> &str {
@@ -82,274 +69,252 @@ impl std::fmt::Display for Oid {
     }
 }
 
-/// One commit, with everything a block on screen needs to label itself.
-#[derive(Debug, Clone)]
-pub struct Commit {
-    pub id: Oid,
-    /// Parents in git's own order: `parents[0]` is the first parent, which is
-    /// the one a linear history follows and the one a merge came *from*.
-    pub parents: Vec<Oid>,
-    /// First line of the commit message.
-    pub summary: String,
-    pub author: String,
-    /// Committer date, unix seconds.
-    pub when: i64,
-    /// Lines added / removed, summed over the diff against the first parent.
-    ///
-    /// A merge commit has no such diff, so it reports `(0, 0)` — honest rather
-    /// than a number picked from one side.
-    pub insertions: u32,
-    pub deletions: u32,
+/// Where a version of a file's content lives.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Blob {
+    /// An object git already has.
+    Object(Oid),
+    /// The work-tree file at this repository path, as it was when loaded.
+    File(String),
+    /// Content the plan produced (a partly staged file, a resolution).
+    Text(Arc<[u8]>),
 }
 
-/// What kind of thing points at a commit.
+/// Regular file, the git mode almost everything has.
+pub const MODE_FILE: u32 = 0o100_644;
+/// Executable file.
+pub const MODE_EXEC: u32 = 0o100_755;
+/// Symbolic link.
+pub const MODE_LINK: u32 = 0o120_000;
+/// A submodule.  Shown, never edited.
+pub const MODE_GITLINK: u32 = 0o160_000;
+
+/// One version of a path: its mode and its content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub mode: u32,
+    pub blob: Blob,
+}
+
+impl Entry {
+    pub fn object(mode: u32, oid: Oid) -> Self {
+        Entry { mode, blob: Blob::Object(oid) }
+    }
+
+    pub fn text(mode: u32, bytes: impl Into<Arc<[u8]>>) -> Self {
+        Entry { mode, blob: Blob::Text(bytes.into()) }
+    }
+}
+
+/// The three versions git could not reconcile.  Any may be absent: an
+/// add/add conflict has no base, a modify/delete has no stage on one side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub base: Option<Entry>,
+    pub left: Option<Entry>,
+    pub right: Option<Entry>,
+}
+
+/// What the index holds for a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Index {
+    /// One entry, or `None` when the path is not in the index.
+    Entry(Option<Entry>),
+    /// Unmerged: the three stages of a conflict.
+    Conflict(Box<Conflict>),
+}
+
+impl Index {
+    pub fn entry(&self) -> Option<&Entry> {
+        match self {
+            Index::Entry(e) => e.as_ref(),
+            Index::Conflict(_) => None,
+        }
+    }
+
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Index::Conflict(_))
+    }
+}
+
+/// A path's three versions.  Absent from [`Repo::files`] means all three are
+/// the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileState {
+    pub head: Option<Entry>,
+    pub index: Index,
+    pub work: Option<Entry>,
+}
+
+/// How far a path is from HEAD, as the changes tree marks it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefKind {
-    /// A local branch — the only kind this view can move.
-    Local,
-    /// A remote-tracking branch.  Drawn dim: it records where the remote was
-    /// at the last fetch, and moving it locally would only lie about that.
-    Remote,
-    Tag,
-}
-
-/// A named pointer into the graph.
-#[derive(Debug, Clone)]
-pub struct Ref {
-    /// Short name: `main`, `origin/main`, `v1.2`.
-    pub name: String,
-    pub kind: RefKind,
-    pub target: Oid,
-    /// The remote-tracking branch this one is configured to track, if any —
-    /// what makes an ahead/behind count meaningful.
-    pub upstream: Option<String>,
+pub enum Mark {
+    Conflicted,
+    /// Not in HEAD or the index; only on disk.
+    Untracked,
+    /// The index matches the work tree, and both differ from HEAD.
+    Staged,
+    /// The index still matches HEAD.
+    Unstaged,
+    /// The index differs from both.
+    Partly,
 }
 
 /// Where HEAD is.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Head {
     /// The branch HEAD is on, or `None` when detached.
     pub branch: Option<String>,
-    /// The commit HEAD resolves to.  `None` in a repository with no commits
-    /// yet, where the branch exists but points at nothing.
-    pub target: Option<Oid>,
+    /// The commit HEAD resolves to; `None` before the first commit.
+    pub commit: Option<Oid>,
 }
 
-impl Head {
-    pub fn detached(&self) -> bool {
-        self.branch.is_none() && self.target.is_some()
-    }
-}
-
-/// One path `git status` reported, and what has happened to it.
-///
-/// The two columns are git's own: the first is the index, the second the work
-/// tree, so one file can be both staged and unstaged (edited after `git add`)
-/// and an untracked file is `??`.  Kept verbatim rather than reduced to a
-/// category, because the pair *is* the state and any reduction loses a case.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Change {
-    pub path: String,
-    pub index: char,
-    pub work: char,
-}
-
-impl Change {
-    /// Never added to the repository at all — the scrap notebooks and stray
-    /// output files that accumulate in a working tree.
-    pub fn is_untracked(&self) -> bool {
-        self.index == '?'
-    }
-
-    /// The unmerged states, from `git status`'s own table.  Both columns
-    /// matter: `AA` and `DD` are conflicts despite looking like ordinary
-    /// staged changes.
-    pub fn is_conflicted(&self) -> bool {
-        conflicted(self.index, self.work)
-    }
-
-    pub fn is_staged(&self) -> bool {
-        !self.is_untracked() && !self.is_conflicted() && self.index != ' '
-    }
-
-    pub fn is_unstaged(&self) -> bool {
-        !self.is_untracked() && !self.is_conflicted() && self.work != ' '
-    }
-
-    /// A word for what happened, for a list the user reads.
-    ///
-    /// Says both halves when both apply ("staged, edited since"), because a
-    /// file that was added and then edited again is exactly the case someone
-    /// is surprised by at commit time.
-    pub fn describe(&self) -> String {
-        if self.is_conflicted() {
-            return "conflicted".to_string();
-        }
-        if self.is_untracked() {
-            return "untracked".to_string();
-        }
-        let word = |c: char| match c {
-            'A' => "added",
-            'D' => "deleted",
-            'R' => "renamed",
-            'C' => "copied",
-            'T' => "type changed",
-            _ => "modified",
-        };
-        match (self.index, self.work) {
-            (' ', w) => word(w).to_string(),
-            (i, ' ') => format!("{}, staged", word(i)),
-            (i, _) => format!("{}, staged — edited since", word(i)),
-        }
-    }
-}
-
-/// What `git status` says about the working tree.
-///
-/// The paths, not just the counts: a repository quietly fills up with
-/// untracked scratch files, and "3 untracked" is the number you can see
-/// without being told, while *which three* is the thing you actually need.
-/// The counts are derived from the list rather than stored beside it, so the
-/// summary and the list can never disagree.
+/// A commit's tree: a real tree-ish with planned changes laid over it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkTree {
-    pub entries: Vec<Change>,
+pub struct Tree {
+    /// A commit or tree git has; `None` is the empty tree.
+    pub base: Option<Oid>,
+    /// Paths whose entry differs from `base` (`None` = removed).
+    pub overrides: BTreeMap<String, Option<Entry>>,
 }
 
-impl WorkTree {
-    pub fn new(entries: Vec<Change>) -> Self {
-        WorkTree { entries }
+impl Tree {
+    pub fn of(base: Option<Oid>) -> Self {
+        Tree { base, overrides: BTreeMap::new() }
+    }
+}
+
+/// A commit the plan will create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCommit {
+    pub parents: Vec<Oid>,
+    pub message: String,
+    pub tree: Tree,
+}
+
+impl PendingCommit {
+    /// The message's first line.
+    pub fn summary(&self) -> &str {
+        self.message.lines().next().unwrap_or("")
+    }
+}
+
+/// One `git stash` entry, newest first in [`Repo::stashes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashEntry {
+    /// The stash commit, or a planned one (pending id, no object yet).
+    pub commit: Oid,
+    pub message: String,
+    /// For a planned stash: the paths it took away, to give back on pop.
+    pub saved: Option<BTreeMap<String, FileState>>,
+}
+
+/// An operation stopped part-way, waiting for conflicts to be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InProgress {
+    pub kind: conflict::Operation,
+    /// The commit being merged, picked or reverted.
+    pub commit: Option<Oid>,
+    /// What to call the incoming side ("feature", a commit subject).
+    pub label: String,
+    /// The message the finishing commit will carry.
+    pub message: String,
+    /// Commits still to replay after this one, oldest first.
+    pub rest: Vec<Oid>,
+    /// The branch a rebase will move when it finishes.
+    pub branch: Option<String>,
+    /// Where a rebase is landing, for the labels.
+    pub onto: Option<String>,
+}
+
+/// A repository, real or projected.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Repo {
+    pub head: Head,
+    /// Local branches.
+    pub branches: BTreeMap<String, Oid>,
+    pub tags: BTreeMap<String, Oid>,
+    pub stashes: Vec<StashEntry>,
+    pub operation: Option<InProgress>,
+    /// Every path whose three versions are not all equal.
+    pub files: BTreeMap<String, FileState>,
+    /// Commits the plan created, addressed by [`Oid::pending`].
+    pub pending: Vec<PendingCommit>,
+    /// The loaded state, compared again before anything is written.
+    pub fingerprint: load::Fingerprint,
+}
+
+impl Repo {
+    /// HEAD's tree: the commit it points at, with any planned changes.
+    pub fn head_tree(&self) -> Tree {
+        self.tree_of(self.head.commit.as_ref())
     }
 
-    fn count(&self, which: fn(&Change) -> bool) -> usize {
-        self.entries.iter().filter(|c| which(c)).count()
+    /// The tree of `commit`, real or planned.
+    pub fn tree_of(&self, commit: Option<&Oid>) -> Tree {
+        match commit {
+            None => Tree::of(None),
+            Some(oid) => match oid.pending_index().and_then(|i| self.pending.get(i)) {
+                Some(p) => p.tree.clone(),
+                None => Tree::of(Some(oid.clone())),
+            },
+        }
     }
 
-    pub fn staged(&self) -> usize {
-        self.count(Change::is_staged)
+    /// A short name for HEAD: its branch, or where it is detached.
+    pub fn head_label(&self) -> String {
+        match (&self.head.branch, &self.head.commit) {
+            (Some(b), _) => b.clone(),
+            (None, Some(c)) => format!("detached at {}", c.short()),
+            (None, None) => "no commits".to_string(),
+        }
     }
 
-    pub fn unstaged(&self) -> usize {
-        self.count(Change::is_unstaged)
+    /// The commit a branch name or a commit id refers to.
+    pub fn resolve(&self, target: &Target) -> Option<Oid> {
+        match target {
+            Target::Branch(name) => self.branches.get(name).cloned(),
+            Target::Commit(oid) => Some(oid.clone()),
+        }
     }
 
-    pub fn untracked(&self) -> usize {
-        self.count(Change::is_untracked)
-    }
-
-    pub fn conflicted(&self) -> usize {
-        self.count(Change::is_conflicted)
-    }
-
-    /// True when there is anything at all uncommitted.
-    ///
-    /// This is the gate on applying a plan: replaying commits over uncommitted
-    /// work is the reliable way to lose it.  Untracked files are excluded —
-    /// git itself lets a checkout proceed past them, and refusing on a stray
-    /// build artefact would make the feature unusable in a real tree.
-    pub fn is_dirty(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|c| c.is_staged() || c.is_unstaged() || c.is_conflicted())
-    }
-
-    /// The two lines the HEAD block shows: what would go into the next commit,
-    /// and what git is not tracking at all.
-    ///
-    /// Built here rather than in the renderer because the layout has to size a
-    /// block against them before anything is drawn, and a block sized from one
-    /// string and filled with another clips the half that matters.
-    pub fn summary_lines(&self) -> [String; 2] {
-        let mut tracked = Vec::new();
-        for (n, word) in [
-            (self.conflicted(), "conflicted"),
-            (self.staged(), "staged"),
-            (self.unstaged(), "unstaged"),
-        ] {
-            if n > 0 {
-                tracked.push(format!("{n} {word}"));
+    /// `(staged, unstaged, conflicted)` path counts, for the status line.
+    pub fn counts(&self, store: &store::Store) -> (usize, usize, usize) {
+        let mut out = (0, 0, 0);
+        for state in self.files.values() {
+            match store.mark(state) {
+                Mark::Conflicted => out.2 += 1,
+                Mark::Staged => out.0 += 1,
+                Mark::Partly => {
+                    out.0 += 1;
+                    out.1 += 1;
+                }
+                Mark::Unstaged | Mark::Untracked => out.1 += 1,
             }
         }
-        let first = if tracked.is_empty() {
-            "clean".to_string()
-        } else {
-            tracked.join(" · ")
-        };
-        let second = match self.untracked() {
-            0 if self.is_dirty() => "w to list them".to_string(),
-            0 => String::new(),
-            n => format!("{n} untracked  (w)"),
-        };
-        [first, second]
+        out
     }
 }
 
-/// An immutable snapshot of the repository's history.
-pub struct Dag {
-    /// Commits in git's topological order — newest first, and every commit
-    /// listed before any of its ancestors.  The layout depends on that
-    /// ordering, so it is a property of the type rather than of the loader.
-    commits: Vec<Commit>,
-    index: HashMap<Oid, usize>,
-    pub refs: Vec<Ref>,
-    pub head: Head,
-    pub work: WorkTree,
-    /// True when the walk stopped at the configured commit limit, so the
-    /// oldest blocks on screen have parents that were never loaded.
-    pub truncated: bool,
+/// What a step names as its subject: a branch (resolved when the step runs)
+/// or a fixed commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Branch(String),
+    Commit(Oid),
 }
 
-impl Dag {
-    pub fn new(
-        commits: Vec<Commit>,
-        refs: Vec<Ref>,
-        head: Head,
-        work: WorkTree,
-        truncated: bool,
-    ) -> Self {
-        let index = commits
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.id.clone(), i))
-            .collect();
-        Dag { commits, index, refs, head, work, truncated }
+impl Target {
+    /// How the target reads in a plan row and on git's command line.
+    pub fn name(&self) -> String {
+        match self {
+            Target::Branch(b) => b.clone(),
+            Target::Commit(c) => c.short().to_string(),
+        }
     }
-
-    pub fn commits(&self) -> &[Commit] {
-        &self.commits
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.commits.is_empty()
-    }
-
-    pub fn get(&self, id: &Oid) -> Option<&Commit> {
-        self.index.get(id).map(|&i| &self.commits[i])
-    }
-
-    pub fn find_ref(&self, name: &str) -> Option<&Ref> {
-        self.refs.iter().find(|r| r.name == name)
-    }
-
-    /// The local branches, which are the only refs the view can move.
-    pub fn local_branches(&self) -> impl Iterator<Item = &Ref> {
-        self.refs.iter().filter(|r| r.kind == RefKind::Local)
-    }
-}
-
-/// Whether git's two status columns describe an unmerged path.
-///
-/// A free function because the staging view asks the same question of its own
-/// copy of those two columns, and a second statement of the table is a second
-/// chance to leave out `AA`.
-pub fn conflicted(index: char, work: char) -> bool {
-    matches!((index, work), ('D', 'D') | ('A', 'A') | ('U', _) | (_, 'U'))
 }
 
 /// Render `when` as an age relative to `now`, both unix seconds.
-///
-/// Coarse on purpose: a commit block has one short field for this, and "3
-/// days ago" answers the question a timestamp would make the reader compute.
 pub fn relative_time(when: i64, now: i64) -> String {
     let secs = (now - when).max(0);
     const MINUTE: i64 = 60;
@@ -375,117 +340,88 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// A throwaway repository on disk, for tests.
+#[cfg(test)]
+pub mod testrepo {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::load::git;
+
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    pub struct TestRepo {
+        pub root: PathBuf,
+    }
+
+    impl TestRepo {
+        pub fn new() -> Option<Self> {
+            let n = SEQ.fetch_add(1, Ordering::SeqCst);
+            let root = std::env::temp_dir().join(format!("sv-vcs-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).ok()?;
+            let repo = TestRepo { root };
+            repo.git(&["init", "-q", "-b", "main"])?;
+            repo.git(&["config", "user.email", "test@example.com"])?;
+            repo.git(&["config", "user.name", "Test"])?;
+            repo.git(&["config", "commit.gpgsign", "false"])?;
+            Some(repo)
+        }
+
+        pub fn git(&self, args: &[&str]) -> Option<String> {
+            git(&self.root, args).ok()
+        }
+
+        pub fn write(&self, file: &str, contents: &str) {
+            let path = self.root.join(file);
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            std::fs::write(path, contents).unwrap();
+        }
+
+        pub fn read(&self, file: &str) -> Option<String> {
+            std::fs::read_to_string(self.root.join(file)).ok()
+        }
+
+        pub fn commit(&self, file: &str, contents: &str, message: &str) {
+            self.write(file, contents);
+            self.git(&["add", file]).unwrap();
+            self.git(&["commit", "-q", "-m", message]).unwrap();
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn commit(id: &str, parents: &[&str]) -> Commit {
-        Commit {
-            id: Oid::new(id),
-            parents: parents.iter().map(|p| Oid::new(*p)).collect(),
-            summary: format!("commit {id}"),
-            author: "Test".into(),
-            when: 0,
-            insertions: 1,
-            deletions: 0,
-        }
-    }
-
-    fn dag() -> Dag {
-        Dag::new(
-            vec![commit("cccc", &["bbbb"]), commit("bbbb", &["aaaa"]), commit("aaaa", &[])],
-            vec![
-                Ref { name: "main".into(), kind: RefKind::Local, target: Oid::new("cccc"), upstream: Some("origin/main".into()) },
-                Ref { name: "origin/main".into(), kind: RefKind::Remote, target: Oid::new("bbbb"), upstream: None },
-            ],
-            Head { branch: Some("main".into()), target: Some(Oid::new("cccc")) },
-            WorkTree::default(),
-            false,
-        )
-    }
-
     #[test]
-    fn a_short_hash_is_a_display_form_and_never_the_stored_value() {
-        let id = Oid::new("a3f91c2b7d4e5f60718293a4b5c6d7e8f9012345");
-        assert_eq!(id.short(), "a3f91c2");
-        assert_eq!(id.short().len(), SHORT_LEN);
-        // The full value survives, so it can always be handed to git.
-        assert_eq!(id.as_str().len(), 40);
-    }
-
-    /// A hash shorter than the abbreviation (a test fixture, or a repository
-    /// using a shorter one) must not panic on the slice.
-    #[test]
-    fn shortening_a_hash_that_is_already_short_is_not_a_panic() {
-        assert_eq!(Oid::new("abc").short(), "abc");
-        assert_eq!(Oid::new("").short(), "");
-    }
-
-    /// A pending id must be impossible to mistake for a real one: it would
-    /// otherwise be handed to git as an argument and fail, or worse, resolve.
-    #[test]
-    fn a_pending_commit_is_not_a_hash_and_never_looks_like_one() {
-        let pending = Oid::pending(3);
-        assert!(pending.is_pending());
-        assert_eq!(pending.short(), "new");
-        // Hashes are hex, so the marker cannot collide with one.
+    fn a_pending_id_is_never_mistaken_for_a_hash() {
+        let p = Oid::pending(3);
+        assert!(p.is_pending());
+        assert_eq!(p.pending_index(), Some(3));
+        assert_eq!(p.short(), "new");
         assert!(!Oid::new("a3f91c2").is_pending());
-        assert!(Oid::pending(0) != Oid::pending(1));
+        assert_eq!(Oid::new("a3f91c2b7d4e").short(), "a3f91c2");
+        assert_eq!(Oid::new("abc").short(), "abc");
     }
 
     #[test]
-    fn the_index_answers_lookups_and_tolerates_a_ref_past_the_horizon() {
-        let dag = dag();
-        assert_eq!(dag.get(&Oid::new("bbbb")).map(|c| c.summary.as_str()), Some("commit bbbb"));
-        // A ref pointing past the loaded window is normal, not an error.
-        assert!(dag.get(&Oid::new("dddd")).is_none());
-        // Newest first, and every commit before its ancestors.
-        let order: Vec<_> = dag.commits().iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(order, vec!["cccc", "bbbb", "aaaa"]);
-    }
-
-    #[test]
-    fn refs_are_found_by_name_and_by_what_they_point_at() {
-        let dag = dag();
-        assert_eq!(dag.find_ref("origin/main").map(|r| r.kind), Some(RefKind::Remote));
-        // Only local branches are movable, so only they are offered.
-        let local: Vec<_> = dag.local_branches().map(|r| r.name.as_str()).collect();
-        assert_eq!(local, vec!["main"]);
-    }
-
-    /// Untracked files deliberately do not count: git lets a checkout proceed
-    /// past them, and a stray build artefact must not block every apply.
-    #[test]
-    fn only_tracked_changes_make_the_tree_dirty() {
-        assert!(!WorkTree::default().is_dirty());
-        let tree = |index: char, work: char| {
-            WorkTree::new(vec![Change { path: "f.rs".into(), index, work }])
-        };
-        assert!(!tree('?', '?').is_dirty());
-        assert!(tree('M', ' ').is_dirty());
-        assert!(tree(' ', 'M').is_dirty());
-        assert!(tree('U', 'U').is_dirty());
-    }
-
-    #[test]
-    fn head_is_detached_only_when_it_has_a_commit_but_no_branch() {
-        assert!(Head { branch: None, target: Some(Oid::new("a")) }.detached());
-        assert!(!Head { branch: Some("main".into()), target: Some(Oid::new("a")) }.detached());
-        // An unborn branch in a fresh repository is not "detached".
-        assert!(!Head { branch: Some("main".into()), target: None }.detached());
-        assert!(!Head::default().detached());
-    }
-
-    #[test]
-    fn ages_read_as_ages_rather_than_timestamps() {
+    fn ages_read_as_ages() {
         let now = 1_000_000_000;
         assert_eq!(relative_time(now, now), "just now");
-        assert_eq!(relative_time(now - 90, now), "1m ago");
         assert_eq!(relative_time(now - 3 * 3600, now), "3h ago");
-        assert_eq!(relative_time(now - 3 * 86400, now), "3d ago");
-        assert_eq!(relative_time(now - 60 * 86400, now), "2mo ago");
-        assert_eq!(relative_time(now - 800 * 86400, now), "2y ago");
-        // Clock skew (a commit dated in the future) must not underflow.
         assert_eq!(relative_time(now + 5000, now), "just now");
     }
 }

@@ -64,12 +64,8 @@ pub fn update_scroll(app: &mut App) {
     match app.view() {
         crate::view::View::Table => return super::table::update_scroll(app),
 
-        // The commit graph keeps its own anchor, in stack rows and lanes.
+        // The version-control view keeps an anchor per panel.
         crate::view::View::Vcs => return super::vcs::update_scroll(app),
-
-        // The resolver's anchor is a row offset into the panes' shared
-        // content, so the two versions of a hunk always scroll together.
-        crate::view::View::Conflict => return super::conflict::update_scroll(app),
 
         // Seamless, row-granular notebook scroll.  The whole notebook is one
         // vertical stack of cells (each `height` rows, separated by a 1-row

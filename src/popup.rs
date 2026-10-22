@@ -40,161 +40,6 @@ pub enum PopupContent {
     /// Two-column key → description table. Covers which-key.
     /// Purely informational — any keypress dismisses with passthrough.
     KeyHints(KeyHintsState),
-    /// The work tree, side by side with the selected file's diff.  Covers
-    /// interactive staging.
-    Stage(StageState),
-    /// A list of things that are each either on or off.  Covers which branches
-    /// the commit graph draws.
-    Toggles(ToggleListState),
-}
-
-/// One row of a [`ToggleListState`].
-#[derive(Clone)]
-pub struct ToggleItem {
-    pub label: String,
-    /// Shown dimmed after the label — what this row *is*, when the name alone
-    /// does not say (a branch's tip, whether it is a remote).
-    pub detail: String,
-    pub on: bool,
-}
-
-/// A list whose rows are switches rather than destinations.
-///
-/// Separate from [`ListState`] because that list's keys are a fuzzy filter —
-/// every printable key types into it, `Space` included — and the one gesture
-/// this needs is `Space`.  A list you *pick from* and a list you *set* are
-/// different things to operate, however similar they look.
-pub struct ToggleListState {
-    pub items: Vec<ToggleItem>,
-    pub selected: usize,
-    /// A toggle the key handler asked for, as an index into `items`.
-    ///
-    /// Keys are handled where there is no `App` to act through, so the request
-    /// is parked here and run on the next `PopupAction::Continue` — the same
-    /// shape the staging view and the theme picker's live preview use.
-    pub toggled: Option<usize>,
-}
-
-impl ToggleListState {
-    pub fn select(&mut self, index: usize) {
-        if !self.items.is_empty() {
-            self.selected = index.min(self.items.len() - 1);
-        }
-    }
-}
-
-/// One path `git status` reported, with git's own two status columns.
-///
-/// Kept verbatim rather than reduced to a `staged: bool`, because they answer
-/// two different questions — what is on its way into the next commit, and what
-/// is only in the work tree — and a file is very often both at once.
-#[derive(Clone)]
-pub struct StageEntry {
-    /// Repository-relative, which is how it is listed.
-    pub path: String,
-    /// Where `Enter` opens it — resolved when the list is built, since the
-    /// popup has no idea which repository it is describing.
-    pub file: std::path::PathBuf,
-    pub index: char,
-    pub work: char,
-    /// A word for what happened, for the pane heading: git's two columns are
-    /// exact and terse, and "staged, edited since" is the case people are
-    /// surprised by at commit time.
-    pub detail: String,
-}
-
-impl StageEntry {
-    /// Is any of this file on its way into the next commit?
-    pub fn staged(&self) -> bool {
-        !matches!(self.index, ' ' | '?')
-    }
-
-    /// Is *all* of it?  What the toggle keys off: a file with staged and
-    /// unstaged parts is one more `git add` away from being ready, so Space
-    /// stages it rather than undoing the half that was done.
-    pub fn fully_staged(&self) -> bool {
-        self.staged() && self.work == ' '
-    }
-
-    /// Is git reporting a conflict on it?  The same table `Change` reads, and
-    /// deliberately the same function.
-    pub fn is_conflicted(&self) -> bool {
-        crate::vcs::conflicted(self.index, self.work)
-    }
-
-    /// How far into the next commit this file is, as one of the three states
-    /// the dot in front of it can be.
-    pub fn state(&self) -> StageMark {
-        if self.is_conflicted() {
-            StageMark::Conflicted
-        } else if self.fully_staged() {
-            StageMark::Staged
-        } else if self.staged() {
-            StageMark::Partly
-        } else {
-            StageMark::Unstaged
-        }
-    }
-}
-
-/// What the dot in front of a file says.
-///
-/// The same language as the branch picker's switches — filled means "in",
-/// hollow means "out" — because they are the same question asked about two
-/// different things, and a reader should not have to learn it twice.  git's own
-/// two status columns stay beside it: the dot is the glance, the columns are
-/// the detail, and neither is a replacement for the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StageMark {
-    /// Nothing of it is staged, or it is untracked.
-    Unstaged,
-    /// Staged, with more changed since — the case people are surprised by at
-    /// commit time, so it gets its own colour rather than passing for staged.
-    Partly,
-    Staged,
-    Conflicted,
-}
-
-/// The work tree, and the diff of whichever entry is selected.
-///
-/// A list on its own answers "what is uncommitted"; the question that actually
-/// stops someone committing is "what is *in* these changes", and answering it
-/// meant leaving the view, opening the file and reading around the edits.  The
-/// two panes are one popup rather than two so the selection and the diff cannot
-/// disagree about which file is being looked at.
-pub struct StageState {
-    pub entries: Vec<StageEntry>,
-    pub selected: usize,
-    /// The selected entry's diff, already sanitised for a cell buffer.
-    pub diff: Vec<String>,
-    pub diff_scroll: usize,
-    /// The path `diff` was read for.  `None` means "re-read it": set by every
-    /// move, and by a staging toggle, so the pane is refreshed exactly when the
-    /// thing it describes changed.
-    pub loaded: Option<String>,
-    /// A stage/unstage the key handler asked for.
-    ///
-    /// Keys are handled where there is no `App` to reach git through, so the
-    /// request is parked here and run by `exec::vcs::pump_stage_popup` on the
-    /// next `PopupAction::Continue` — the same shape the theme picker's live
-    /// preview uses.
-    pub toggle: bool,
-}
-
-impl StageState {
-    pub fn selected_entry(&self) -> Option<&StageEntry> {
-        self.entries.get(self.selected)
-    }
-
-    /// Move the selection, forgetting the diff that belonged to the old one.
-    pub fn select(&mut self, index: usize) {
-        if self.entries.is_empty() {
-            return;
-        }
-        self.selected = index.min(self.entries.len() - 1);
-        self.loaded = None;
-        self.diff_scroll = 0;
-    }
 }
 
 pub enum PopupAnchor {
@@ -237,6 +82,9 @@ pub enum PopupTarget {
     /// Run the version-control plan the popup just listed
     /// ([`ConfirmPayload::Choice`] is `"apply"` or `"cancel"`).
     ApplyVcsPlan,
+    /// Plan the version-control step the confirmed row describes
+    /// ([`ConfirmPayload::Choice`] is `action\x1fvalue`).
+    VcsPick,
 }
 
 /// Typed data carried by a confirmed [`ListItem`]. Replaces the old
@@ -298,6 +146,9 @@ pub struct ListState {
     /// True once the user has pressed ESC in a two_phase popup.
     /// In this mode printable keys navigate (j/k) instead of updating the filter.
     pub navigating: bool,
+    /// The filter is a search run elsewhere (live grep): items are shown as
+    /// given, unfiltered and unhighlighted.
+    pub live: bool,
     /// For completion (InsertText) popups: true once the user has pressed Tab
     /// to explicitly engage with the list. In passive mode (focused=false) the
     /// popup is a hint overlay and all keys fall through to insert mode.
@@ -403,6 +254,7 @@ impl ListState {
             selected: 0,
             two_phase: false,
             navigating: false,
+            live: false,
             focused: false,
             search: None,
             doc: None,
@@ -453,6 +305,9 @@ impl ListState {
 
     fn compute_filtered_indices(&self) -> Vec<usize> {
         let active_filter = self.effective_filter();
+        if self.live {
+            return (0..self.items.len()).collect();
+        }
         if active_filter.is_empty() {
             // With recency tracking, float recently-used items to the top in
             // recency order; everything else keeps its original order below.
@@ -831,64 +686,16 @@ impl Popup {
         }
     }
 
-    /// The version-control plan confirmation: the derived git commands, then
-    /// the two answers.
-    ///
-    /// The commands are listed rather than summarised because this is the one
-    /// place a surprise can surface — the graph shows the *shape* that was
-    /// asked for, and a shape that quietly becomes a nine-commit replay is
-    /// exactly what someone would want to see before agreeing.  They carry the
-    /// `cancel` payload so that confirming one by reflex does nothing.
-    /// The first of two confirmations, when a plan would rewrite commits a
-    /// remote already carries.
-    ///
-    /// Two popups rather than one sterner one because the cost of this
-    /// mistake lands on other people, and the point of the extra press is
-    /// that it cannot be reached by the reflex that clears the ordinary
-    /// confirmation.  The commits and the branches carrying them are named:
-    /// "this rewrites published history" is a warning, and *which* commits is
-    /// what tells you whether it is the one you pushed a minute ago or the
-    /// week everybody else is working on top of.
-    ///
-    /// Stopping is the first row, so a reflexive Enter stops.
-    pub fn vcs_published_warning(commits: Vec<String>, remotes: Vec<String>) -> Self {
-        let n = commits.len();
-        let carried = remotes.join(", ");
-        let mut items = vec![
-            ListItem {
-                label: "Stop — leave the plan alone".into(),
-                detail: Some("nothing has been written yet".into()),
-                payload: Some(ConfirmPayload::Choice("cancel".into())),
-                ..Default::default()
-            },
-            ListItem {
-                label: "I know — these commits are mine to rewrite".into(),
-                detail: Some("go on to the list of git commands".into()),
-                payload: Some(ConfirmPayload::Choice("published".into())),
-                ..Default::default()
-            },
-            ListItem {
-                label: format!(
-                    "{n} commit{} already on {carried}",
-                    if n == 1 { "" } else { "s" }
-                ),
-                kind: Some("carried by".into()),
-                payload: Some(ConfirmPayload::Choice("cancel".into())),
-                ..Default::default()
-            },
-        ];
-        items.extend(commits.into_iter().map(|c| ListItem {
-            label: c,
-            kind: Some("rewritten".into()),
-            payload: Some(ConfirmPayload::Choice("cancel".into())),
-            ..Default::default()
-        }));
+
+    /// A fuzzy-filterable list whose confirmed row plans a version-control
+    /// step (a branch to switch to, a commit to cherry-pick).
+    pub fn vcs_pick(title: &str, items: Vec<ListItem>) -> Self {
         Self {
-            title: Some("This rewrites history the remote already has".into()),
+            title: Some(title.into()),
             content: PopupContent::List(ListState::new(items)),
             anchor: PopupAnchor::Center,
-            width: PopupSize::FractionOfScreen(0.7),
-            on_confirm: PopupTarget::ApplyVcsPlan,
+            width: PopupSize::FractionOfScreen(0.6),
+            on_confirm: PopupTarget::VcsPick,
         }
     }
 
@@ -908,7 +715,7 @@ impl Popup {
             ListItem {
                 label: "Apply these changes".into(),
                 detail: Some(format!(
-                    "{count} git operation{}; every branch is saved first, and :vc-undo puts them back",
+                    "{count} operation{}; a backup is taken first, and :vc-undo puts it all back",
                     if count == 1 { "" } else { "s" }
                 )),
                 payload: Some(ConfirmPayload::Choice("apply".into())),
@@ -916,7 +723,7 @@ impl Popup {
             },
         );
         Self {
-            title: Some("Apply the planned history?".into()),
+            title: Some("Apply the plan?".into()),
             content: PopupContent::List(ListState::new(items)),
             anchor: PopupAnchor::Center,
             width: PopupSize::FractionOfScreen(0.7),
@@ -989,16 +796,6 @@ impl Popup {
         popup
     }
 
-    /// A list of on/off switches (`Space` toggles, `Esc` closes).
-    pub fn toggles(title: &str, items: Vec<ToggleItem>) -> Self {
-        Self {
-            title: Some(title.into()),
-            content: PopupContent::Toggles(ToggleListState { items, selected: 0, toggled: None }),
-            anchor: PopupAnchor::Center,
-            width: PopupSize::FractionOfScreen(0.5),
-            on_confirm: PopupTarget::Dismiss,
-        }
-    }
 
     /// Fuzzy-filterable navigate list (buffer picker, symbol picker, diagnostics).
     pub fn navigate(title: &str, items: Vec<ListItem>) -> Self {
@@ -1060,27 +857,6 @@ impl Popup {
         }
     }
 
-    /// The work tree beside the selected file's diff — interactive staging.
-    ///
-    /// Wide and tall on purpose: it is a reading view, and the right-hand pane
-    /// is a diff.  `Navigate` on confirm, so `Enter` still opens the file the
-    /// way the plain list did.
-    pub fn stage(entries: Vec<StageEntry>) -> Self {
-        Self {
-            title: Some("work tree".into()),
-            content: PopupContent::Stage(StageState {
-                entries,
-                selected: 0,
-                diff: Vec::new(),
-                diff_scroll: 0,
-                loaded: None,
-                toggle: false,
-            }),
-            anchor: PopupAnchor::Center,
-            width: PopupSize::FractionOfScreen(0.9),
-            on_confirm: PopupTarget::Navigate,
-        }
-    }
 
     /// Which-key strip shown at the bottom of the screen.
     pub fn which_key(prefix: &str, hints: Vec<KeyHint>) -> Self {

@@ -129,7 +129,7 @@ file_picker = "find . -type f | fzf"
 | `search-next` | `n`, `ctrl+n` | Jump to the next match (wraps around) |
 | `search-prev` | `N`, `ctrl+p` | Jump to the previous match (wraps around) |
 | `grep-buffer` | `ctrl+f` | Telescope-style fuzzy line picker over the current buffer (`:grep-buffer`) |
-| `grep-project` | `ctrl+g` | Project-wide grep popup via ripgrep/grep (`:grep`, `:rg`) |
+| `grep-project` | `ctrl+g` | Live project grep: the query is a ripgrep regex (smart case), re-run as you type, first 10,000 matches; falls back to `grep -rE` (`:grep`, `:rg`) |
 
 Search is live: the cursor moves to the nearest match as you type. Press `Esc` to cancel and return the cursor to its original position.
 
@@ -188,7 +188,7 @@ opened by a relative or absolute path.
 | `open-symbol-picker` | — | Fuzzy picker over tree-sitter symbols in the buffer (`:symbols`) |
 | `open-diagnostic-picker` | — | Fuzzy picker over all LSP diagnostics (`:diagnostics`) |
 | `open-config` | — | Open the user config file for editing (`:config`) |
-| `reload-config` | — | Reload the config from disk without restarting (`:config-reload`). Every setting takes effect, including ones read once at startup (`vcs.orientation`, `ui.command_history`, `editor.crash_recovery`, `editor.max_undo`, `[keys]`); problems with the file are reported in `*Messages*` |
+| `reload-config` | — | Reload the config from disk without restarting (`:config-reload`). Every setting takes effect, including ones read once at startup (`ui.command_history`, `editor.crash_recovery`, `editor.max_undo`, `[keys]`); problems with the file are reported in `*Messages*` |
 | `set <setting> <value>` | — | Change any config value for the session (`:set editor.tab_width 2`, `:set tab_width 2`, `:set theme.name nord`). The name is a dotted path or a name unique across sections; the value is TOML (a bare word is a string). Unknown names and wrong types are refused |
 | `toggle <setting>` | — | Flip an on/off config value for the session (`:toggle word_wrap`, `:toggle conflict.show_base`) |
 | `open-theme-picker` | — | Fuzzy picker over all color themes, built-in + user, with live preview as you scroll — ESC restores the current theme (`:theme`, `:themes`); see [themes.md](themes.md) |
@@ -206,7 +206,7 @@ session's config, so `:set`, the toggles and `:config-reload` always agree.
 `[keys.<layer>]` tables in the config bind key sequences to commands, in any
 layer: `normal`, `select`, `notebook`, `table`, `cell`, `sql`, `commit`, `vcs`,
 `conflict`, `conflict-edit`. A view layer falls back to `normal` for keys it
-doesn't bind. Keys are a single character, a name (`Enter`, `Space`, `Esc`,
+doesn't bind (`conflict` falls back to `vcs` first). Keys are a single character, a name (`Enter`, `Space`, `Esc`,
 `Tab`, `PgUp`, …) or modifiers plus a key (`ctrl+s`, `C-s`, `alt+x`); a
 sequence is keys separated by spaces, so the `g` and `z` sub-modes are
 rebindable too:
@@ -698,309 +698,133 @@ plain buffer.
 
 ## Version control (`:vc`)
 
-A visual git client: commits are blocks, parent links are arrows, and you
-rearrange history by grabbing a commit and dropping it somewhere else.
+`g V` (`:vc`, `:git`) opens the repository containing the current file:
 
-**Time runs left to right** — the oldest commit loaded is at the left edge, the
-newest at the right, and every arrow points *backwards*, from a commit to the
-parent it follows.
+- **Left: the changes tree.** Every path whose HEAD, index and work-tree
+  versions differ — untracked files included — as a collapsible directory tree.
+  The mark beside each says `●` staged, `○` not staged, `◐` partly staged, `?`
+  untracked, `!` conflicted; a directory's mark sums up its files.
+- **Left, below: the plan.** Every step you have planned, in order.
+- **Right: the selected file.** HEAD on the left and the work tree on the
+  right, aligned row for row, each change marked staged or not. A conflicted
+  file shows the conflict resolver here instead (below). Too narrow for two
+  columns, the diff becomes one.
 
-**Every branch gets a row of its own**, with its name written above it and
-pinned to the left edge so it stays readable however far along the history you
-have scrolled. `h`/`l` travel through history, `j`/`k` step between branches.
-A branch merely *ahead* of another still gets its own row: sharing one saved a
-line and cost the only thing on screen that said which of the two you were
-looking at.
+**Nothing you do in the view changes the repository** until `g a`
+(`:vc-apply`). Every key adds a step to the plan, and the view always shows the
+repository *as the plan will leave it*: stage a change and its mark turns
+green; plan a merge that will conflict and the conflicts appear, ready to be
+resolved, before anything has run. `u` takes back the last step; `Tab` to the
+plan and `x` removes any step (refused, with the reason, if a later step
+depended on it).
 
-**Arrows are not selectable.** An arrow is another name for the commit it
-leaves — dragging one and dragging its block made the same edit — so `h`/`l`
-step block to block and the arrow follows whatever you move.
+`g a` checks that the repository has not changed since the view loaded it
+(`r` re-reads it and keeps every step that still applies), lists every git
+command it will run, and asks. Before the first command it saves a backup —
+every branch and HEAD, the index, every changed file, and any stash the plan
+drops — which `g U` (`:vc-undo`) restores. If a command fails part way (a
+`pre-commit` hook rejecting a commit, say), the run stops, says why, and the
+view re-reads the repository as it now is.
 
-Press **`?`** in the graph for a scrollable sheet of every key with
-walkthroughs of the common gestures.
-
-The organising idea is that **nothing here is a git verb**. You state a shape —
-"this branch should sit on top of that one" — and the editor works out the
-commands that would produce it. Fast-forwarding is not a concept you are taught;
-it is simply what comes out when a branch moves and nothing needed rewriting.
-
-### Two kinds of action
-
-| | What happens | Which commands |
-|---|---|---|
-| **Planned** | Only the picture changes. Reaches the repository once, at `:vc-apply`, behind a confirmation and a backup. | grab/drop, `d`, `m`, `u`, `gx` |
-| **Immediate** | Runs now. | `c`, `+`, `-`, `s`, `w`, `Enter`, commit, fetch, pull, push |
-
-The line between them is *could this make a commit unreachable* — which is
-exactly what the backup refs exist to cover.
-
-### Opening and moving around
+Changes are the unit of staging: each contiguous run of changed lines, with no
+context lines, so two edits a line apart are still two changes.
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `version-control` | `gV` | `:vc`, `:git` | Open the graph for the repository containing the current file |
-| `version-control-close` | `q` | `:vc-close` | Leave the graph |
-| `version-control-refresh` | `r` | `:vc-refresh` | Re-read the repository (discards the plan) |
-| — | `h` / `l` | — | Back / forward through history, one commit per press |
-| — | `j` / `k` | — | Between branches, staying at the same point in history |
-| — | `J` / `K`, `gg` / `ge` | — | Page back/forward; oldest / newest commit |
-| `version-control-enter` | `Enter` | `:vc-enter` | Act on what the cursor is on: check out a branch label, else read the commit |
-| `version-control-show` | — | `:vc-show` | Open the selected commit's diff in an ordinary buffer (`q` returns to the graph) |
-| `yank-selection` | `y` | — | Copy the selected commit's full hash |
-| `version-control-help` | `?` | `:vc-help`, `:vc-keys` | Every key the graph binds, as one grouped sheet — the same which-key float the `g` prefix opens, spilling into columns when it outgrows the screen |
-| `version-control-guide` | `g?` | `:vc-guide` | What the gestures *mean*: the two kinds of action, the walkthroughs, and what is refused. A scrollable float (`Tab` to scroll, `Esc` closes) |
+| `version-control` | `gV` | `:vc`, `:git` | Open the view |
+| `version-control-close` | `q` | `:vc-close` | Leave it; an unapplied plan is kept until you come back |
+| `version-control-enter` | `Enter`, `l` | `:vc-enter` | Unfold a directory, or move into the file's diff |
+| — | `h` | — | Fold a directory, go to its parent, or leave the diff |
+| — | `j` / `k` | — | Next / previous row in the tree, change in the diff, or step in the plan |
+| `version-control-focus-next` | `Tab` | `:vc-focus` | Cycle the tree, the diff and the plan |
+| `version-control-next-file` | `]` | `:vc-next-file` | Next changed file |
+| `version-control-prev-file` | `[` | `:vc-prev-file` | Previous changed file |
+| — | `J` / `K`, `Ctrl+d` / `Ctrl+u` | — | Scroll the diff half a screen |
+| `version-control-toggle-stage` | `Space` | `:vc-stage` | Stage the file, directory or change under the cursor; unstage it if it is already staged |
+| `version-control-discard` | `d` | `:vc-discard` | Throw it away: index and work tree go back to HEAD. An untracked file is deleted |
+| `version-control-stage-all` | `a` | `:vc-stage-all` | Stage every change |
+| `version-control-unstage-all` | `A` | `:vc-unstage-all` | Unstage everything |
+| `version-control-commit` | `c` | `:vc-commit <message>`, `:commit` | Commit what is staged. Bare, it opens a `*commit message*` buffer; `q` there adds the commit to the plan |
+| `version-control-amend` | `C` | `:vc-amend <message>`, `:amend` | Amend the last commit (the buffer starts with its message) |
+| `version-control-branch-keys` | `b` | — | The branch keys, in a which-key strip |
+| `version-control-switch` | `b b` | `:vc-switch` | Switch to a branch (picker). Refused, as git would refuse it, if your changes would be overwritten |
+| `version-control-branch` | `b n` | `:vc-branch <name>`, `:branch` | A new branch at HEAD, and switch to it |
+| `version-control-rename-branch` | `b r` | `:vc-rename <name>` | Rename the current branch |
+| `version-control-delete-branch` | `b d` | `:vc-delete-branch` | Delete a branch (picker) |
+| `version-control-merge` | `b m` | `:vc-merge` | Merge a branch into this one (picker). Fast-forwards when it can |
+| `version-control-rebase` | `b R` | `:vc-rebase` | Rebase this branch onto another (picker) |
+| `version-control-stash-keys` | `s` | — | The stash keys |
+| `version-control-stash` | `s s` | `:vc-stash [message]`, `:stash` | Stash the changes (untracked files stay) |
+| `version-control-stash-pop` | `s p` | `:vc-stash-pop` | Pop a stash (picker) |
+| `version-control-stash-apply` | `s a` | `:vc-stash-apply` | Apply a stash, keeping it |
+| `version-control-stash-drop` | `s d` | `:vc-stash-drop` | Drop a stash |
+| `version-control-log-keys` | `L` | — | The history keys; each opens a picker over HEAD's history |
+| `version-control-cherry-pick` | `L p` | `:vc-cherry-pick` | Cherry-pick a commit |
+| `version-control-revert` | `L v` | `:vc-revert` | Revert a commit |
+| `version-control-reset-soft` | `L r` | `:vc-reset-soft` | Move HEAD to a commit, keeping the index and the files |
+| `version-control-reset-mixed` | `L R` | `:vc-reset-mixed` | Move HEAD to a commit and unstage, keeping the files |
+| `version-control-tag` | `L t` | `:vc-tag <name>`, `:tag` | Tag a commit (picker, then the name); with a name, tags HEAD |
+| `version-control-continue` | `g C` | `:vc-continue` | Continue the merge, rebase, cherry-pick or revert in progress, once its conflicts are resolved |
+| `version-control-abort` | `g A` | `:vc-abort` | Abort it |
+| `version-control-undo-step` | `u` | `:vc-undo-step` | Take back the last planned step |
+| `version-control-remove-step` | `x` | `:vc-remove-step` | Remove the step under the cursor (in the plan) |
+| `version-control-clear-plan` | `g x` | `:vc-clear-plan` | Discard the whole plan |
+| `version-control-apply` | `g a` | `:vc-apply`, `:apply` | Show the git commands the plan becomes, then run them |
+| `version-control-undo` | `g U` | `:vc-undo` | Put the repository back the way it was before the last apply |
+| `version-control-refresh` | `r`, `g r` | `:vc-refresh` | Re-read the repository, keeping the steps that still apply |
+| `version-control-git-status` | `g s` | `:vc-git-status`, `:git-status` | `git status` verbatim, in a float |
+| `version-control-help` | `?` | `:vc-help`, `:vc-keys` | Every key the view binds, grouped |
 
-### Rearranging history
+**What the projection cannot know.** Hooks run when the plan is applied, not
+before: a `pre-commit` hook can reject a commit or rewrite files, and the view
+shows what actually happened once it re-reads the repository. A planned merge,
+rebase, cherry-pick or revert is predicted with `git merge-tree`, the same
+merge `git merge` runs; if git's real conflicts turn out different from the
+predicted ones, the apply stops there and the view shows the real ones. A stash
+that would conflict with the work tree is refused rather than predicted.
 
-Grab something, move the cursor to a commit, drop it. **While it is held the
-graph rearranges under the cursor**, so what you see before pressing Space the
-second time is what you would get. `Esc` puts it back down.
+Push, pull and fetch are not part of the view.
 
-| Holding | Dropping it on a commit means |
-|---------|-------------------------------|
-| a **commit block** | that commit now follows the one you dropped it on |
-| a **branch label** | the branch now points there |
+Status-line modules: `vcs_head` (the branch HEAD will be on), `vcs_plan`
+(hidden until something is planned), `vcs_worktree`, `vcs_selection`. Theme
+keys live under `[vcs]`.
 
-| Command | Default Key | Alias | Description |
-|---------|-------------|-------|-------------|
-| `version-control-grab` | `Space` | `:vc-grab` | Pick up / put down the commit or branch under the cursor |
-| `version-control-drop` | `d`, `gd` | `:vc-drop` | Remove the selected commit; its children attach to its parent |
-| `version-control-merge` | `m`, `gm` | `:vc-merge` | Plan a merge of the selection into the current branch. The merge commit is drawn before it exists |
-| `version-control-undo-edit` | `u` | `:vc-undo-edit` | Take back the last planned change |
-| `version-control-reset` | `gx` | `:vc-reset` | Discard every planned change |
+### Conflicts
 
-Two shapes are refused rather than drawn: a commit cannot become its own
-ancestor, and a **merge cannot be replayed onto a new parent** (the same limit
-`git rebase` has without `--rebase-merges`).
+A conflicted file — one git left behind, or one a planned merge will produce —
+shows in the diff panel as **its two versions side by side, each labelled with
+whose work it is** (a branch name, the commit, its author and its age) instead
+of git's `<<<<<<< HEAD` / `>>>>>>> 9f2c1ab` markers. `:conflicts` (aliases
+`:resolve`, `:merge-conflicts`) opens the view on the first one.
 
-### Applying
-
-| Command | Default Key | Alias | Description |
-|---------|-------------|-------|-------------|
-| `version-control-apply` | `ga` | `:vc-apply`, `:apply` | Show the derived git commands, then run them |
-| `version-control-undo` | `gU` | `:vc-undo` | Put every branch back where it was before the last apply |
-| `version-control-abort` | `gA` | `:vc-abort` | Abort the cherry-pick / merge a conflict left in progress |
-| `version-control-continue` | `gC` | `:vc-continue` | Resume after resolving a conflict |
-
-`:vc-apply` refuses outright while the work tree is dirty — replaying commits
-over uncommitted work is the reliable way to lose it. Before the first write it
-saves every local branch under `refs/sakharov/undo/<stamp>/<branch>`; `:vc-undo`
-restores them and deletes the backup. A real ref rather than the reflog, because
-it survives `gc` and covers branches that were never checked out.
-
-**Rewriting history the remote already has** is confirmed **twice**. A commit a
-remote-tracking branch contains is one anybody who has fetched may already be
-building on; recreating it gives it a new hash, so their history and yours
-diverge and each of them has to reconcile it by hand. It is not refused —
-amending a commit you pushed a minute ago is an everyday thing to want — but
-the first dialog names the commits and the remote branches carrying them, and
-its first row (the one a reflexive `Enter` takes) is *Stop*. Only after
-agreeing does the ordinary list of git commands appear. A plan that rewrites
-only your own unpushed work gets one dialog, as before: a warning that fires on
-the everyday case is a warning nobody reads.
-
-A **conflict** stops the run where it stopped, names the conflicted files, and
-**opens the resolver** (below). `g c` (`:vc-continue`) carries on once they are
-resolved; `g a` (`:vc-abort`) backs the whole thing out.
-
-## Merge-conflict resolver
-
-`:conflicts` (aliases `:resolve`, `:merge-conflicts`) opens the two competing
-versions of a conflicted file **side by side, each labelled with whose work it
-is** — a branch name, the commit, its author and its age — instead of git's
-`<<<<<<< HEAD` / `>>>>>>> 9f2c1ab` markers. It also opens by itself when an
-apply conflicts, and `Enter` on a conflicted file in the staging view (`w`) goes
-here rather than opening the raw text.
-
-Three things it shows that the markers do not:
-
-- **Who each side is.** `HEAD` is a pointer and `9f2c1ab` is a hash; neither
-  answers "is the 30 mine or theirs?".
 - **Which way round they are.** In a merge the left pane is your branch. In a
-  **rebase or cherry-pick** — which is what `g a` in the graph runs — git checks
-  out the base and replays your commits onto it, so the left pane is *the branch
-  you are landing on* and the right is *your own commit*. The panes say so in
-  words, and the message line says it on the way in.
-- **The common ancestor** (`3`), which is what tells a real disagreement
-  (`30 → 60` against `30 → 45`) from a one-sided change (`30 → 60` against an
-  untouched `30`). Off by default; it costs a third of the width.
+  **rebase or cherry-pick** git checks out the base and replays your commits
+  onto it, so the left pane is *the branch you are landing on* and the right is
+  *your own commit*. The panes say so in words.
+- **The common ancestor** (`3`) tells a real disagreement (`30 → 60` against
+  `30 → 45`) from a one-sided change. Off by default (`[conflict] show_base`).
 
-Each side of a conflict is a **switch**, not a menu entry — `Space` toggles the
-focused one, and the merged text is whichever sides are on, in file order. That
-gives take-left, take-right, **keep both** (the answer for two imports or two
-list entries) and **delete the section**, from one key.
+Each side of a conflict is a **switch** — `Space` toggles the focused one, and
+the merged text is whichever sides are on, in file order: take-left,
+take-right, **keep both**, or **delete the section**. When every section is
+answered, `Enter` adds the file's resolution to the plan and moves to the next
+conflicted file; `g C` then plans continuing the operation.
 
-Nothing reaches the disk until `Enter`, which writes the merged file and stages
-it — and even that is undone by `:conflict-revert`, since git holds all three
-versions until the operation finishes. A file with an unanswered section is
-**refused** rather than written: the write would silently delete that section
-along with the markers that would have shown the mistake.
+While the diff panel shows a conflict these keys change meaning (everything
+else is the view's):
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `conflicts` | — | `:resolve`, `:merge-conflicts` | Open the resolver |
-| `conflict-close` | `q` | `:resolve-close` | Leave it (answers are kept if you come back) |
-| `conflict-take-side` | `Space` | `:resolve-take` | Take, or drop, the focused version |
+| `conflict-take-side` | `Space` | `:resolve-take` | Take, or drop, the focused version (`h`/`l` choose it) |
 | `conflict-take-left` | `a` | `:resolve-left` | Take only the left version |
 | `conflict-take-right` | `b` | `:resolve-right` | Take only the right version |
-| `conflict-take-left-all` | `A` | `:resolve-left-all` | Take the left for every **unanswered** conflict in this file (answers already given are left alone) |
+| `conflict-take-left-all` | `A` | `:resolve-left-all` | Take the left for every **unanswered** conflict in this file |
 | `conflict-take-right-all` | `B` | `:resolve-right-all` | The same, taking the right |
 | `conflict-next` | `n` | `:resolve-next` | Next **unanswered** conflict (`j`/`k` walk every conflict) |
 | `conflict-prev` | `N` | `:resolve-prev` | Previous unanswered conflict |
-| `conflict-next-file` | `]` | `:resolve-next-file` | Next conflicted file |
-| `conflict-prev-file` | `[` | `:resolve-prev-file` | Previous conflicted file |
 | `conflict-toggle-base` | `3` | `:resolve-base` | Show the common ancestor as a third pane |
 | `conflict-edit` | `e` | `:resolve-edit` | Edit this section by hand in a `*conflict …*` buffer; `q` takes the text back as that section's answer |
-| `conflict-write` | `Enter`, `gw` | `:resolve-write` | Write this file's resolution and stage it |
-| `conflict-revert` | `gx` | `:resolve-revert` | Put this file back the way git left it, markers and all |
-| `conflict-diff` | `d` | `:resolve-diff` | This file's diff, in a float |
-| `conflict-refresh` | `r` | `:resolve-refresh` | Re-read the conflicted files, keeping the answers given |
-| `conflict-help` | `?`, `g?` | `:resolve-help` | Every key the resolver binds |
+| `conflict-resolve-file` | `Enter` | `:resolve-file` | Plan this file's resolution (refused while a section is unanswered) |
+| `conflict-help` | — | `:resolve-help` | The key sheet |
 
-`u` takes back the last choice and puts the cursor on it. `g c` / `g a` carry
-on with or abort the operation, and `g s` shows `git status` verbatim. On a
-terminal too narrow to give each version a readable column the panes **stack**
-instead of splitting, and the motion keys follow the picture.
-
-### Everyday actions
-
-| Command | Default Key | Alias | Description |
-|---------|-------------|-------|-------------|
-| `version-control-checkout` | `c`, `gc` | `:vc-checkout`, `:checkout` | Check out the branch under the cursor. On a remote-tracking branch it creates the matching local one; on a bare commit it detaches HEAD and says so |
-| `version-control-stage` | `+` | `:vc-stage`, `:stage` | Stage every change in the work tree |
-| `version-control-unstage` | `-` | `:vc-unstage`, `:unstage` | Unstage everything |
-| `version-control-status` | `w` | `:vc-status`, `:status` | The staging view: every uncommitted **and untracked** file beside the selected one's diff. `j`/`k` pick a file, `Space` stages or unstages it, `Ctrl+d`/`Ctrl+u` scroll the diff, `Enter` opens the file, `q` closes |
-| `version-control-git-status` | `s` | `:vc-git-status`, `:git-status` | `git status` verbatim, in a scrollable float (`q` / `Esc` closes) |
-| `version-control-commit` | `C` | `:vc-commit <message>` | Commit what is staged. Bare, it asks for the message in the minibuffer (and says so first if nothing is staged) |
-| `version-control-branch` | `n` | `:vc-branch <name>` | Create a branch at the selected commit and check it out. Bare, it asks for the name |
-| `version-control-fetch` | `f` | `:vc-fetch`, `:fetch` | Fetch from every remote |
-| `version-control-pull` | `p` | `:vc-pull`, `:pull` | Pull the current branch (`--ff-only`) |
-| `version-control-push` | `P` | `:vc-push`, `:push` | Push the current branch, setting the upstream if it has none |
-| `version-control-upstream` | `gu` | `:vc-upstream <remote/branch>` | Set the current branch's upstream. Bare, it asks for the target |
-| `version-control-output` | `go` | `:vc-output` | Reopen the last streamed command's transcript |
-| `version-control-flip` | `o` | `:vc-flip`, `:vc-orientation` | Turn the graph: history left to right, or down the screen |
-| `version-control-visible-branches` | `b` | `:vc-visible`, `:vc-hidden` | Which branches the graph draws — `Space` shows/hides, `a` shows all, `q` closes |
-| `version-control-hide-branch` | `x` | `:vc-hide` | Take the branch under the cursor out of the graph |
-
-Commit, fetch, pull and push run on a background thread through **your** git, so
-your `.gitconfig`, hooks and credential helper all apply. The editor never
-handles a credential.
-
-Those four **stream their output into a read-only `*git output*` buffer**, which
-opens as they start and fills as they print. A `pre-commit` hook that runs a
-linter suite is the reason: run in the foreground it froze the editor for as
-long as the hook took, with nothing on screen to say anything was happening.
-The buffer is an ordinary text buffer — search, motions and wrap all work — but
-refuses edits, since it is a transcript rather than a document. It is
-**coloured**: added and removed lines of a diff, hunk headers, commit hashes,
-and a hook's own verdict words (`Passed`, `failed`, `warning` — and
-`black.....Passed`, where the verdict is a suffix). The colours are the
-editor's own, from the text, in your theme — not the tool's ANSI, which mostly
-is not there anyway, since git and everything a hook runs turn colour off when
-they are writing to a pipe. The same colouring applies to a commit's diff
-(`Enter` on a commit), the staging pane's diff, and `git status` in a float. `q` goes back to
-the graph; `:vc-output` brings it back after you have gone off to look at
-whatever the hook complained about. Leaving while a command is still running is
-fine: it keeps writing, and the transcript is whole when you return.
-
-### Which way it runs
-
-History runs **top to bottom** by default — newest first, the order `git log`
-prints, a branch is a column — with `j`/`k` travelling time and `h`/`l` stepping
-between branches. Horizontal puts the oldest commit at the left edge and makes
-a branch a row with its name above it, `h`/`l` travelling time instead. `o` (`:vc-flip`) turns it a quarter turn — newest commit
-at the top, a branch is a column named in a row above the graph, and the keys
-follow the picture, so `j`/`k` then walk history and `h`/`l` change branch.
-Paging and `gg`/`ge` follow the screen too: `gg` is the top of the graph and
-`J` pages down it, whichever way round it is drawn.
-
-The flip lasts the **session** — the graph is closed and reopened constantly
-(`q`, opening a file, `H`/`L`), and a preference you state once should not have
-to be stated again each time. `[vcs] orientation = "vertical"` (the shipped
-default) or `"horizontal"` is what a session starts as.
-
-It is one layout, not two. The geometry is computed on an *along* (time) axis
-and an *across* (track) axis, and only two things know which screen axis is
-which: `Layout::screen`, which the renderer and the navigation both map
-through, and the glyph a stroke is drawn with. So a block is the same box
-either way, and an invariant that holds in one picture holds in the other.
-
-### Merging one branch into another
-
-Merging is not a drag — nothing is being *moved*. You say which commit is
-coming in, and it comes into whichever branch you are on:
-
-1. Be on the branch that should **receive** the merge (the modeline's `⎇` says
-   where you are; `c` on a branch label checks it out).
-2. Put the cursor on the tip of the branch coming in — its label, or the block
-   it sits on.
-3. `m`. A new block appears where the merge would be, amber, with two arrows:
-   it does not exist yet.
-4. `:vc-apply`. Nothing has touched the repository until then.
-
-Grabbing the previous merge commit and moving it is a different request — it
-says *that merge should have followed some other commit* — which is a rewrite of
-history, and is refused when applied: cherry-pick cannot recreate a merge.
-
-### Which branches are in it
-
-A repository with thirty branches draws thirty tracks, and the two you are
-working on are somewhere in the middle of them. `b` (`:vc-visible`) lists every ref with a mark
-saying whether the graph draws it; `Space` shows or hides the one under the
-cursor, `a` shows everything again. `x` hides the branch label the cursor is on
-without opening the list — the fast half of the gesture, since hiding is
-usually something you decide while looking straight at the branch you are tired
-of. There is deliberately no `x` to put one back: what is hidden is not on
-screen to press a key on, so `b` is the way.
-
-Hiding is a **display** choice and nothing else. The branch is untouched: still
-in git, still walked by `:vc-apply`, still backed up before a rewrite. A commit
-stays visible as long as *any* shown ref leads to it, so hiding a topic branch
-takes away the commits only it leads to and leaves the trunk it was cut from
-alone; hiding the branch HEAD is on takes away its label and none of its
-history. What is hidden lasts the session, like the orientation, and the
-modeline's `vcs_hidden` module says how many there are — a graph with a branch
-missing otherwise looks exactly like a repository without that branch.
-
-Hidden branches are still *loaded*: the walk back is 400 commits from every
-ref, so a busy branch you have hidden still spends some of that budget.
-
-### What the graph shows
-
-The **HEAD block** sits directly after the commit it names — where
-the next commit would go, not at the end of the graph, where its arrow would
-have to span however far back HEAD happens to be. It carries the work-tree
-summary: how much is staged, unstaged or conflicted, and how many files git is
-not tracking at all.
-
-`w` turns that summary into the **staging view** — a two-pane float with the
-files on the left, git's own two status columns beside each one, and the
-selected file's diff on the right. `Space` stages or unstages the file under the
-cursor, so deciding and doing happen in the same place: the question that
-actually stops someone committing is "what is *in* these changes", and answering
-it used to mean leaving the view and opening the file. An untracked file has no
-diff, so the pane shows its contents instead — which is what you need before
-deciding whether it belongs in the repository at all. `s` shows `git status`
-verbatim when you want git's own words.
-
-Each commit block shows its abbreviated hash and ref labels along its top
-border, the subject over two rows, the author and age, and `+added -removed`
-along the bottom border.
-
-**Colour is the branch a commit is on**, and so is the track: walking back from a
-branch label, each commit takes that label's colour — and its row — until the
-next label, so a branch, its name above the row, and its run of history all read
-as one thing. History no branch points into (a topic whose branch was deleted,
-say) has no name to write, so those runs share the rows below the named ones.
-HEAD has a colour nothing else uses. The cursor marks by **weight** — bold text and a heavy border — so
-the thing you are on keeps the colour that says which branch it is; something
-you have *picked up* does recolour, because that is a state it is in.
-
-History is walked back 400 commits from every local branch, HEAD, and the
-upstream of each local branch (without those, an "ahead by 3" is a label
-pointing at commits that were never loaded). When the walk stops at the limit
-the graph says so rather than letting the oldest block pass for a root.
-
-Status-line modules: `vcs_head`, `vcs_plan` (hidden until something is planned),
-`vcs_hidden` (hidden until a branch is), `vcs_worktree`, `vcs_selection`. Theme
-keys live under `[vcs]`.
+`u` takes back the last choice (or, with none left, the last planned step).

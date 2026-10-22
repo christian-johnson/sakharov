@@ -233,41 +233,19 @@ pub struct NotebookSpec {
     pub border_error: Option<String>,
 }
 
-/// `[vcs]` — the version-control graph view.
+/// `[vcs]` — the version-control view.
 ///
-/// Version-control view colors. Every key falls back to an existing `[ui]`
-/// color, so a theme that says nothing about the graph still draws it in its
-/// own palette rather than in hard-coded ANSI.
+/// Every key falls back to an existing `[ui]` color, so a theme that says
+/// nothing about the view still draws it in its own palette.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VcsSpec {
-    /// Border of whatever is currently being dragged. Falls back to
-    /// `ui.warning` — it is a held object, not a selected one.
-    #[serde(default)]
-    pub grabbed: Option<String>,
-    /// Abbreviated commit hashes. Falls back to `ui.info`.
+    /// Abbreviated commit hashes in git output. Falls back to `ui.info`.
     #[serde(default)]
     pub hash: Option<String>,
-    /// Local branch labels. Falls back to `ui.success`.
+    /// The branch name in the status line. Falls back to `ui.success`.
     #[serde(default)]
     pub branch: Option<String>,
-    /// Remote-tracking branch labels. Falls back to `ui.dim`.
-    #[serde(default)]
-    pub remote: Option<String>,
-    /// Per-branch commit colours, cycled so neighbouring branches differ.
-    /// Falls back to a palette built from
-    /// `ui.accent`, `ui.success`, `ui.warning`, `ui.info` and `ui.error`.
-    #[serde(default)]
-    pub palette: Option<Vec<String>>,
-    /// Tag labels. Falls back to `ui.warning`.
-    #[serde(default)]
-    pub tag: Option<String>,
-    /// The HEAD block. Falls back to `ui.accent`.
-    #[serde(default)]
-    pub head: Option<String>,
-    /// The arrows between blocks. Falls back to `ui.line_numbers`.
-    #[serde(default)]
-    pub edge: Option<String>,
-    /// A commit the plan would create but that does not exist yet.
+    /// Planned steps — something that will happen but has not yet.
     /// Falls back to `ui.warning`.
     #[serde(default)]
     pub pending: Option<String>,
@@ -372,16 +350,8 @@ pub struct Theme {
     pub table_sparkline: Color,
 
     // --- Version-control view ---
-    pub vcs_grabbed: Color,
-    pub vcs_hash: Color,
     pub vcs_branch: Color,
-    pub vcs_remote: Color,
-    pub vcs_tag: Color,
-    pub vcs_head: Color,
-    pub vcs_edge: Color,
     pub vcs_pending: Color,
-    /// One colour per branch, cycled — see [`Theme::vcs_tint`].
-    pub vcs_palette: Vec<Color>,
     pub modes: ModeColors,
     /// Style per highlight index (see `highlight::HIGHLIGHT_NAMES` + `MD_*`).
     syntax: Vec<Style>,
@@ -389,14 +359,6 @@ pub struct Theme {
 
 impl Theme {
 
-    /// The colour for group `tint`, cycled through the palette.
-    ///
-    /// Cycled rather than clamped: a repository with more branches than
-    /// colours must still tell neighbouring ones apart, and repeating the last
-    /// colour for every branch beyond it would not.
-    pub fn vcs_tint(&self, tint: usize) -> Color {
-        self.vcs_palette[tint % self.vcs_palette.len()]
-    }
     /// The classic terminal-inherited look (theme name "default").
     pub fn terminal_default() -> Self {
         resolve(&ThemeSpec::default(), "default")
@@ -448,9 +410,6 @@ pub fn set_active(theme: Theme) {
 /// Parse a color value: `#rrggbb` hex, an ANSI color name (`"blue"`,
 /// `"light-magenta"`, …, which tracks the terminal's palette), a `[palette]`
 /// reference, or `"none"`/`""` for unset.
-/// HEAD's colour: lavender, reserved for it alone.
-const LAVENDER: Color = Color::Rgb(0xb4, 0xa0, 0xe8);
-
 fn parse_color(s: &str, palette: &HashMap<String, String>) -> Option<Color> {
     let s = s.trim();
     if s.is_empty() || s.eq_ignore_ascii_case("none") {
@@ -664,35 +623,9 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     let table_sparkline = pick(&[c(&spec.table.sparkline)], table_numeric);
 
     // --- Version-control view ---
-    // Every one derives from a color the theme already defines: a commit graph
-    // introduces no new *kind* of meaning, only new places to put branch-green,
-    // hash-blue and warning-amber.
-    let vcs_grabbed = pick(&[c(&spec.vcs.grabbed)], warning);
     let vcs_hash = pick(&[c(&spec.vcs.hash)], info);
     let vcs_branch = pick(&[c(&spec.vcs.branch)], success);
-    let vcs_remote = pick(&[c(&spec.vcs.remote)], dim);
-    let vcs_tag = pick(&[c(&spec.vcs.tag)], warning);
-    // HEAD gets a colour of its own rather than borrowing the accent, and
-    // nothing else uses it: "where you are" is the one pointer that has to be
-    // findable at a glance, and it cannot be if it is also the colour of a
-    // lane, a focused block or a label.
-    let vcs_head = pick(&[c(&spec.vcs.head)], LAVENDER);
-    let vcs_edge = pick(&[c(&spec.vcs.edge)], line_numbers);
     let vcs_pending = pick(&[c(&spec.vcs.pending)], warning);
-    // One colour per branch: what makes two branches tellable apart without
-    // reading a single label.  Cycled, so a repository with more branches than
-    // colours still tells neighbouring ones apart.
-    //
-    // Deliberately excludes `warning` and the HEAD lavender: those two mean
-    // *held* and *where you are*, and a lane that happened to share one would
-    // make grabbing a commit look like it had merely changed branch.
-    let vcs_palette: Vec<Color> = spec
-        .vcs
-        .palette
-        .as_ref()
-        .map(|names| names.iter().filter_map(|n| parse_color(n, pal)).collect::<Vec<_>>())
-        .filter(|colors: &Vec<Color>| !colors.is_empty())
-        .unwrap_or_else(|| vec![accent, success, info, error]);
 
     // --- Syntax palette ---
     let keyword = c(&spec.syntax.keyword);
@@ -763,7 +696,7 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     // --- git output ---
     //
     // Deliberately the same colours the editor already uses for git elsewhere
-    // (the gutter marks, the staging pane, the commit graph's counts), so a
+    // (the gutter marks and the version-control view's diff), so a
     // diff reads the same wherever it is shown, and a theme that sets them
     // sets them everywhere.
     syntax[crate::highlight::GIT_ADDED] = s(git_added);
@@ -820,15 +753,8 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         nb_border_running,
         nb_border_ok,
         nb_border_error,
-        vcs_grabbed,
-        vcs_hash,
         vcs_branch,
-        vcs_remote,
-        vcs_tag,
-        vcs_head,
-        vcs_edge,
         vcs_pending,
-        vcs_palette,
         table_header,
         table_header_bg,
         table_grid,
@@ -1026,7 +952,11 @@ pub fn mode_color(mode: &Mode) -> Color {
         Mode::Insert => m.insert,
         Mode::Select => m.select,
         Mode::Command | Mode::Prompt { .. } => m.command,
-        Mode::Goto { .. } | Mode::FindChar { .. } | Mode::Search { .. } | Mode::Match { .. } => m.goto,
+        Mode::Goto { .. }
+        | Mode::FindChar { .. }
+        | Mode::Search { .. }
+        | Mode::Match { .. }
+        | Mode::Prefix(_) => m.goto,
         Mode::Jump { .. } => m.jump,
         Mode::Fold => m.fold,
     }

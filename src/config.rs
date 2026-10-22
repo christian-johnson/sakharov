@@ -32,8 +32,6 @@ pub struct Config {
     #[serde(default)]
     pub table: TableConfig,
     #[serde(default)]
-    pub vcs: VcsConfig,
-    #[serde(default)]
     pub conflict: ConflictConfig,
     #[serde(default)]
     pub keys: KeysConfig,
@@ -50,27 +48,7 @@ pub struct Config {
     pub languages: HashMap<String, LanguageConfig>,
 }
 
-/// The version-control graph (`[vcs]`).
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct VcsConfig {
-    /// `"vertical"` (top to bottom, newest first) or `"horizontal"` (history
-    /// left to right).  A session starts this way; `:vc-flip` turns the graph
-    /// over for the rest of it.
-    #[serde(default = "default_orientation")]
-    pub orientation: crate::vcs::layout::Orientation,
-}
-
-fn default_orientation() -> crate::vcs::layout::Orientation {
-    crate::vcs::layout::Orientation::Vertical
-}
-
-impl Default for VcsConfig {
-    fn default() -> Self {
-        VcsConfig { orientation: default_orientation() }
-    }
-}
-
-/// The merge-conflict resolver (`[conflict]`).
+/// Conflict resolution in the version-control view (`[conflict]`).
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ConflictConfig {
     /// Show the common ancestor as a third pane beside the two versions.
@@ -328,7 +306,7 @@ pub struct StatuslineConfig {
     /// Layout used in the tabular data view (`:csv`).
     #[serde(default = "default_table_layout")]
     pub table: StatuslineLayout,
-    /// `[statusline.vcs]` — the version-control graph.
+    /// `[statusline.vcs]` — the version-control view.
     #[serde(default = "default_vcs_layout")]
     pub vcs: StatuslineLayout,
     /// String inserted between adjacent modules.  Default `""` relies on each
@@ -366,11 +344,6 @@ impl StatuslineConfig {
             View::Notebook => self.notebook.clone(),
             View::Table => self.table.clone(),
             View::Vcs => self.vcs.clone(),
-            // The resolver shares the graph's layout: both are views onto the
-            // repository rather than onto a document, and what the modeline
-            // has to say — which branch, how much is outstanding — is the same
-            // question in each.
-            View::Conflict => self.vcs.clone(),
         }
     }
 }
@@ -411,7 +384,7 @@ fn default_table_layout() -> StatuslineLayout {
 }
 fn default_vcs_layout() -> StatuslineLayout {
     StatuslineLayout::new(
-        &["mode", "file", "vcs_head", "vcs_plan", "vcs_hidden"],
+        &["mode", "file", "vcs_head", "vcs_plan"],
         &["spinner", "vcs_worktree", "vcs_selection"],
     )
 }
@@ -792,10 +765,6 @@ mod tests {
     /// instead of silently picking some other value.
     #[test]
     fn enum_settings_parse_strictly() {
-        let vcs = |v: &str| toml::from_str::<VcsConfig>(&format!("orientation = {v:?}"));
-        assert_eq!(vcs("down").unwrap().orientation, crate::vcs::layout::Orientation::Vertical);
-        assert!(vcs("vertcal").is_err());
-
         let ui = |v: &str| toml::from_str::<UiConfig>(&format!("command_history = {v:?}"));
         assert_eq!(ui("persist").unwrap().command_history, CommandHistoryMode::Global);
         assert!(ui("sesion").is_err());

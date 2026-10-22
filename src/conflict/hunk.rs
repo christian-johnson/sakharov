@@ -19,7 +19,8 @@
 
 use std::path::Path;
 
-use super::{ConflictFile, Choice};
+use super::{Choice, ConflictFile};
+use crate::vcs::Oid;
 
 /// One stretch of the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,25 +143,20 @@ pub fn parse_diff3(merged: &str) -> Vec<Region> {
     regions
 }
 
-/// Run the three-way merge and build the file's regions.
+/// The three stages' blob ids: base, left, right.  `None` is an absent stage.
+pub type Stages = (Option<Oid>, Option<Oid>, Option<Oid>);
+
+/// Run the three-way merge over the stage blobs and build the regions.
 ///
-/// `git merge-file` exits 1 when there are conflicts and >1 on a real error,
-/// so a non-zero status is not by itself a failure — the *output* is what is
-/// wanted either way.
-pub fn regions_for(
-    root: &Path,
-    file: &ConflictFile,
-) -> Result<Vec<Region>, String> {
-    // A side missing its stage is a modify/delete: the deleted side is an
-    // empty file, which makes the whole thing one conflict between the
-    // surviving text and nothing.  That is exactly the right shape — "keep it"
-    // and "let the deletion stand" are the two switches.  The stages are read
-    // straight from the index (`--object-id`, git 2.43+); git knows the empty
-    // blob without it ever being written.
+/// An absent stage is a modify/delete or an add/add: it merges as an empty
+/// file, which makes "keep it" and "let the deletion stand" the two switches.
+/// `git merge-file` exits 1 when there are conflicts and above 1 on a real
+/// error, so a non-zero status is not by itself a failure.
+pub fn regions_for(root: &Path, stages: &Stages) -> Result<Vec<Region>, String> {
     let mut empty_blob = None;
-    let mut side = |stage: u8, text: &Option<String>| -> Result<String, String> {
-        if text.is_some() {
-            return Ok(format!(":{stage}:{}", file.path));
+    let mut side = |oid: &Option<Oid>| -> Result<String, String> {
+        if let Some(oid) = oid {
+            return Ok(oid.to_string());
         }
         if empty_blob.is_none() {
             let out = crate::vcs::load::git_command(root)
@@ -172,7 +168,7 @@ pub fn regions_for(
         }
         Ok(empty_blob.clone().unwrap_or_default())
     };
-    let (left, base, right) = (side(2, &file.left)?, side(1, &file.base)?, side(3, &file.right)?);
+    let (base, left, right) = (side(&stages.0)?, side(&stages.1)?, side(&stages.2)?);
 
     let out = crate::vcs::load::git_command(root)
         .arg("merge-file")
@@ -184,11 +180,8 @@ pub fn regions_for(
         .args(["-L", LABEL_BASE])
         .args(["-L", LABEL_RIGHT])
         .args([&left, &base, &right])
-        .output();
-
-    let out = out.map_err(|e| format!("cannot run git merge-file: {e}"))?;
-    // Exit codes above 1 are real errors; 1 just means "there were conflicts",
-    // which is the only reason we are here.
+        .output()
+        .map_err(|e| format!("cannot run git merge-file: {e}"))?;
     if !out.status.success() && out.status.code().unwrap_or(2) > 1 {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
@@ -196,8 +189,8 @@ pub fn regions_for(
 }
 
 /// Give `file` its regions and a fresh, undecided choice per conflict.
-pub fn fill(root: &Path, file: &mut ConflictFile) -> Result<(), String> {
-    file.regions = regions_for(root, file)?;
+pub fn fill(root: &Path, file: &mut ConflictFile, stages: Stages) -> Result<(), String> {
+    file.regions = regions_for(root, &stages)?;
     let conflicts = file.regions.iter().filter(|r| r.is_conflict()).count();
     file.choices = vec![Choice::default(); conflicts];
     file.history.clear();
