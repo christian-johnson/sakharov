@@ -618,9 +618,9 @@ pub struct App {
     /// True when `buffer.rope` has changed and `highlight_spans` needs recomputing.
     /// The render loop recomputes lazily once per frame instead of once per keystroke.
     pub highlights_dirty: bool,
-    /// Buffer (`Buffer::id`) and lines `highlight_spans` covers; `None` once
-    /// they are stale.
-    pub highlight_window: Option<(u64, std::ops::Range<usize>)>,
+    /// Buffer (`Buffer::id`) and char ranges `highlight_spans` covers; `None`
+    /// once they are stale.
+    pub highlight_window: Option<(u64, Vec<std::ops::Range<usize>>)>,
     /// Per-line diagnostic ranges for the current file, rebuilt on LSP diagnostics
     /// events and on file switches.  Avoids rebuilding this map every render frame.
     pub diag_by_line: std::collections::HashMap<usize, Vec<(usize, usize, DiagnosticSeverity)>>,
@@ -1282,40 +1282,59 @@ fn draw_frame(
     Ok(())
 }
 
-/// Make `app.highlight_spans` cover every line the text view can show,
-/// highlighting a screen of margin either side so scrolling a little doesn't
-/// re-run the query.  Only the text view draws from these spans.
+/// Make `app.highlight_spans` cover every char the text view shows, with a
+/// screen of margin around it so scrolling a little doesn't re-run the query.
+/// Only the text view draws from these spans.
 fn refresh_highlight_window(app: &mut App) {
     match app.view() {
         View::Text => {}
         View::Notebook | View::Table | View::Vcs => return,
     }
-    // A screen of lines not hidden in a fold, from the scroll row down
-    // (wrapping can only show fewer).
-    let total = app.buffer.rope.len_lines();
-    let mut line = app.scroll_row;
-    for _ in 0..app.viewport_height {
-        if line >= total {
-            break;
-        }
-        line = app.fold.fold_end_at(line).map_or(line, |end| end) + 1;
-    }
-    let visible = app.scroll_row..line;
-    let covered = app.highlight_window.as_ref().is_some_and(|(id, w)| {
-        *id == app.buffer.id && w.start <= visible.start && visible.end <= w.end
+    let visible = crate::ui::visible_char_ranges(app);
+    let covered = app.highlight_window.as_ref().is_some_and(|(id, window)| {
+        *id == app.buffer.id
+            && visible.iter().all(|v| window.iter().any(|w| w.start <= v.start && v.end <= w.end))
     });
     if covered {
         return;
     }
-    let margin = app.viewport_height;
     let window = if app.highlighter.whole_document() {
-        0..usize::MAX
+        std::iter::once(0..app.buffer.rope.len_chars()).collect()
     } else {
-        visible.start.saturating_sub(margin)..visible.end + margin
+        highlight_margin(&app.buffer.rope, &visible, app.viewport_width, app.viewport_height)
     };
-    app.highlight_spans =
-        app.highlighter.highlight_lines(&app.buffer.rope, app.buffer.id, window.clone());
+    app.highlight_spans = app.highlighter.highlight_ranges(&app.buffer.rope, app.buffer.id, &window);
     app.highlight_window = Some((app.buffer.id, window));
+}
+
+/// `visible` grown by a screen's width either side of each row and a screen of
+/// lines above and below, merged where they touch. Each margin is capped at a
+/// screenful of chars, so a huge line never pulls in all of itself.
+fn highlight_margin(
+    rope: &ropey::Rope,
+    visible: &[std::ops::Range<usize>],
+    width: usize,
+    height: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let len = rope.len_chars();
+    let screen = width * height;
+    let mut window: Vec<std::ops::Range<usize>> = Vec::new();
+    for v in visible {
+        let r = v.start.saturating_sub(width)..(v.end + width).min(len);
+        match window.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => window.push(r),
+        }
+    }
+    if let Some(first) = window.first_mut() {
+        let above = rope.line_to_char(rope.char_to_line(first.start).saturating_sub(height));
+        first.start = above.max(first.start.saturating_sub(screen));
+    }
+    if let Some(last) = window.last_mut() {
+        let below_line = (rope.char_to_line(last.end) + height + 1).min(rope.len_lines());
+        last.end = rope.line_to_char(below_line).min(last.end + screen);
+    }
+    window
 }
 
 /// Draw the dashboard, with the command line under it while one is being typed.
@@ -1611,6 +1630,29 @@ fn set_cursor_shape(color: ratatui::style::Color) {
 mod tests {
     use super::*;
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    /// On a huge single line, highlighting queries only the part around the
+    /// screen; querying the whole line took half a second per frame.
+    #[test]
+    fn highlighting_a_huge_line_covers_only_the_part_on_screen() {
+        let mut app = App::new(None, crate::config::Config::load());
+        app.highlighter = Highlighter::new(Some(std::path::Path::new("x.json")));
+        app.viewport_width = 80;
+        app.viewport_height = 20;
+        let text = format!("[{}1]", "1, ".repeat(100_000));
+        app.buffer.rope = ropey::Rope::from_str(&text);
+        app.selection = crate::selection::Selection::point(text.len() - 2);
+
+        crate::exec::update_scroll(&mut app);
+        refresh_highlight_window(&mut app);
+
+        let last_number = text.len() - 2;
+        assert!(
+            app.highlight_spans.iter().any(|&(s, e, _)| s <= last_number && last_number < e),
+            "the number under the cursor is highlighted"
+        );
+        assert!(app.highlight_spans.len() < 1_000, "{} spans", app.highlight_spans.len());
+    }
 
     fn request(png: &crate::notebook::Png, row: u16, skip_rows: u16, rows: u16) -> ImageRequest {
         ImageRequest {

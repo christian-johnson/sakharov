@@ -568,19 +568,19 @@ pub fn execute(app: &mut App, cmd: &Command) {
                     }
                 }
 
-                let new_lang = crate::lang::lang_for_path(&new_path).map(str::to_owned);
-                app.lsp_language = new_lang.clone();
+                app.lsp_language = crate::lang::lang_for_path(&new_path).map(str::to_owned);
                 app.highlighter = crate::highlight::Highlighter::new(Some(&new_path));
+                edit::limit_large_buffer(app);
                 recompute_highlights(app);
 
-                if let Some(ref lang) = new_lang {
+                if let Some(lang) = app.lsp_language.clone() {
                     let file_dir = new_path.parent().filter(|p| !p.as_os_str().is_empty());
-                    if let Some(server_config) = app.config.language_servers.get(lang).cloned() {
-                        app.lsp.ensure_server(lang, &server_config, file_dir);
+                    if let Some(server_config) = app.config.language_servers.get(&lang).cloned() {
+                        app.lsp.ensure_server(&lang, &server_config, file_dir);
                     }
-                    if app.lsp.is_ready(lang) {
+                    if app.lsp.is_ready(&lang) {
                         let text = app.buffer.rope.to_string();
-                        app.lsp.did_open(lang, &new_path, &text);
+                        app.lsp.did_open(&lang, &new_path, &text);
                     }
                 }
 

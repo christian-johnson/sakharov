@@ -246,6 +246,11 @@ impl Highlighter {
         }
     }
 
+    /// True when this buffer gets any highlighting at all.
+    pub fn is_active(&self) -> bool {
+        self.grammar.is_some() || self.whole_document()
+    }
+
     /// True when highlights always cover the whole document (the hand-written
     /// highlighters), so scrolling never needs them recomputed.
     pub fn whole_document(&self) -> bool {
@@ -291,13 +296,14 @@ impl Highlighter {
         }
     }
 
-    /// Highlight spans for lines `lines` of the buffer `buffer_id`, re-parsing
-    /// incrementally from the recorded edits.  Spans are [`flatten`]ed.
-    pub fn highlight_lines(
+    /// Highlight spans for the char ranges `chars` of the buffer `buffer_id`,
+    /// re-parsing incrementally from the recorded edits.  Spans are
+    /// [`flatten`]ed; the hand-written highlighters always cover everything.
+    pub fn highlight_ranges(
         &mut self,
         rope: &Rope,
         buffer_id: u64,
-        lines: std::ops::Range<usize>,
+        chars: &[std::ops::Range<usize>],
     ) -> Vec<Span> {
         if self.markdown {
             return flatten(crate::markdown::highlight(rope));
@@ -310,16 +316,21 @@ impl Highlighter {
         }
         let Some(grammar) = self.grammar.clone() else { return Vec::new() };
         let Some(tree) = self.tree(rope, buffer_id) else { return Vec::new() };
-        let last = rope.len_lines();
-        let bytes = rope.line_to_byte(lines.start.min(last))..rope.line_to_byte(lines.end.min(last));
-        flatten(query_spans(&grammar, tree, rope, bytes))
+        let len = rope.len_chars();
+        let byte = |c: usize| rope.char_to_byte(c.min(len));
+        let spans = chars
+            .iter()
+            .flat_map(|r| query_spans(&grammar, tree, rope, byte(r.start)..byte(r.end)))
+            .collect();
+        flatten(spans)
     }
 
     /// Highlight the whole of `rope` from scratch — for text that isn't the
     /// tracked buffer (notebook cells, tests).
     pub fn highlight(&mut self, rope: &Rope) -> Vec<Span> {
         self.invalidate();
-        let spans = self.highlight_lines(rope, u64::MAX, 0..rope.len_lines());
+        let all = 0..rope.len_chars();
+        let spans = self.highlight_ranges(rope, u64::MAX, std::slice::from_ref(&all));
         self.invalidate();
         spans
     }
@@ -500,7 +511,7 @@ mod tests {
         let path = std::path::Path::new("x.rs");
         let mut rope = Rope::from_str("fn main() {\n    let x = 1;\n}\n");
         let mut hl = Highlighter::new(Some(path));
-        hl.highlight_lines(&rope, 7, 0..rope.len_lines());
+        hl.highlight_ranges(&rope, 7, std::slice::from_ref(&(0..rope.len_chars())));
 
         for (start, end, text) in [(16, 19, "\"a\""), (0, 0, "// c\n"), (5, 9, "")] {
             let edit = input_edit(&rope, start, end, text);
@@ -508,7 +519,7 @@ mod tests {
             rope.insert(start, text);
             hl.edit(&edit);
         }
-        let incremental = hl.highlight_lines(&rope, 7, 0..rope.len_lines());
+        let incremental = hl.highlight_ranges(&rope, 7, std::slice::from_ref(&(0..rope.len_chars())));
 
         assert_eq!(incremental, Highlighter::new(Some(path)).highlight(&rope));
     }

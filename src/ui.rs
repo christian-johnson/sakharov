@@ -176,6 +176,53 @@ pub(crate) fn text_width(app: &App) -> usize {
     line_layout(app, app.viewport_width as u16).text_width
 }
 
+/// Row starts of wrapped line `line_idx`, kept in `cache` across that line's
+/// rows so a long line is scanned once per frame, not once per row.
+fn cached_wrap_starts<'c>(
+    cache: &'c mut Option<(usize, Vec<usize>)>,
+    line_idx: usize,
+    line: ropey::RopeSlice<'_>,
+    text_width: usize,
+    tab_width: usize,
+) -> &'c [usize] {
+    if cache.as_ref().map(|(l, _)| *l) != Some(line_idx) {
+        *cache = Some((line_idx, crate::render_util::wrap_row_starts(line, text_width, tab_width)));
+    }
+    &cache.as_ref().expect("just filled").1
+}
+
+/// Buffer char ranges the text view shows, one per screen row (a fold's
+/// summary row counts as its first line's row), from the renderer's geometry.
+pub(crate) fn visible_char_ranges(app: &App) -> Vec<std::ops::Range<usize>> {
+    let text_width = text_width(app);
+    let tab_width = app.config.editor.tab_width;
+    let word_wrap = app.config.editor.word_wrap;
+    let rope = &app.buffer.rope;
+    let rows = build_vis_rows(
+        &app.fold, rope, (app.scroll_row, app.scroll_sub), app.viewport_height,
+        word_wrap, text_width, tab_width,
+    );
+    let mut wrap_starts: Option<(usize, Vec<usize>)> = None;
+    rows.iter()
+        .map(|row| {
+            let line = rope.line(row.line_idx);
+            let base = rope.line_to_char(row.line_idx);
+            let len = line.len_chars();
+            let (start, end) = if word_wrap && row.fold_end.is_none() {
+                let starts =
+                    cached_wrap_starts(&mut wrap_starts, row.line_idx, line, text_width, tab_width);
+                let start = starts.get(row.sub_row).copied().unwrap_or(len);
+                (start, starts.get(row.sub_row + 1).copied().unwrap_or(len))
+            } else {
+                let at = |col| crate::render_util::char_at_col(line, col, tab_width).0;
+                let scroll = if word_wrap { 0 } else { app.scroll_col };
+                (at(scroll), (at(scroll + text_width) + 1).min(len))
+            };
+            base + start..base + end
+        })
+        .collect()
+}
+
 fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let th = theme::active();
     let LineLayout { git_col, line_num_width, gutter_width, right_gutter, text_width } =
@@ -204,6 +251,9 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let mut cells: Vec<(char, Style)> = Vec::with_capacity(text_width + 8);
+    let mut first_cell: Vec<usize> = Vec::with_capacity(text_width + 8);
+    // Row starts of the wrapped line being drawn, kept across its rows.
+    let mut wrap_starts: Option<(usize, Vec<usize>)> = None;
 
     for (row, vis) in vis_rows.iter().enumerate() {
         let line_idx = vis.line_idx;
@@ -313,16 +363,25 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
         let badge_len = fold_badge.as_ref().map(|b| b.chars().count()).unwrap_or(0);
         let content_width = text_width.saturating_sub(badge_len);
 
-        // `effective_skip`: the first display column that is visible on this screen row.
-        //   - No wrap: app.scroll_col (horizontal scroll offset)
-        //   - Wrap sub-row N: N * text_width
-        let effective_skip = if word_wrap { sub_row * text_width } else { app.scroll_col };
-        // The visible display-column window is [effective_skip, effective_skip + content_width).
+        // Where this row starts drawing: the wrap rule's row start (columns
+        // counted from the row), or the first char the horizontal scroll
+        // reaches (columns counted from the line). The visible window is
+        // [effective_skip, effective_skip + content_width).
+        let (row_start, mut col_offset, effective_skip, row_end) = if word_wrap {
+            let starts =
+                cached_wrap_starts(&mut wrap_starts, line_idx, line_str, text_width, tab_width);
+            let start = starts.get(sub_row).copied().unwrap_or(line_len);
+            (start, 0, 0, starts.get(sub_row + 1).copied().unwrap_or(line_len))
+        } else {
+            let (start, col) = crate::render_util::char_at_col(line_str, app.scroll_col, tab_width);
+            (start, col, app.scroll_col, line_len)
+        };
 
         cells.clear();
-        let mut col_offset = 0usize; // display col from start of line
+        // `cells` index of each drawn char's first cell, by char offset from `row_start`.
+        first_cell.clear();
 
-        for (char_off, c) in line_str.chars().enumerate() {
+        for (char_off, c) in (row_start..row_end).zip(line_str.chars_at(row_start)) {
             let char_idx = line_start_char + char_off;
 
             if c == '\n' || c == '\r' {
@@ -334,11 +393,6 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
 
             let w = char_display_width(c, col_offset, tab_width);
 
-            // Skip characters that end entirely before the visible window.
-            if col_offset + w <= effective_skip {
-                col_offset += w;
-                continue;
-            }
             // Stop characters that start at or past the visible window's right edge.
             if col_offset >= effective_skip + content_width {
                 break;
@@ -369,6 +423,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 style
             };
 
+            first_cell.push(cells.len());
             if c == '\t' {
                 // Render only the portion of the tab that falls in the visible window.
                 let tab_end = col_offset + w;
@@ -394,28 +449,15 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
             }
         } else if matches!(app.mode, crate::mode::Mode::Jump { .. }) {
             // Jump label overlay, on every wrapped row of a (non-fold) line:
-            // each row paints the labels whose column falls in its window.
-            // Map char offsets to display columns (tab-aware) before painting.
-            let mut cols = Vec::with_capacity(line_len + 1);
-            let mut col = 0usize;
-            for c in line_str.chars() {
-                cols.push(col);
-                col += char_display_width(c, col, tab_width);
-            }
-            cols.push(col);
-            let display_col_of = |char_off: usize| cols[char_off.min(line_len)];
+            // each row paints the labels whose char it drew.
             for_each_jump_label_char(
                 &app.jump.labels,
                 &app.jump.typed,
                 line_start_char,
                 line_len,
                 |char_off, lc, style| {
-                    let display_col = display_col_of(char_off);
-                    if display_col < effective_skip {
-                        return;
-                    }
-                    let idx = display_col - effective_skip;
-                    if idx < cells.len() {
+                    let drawn = char_off.checked_sub(row_start).and_then(|i| first_cell.get(i));
+                    if let Some(&idx) = drawn.filter(|&&idx| idx < cells.len()) {
                         cells[idx] = (lc, style);
                     }
                 },
@@ -473,12 +515,6 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
     let line_str = rope.line(line_idx);
     let cursor_off = head - line_start;
 
-    // Compute total display column from the start of this logical line.
-    let mut total_col: usize = 0;
-    for i in 0..cursor_off {
-        total_col += char_display_width(line_str.char(i), total_col, tab_width);
-    }
-
     if word_wrap && text_width > 0 {
         // With wrapping: find the screen row by walking the visible entry list.
         let vis_rows = build_vis_rows(
@@ -492,11 +528,12 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
         let starts =
             crate::render_util::wrap_row_starts(line_str, text_width, tab_width);
         let cursor_sub_row = starts.iter().rposition(|&s| cursor_off >= s).unwrap_or(0);
-        let mut col_in_sub_row = 0usize;
-        for i in starts[cursor_sub_row]..cursor_off {
-            col_in_sub_row +=
-                char_display_width(line_str.char(i), col_in_sub_row, tab_width);
-        }
+        let row_start = starts[cursor_sub_row];
+        let col_in_sub_row = crate::render_util::display_col(
+            line_str.slice(row_start..),
+            cursor_off - row_start,
+            tab_width,
+        );
 
         let screen_row = vis_rows.iter().position(|v| {
             v.line_idx == line_idx && v.fold_end.is_none() && v.sub_row == cursor_sub_row
@@ -510,6 +547,7 @@ pub fn cursor_screen_pos(app: &App, lines_area: Rect) -> Option<(u16, u16)> {
         let entries = app.fold.visible_entries(app.scroll_row, lines_area.height as usize, total_lines);
         let screen_row = entries.iter().position(|&(l, _)| l == line_idx)?;
 
+        let total_col = crate::render_util::display_col(line_str, cursor_off, tab_width);
         let text_col = total_col.saturating_sub(app.scroll_col);
         if text_col >= text_width {
             return None;
@@ -840,6 +878,37 @@ impl Widget for LineWidget<'_> {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    /// A minified file is one enormous line. Drawing it with the cursor at its
+    /// end must cost what the screen shows, not what the line holds.
+    #[test]
+    fn a_huge_single_line_draws_quickly_and_shows_its_tail() {
+        for wrap in [false, true] {
+            let mut app = App::new(None, crate::config::Config::load());
+            app.config.editor.word_wrap = wrap;
+            app.config.editor.line_numbers = false;
+            app.config.editor.git_gutter = false;
+            app.viewport_width = 40;
+            app.viewport_height = 10;
+            let line = "0123456789".repeat(200_000) + "END";
+            app.buffer.rope = ropey::Rope::from_str(&line);
+            app.selection = crate::selection::Selection::point(line.len() - 1);
+            let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+
+            let started = std::time::Instant::now();
+            crate::exec::update_scroll(&mut app);
+            terminal.draw(|f| render(f, &app)).unwrap();
+            let cursor = cursor_screen_pos(&app, Rect::new(0, 0, 40, 10));
+            let elapsed = started.elapsed();
+
+            let buf = terminal.backend().buffer();
+            let rows: Vec<String> =
+                (0..10).map(|y| (0..40).map(|x| buf[(x, y)].symbol()).collect()).collect();
+            assert!(rows.iter().any(|r| r.contains("END")), "wrap={wrap}: tail not drawn: {rows:?}");
+            assert!(cursor.is_some(), "wrap={wrap}: cursor off screen");
+            assert!(elapsed < std::time::Duration::from_millis(250), "wrap={wrap}: took {elapsed:?}");
+        }
+    }
 
     /// `gw` labels every word on screen — including the ones on the wrapped
     /// rows of a long line, which used to get none.

@@ -130,13 +130,8 @@ pub fn update_scroll(app: &mut App) {
 
     // Horizontal — accurate display-column calculation (handles tabs)
     let line_start = rope.line_to_char(line_idx);
-    let line_str = rope.line(line_idx);
-    let cursor_off = pos - line_start;
-    let mut display_col: usize = 0;
-    for i in 0..cursor_off {
-        display_col +=
-            crate::render_util::char_display_width(line_str.char(i), display_col, tab_width);
-    }
+    let display_col =
+        crate::render_util::display_col(rope.line(line_idx), pos - line_start, tab_width);
 
     if display_col < app.scroll_col {
         app.scroll_col = display_col;

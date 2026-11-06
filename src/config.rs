@@ -193,10 +193,15 @@ pub struct EditorConfig {
     /// cursor position. `0` disables the throttle entirely.
     #[serde(default = "default_lsp_signature_throttle_ms")]
     pub lsp_signature_throttle_ms: u64,
+    /// Buffers larger than this many megabytes get no syntax highlighting and
+    /// no language server: parsing and syncing them stalls every edit.
+    #[serde(default = "default_large_file_mb")]
+    pub large_file_mb: usize,
 }
 
 fn default_expand_tabs() -> bool { true }
 fn default_max_undo() -> usize { 200 }
+fn default_large_file_mb() -> usize { 2 }
 fn default_file_picker_max_files() -> usize { 2000 }
 fn default_file_picker_max_depth() -> usize { 10 }
 fn default_crash_recovery() -> bool { true }

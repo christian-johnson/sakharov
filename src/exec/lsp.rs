@@ -778,20 +778,20 @@ pub fn open_file_at(app: &mut App, path: &std::path::Path, line: usize, characte
     app.scroll_col = 0;
     app.insert_session_active = false;
 
-    let new_lang = crate::lang::lang_for_path(path).map(str::to_owned);
-    app.lsp_language = new_lang.clone();
+    app.lsp_language = crate::lang::lang_for_path(path).map(str::to_owned);
     app.highlighter = Highlighter::new(Some(path));
+    super::edit::limit_large_buffer(app);
     super::recompute_highlights(app);
 
     let file_dir = path.parent().filter(|p| !p.as_os_str().is_empty());
-    if let Some(ref lang) = new_lang {
-        if let Some(server_config) = app.config.language_servers.get(lang).cloned() {
-            app.lsp.ensure_server(lang, &server_config, file_dir);
+    if let Some(lang) = app.lsp_language.clone() {
+        if let Some(server_config) = app.config.language_servers.get(&lang).cloned() {
+            app.lsp.ensure_server(&lang, &server_config, file_dir);
         }
-        if app.lsp.is_ready(lang) {
+        if app.lsp.is_ready(&lang) {
             let text = app.buffer.rope.to_string();
-            app.lsp.did_open(lang, path, &text);
-            prewarm_current(app, lang);
+            app.lsp.did_open(&lang, path, &text);
+            prewarm_current(app, &lang);
         }
     }
 

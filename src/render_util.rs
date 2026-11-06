@@ -119,17 +119,89 @@ pub fn scan_wrap_rows(
     if text_width == 0 {
         return;
     }
-    let mut col = 0usize;
-    for (i, c) in line.chars().enumerate() {
-        if c == '\n' || c == '\r' {
-            break;
+    let (mut col, mut i) = (0usize, 0usize);
+    for chunk in line.chunks() {
+        if is_plain(chunk) {
+            let mut left = chunk.len();
+            while col + left >= text_width {
+                let k = text_width - col;
+                i += k;
+                left -= k;
+                col = 0;
+                on_row_start(i);
+            }
+            col += left;
+            i += left;
+            continue;
         }
-        col += char_display_width(c, col, tab_width);
-        if col >= text_width {
-            on_row_start(i + 1);
-            col = 0;
+        for c in chunk.chars() {
+            if c == '\n' || c == '\r' {
+                return;
+            }
+            col += char_display_width(c, col, tab_width);
+            i += 1;
+            if col >= text_width {
+                on_row_start(i);
+                col = 0;
+            }
         }
     }
+}
+
+/// True when every char of `chunk` is one byte, one char and one display
+/// column (ASCII other than a tab or line break), so a run of it is measured
+/// by its length alone. This keeps the column scans fast on a huge line.
+fn is_plain(chunk: &str) -> bool {
+    let bytes = chunk.as_bytes();
+    chunk.is_ascii() && !b"\t\n\r".iter().any(|b| bytes.contains(b))
+}
+
+/// Display column at which char `off` of `line` starts, with tab stops
+/// counted from the start of `line`.
+pub fn display_col(line: ropey::RopeSlice<'_>, off: usize, tab_width: usize) -> usize {
+    let (mut col, mut left) = (0usize, off);
+    for chunk in line.chunks() {
+        if left == 0 {
+            break;
+        }
+        if is_plain(chunk) {
+            let n = chunk.len().min(left);
+            col += n;
+            left -= n;
+            continue;
+        }
+        for c in chunk.chars().take(left) {
+            col += char_display_width(c, col, tab_width);
+            left -= 1;
+        }
+    }
+    col
+}
+
+/// The first char of `line` whose display span reaches past column `col`, and
+/// the column that char starts at — where a row scrolled `col` columns right
+/// begins drawing. Past the end of the line: `(len_chars, its width)`.
+pub fn char_at_col(line: ropey::RopeSlice<'_>, col: usize, tab_width: usize) -> (usize, usize) {
+    let (mut off, mut at) = (0usize, 0usize);
+    for chunk in line.chunks() {
+        if is_plain(chunk) {
+            if at + chunk.len() > col {
+                return (off + col - at, col);
+            }
+            off += chunk.len();
+            at += chunk.len();
+            continue;
+        }
+        for c in chunk.chars() {
+            let w = char_display_width(c, at, tab_width);
+            if at + w > col {
+                return (off, at);
+            }
+            at += w;
+            off += 1;
+        }
+    }
+    (off, at)
 }
 
 /// Char offsets within `line` at which each soft-wrapped visual row starts.

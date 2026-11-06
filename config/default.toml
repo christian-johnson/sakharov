@@ -67,6 +67,9 @@ crash_recovery_exclude = [
 # call. A deferred trailing refresh always fires after the window, so the hint
 # settles on the final cursor position. 0 disables the throttle.
 lsp_signature_throttle_ms = 50
+# Buffers larger than this (in megabytes) open without syntax highlighting or a
+# language server, which would otherwise stall every edit.
+large_file_mb = 2
 # file_picker = "yazi --chooser-file=$SV_PICKER_FILE"
 # file_picker = "find . -type f | fzf"
 

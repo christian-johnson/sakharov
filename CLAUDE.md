@@ -98,7 +98,11 @@ src/
   symbol (`render_util::sanitize_output` / `sanitize_source`,
   `table::layout::sanitize`) — raw control chars are emitted verbatim by the
   backend and corrupt the screen.
-- Widths are display columns (`unicode_width`), never `str::len`.
+- Widths are display columns (`unicode_width`), never `str::len`. Column math
+  on a buffer line goes through `render_util::display_col` / `char_at_col` /
+  `scan_wrap_rows` (fast on a megabyte-long line), never a `line.char(i)` loop.
+- Past `editor.large_file_mb` a buffer loses highlighting and its language
+  server (`exec::edit::limit_large_buffer`).
 - Renderers emit `kitty::ImageRequest`s into `app.graphics.pending`; only
   `app.rs` turns them into terminal output. Kitty and Ghostty get Unicode
   placeholder cells written during the draw (`paint_image_placeholders`: one
