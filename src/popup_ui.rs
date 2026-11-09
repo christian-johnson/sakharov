@@ -428,13 +428,15 @@ fn render_list_popup(
             }
         }
 
-        // Label — highlight chars that matched the filter.
+        // Label — highlight chars that matched the filter.  A command typed by
+        // its alias is shown under that alias (`ListItem::shown`).
         let label_start = x;
         let active_filter = state.effective_filter();
+        let (label, detail) = if state.live { (item.label.as_str().into(), item.detail.as_deref().map(Into::into)) } else { item.shown(active_filter) };
         let matched: std::collections::HashSet<usize> = if active_filter.is_empty() || state.live {
             Default::default()
         } else {
-            match_positions(&item.label, active_filter)
+            match_positions(&label, active_filter.trim_start_matches(':'))
                 .unwrap_or_default()
                 .into_iter()
                 .collect()
@@ -443,7 +445,7 @@ fn render_list_popup(
             .fg(th.popup_match)
             .bg(row_bg)
             .add_modifier(Modifier::BOLD);
-        for (char_idx, c) in item.label.chars().enumerate() {
+        for (char_idx, c) in label.chars().enumerate() {
             if x >= inner.right().saturating_sub(scrollbar_width) {
                 break;
             }
@@ -454,7 +456,7 @@ fn render_list_popup(
         let label_end = x;
 
         // Detail (right-aligned)
-        if let Some(ref detail) = item.detail {
+        if let Some(ref detail) = detail {
             let detail_style = Style::default().fg(th.popup_dim).bg(row_bg);
             let max_detail_right = inner.right().saturating_sub(scrollbar_width);
             // Available space between label end and right edge

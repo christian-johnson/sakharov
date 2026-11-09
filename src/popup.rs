@@ -196,6 +196,49 @@ pub struct DocPanel {
 }
 
 impl ListItem {
+    /// The alias this row should be shown under for `filter`, if any: the one
+    /// the typed text matches strictly better than the label (`scratch` for
+    /// `switch-to-scratch`).  What you type is then what you see — the name
+    /// the dashboard and the messages teach is the name the palette answers
+    /// with.  `None` keeps the label (no filter, or the label matches as well).
+    pub fn alias_shown_for(&self, filter: &str) -> Option<&'static str> {
+        let typed = filter.trim().trim_start_matches(':').replace(' ', "-");
+        if typed.is_empty() {
+            return None;
+        }
+        let label_score = match_score(&self.label, &typed).unwrap_or(u32::MAX);
+        self.aliases
+            .iter()
+            .filter_map(|a| match_score(a, &typed).map(|s| (s, *a)))
+            .filter(|(s, _)| *s < label_score)
+            .min_by_key(|(s, a)| (*s, a.len()))
+            .map(|(_, a)| a)
+    }
+
+    /// The row's `(label, detail)` as drawn for `filter`.  Under an alias the
+    /// detail's `[…, :alias]` entry names the full command instead, so both
+    /// names stay on screen and neither is shown twice.
+    pub fn shown(&self, filter: &str) -> (std::borrow::Cow<'_, str>, Option<std::borrow::Cow<'_, str>>) {
+        use std::borrow::Cow;
+        let detail = self.detail.as_deref().map(Cow::Borrowed);
+        let Some(alias) = self.alias_shown_for(filter) else {
+            return (Cow::Borrowed(self.label.as_str()), detail);
+        };
+        let detail = detail.map(|d| match d.rfind("  [").filter(|_| d.ends_with(']')) {
+            Some(at) => {
+                let (desc, bracket) = d.split_at(at);
+                let inner = &bracket[3..bracket.len() - 1];
+                let entries: Vec<String> = inner
+                    .split(", ")
+                    .map(|e| if e == format!(":{alias}") { format!(":{}", self.label) } else { e.to_string() })
+                    .collect();
+                Cow::Owned(format!("{desc}  [{}]", entries.join(", ")))
+            }
+            None => Cow::Owned(format!("{d}  [:{}]", self.label)),
+        });
+        (Cow::Borrowed(alias), detail)
+    }
+
     /// The payload to return when this item is confirmed: its explicit typed
     /// payload, or its label wrapped in [`ConfirmPayload::Label`].
     pub fn confirm_payload(&self) -> ConfirmPayload {
@@ -951,6 +994,29 @@ mod tests {
             let first = state.filtered_indices()[0];
             assert_eq!(items[first].label, want, "typed {typed:?}");
         }
+    }
+
+    /// The dashboard teaches `:scratch`; typing it shows `scratch`, not the
+    /// long canonical name, with that name kept in the bracket.
+    #[test]
+    fn a_row_is_shown_under_the_alias_that_was_typed() {
+        let items = command_palette_items(&crate::keymap::Keymap::default_bindings());
+        let scratch = items.iter().find(|i| i.label == "switch-to-scratch").unwrap();
+        for typed in ["scratch", ":scratch", "scr"] {
+            let (label, detail) = scratch.shown(typed);
+            assert_eq!(label, "scratch", "typed {typed:?}");
+            assert_eq!(detail.as_deref(), Some("Switch to *scratch* buffer  [:switch-to-scratch]"));
+        }
+        // The label wins when it matches at least as well, or nothing is typed.
+        assert_eq!(scratch.shown("switch").0, "switch-to-scratch");
+        assert_eq!(scratch.shown("").0, "switch-to-scratch");
+        // Confirming still runs the canonical command.
+        assert!(matches!(scratch.confirm_payload(), ConfirmPayload::Label(l) if l == "switch-to-scratch"));
+
+        let config = items.iter().find(|i| i.label == "open-config").unwrap();
+        assert_eq!(config.shown("config").0, "config");
+        let quit = items.iter().find(|i| i.label == "force-quit").unwrap();
+        assert_eq!(quit.shown("q!"), ("q!".into(), Some("Quit without saving  [:force-quit]".into())));
     }
 
     #[test]

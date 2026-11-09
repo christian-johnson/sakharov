@@ -231,7 +231,10 @@ generated from the keymap, so they show your bindings. Entries that can't
 be understood are reported in `*Messages*`.
 
 Every command is in the palette. Each row ends in `[keys, :aliases]`, and on a
-narrow screen the description is shortened before that bracket is.
+narrow screen the description is shortened before that bracket is. Typing a
+command's alias shows the row under that alias — `scratch` lists
+`scratch … [:switch-to-scratch]` — so the name you typed (and the one the
+dashboard and messages use) is the name you see; Enter runs the same command.
 ### Moving through wrapped text
 
 When soft-wrap is on, `j` / `k` (and the arrow keys, and `Ctrl+d` / `Ctrl+u`,
