@@ -49,6 +49,7 @@ pub(crate) fn keymap_layer(app: &App) -> crate::keymap::Layer {
         // that is the point of the escape hatch — so only `q` is overridden,
         // to take the edited text back to the resolver.
         View::Text if app.in_conflict_edit_buffer() => Layer::ConflictEdit,
+        View::Text if app.notebook_focused_edit() => Layer::NotebookCell,
         View::Text if app.in_cell_buffer() => Layer::Cell,
         View::Text if app.in_sql_buffer() => Layer::Sql,
         View::Text if app.in_commit_buffer() => Layer::Commit,
@@ -194,7 +195,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Insert => handle_insert(app, key),
         Mode::Command => handle_command(app, key),
         Mode::Goto { .. } => handle_goto(app, key),
-        Mode::FindChar { dir, till } => handle_find_char(app, key, dir, till),
+        Mode::FindChar { dir, till, extend } => handle_find_char(app, key, dir, till, extend),
         Mode::Search { forward } => handle_search(app, key, forward),
         Mode::Jump { .. } => handle_jump(app, key),
         Mode::Fold => handle_fold(app, key),
@@ -302,11 +303,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
         }
         Mode::Search { forward } => {
             app.search.query.push_str(&flatten_lines(&text));
-            exec::search_compute_matches(app);
-            if !app.search.matches.is_empty() {
-                exec::search_jump(app, !forward);
-                app.mode = Mode::Search { forward };
-            }
+            exec::search_update(app, forward);
             return;
         }
         Mode::Insert => begin_insert_edit(app),
@@ -522,14 +519,32 @@ fn handle_insert(app: &mut App, key: KeyEvent) {
 // Command mode
 // ---------------------------------------------------------------------------
 
+/// Apply a typing key to a one-line input — the command line, a prompt, the
+/// search query: a char, Backspace, `ctrl+w` (drop the last word) or `ctrl+u`
+/// (clear).  Returns true when `buf` changed.
+pub(crate) fn edit_line(buf: &mut String, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let before = buf.len();
+    match key.code {
+        KeyCode::Backspace => {
+            buf.pop();
+        }
+        KeyCode::Char('w') if ctrl => {
+            let kept = buf.trim_end().trim_end_matches(|c: char| !c.is_whitespace()).len();
+            buf.truncate(kept);
+        }
+        KeyCode::Char('u') if ctrl => buf.clear(),
+        KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => buf.push(c),
+        _ => {}
+    }
+    buf.len() != before
+}
+
 fn handle_command(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
             app.command_buf.clear();
-        }
-        KeyCode::Backspace => {
-            app.command_buf.pop();
         }
         KeyCode::Enter => {
             let input = app.command_buf.trim().to_string();
@@ -546,10 +561,9 @@ fn handle_command(app: &mut App, key: KeyEvent) {
                 app.messages.show(format!("Unknown command: {input}"));
             }
         }
-        KeyCode::Char(c) => {
-            app.command_buf.push(c);
+        _ => {
+            edit_line(&mut app.command_buf, key);
         }
-        _ => {}
     }
 }
 
@@ -563,9 +577,6 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
             app.mode = Mode::Normal;
             app.command_buf.clear();
             app.messages.clear();
-        }
-        KeyCode::Backspace => {
-            app.command_buf.pop();
         }
         KeyCode::Enter => {
             let name = app.command_buf.trim().to_string();
@@ -590,10 +601,9 @@ fn handle_prompt(app: &mut App, key: KeyEvent, kind: PromptKind) {
                 | PromptKind::VcsTag => exec::vcs::prompted(app, kind, &name),
             }
         }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.command_buf.push(c);
+        _ => {
+            edit_line(&mut app.command_buf, key);
         }
-        _ => {}
     }
 }
 
@@ -621,14 +631,14 @@ fn handle_goto(app: &mut App, key: KeyEvent) {
 // FindChar mode
 // ---------------------------------------------------------------------------
 
-fn handle_find_char(app: &mut App, key: KeyEvent, dir: FindDir, till: bool) {
-    app.mode = Mode::Normal;
+fn handle_find_char(app: &mut App, key: KeyEvent, dir: FindDir, till: bool, extend: bool) {
+    app.mode = if extend { Mode::Select } else { Mode::Normal };
     if let KeyCode::Char(c) = key.code {
         let rope = &app.buffer.rope;
         let sel = app.selection;
         app.selection = match dir {
-            FindDir::Forward => motion::find_char_forward(rope, sel, c, till, false),
-            FindDir::Backward => motion::find_char_backward(rope, sel, c, till, false),
+            FindDir::Forward => motion::find_char_forward(rope, sel, c, till, extend),
+            FindDir::Backward => motion::find_char_backward(rope, sel, c, till, extend),
         };
         exec::update_scroll(app);
     }
@@ -640,28 +650,13 @@ fn handle_find_char(app: &mut App, key: KeyEvent, dir: FindDir, till: bool) {
 
 fn handle_search(app: &mut App, key: KeyEvent, forward: bool) {
     match key.code {
-        KeyCode::Esc => {
-            app.mode = Mode::Normal;
-            app.messages.clear();
-        }
-        KeyCode::Backspace => {
-            app.search.query.pop();
-            exec::search_compute_matches(app);
-        }
-        KeyCode::Enter => {
-            app.mode = Mode::Normal;
-            exec::search_compute_matches(app);
-            exec::search_jump(app, !forward);
-        }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.search.query.push(c);
-            exec::search_compute_matches(app);
-            if !app.search.matches.is_empty() {
-                exec::search_jump(app, !forward);
-                app.mode = Mode::Search { forward };
+        KeyCode::Esc => exec::search_cancel(app),
+        KeyCode::Enter => exec::search_confirm(app),
+        _ => {
+            if edit_line(&mut app.search.query, key) {
+                exec::search_update(app, forward);
             }
         }
-        _ => {}
     }
 }
 

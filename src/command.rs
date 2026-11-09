@@ -36,9 +36,8 @@ macro_rules! commands {
                 $(, palette: $ddesc:literal)? ; )*
         }
     ) => {
-        /// Every editor action that can be triggered by a key, the command line, or a script.
+        /// Every editor action that can be triggered by a key or the command line.
         #[derive(Debug, Clone)]
-        #[allow(dead_code)]
         pub enum Command {
             $( $uvar, )*
             $( $dvar ( $($dty),* ), )*
@@ -46,7 +45,6 @@ macro_rules! commands {
 
         impl Command {
             /// The canonical command name used in docs and the `:` command line.
-            #[allow(dead_code)]
             pub fn name(&self) -> &'static str {
                 match self {
                     $( Command::$uvar => $uname, )*
@@ -199,8 +197,6 @@ commands! {
         // --- Notebook navigation / editing ---
         NotebookNextCell => "notebook-next-cell", palette: "Next cell";
         NotebookPrevCell => "notebook-prev-cell", palette: "Previous cell";
-        NotebookScrollDown => "notebook-scroll-down", palette: "Scroll the notebook down one cell";
-        NotebookScrollUp => "notebook-scroll-up", palette: "Scroll the notebook up one cell";
         NotebookExecuteCell => "notebook-execute-cell", aliases: ["run"], palette: "Execute cell";
         NotebookExecuteAndAdvance => "notebook-execute-and-advance", aliases: ["run-next"], palette: "Execute cell and advance";
         NotebookExecuteAllCells => "notebook-execute-all-cells", aliases: ["run-all", "execute-all-cells"], palette: "Execute all cells in order";
@@ -354,8 +350,6 @@ commands! {
         SwitchTheme(String) => "theme";
         // Select the text object at the cursor (`m i w`, `m o f`, ...).
         SelectTextObject(crate::textobject::TextObject, crate::textobject::Scope) => "select-text-object";
-        // A list of commands executed in sequence (composition / scripting).
-        Sequence(Vec<Command>) => "sequence";
     }
 }
 
@@ -493,7 +487,7 @@ mod tests {
     /// Commands that are deliberately not in the palette: each needs an
     /// argument the palette can't supply, or has a palette entry under the
     /// command it opens (`theme` → `open-theme-picker`).
-    const NOT_IN_PALETTE: &[&str] = &["goto-line", "theme", "select-text-object", "sequence"];
+    const NOT_IN_PALETTE: &[&str] = &["goto-line", "theme", "select-text-object"];
 
     /// Every command is findable in the palette — and so has a description
     /// for the which-key popups, rather than falling back to its raw name.
@@ -513,8 +507,8 @@ mod tests {
     fn every_command_is_documented() {
         let docs = include_str!("../docs/commands.md");
         for name in Command::all_names() {
-            if matches!(*name, "sequence" | "select-text-object") {
-                continue; // internal: key sequences and `m i w` produce these
+            if *name == "select-text-object" {
+                continue; // internal: `m i w` produces it
             }
             assert!(docs.contains(&format!("`{name}")), "{name:?} is missing from docs/commands.md");
         }

@@ -600,10 +600,10 @@ pub struct ExtraServerConfig {
 pub(crate) const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 impl Config {
-    /// [`load_reporting`](Self::load_reporting) without the warning.
+    /// The built-in defaults: a test never reads the user's own config file.
     #[cfg(test)]
     pub fn load() -> Self {
-        Self::load_reporting().0
+        toml::from_str(DEFAULT_CONFIG).expect("BUG: compiled-in default.toml is invalid")
     }
 
     /// Load config from `~/.config/sakharov/config.toml`, deep-merged over the

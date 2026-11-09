@@ -270,12 +270,33 @@ fn stdin_hung_up() -> bool {
 #[derive(Default)]
 pub struct SearchState {
     pub query: String,
+    /// Char index of every match's first char, ascending.
     pub matches: Vec<usize>,
     pub current: usize,
-    pub active: bool,
-    /// True when search was just opened — allows the first typed char to
-    /// replace the previous query instead of appending to it.
-    pub just_opened: bool,
+    /// The text `matches` was computed over.  An edit swaps the buffer's rope
+    /// for another instance, which is how stale matches are recognised.
+    pub searched: Option<ropey::Rope>,
+    /// While the query is being typed: where the cursor was, and the query
+    /// before it — what `Esc` puts back.
+    pub origin: Option<(Selection, String)>,
+}
+
+impl SearchState {
+    /// Chars in the query — the length of every match.
+    pub fn match_len(&self) -> usize {
+        self.query.chars().count()
+    }
+
+    /// True when `matches` describes `rope` as it is now.
+    pub fn is_current(&self, rope: &ropey::Rope) -> bool {
+        self.searched.as_ref().is_some_and(|r| r.is_instance(rope))
+    }
+
+    /// True when char `idx` of `rope` is inside a match worth highlighting.
+    pub fn is_match(&self, rope: &ropey::Rope, idx: usize) -> bool {
+        let before = self.matches.partition_point(|&m| m <= idx);
+        before > 0 && idx < self.matches[before - 1] + self.match_len() && self.is_current(rope)
+    }
 }
 
 
@@ -1218,6 +1239,12 @@ fn draw_frame(
             }
         }
         refresh_highlight_window(app);
+        // Matches found in text that is no longer on screen: stop drawing
+        // them, and let go of the rope they were found in.
+        if app.search.searched.is_some() && !app.search.is_current(&app.buffer.rope) {
+            app.search.matches.clear();
+            app.search.searched = None;
+        }
         // After an external program (file picker etc.) suspends and resumes the
         // terminal, ratatui's diffing state is stale — force a full repaint.
         if app.needs_clear {
@@ -1400,6 +1427,7 @@ fn draw_view(
                 jump_labels: &app.jump.labels,
                 jump_typed: &app.jump.typed,
                 word_wrap: app.config.editor.word_wrap,
+                search: Some(&app.search),
             };
             let (images, cursor) = crate::notebook_ui::render(
                 f,

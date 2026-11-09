@@ -43,6 +43,8 @@ pub struct ActiveCellView<'a> {
     /// The `editor.word_wrap` toggle — non-markdown cells wrap when set
     /// (markdown cells always wrap; see [`cell_wraps`]).
     pub word_wrap: bool,
+    /// The buffer search, whose matches are highlighted in the focused cell.
+    pub search: Option<&'a crate::app::SearchState>,
 }
 
 /// Cache of per-cell highlight spans plus the shared tree-sitter highlighter
@@ -585,6 +587,7 @@ fn render_cell_content(
         // Only overlay jump labels on the focused cell.
         jump_labels: if is_focused { ctx.active.jump_labels } else { &[] },
         jump_typed: if is_focused { ctx.active.jump_typed } else { "" },
+        search: ctx.active.search.filter(|_| is_focused).map(|s| (s, rope)),
     };
 
     let mut current_row = area.top();
@@ -843,10 +846,10 @@ fn render_folded_cell_summary_rope(
     let hidden_lines = total_lines.saturating_sub(1);
     let output_count = outputs.len();
 
-    let source_str = source.to_string();
-    let first_line = source_str.lines().next().unwrap_or("").trim_end();
     let max_content = (area.width as usize).saturating_sub(30);
-    let content: String = first_line.chars().take(max_content).collect();
+    let first_line: String = source.line(0).chars().take(max_content).collect();
+    let content = crate::render_util::sanitize_source(&first_line, 1);
+    let content = content.trim_end();
 
     let suffix = if output_count > 0 {
         format!("  ▶ {} lines · {} outputs", hidden_lines, output_count)
@@ -1314,6 +1317,8 @@ struct SourceLineCtx<'a> {
     /// Jump-mode labels to overlay on the focused cell's source lines.
     jump_labels: &'a [(usize, String)],
     jump_typed: &'a str,
+    /// The search whose matches to highlight, with the text it was run over.
+    search: Option<(&'a crate::app::SearchState, &'a ropey::Rope)>,
 }
 
 /// One visual row of cell source, as `render_source_line` addresses it.
@@ -1392,8 +1397,10 @@ fn render_source_line(frame: &mut Frame, area: Rect, row: SourceRow<'_>, ctx: &S
         };
         let style = if ctx.cursor_pos == Some(char_idx) {
             cursor_style
-        } else if has_selection && char_idx >= sel_lo && char_idx < sel_hi {
+        } else if has_selection && char_idx >= sel_lo && char_idx <= sel_hi {
             selection_style
+        } else if ctx.search.is_some_and(|(search, rope)| search.is_match(rope, char_idx)) {
+            crate::theme::search_match_style()
         } else {
             base_style
         };
@@ -1408,7 +1415,7 @@ fn render_source_line(frame: &mut Frame, area: Rect, row: SourceRow<'_>, ctx: &S
                 .filter(|(dl, cs, ce, _)| *dl == line_no && col_in_line >= *cs && col_in_line < *ce)
                 .map(|(_, _, _, sev)| sev),
         );
-        buf[(x, area.y)].set_char(c).set_style(style);
+        buf[(x, area.y)].set_char(crate::render_util::cell_char(c)).set_style(style);
         x += 1;
     }
 
@@ -1886,6 +1893,7 @@ mod tests {
             jump_labels: &[],
             jump_typed: "",
             word_wrap: false,
+            search: None,
         };
 
         let backend = ratatui::backend::TestBackend::new(80, 24);
@@ -2044,6 +2052,7 @@ mod tests {
                 jump_labels: &[],
                 jump_typed: "",
                 word_wrap: false,
+            search: None,
             };
 
             // Terminal tall enough for the whole cell plus the 2 status rows.
@@ -2143,6 +2152,7 @@ mod tests {
             jump_typed: "",
             // `editor.word_wrap` is off: output wraps regardless of the toggle.
             word_wrap: false,
+            search: None,
         };
         let height = cell_display_height(&rope, &nb.cells[0], limits, Geometry { cell_px: None, inner_cols: avail, word_wrap: false }) + 4;
         let backend = ratatui::backend::TestBackend::new(width, height);
@@ -2220,6 +2230,7 @@ mod tests {
             jump_labels: &[],
             jump_typed: "",
             word_wrap: false,
+            search: None,
         };
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -2287,6 +2298,7 @@ mod tests {
             jump_labels: &[],
             jump_typed: "",
             word_wrap: false,
+            search: None,
         };
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -2364,6 +2376,7 @@ mod tests {
             jump_labels: &[],
             jump_typed: "",
             word_wrap: false,
+            search: None,
         };
         let width = 80u16;
         let backend = ratatui::backend::TestBackend::new(width, 12);

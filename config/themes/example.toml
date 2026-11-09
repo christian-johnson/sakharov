@@ -62,6 +62,7 @@ dim          = "grey"      # hints, separators, fold counts  (← syntax.comment
 line_numbers = "#3b4261"   # gutter line numbers             (← blend of bg/fg)
 selection    = "#283457"   # selection background            (← blend of bg/fg)
 # selection_text = ""      # text over a selection           (← keep foreground)
+# search       = ""        # search match background         (← warning)
 accent       = "orange"    # fold arrows / badges            (← orange)
 
 error        = "red"       # diagnostics, errors             (← ANSI red)

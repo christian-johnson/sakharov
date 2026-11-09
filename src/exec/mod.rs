@@ -32,7 +32,7 @@ pub use table::{is_table_path, poll_table_load};
 // The minibuffer prompts' answers land here (`input::handle_prompt`).
 pub(crate) use table::{apply_filter as table_filter, apply_group as table_group_by};
 pub(crate) use attach::attach as attach_database;
-pub use search::{search_compute_matches, search_jump};
+pub use search::{search_cancel, search_confirm, search_update};
 
 // Names used by `execute()` and by sibling submodules via `super::…`.
 use buffers::{
@@ -255,8 +255,20 @@ pub fn execute(app: &mut App, cmd: &Command) {
         Command::MoveLineStart       => app.selection = motion::move_line_start(&app.buffer.rope, app.selection, extend),
         Command::MoveLineFirstNonWs  => app.selection = motion::move_line_first_non_ws(&app.buffer.rope, app.selection, extend),
         Command::MoveLineEnd         => app.selection = motion::move_line_end(&app.buffer.rope, app.selection, extend),
-        Command::GotoFileStart       => app.selection = motion::goto_file_start(&app.buffer.rope, app.selection, extend),
-        Command::GotoFileEnd         => app.selection = motion::goto_file_end(&app.buffer.rope, app.selection, extend),
+        // A notebook's document is the whole cell stack, so these leave the
+        // focused cell — except while selecting, which one cell must contain.
+        Command::GotoFileStart => {
+            if !extend {
+                notebook::focus_edge_cell(app, false);
+            }
+            app.selection = motion::goto_file_start(&app.buffer.rope, app.selection, extend);
+        }
+        Command::GotoFileEnd => {
+            if !extend {
+                notebook::focus_edge_cell(app, true);
+            }
+            app.selection = motion::goto_file_end(&app.buffer.rope, app.selection, extend);
+        }
         Command::GotoLine(n)  => app.selection = motion::goto_line(&app.buffer.rope, app.selection, *n, extend),
         Command::SelectLine   => app.selection = motion::select_line(&app.buffer.rope, app.selection),
         Command::SelectAll    => app.selection = motion::select_all(&app.buffer.rope),
@@ -300,7 +312,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::FindCharForward => {
-            app.mode = Mode::FindChar { dir: FindDir::Forward, till: false };
+            app.mode = Mode::FindChar { dir: FindDir::Forward, till: false, extend };
             app.popup = Some(crate::popup::Popup::which_key(
                 "f",
                 vec![KeyHint::binding("any char", "move cursor to next occurrence")],
@@ -308,7 +320,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::TillCharForward => {
-            app.mode = Mode::FindChar { dir: FindDir::Forward, till: true };
+            app.mode = Mode::FindChar { dir: FindDir::Forward, till: true, extend };
             app.popup = Some(crate::popup::Popup::which_key(
                 "t",
                 vec![KeyHint::binding("any char", "move cursor till next occurrence")],
@@ -316,7 +328,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::FindCharBackward => {
-            app.mode = Mode::FindChar { dir: FindDir::Backward, till: false };
+            app.mode = Mode::FindChar { dir: FindDir::Backward, till: false, extend };
             app.popup = Some(crate::popup::Popup::which_key(
                 "F",
                 vec![KeyHint::binding("any char", "move cursor to previous occurrence")],
@@ -324,7 +336,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::TillCharBackward => {
-            app.mode = Mode::FindChar { dir: FindDir::Backward, till: true };
+            app.mode = Mode::FindChar { dir: FindDir::Backward, till: true, extend };
             app.popup = Some(crate::popup::Popup::which_key(
                 "T",
                 vec![KeyHint::binding("any char", "move cursor till previous occurrence")],
@@ -366,18 +378,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::PasteAfter  => text::paste_after(app),
         Command::PasteBefore => text::paste_before(app),
-        Command::Undo => {
-            if app.buffer.undo() {
-                text::clamp_selection(app);
-                edit::replaced(app);
-            }
-        }
-        Command::Redo => {
-            if app.buffer.redo() {
-                text::clamp_selection(app);
-                edit::replaced(app);
-            }
-        }
+        Command::Undo | Command::Redo => text::undo_redo(app, matches!(cmd, Command::Redo)),
         Command::OpenLineBelow => {
             text::open_line_below(app);
             return;
@@ -393,11 +394,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
             return;
         }
         Command::EnterInsertAfter => {
-            let len = app.buffer.rope.len_chars();
-            if len > 0 {
-                let pos = (app.selection.head + 1).min(len);
-                app.selection = Selection::point(pos);
-            }
+            app.selection = Selection::point(text::after_cursor(app, app.selection.head));
             app.mode = Mode::Insert;
             return;
         }
@@ -408,13 +405,7 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
         Command::EnterInsertAtLineEnd => {
             let le = motion::move_line_end(&app.buffer.rope, app.selection, false);
-            let len = app.buffer.rope.len_chars();
-            if len > 0 {
-                let pos = (le.head + 1).min(len);
-                app.selection = Selection::point(pos);
-            } else {
-                app.selection = le;
-            }
+            app.selection = Selection::point(text::after_cursor(app, le.head));
             app.mode = Mode::Insert;
             return;
         }
@@ -432,6 +423,10 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 app.selection = Selection::point(if pos > ls { pos - 1 } else { pos });
             } else {
                 app.selection = Selection::point(app.selection.head);
+                // Esc with nothing else to leave turns the match highlight off.
+                if app.mode == Mode::Normal {
+                    search::clear_highlight(app);
+                }
             }
             app.mode = Mode::Normal;
             // The call-signature hint only makes sense while typing arguments.
@@ -682,13 +677,6 @@ pub fn execute(app: &mut App, cmd: &Command) {
             }
             return;
         }
-        Command::Sequence(cmds) => {
-            let cmds = cmds.clone();
-            for c in &cmds {
-                execute(app, c);
-            }
-            return;
-        }
 
         // --- Notebook commands ---
         Command::NotebookNextCell => {
@@ -703,19 +691,6 @@ pub fn execute(app: &mut App, cmd: &Command) {
                 .map(|(_, s)| s.focused_cell.saturating_sub(1))
                 .unwrap_or(0);
             notebook::switch_focused_cell(app, target);
-            return;
-        }
-        Command::NotebookScrollDown => {
-            if let Some((ref nb, ref mut state)) = app.notebook {
-                let last = nb.cells.len().saturating_sub(1);
-                state.scroll_cell = (state.scroll_cell + 1).min(last);
-            }
-            return;
-        }
-        Command::NotebookScrollUp => {
-            if let Some((_, ref mut state)) = app.notebook {
-                state.scroll_cell = state.scroll_cell.saturating_sub(1);
-            }
             return;
         }
         Command::NotebookExecuteCell => {
@@ -867,28 +842,16 @@ pub fn execute(app: &mut App, cmd: &Command) {
         }
 
         // --- Search ---
-        Command::SearchForward => {
-            app.mode = Mode::Search { forward: true };
-            app.search.query.clear();
-            app.search.just_opened = true;
-            app.search.active = false;
-            search_compute_matches(app);
-            return;
-        }
-        Command::SearchBackward => {
-            app.mode = Mode::Search { forward: false };
-            app.search.query.clear();
-            app.search.just_opened = true;
-            app.search.active = false;
-            search_compute_matches(app);
+        Command::SearchForward | Command::SearchBackward => {
+            search::begin(app, matches!(cmd, Command::SearchForward));
             return;
         }
         Command::SearchNext => {
-            search_jump(app, false);
+            search::search_jump(app, false);
             return;
         }
         Command::SearchPrev => {
-            search_jump(app, true);
+            search::search_jump(app, true);
             return;
         }
 
@@ -3105,6 +3068,135 @@ mod tests {
         assert!(last > 0, "scrolling a tall cell must move the anchor");
 
         let _ = std::fs::remove_file(&target);
+    }
+
+    /// A notebook on disk with two cells, `a\nb` and `c\nd`, the first focused.
+    fn two_cell_notebook(tag: &str) -> (App, std::path::PathBuf) {
+        let mut app = App::new(None, Config::load());
+        let dir = unique_tmp_dir(tag);
+        let target = dir.join(format!("{tag}.ipynb"));
+        let _ = std::fs::remove_file(&target);
+        app.buffer.path = Some(dir.join("anchor.txt"));
+        create_new_notebook(&mut app, tag);
+        if let Some((ref mut nb, ref mut state)) = app.notebook {
+            nb.cells[0].source = Rope::from_str("a\nb");
+            let mut second = nb.cells[0].clone();
+            second.id = crate::notebook::new_cell_id();
+            second.source = Rope::from_str("c\nd");
+            nb.cells.push(second);
+            state.focused_cell = 0;
+        }
+        notebook::load_focused_cell(&mut app);
+        (app, target)
+    }
+
+    /// `gg` / `ge` used to stop at the edges of the focused cell.
+    #[test]
+    fn gg_and_ge_reach_the_ends_of_the_notebook_not_of_the_cell() {
+        let (mut app, target) = two_cell_notebook("gotoends");
+
+        press(&mut app, "ge");
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 1);
+        assert_eq!(app.selection.head, 2, "the last line of the last cell");
+
+        press(&mut app, "gg");
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+        assert_eq!(app.selection.head, 0);
+
+        // A selection lives in one cell, so extending stays inside it.
+        press(&mut app, "vge");
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+        assert_eq!(app.selection, Selection::new(0, 2));
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// Every key that edits or moves in a text buffer does the same thing in
+    /// a notebook cell; the notebook only claims keys Normal leaves free.
+    #[test]
+    fn the_editing_keys_mean_the_same_thing_inside_a_notebook_cell() {
+        let (mut app, target) = two_cell_notebook("samekeys");
+        app.selection = Selection::point(2);
+
+        press(&mut app, "I");
+        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(app.selection.head, 2, "the start of the line");
+        assert!(!app.notebook_focused_edit(), "no overlay opened");
+        crate::input::handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Esc),
+        );
+
+        press(&mut app, "]");
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 1);
+        press(&mut app, "[");
+        assert_eq!(app.notebook.as_ref().unwrap().1.focused_cell, 0);
+
+        // The full-screen cell is backed out of with `q`, like every other
+        // temporary buffer.
+        press(&mut app, "go");
+        assert!(app.notebook_focused_edit());
+        press(&mut app, "q");
+        assert!(!app.notebook_focused_edit());
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// Leaving a cell used to throw its undo history away.
+    #[test]
+    fn a_cells_undo_history_survives_leaving_the_cell() {
+        let (mut app, target) = two_cell_notebook("cellundo");
+
+        press(&mut app, "x");
+        press(&mut app, "d");
+        assert_eq!(app.buffer.rope.to_string(), "b");
+        press(&mut app, "]");
+        press(&mut app, "[");
+        press(&mut app, "u");
+        assert_eq!(app.buffer.rope.to_string(), "a\nb");
+        assert!(app.notebook.as_ref().unwrap().0.modified);
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn find_char_extends_the_selection_in_select_mode() {
+        let mut app = app_with_source("let total = 3;\n", "t.rs");
+        press(&mut app, "vf=");
+        assert_eq!(app.mode, Mode::Select);
+        assert_eq!(app.selection, Selection::new(0, 10));
+    }
+
+    /// `a` and `A` on an empty line used to step over its line break and
+    /// insert at the start of the next line.
+    #[test]
+    fn appending_on_an_empty_line_stays_on_that_line() {
+        for key in ["a", "A"] {
+            let mut app = app_with_source("one\n\nthree\n", "t.txt");
+            app.selection = Selection::point(4);
+            press(&mut app, key);
+            press(&mut app, "x");
+            assert_eq!(app.buffer.rope.to_string(), "one\nx\nthree\n", "{key}");
+        }
+    }
+
+    #[test]
+    fn undo_and_redo_put_the_cursor_where_the_text_changed() {
+        let mut app = app_with_source("one\n222\nthree\n", "t.txt");
+        app.selection = Selection::point(4);
+        press(&mut app, "x");
+        press(&mut app, "d");
+        press(&mut app, "gg");
+
+        press(&mut app, "u");
+        assert_eq!(app.buffer.rope.to_string(), "one\n222\nthree\n");
+        assert_eq!(app.selection.head, 4);
+        press(&mut app, "gg");
+        press(&mut app, "U");
+        assert_eq!(app.selection.head, 4);
+
+        press(&mut app, "U");
+        assert_eq!(app.messages.current(), Some("Nothing to redo"));
     }
 
     #[test]

@@ -453,18 +453,6 @@ impl ListState {
         }
     }
 
-    /// Append char, reset selected to 0.
-    pub fn push_filter_char(&mut self, c: char) {
-        self.filter.push(c);
-        self.selected = 0;
-    }
-
-    /// Remove last char, reset selected to 0.
-    pub fn pop_filter_char(&mut self) {
-        self.filter.pop();
-        self.selected = 0;
-    }
-
 }
 
 /// Score an item against the user's filter string.

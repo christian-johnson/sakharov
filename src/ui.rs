@@ -238,6 +238,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
     let tab_width = app.config.editor.tab_width;
 
     let spans = &app.highlight_spans;
+    let search_on = !app.search.matches.is_empty();
 
     let sel_start = app.selection.start();
     let sel_end = app.selection.end();
@@ -405,6 +406,8 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 theme::cursor_style(&app.mode)
             } else if char_idx >= sel_start && char_idx <= sel_end && sel_start != sel_end {
                 theme::selection_style()
+            } else if search_on && app.search.is_match(rope, char_idx) {
+                theme::search_match_style()
             } else {
                 base_style
             };
@@ -434,7 +437,7 @@ fn render_lines(frame: &mut Frame, app: &App, area: Rect) {
                 }
                 col_offset = tab_end;
             } else {
-                cells.push((c, style));
+                cells.push((crate::render_util::cell_char(c), style));
                 col_offset += w;
             }
         }
@@ -613,10 +616,21 @@ fn notebook_status(
     let filename = format!("{nb_name}  ·  cell [{}].{ext}", state.focused_cell + 1);
 
     // Diagnostics are reported per virtual cell path; sum across them all.
-    for idx in 0..nb.cells.len() {
-        let vpath =
-            crate::notebook::cell_virtual_path(&nb.path, &nb.metadata.kernel_language, idx);
-        count_diagnostics(app, &crate::lsp::diagnostic_key(&vpath), diag_errors, diag_warnings);
+    // Resolving a key touches the filesystem, so one is resolved and the rest
+    // recognised by its shape rather than one resolved per cell, every frame.
+    let first = crate::notebook::cell_virtual_path(&nb.path, &nb.metadata.kernel_language, 0);
+    let first = crate::lsp::diagnostic_key(&first);
+    let suffix = format!(".{ext}");
+    if let Some(prefix) = first.strip_suffix(&format!("0{suffix}")) {
+        for key in app.lsp.diagnostics.keys() {
+            let cell = key
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_suffix(&suffix))
+                .and_then(|idx| idx.parse::<usize>().ok());
+            if cell.is_some_and(|idx| idx < nb.cells.len()) {
+                count_diagnostics(app, key, diag_errors, diag_warnings);
+            }
+        }
     }
 
     // The chip shows *this notebook's* kernel — one per notebook, so another
@@ -908,6 +922,45 @@ mod tests {
             assert!(cursor.is_some(), "wrap={wrap}: cursor off screen");
             assert!(elapsed < std::time::Duration::from_millis(250), "wrap={wrap}: took {elapsed:?}");
         }
+    }
+
+    fn draw(app: &App, width: u16, height: u16) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| render(f, app)).unwrap();
+        terminal
+    }
+
+    /// A control char stored as a cell symbol is written to the terminal raw.
+    #[test]
+    fn control_characters_in_a_file_never_reach_the_terminal() {
+        let mut app = App::new(None, crate::config::Config::load());
+        app.buffer.rope = ropey::Rope::from_str("a\u{1b}[31mb\u{7}c\n");
+        let terminal = draw(&app, 30, 5);
+        let buf = terminal.backend().buffer();
+        for x in 0..30 {
+            assert!(!buf[(x, 0)].symbol().contains(char::is_control));
+        }
+    }
+
+    #[test]
+    fn search_matches_are_highlighted_until_the_text_changes() {
+        let mut app = App::new(None, crate::config::Config::load());
+        app.config.editor.line_numbers = false;
+        app.config.editor.git_gutter = false;
+        app.buffer.rope = ropey::Rope::from_str("x foo y foo\n");
+        app.search.query = "foo".into();
+        crate::exec::execute(&mut app, &crate::command::Command::SearchNext);
+        let matched = theme::search_match_style().bg;
+
+        let terminal = draw(&app, 30, 5);
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(9, 0)].style().bg, matched, "the second match");
+        assert_ne!(buf[(1, 0)].style().bg, matched);
+
+        // Match positions describe the old text; an edit stops drawing them.
+        crate::exec::edit::insert(&mut app, 0, "zz");
+        let terminal = draw(&app, 30, 5);
+        assert_ne!(terminal.backend().buffer()[(11, 0)].style().bg, matched);
     }
 
     /// `gw` labels every word on screen — including the ones on the wrapped

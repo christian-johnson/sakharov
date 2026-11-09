@@ -158,6 +158,11 @@ pub(super) fn save_notebook(app: &mut App) -> anyhow::Result<()> {
 
 /// Load the focused notebook cell into app.buffer, updating all dependent state.
 pub fn load_focused_cell(app: &mut App) {
+    // The buffer this cell was left in, when its text is still the cell's.
+    let kept = app.notebook.as_mut().and_then(|(nb, state)| {
+        let cell = nb.cells.get(state.focused_cell)?;
+        state.cell_buffers.remove(&cell.id).filter(|b| b.rope == cell.source)
+    });
     if let Some((ref nb, ref state)) = app.notebook {
         let idx = state.focused_cell;
         if idx >= nb.cells.len() {
@@ -170,9 +175,13 @@ pub fn load_focused_cell(app: &mut App) {
 
         let virtual_path = crate::notebook::cell_virtual_path(&notebook_path, &language, idx);
 
-        app.buffer = Buffer::new_empty();
+        app.buffer = kept.unwrap_or_else(Buffer::new_empty);
         app.buffer.rope = source;
         app.buffer.path = Some(virtual_path.clone());
+        // The notebook carries the unsaved flag, and the server is resynced
+        // in full on the first edit.
+        app.buffer.modified = false;
+        app.buffer.lsp_synced_chars = None;
         app.selection = Selection::point(0);
         app.scroll_row = 0;
         app.scroll_col = 0;
@@ -695,7 +704,7 @@ pub(super) fn notebook_move_down(app: &mut App, extend: bool) -> bool {
                 s.clear_output_browsing();
             }
             switch_focused_cell(app, focused + 1);
-            place_cursor_at_line(app, 0, 0);
+            super::place_cursor_on_row(app, 0, false, 0);
             super::update_scroll(app);
         }
         return true; // consumed even when pinned at the very bottom
@@ -802,35 +811,27 @@ pub(super) fn switch_focused_cell(app: &mut App, new_idx: usize) {
     super::lsp_did_change(app);
     save_focused_cell(app);
     if let Some((ref nb, ref mut state)) = app.notebook {
+        if let Some(cell) = nb.cells.get(state.focused_cell) {
+            let left = std::mem::replace(&mut app.buffer, Buffer::new_empty());
+            state.cell_buffers.insert(cell.id.clone(), left);
+        }
         let last = nb.cells.len().saturating_sub(1);
         state.focused_cell = new_idx.min(last);
     }
     load_focused_cell(app);
 }
 
-/// Place a point selection on `line_idx` (clamped) at column `col` (clamped to
-/// the line's content), using the same column discipline as vertical motion.
-pub(super) fn place_cursor_at_line(app: &mut App, line_idx: usize, col: usize) {
-    let rope = &app.buffer.rope;
-    if rope.len_chars() == 0 {
-        app.selection = Selection::point(0);
+/// Focus the first (or, with `last`, the last) cell: where `gg` / `ge` go in
+/// a notebook, whose document is the whole cell stack rather than one cell.
+pub(super) fn focus_edge_cell(app: &mut App, last: bool) {
+    if !app.in_notebook_nav() {
         return;
     }
-    let line_idx = line_idx.min(rope.len_lines().saturating_sub(1));
-    let line_start = rope.line_to_char(line_idx);
-    let line = rope.line(line_idx);
-    let nl = line.len_chars();
-    let content_len = if nl > 0 && (line.char(nl - 1) == '\n' || line.char(nl - 1) == '\r') {
-        nl - 1
-    } else {
-        nl
-    };
-    let head = if content_len == 0 {
-        line_start
-    } else {
-        line_start + col.min(content_len - 1)
-    };
-    app.selection = Selection::point(head);
+    let Some((nb, state)) = app.notebook.as_ref() else { return };
+    let target = if last { nb.cells.len().saturating_sub(1) } else { 0 };
+    if state.focused_cell != target {
+        switch_focused_cell(app, target);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -842,16 +843,6 @@ pub(super) fn place_cursor_at_line(app: &mut App, line_idx: usize, col: usize) {
 // h/l/w/b/e/0/^/$ and Select-mode extension all behave identically to the
 // source buffer without re-implementing char/word boundaries a second time.
 // ---------------------------------------------------------------------------
-
-/// A line's content length excluding a trailing `\n`/`\r` — the same
-/// trimming `motion.rs`'s internal `line_end_char` applies, so a column
-/// derived here never spills past this row into the next one when added to
-/// `line_to_char`.
-pub(super) fn rope_line_content_len(rope: &ropey::Rope, line_idx: usize) -> usize {
-    let line = rope.line(line_idx);
-    let n = line.len_chars();
-    if n > 0 && matches!(line.char(n - 1), '\n' | '\r') { n - 1 } else { n }
-}
 
 /// Build the focused cell's output virtual rope (see
 /// `notebook_ui::output_virtual_rope`) using exactly the geometry the
@@ -887,7 +878,7 @@ pub(super) fn output_motion(
     let last_line = rope.len_lines().saturating_sub(1);
     let to_char = |r: usize, c: usize| {
         let r = r.min(last_line);
-        rope.line_to_char(r) + c.min(rope_line_content_len(&rope, r))
+        rope.line_to_char(r) + c.min(motion::line_content_len(&rope, r))
     };
     let head = to_char(row, output_col);
     let anchor = output_anchor.map(|(r, c)| to_char(r, c)).unwrap_or(head);
@@ -920,7 +911,7 @@ pub(super) fn yank_output_selection(app: &App) -> Option<String> {
     let last_line = rope.len_lines().saturating_sub(1);
     let to_char = |r: usize, c: usize| {
         let r = r.min(last_line);
-        rope.line_to_char(r) + c.min(rope_line_content_len(&rope, r))
+        rope.line_to_char(r) + c.min(motion::line_content_len(&rope, r))
     };
     let head = to_char(row, state.output_col);
     let anchor = state.output_anchor.map(|(r, c)| to_char(r, c)).unwrap_or(head);

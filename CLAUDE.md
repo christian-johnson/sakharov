@@ -82,6 +82,9 @@ src/
 - Every key (including the `g`/`z` sub-modes) is a row in `keymap::defaults`.
   Which-key popups, the vcs `key_sheet` and the palette's key labels
   are generated from the keymap — never hand-write a key into a description.
+- A layer over a text buffer (notebook, cell, sql, commit, …) only binds keys
+  Normal leaves free, so no editing key changes meaning there (pinned by a
+  test in `keymap.rs`). Bufferless views reinterpret keys instead.
 - Config values changed at runtime go through `exec::settings::replace_config`
   (`:set`, `:toggle`, the dedicated toggles, `:config-reload`); state derived
   from config at startup lives in `App::apply_config`.

@@ -57,6 +57,9 @@ pub struct NotebookState {
     /// expanding it makes every row real, so `j`/`k` scroll through the lot.
     /// Session-only; not persisted to .ipynb.
     pub expanded_outputs: BTreeSet<usize>,
+    /// The buffer each cell was last edited in, by cell id, so a cell's undo
+    /// history survives the cursor leaving it.
+    pub cell_buffers: std::collections::HashMap<String, crate::buffer::Buffer>,
     /// Memoised cell display heights (see `notebook_ui::nb_cell_heights`).
     /// Heights are needed by the scroll math and the renderer every frame,
     /// through `&self`, so the cache mutates behind a `RefCell`.
@@ -104,6 +107,7 @@ impl NotebookState {
             cell_redo: Vec::new(),
             folded_cells: BTreeSet::new(),
             expanded_outputs: BTreeSet::new(),
+            cell_buffers: std::collections::HashMap::new(),
             heights: CellHeightCache::default(),
         }
     }

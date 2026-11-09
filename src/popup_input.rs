@@ -285,23 +285,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> PopupAction {
             PopupAction::Continue
         }
 
-        KeyCode::Backspace => {
+        // The filter row is edited like every other one-line input.
+        _ => {
             if let PopupContent::List(ref mut s) = popup.content {
-                s.pop_filter_char();
+                if crate::input::edit_line(&mut s.filter, key) {
+                    s.selected = 0;
+                }
             }
             PopupAction::Continue
         }
-
-        KeyCode::Char(c)
-            if !key.modifiers.contains(KeyModifiers::CONTROL)
-                && !key.modifiers.contains(KeyModifiers::ALT) =>
-        {
-            if let PopupContent::List(ref mut s) = popup.content {
-                s.push_filter_char(c);
-            }
-            PopupAction::Continue
-        }
-
-        _ => PopupAction::Continue,
     }
 }

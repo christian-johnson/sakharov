@@ -20,6 +20,12 @@ pub fn char_display_width(c: char, col: usize, tab_width: usize) -> usize {
     }
 }
 
+/// `c` as a cell symbol.  A control char stored in a cell is emitted verbatim
+/// by the backend and corrupts the screen, so it draws as a space.
+pub fn cell_char(c: char) -> char {
+    if c.is_control() { ' ' } else { c }
+}
+
 /// Make one line of another program's output safe to draw as cell symbols.
 ///
 /// A raw control character stored in a cell is emitted verbatim by the

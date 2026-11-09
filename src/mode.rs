@@ -43,7 +43,8 @@ pub enum Mode {
     /// `extend` is true when entered from Select mode — motions extend the selection.
     Goto { extend: bool },
     /// Waiting for target char after f/t/F/T.
-    FindChar { dir: FindDir, till: bool },
+    /// `extend` is true when entered from Select mode — the motion extends the selection.
+    FindChar { dir: FindDir, till: bool, extend: bool },
     /// Buffer search — typing builds the query; Enter confirms, Esc cancels.
     Search { forward: bool },
     /// Label-jump mode — visible word starts are labelled; type label to jump.

@@ -150,7 +150,8 @@ I don't plan on adding a version control interface (I use `lazygit` for this) or
 | `Ctrl+n` | Jump to next search match | Jump to next search match |
 | `Ctrl+p` | Jump to previous search match | Jump to previous search match |
 | `Space` | Open Command Palette | — |
-| `K` | LSP Hover Doc | — |
+| `J` / `K` | Half a page down / up | Half a page down / up |
+| `g k` | LSP Hover Doc | — |
 | `Ctrl+s` | Save file | Save file |
 
 ### Notebook Mode
@@ -350,8 +351,6 @@ All commands can be run from the Normal/Select modes via the command line `:` (e
 ### Jupyter Notebooks
 - `notebook-next-cell`: Move selection to next cell.
 - `notebook-prev-cell`: Move selection to previous cell.
-- `notebook-scroll-down`: Scroll notebook view down.
-- `notebook-scroll-up`: Scroll notebook view up.
 - `notebook-enter-edit`: Enter in-cell edit mode.
 - `notebook-exit-edit`: Exit in-cell edit mode.
 - `notebook-execute-cell`: Execute focused cell.

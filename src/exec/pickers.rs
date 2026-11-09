@@ -45,7 +45,9 @@ pub(super) fn grep_buffer(app: &mut App) {
 
 /// Fuzzy picker over the open-buffers list (pre-selects the current buffer).
 pub(super) fn buffer_picker(app: &mut App) {
-    let current = app.buffer.path.clone();
+    // The view's identity, not `app.buffer.path`: in a notebook that is a
+    // cell's virtual path, and a grid's buffer has none.
+    let current = app.current_source_id();
     let items: Vec<crate::popup::ListItem> = app
         .open_buffers
         .iter()
@@ -61,15 +63,8 @@ pub(super) fn buffer_picker(app: &mut App) {
     }
     let mut popup = crate::popup::Popup::navigate("buffers", items);
     if let crate::popup::PopupContent::List(ref mut state) = popup.content {
-        if let Some(cur) = &current {
-            let cur_str = cur.to_string_lossy();
-            if let Some(idx) = state
-                .items
-                .iter()
-                .position(|it| it.detail.as_deref() == Some(cur_str.as_ref()))
-            {
-                state.selected = idx;
-            }
+        if let Some(idx) = app.open_buffers.iter().position(|id| Some(id) == current.as_ref()) {
+            state.selected = idx;
         }
     }
     app.popup = Some(popup);
@@ -304,6 +299,7 @@ fn open_file_external_picker(app: &mut App, cmd: &str) {
     // Resume TUI.
     let _ = execute!(stdout, crossterm::terminal::EnterAlternateScreen);
     let _ = terminal::enable_raw_mode();
+    app.needs_clear = true;
     // The picker may have changed the cursor colour; the next frame resets it.
     app.last_cursor_color = None;
 
@@ -326,6 +322,4 @@ fn open_file_external_picker(app: &mut App, cmd: &str) {
         let path = std::path::PathBuf::from(&chosen);
         super::buffers::open_path(app, &path);
     }
-
-    app.needs_clear = true;
 }

@@ -59,8 +59,8 @@ These commands enter a sub-mode that awaits a second key.
 | `yank-selection` | `y` | Copy the current selection to the clipboard |
 | `paste-after` | `p` | Paste clipboard contents after the cursor |
 | `paste-before` | `P` | Paste clipboard contents before the cursor |
-| `undo` | `u` | Undo the last edit |
-| `redo` | `U` | Redo the last undone edit |
+| `undo` | `u` | Undo the last edit; the cursor moves to where the text changed |
+| `redo` | `U` | Redo the last undone edit; the cursor moves to where the text changed |
 | `open-line-below` | `o` | Insert a new line below the current line and enter Insert mode |
 | `open-line-above` | `O` | Insert a new line above the current line and enter Insert mode |
 
@@ -69,7 +69,7 @@ These commands enter a sub-mode that awaits a second key.
 | Command | Default Key | Description |
 |---------|-------------|-------------|
 | `enter-insert` | `i` | Enter Insert mode at the cursor position |
-| `enter-insert-after` | `a` | Enter Insert mode after the cursor |
+| `enter-insert-after` | `a` | Enter Insert mode after the cursor (on an empty line, on that line) |
 | `enter-insert-at-line-start` | `I` | Move to line start and enter Insert mode |
 | `enter-insert-at-line-end` | `A` | Move to line end and enter Insert mode |
 | `enter-normal` | `Esc` | Return to Normal mode; collapses selection to point |
@@ -118,34 +118,41 @@ file_picker = "find . -type f | fzf"
 | Command | Description |
 |---------|-------------|
 | `shell <cmd>` | Run a shell command via `sh -c`; first 200 chars of stdout (or stderr) shown in the status bar |
-| `sequence` | (programmatic only) Run a sequence of commands in order |
 
 ## Search
 
 | Command | Default Key | Description |
 |---------|-------------|-------------|
-| `search-forward` | `/` | Enter forward search — type a pattern, Enter jumps to the first match below the cursor |
-| `search-backward` | `?` | Enter backward search — same but jumps to the first match above the cursor |
+| `search-forward` | `/` | Enter forward search — type a pattern; the cursor follows the first match at or below where you started, Enter keeps it |
+| `search-backward` | `?` | Enter backward search — same, but the first match at or above where you started |
 | `search-next` | `n`, `ctrl+n` | Jump to the next match (wraps around) |
 | `search-prev` | `N`, `ctrl+p` | Jump to the previous match (wraps around) |
 | `grep-buffer` | `ctrl+f` | Telescope-style fuzzy line picker over the current buffer (`:grep-buffer`) |
 | `grep-project` | `ctrl+g` | Live project grep: the query is a ripgrep regex (smart case), re-run as you type, first 10,000 matches; falls back to `grep -rE` (`:grep`, `:rg`) |
 
-Search is live: the cursor moves to the nearest match as you type. Press `Esc` to cancel and return the cursor to its original position.
+Search is live: the cursor moves to the nearest match as you type, and every
+match is highlighted (theme key `ui.search`). `Esc` cancels: the cursor returns
+to where it was and the previous query is restored. Matches stay highlighted
+until the text is edited or `Esc` is pressed in Normal mode; `n` / `N` search
+again after an edit. In a notebook the search covers the focused cell.
+
+The search query, the `:` command line, the minibuffer prompts and a picker's
+filter row are all edited the same way: `Backspace`, `ctrl+w` (delete the last
+word) and `ctrl+u` (clear).
 
 ## Scrolling
 
 | Command | Default Key | Description |
 |---------|-------------|-------------|
-| `page-down` | `ctrl+d`, `PgDn`, `J` (notebooks) | Scroll half a page down (cursor moves with viewport, extending the selection in Select mode; in a notebook it flows across cells and output blocks) |
-| `page-up` | `ctrl+u`, `PgUp`, `K` (notebooks) | Scroll half a page up (cursor moves with viewport, extending the selection in Select mode; in a notebook it flows across cells and output blocks) |
+| `page-down` | `J`, `ctrl+d`, `PgDn` | Scroll half a page down (cursor moves with viewport, extending the selection in Select mode; in a notebook it flows across cells and output blocks) |
+| `page-up` | `K`, `ctrl+u`, `PgUp` | Scroll half a page up (cursor moves with viewport, extending the selection in Select mode; in a notebook it flows across cells and output blocks) |
 | `scroll-cursor-center` | `gz` (via Goto mode) | Scroll viewport so the cursor line is vertically centred |
 
 ## LSP
 
 | Command | Default Key | Description |
 |---------|-------------|-------------|
-| `lsp-show-documentation` | `gk`, `K` | Show hover documentation for the symbol under the cursor |
+| `lsp-show-documentation` | `gk` | Show hover documentation for the symbol under the cursor |
 | `lsp-code-actions` | `ga` (via Goto mode) | Show code actions for the current selection |
 | `lsp-goto-definition` | `gd` (via Goto mode) | Jump to the definition of the symbol under the cursor |
 | `lsp-goto-references` | `gr` (via Goto mode) | List all references to the symbol under the cursor |
@@ -205,8 +212,8 @@ session's config, so `:set`, the toggles and `:config-reload` always agree.
 ### Custom key bindings
 
 `[keys.<layer>]` tables in the config bind key sequences to commands, in any
-layer: `normal`, `select`, `notebook`, `table`, `cell`, `sql`, `commit`, `vcs`,
-`conflict`, `conflict-edit`. A view layer falls back to `normal` for keys it
+layer: `normal`, `select`, `notebook`, `notebook-cell`, `table`, `cell`, `sql`,
+`commit`, `vcs`, `conflict`, `conflict-edit`. A view layer falls back to `normal` for keys it
 doesn't bind (`conflict` falls back to `vcs` first). Keys are a single character, a name (`Enter`, `Space`, `Esc`,
 `Tab`, `PgUp`, …) or modifiers plus a key (`ctrl+s`, `C-s`, `alt+x`); a
 sequence is keys separated by spaces, so the `g` and `z` sub-modes are
@@ -401,7 +408,7 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `open-as-table` | — | View the current file as a data table (`:csv`, `:table`) |
 | `table-close` | — | Leave the table view and edit the same file as text (`:table-close`, `:close-table`) |
 | `table-open-cell` | `Enter` | Read the cursor cell's full text in its own buffer (`:read-cell`, `:cell-buffer`) |
-| `table-peek-cell` | `gk`, `K` | Peek the cursor cell's full text in a float (`:peek-cell`, `:peek`) |
+| `table-peek-cell` | `gk` | Peek the cursor cell's full text in a float (`:peek-cell`, `:peek`) |
 | `table-yank-cell` | `y` | Copy the cursor cell's full value to the clipboard (`:yank-cell`) |
 | `table-yank-row` | `x` | Copy the cursor row to the clipboard as a tab-separated line (`:yank-row`) |
 | `table-close-cell` | `q` (in a cell buffer) | Return from a cell buffer to its table — also what `:bd` does there (`:cell-back`, `:back-to-table`) |
@@ -573,12 +580,10 @@ Navigation uses the ordinary motions, reinterpreted against the grid:
 | `w` / `b` | next / previous column |
 | `0` / `$` | first / last column |
 | `gg` / `G` | first / last row (keeping the column) |
-| `J` / `Ctrl+u` | half a screen of rows down / up |
+| `J` / `K` | half a screen of rows down / up (also `Ctrl+d` / `Ctrl+u`) |
 
-(`K` is not bound in the table override map, so it keeps whatever it means in
-Normal mode — by default `show-documentation`, which the table view routes to the
-cell peek. If you have rebound `K` in `[keys.normal]` your binding still wins;
-`gk` always peeks. PageUp is `Ctrl+u` / `PgUp`.)
+`J` / `K` page in every view — text, notebook, grid, version control and a
+focused float — so the grid does not bind them itself; `gk` peeks the cell.
 
 Long values are **truncated to their column** with a `…` and never wrap, so a
 column of paragraph-length text can't swallow the grid; multi-line values show a
@@ -595,12 +600,12 @@ there are two ways to see one whole:
   word-wrap all work on it. Word-wrap is forced on while it is open and put back
   as it was when you leave. **`q`** (or `:bd`) returns to the grid, on the same
   cell you left — the table is stashed, not re-parsed.
-- **`gk`** (or `K`, unless you have rebound it) peeks the same text in a float
+- **`gk`** peeks the same text in a float
   beside the grid. The float works exactly like the LSP completion popup: it is
   a passive overlay you read at a glance and any key dismisses, **`Tab`** engages
   with it, and once focused `j`/`k` scroll a line, `J`/`K` (or `Ctrl+d`/`Ctrl+u`)
   half a float, `g`/`G` jump to the ends, `Tab` disengages and `Esc` closes.
-  Hover docs (`K` in a text buffer) behave the same way.
+  Hover docs (`gk` in a text buffer) behave the same way.
 
 The cell buffer is read-only in the sense that the table view is: it is a virtual
 buffer with no path, so `:w` has nothing to save to and edits never reach the
@@ -628,13 +633,18 @@ is in flight — and stop at `table.max_rows`, reporting that they did.
 
 Opening a `.ipynb` file shows its cells as a vertical stack. **There is no separate
 notebook mode** — the focused cell is edited in place with the ordinary Normal /
-Insert / Select modes, exactly like a plain buffer. A few extra bindings apply while
-a notebook is open (they shadow the normal bindings):
+Insert / Select modes, exactly like a plain buffer. Every key means what it means
+in a text buffer; the notebook only adds keys Normal mode leaves free (a test
+keeps it that way):
 
+- `]` / `[` move to the next / previous cell.
+- `gg` / `ge` / `G` go to the first / last cell — the notebook is the document.
+  (While selecting they stay inside the cell, which a selection cannot leave.)
 - `J` / `K` scroll half a page down / up — flowing across cells and through output
   blocks, so they page through the whole notebook rather than one cell.
-- `N` / `M` move to the next / previous cell. (`N` shadows `search-prev` while a
-  notebook is open; `ctrl+p` still works for that.)
+- `go` opens the focused cell full-screen; `q` there (or `Ctrl+Enter`) returns.
+- `u` / `U` undo within the focused cell, and a cell keeps its history when the
+  cursor leaves it and comes back.
 - A plain `j` past a cell's last source line steps into that cell's **output block**
   — so long errors and streams scroll into view — and then into the next cell
   (column preserved). `k` is the exact inverse, so vertical motion flows
@@ -658,12 +668,10 @@ undo) has no default key — use the command palette (`Space`) or the `:` comman
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
 | `enter-notebook` | — | `:nb`, `:notebook` | Open the current buffer's `.ipynb` as a notebook (no-op if already open) |
-| `notebook-next-cell` | `N` | — | Focus the next cell |
-| `notebook-prev-cell` | `M` | — | Focus the previous cell |
-| `notebook-scroll-down` | — | — | Scroll the cell viewport down one cell (snaps back to the focused cell) |
-| `notebook-scroll-up` | — | — | Scroll the cell viewport up one cell (snaps back to the focused cell) |
-| `notebook-open-cell-edit` | — | `:open-cell`, `:edit-cell` | Open the focused cell in a full-screen edit overlay |
-| `notebook-close-cell-edit` | `ctrl+Enter` | `:close-cell`, `:discard-cell` | Save the cell and close the overlay |
+| `notebook-next-cell` | `]` | — | Focus the next cell |
+| `notebook-prev-cell` | `[` | — | Focus the previous cell |
+| `notebook-open-cell-edit` | `go` | `:open-cell`, `:edit-cell` | Open the focused cell in a full-screen edit overlay |
+| `notebook-close-cell-edit` | `q`, `ctrl+Enter` (in the overlay) | `:close-cell`, `:discard-cell` | Save the cell and close the overlay |
 
 ### Cell management
 

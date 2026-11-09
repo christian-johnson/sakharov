@@ -82,6 +82,9 @@ pub struct UiSpec {
     /// Text color over a selection. Omit to keep the theme foreground.
     #[serde(default)]
     pub selection_text: Option<String>,
+    /// Background of search matches. Falls back to `ui.warning`.
+    #[serde(default)]
+    pub search: Option<String>,
     /// Fold arrows / badges and other small accents.
     #[serde(default)]
     pub accent: Option<String>,
@@ -313,6 +316,7 @@ pub struct Theme {
     pub line_numbers: Color,
     pub selection_bg: Color,
     pub selection_fg: Option<Color>,
+    pub search_bg: Color,
     pub accent: Color,
     pub error: Color,
     pub warning: Color,
@@ -534,6 +538,8 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
     let selection_fg = c(&spec.ui.selection_text)
         .or(if themed { None } else { Some(Color::Black) });
 
+    let search_bg = pick(&[c(&spec.ui.search)], warning);
+
     let statusline_bg = pick(&[c(&spec.ui.statusline)], shade(0.13, Color::DarkGray));
     let statusline_fg = pick(
         &[c(&spec.ui.statusline_text), foreground],
@@ -729,6 +735,7 @@ pub fn resolve(spec: &ThemeSpec, fallback_name: &str) -> Theme {
         line_numbers,
         selection_bg,
         selection_fg,
+        search_bg,
         accent,
         error,
         warning,
@@ -942,6 +949,12 @@ pub fn selection_style() -> Style {
         style = style.fg(fg);
     }
     style
+}
+
+/// Style for a search match under `/`, `?`, `n` and `N`.
+pub fn search_match_style() -> Style {
+    let bg = active().search_bg;
+    Style::default().bg(bg).fg(contrast_fg(bg))
 }
 
 /// Resolve the color for a given mode from the active theme.

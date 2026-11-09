@@ -103,9 +103,11 @@ pub fn parse_seq(s: &str) -> Option<Vec<KeyBinding>> {
 pub enum Layer {
     Normal,
     Select,
-    /// While a notebook is open: `N`/`M` move between cells, `J`/`K` page.
+    /// While a notebook is open: `]`/`[` move between cells.
     Notebook,
-    /// While the data grid is open: `J` pages, `K` peeks the cell.
+    /// A notebook cell opened full-screen: `q` returns to the cell stack.
+    NotebookCell,
+    /// While the data grid is open: the cell and column keys.
     Table,
     /// In a `*cell …*` buffer: `q` returns to the grid it was read out of.
     Cell,
@@ -126,10 +128,11 @@ pub enum Layer {
 }
 
 impl Layer {
-    const ALL: [Layer; 10] = [
+    const ALL: [Layer; 11] = [
         Layer::Normal,
         Layer::Select,
         Layer::Notebook,
+        Layer::NotebookCell,
         Layer::Table,
         Layer::Cell,
         Layer::Sql,
@@ -145,6 +148,7 @@ impl Layer {
             Layer::Normal => "normal",
             Layer::Select => "select",
             Layer::Notebook => "notebook",
+            Layer::NotebookCell => "notebook-cell",
             Layer::Table => "table",
             Layer::Cell => "cell",
             Layer::Sql => "sql",
@@ -252,6 +256,9 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         (BOTH, "PgDn", C::PageDown, None),
         (BOTH, "ctrl+u", C::PageUp, None),
         (BOTH, "ctrl+d", C::PageDown, None),
+        // The same in every view: a text buffer, a notebook, a grid, a float.
+        (BOTH, "J", C::PageDown, None),
+        (BOTH, "K", C::PageUp, None),
         (BOTH, "g", C::EnterGotoMode, None),
         (BOTH, "f", C::FindCharForward, None),
         (BOTH, "t", C::TillCharForward, None),
@@ -285,8 +292,6 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         (N, "ctrl+g", C::GrepProject, None),
         (N, "ctrl+o", C::OpenFilePicker, None),
         (N, "z", C::EnterFoldMode, None),
-        // Kept for muscle memory; `g k` is the canonical binding.
-        (N, "K", C::LspShowDocumentation, None),
         (N, "H", C::BufferPrev, None),
         (N, "L", C::BufferNext, None),
         (N, "i", C::EnterInsert, None),
@@ -310,6 +315,7 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         (N, "g b", C::OpenBufferPicker, Some("buffer picker")),
         (N, "g s", C::OpenSymbolPicker, Some("symbol picker")),
         (N, "g c", C::CommentRegion, Some("comment/uncomment selection")),
+        (N, "g f", C::FormatDocument, Some("format buffer")),
         (N, "g D", C::OpenDiagnosticPicker, Some("diagnostic picker")),
         // The kernel's namespace and the repository are reachable from every
         // view: neither is a property of whichever file happens to be open.
@@ -333,12 +339,12 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         // Capitalised: `zo` is fold-open in every view.
         (N, "z O", C::NotebookToggleOutputExpand, Some("expand/collapse full cell output")),
         // --- Notebook ---
-        // J / K page through the notebook, flowing across cells and outputs;
-        // N / M step between cells.
-        (&[Notebook], "J", C::PageDown, None),
-        (&[Notebook], "K", C::PageUp, None),
-        (&[Notebook], "N", C::NotebookNextCell, None),
-        (&[Notebook], "M", C::NotebookPrevCell, None),
+        // Only keys Normal leaves free: every editing key keeps its meaning
+        // inside a cell.  `]` / `[` step between cells, as they step between
+        // files in the version-control view.
+        (&[Notebook], "]", C::NotebookNextCell, None),
+        (&[Notebook], "[", C::NotebookPrevCell, None),
+        (&[Notebook], "g o", C::NotebookOpenCellEdit, Some("open cell full-screen")),
         // Enter on a traceback frame (while browsing output) jumps to its line.
         (&[Notebook], "Enter", C::NotebookFollowError, None),
         // The execute keys.  Chords bound directly in a view layer also fire
@@ -352,8 +358,7 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         // --- Table ---
         // Cell movement reuses the ordinary motions, which `exec::table`
         // reinterprets against the grid; only keys whose meaning differs are
-        // here.  `K` keeps its "tell me more" meaning: the cell peek.
-        (&[Table], "J", C::PageDown, None),
+        // here.
         (&[Table], "Enter", C::TableOpenCell, None),
         (&[Table], "y", C::TableYankCell, None),
         (&[Table], "x", C::TableYankRow, None),
@@ -378,6 +383,7 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         (&[Table], "g V", C::VcsOpen, Some("version control")),
         (&[Table], "g b", C::OpenBufferPicker, Some("buffer picker")),
         // --- Temporary buffers `q` backs out of ---
+        (&[NotebookCell], "q", C::NotebookCloseCellEdit, None),
         (&[Cell], "q", C::TableCloseCell, None),
         (&[Sql], "q", C::BufferClose, None),
         // The query buffer is a cell in all but name: the same execute keys.
@@ -404,8 +410,6 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         (&[Vcs], "r", C::VcsRefresh, None),
         (&[Vcs], "?", C::VcsHelp, None),
         (&[Vcs], "q", C::VcsClose, None),
-        (&[Vcs], "J", C::PageDown, None),
-        (&[Vcs], "K", C::PageUp, None),
         (&[Vcs], "b", C::VcsBranchMenu, None),
         (&[Vcs], "b b", C::VcsSwitch, Some("switch to a branch")),
         (&[Vcs], "b n", C::VcsNewBranch(String::new()), Some("new branch here")),
@@ -707,6 +711,32 @@ mod tests {
         );
         assert_eq!(keymap.hint(Layer::Sql, "run-query"), "C-e");
         assert_eq!(keymap.hint(Layer::Table, "close-derived-table"), "q");
+    }
+
+    /// A layer over a text buffer only claims keys Normal leaves free, so no
+    /// editing key changes meaning there.  Bufferless views (the grid, version
+    /// control) reinterpret keys against their own data instead.
+    #[test]
+    fn layers_over_a_text_buffer_never_shadow_a_normal_key() {
+        let keymap = Keymap::default_bindings();
+        for layer in [
+            Layer::Notebook,
+            Layer::NotebookCell,
+            Layer::Cell,
+            Layer::Sql,
+            Layer::Commit,
+            Layer::ConflictEdit,
+        ] {
+            let Some(map) = keymap.layers.get(&layer) else { continue };
+            for (seq, _) in map.iter() {
+                assert!(
+                    keymap.get(Layer::Normal, seq).is_none(),
+                    "[keys.{}] {} shadows a Normal binding",
+                    layer.name(),
+                    format_seq(seq),
+                );
+            }
+        }
     }
 
     #[test]

@@ -76,6 +76,33 @@ pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> std::io::Resul
     })
 }
 
+/// Char index of the first place `a` and `b` differ, or `None` when equal.
+pub(crate) fn first_difference(a: &Rope, b: &Rope) -> Option<usize> {
+    let (mut chunks_a, mut chunks_b) = (a.chunks(), b.chunks());
+    let (mut rest_a, mut rest_b): (&[u8], &[u8]) = (&[], &[]);
+    let mut byte = 0usize;
+    loop {
+        while rest_a.is_empty() {
+            let Some(chunk) = chunks_a.next() else { break };
+            rest_a = chunk.as_bytes();
+        }
+        while rest_b.is_empty() {
+            let Some(chunk) = chunks_b.next() else { break };
+            rest_b = chunk.as_bytes();
+        }
+        let n = rest_a.len().min(rest_b.len());
+        if n == 0 {
+            let same_length = rest_a.is_empty() && rest_b.is_empty();
+            return (!same_length).then(|| b.byte_to_char(byte));
+        }
+        if let Some(i) = rest_a[..n].iter().zip(&rest_b[..n]).position(|(x, y)| x != y) {
+            return Some(b.byte_to_char(byte + i));
+        }
+        byte += n;
+        (rest_a, rest_b) = (&rest_a[n..], &rest_b[n..]);
+    }
+}
+
 impl Buffer {
     /// Create an empty scratch buffer.
     pub fn new_empty() -> Self {

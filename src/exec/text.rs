@@ -120,6 +120,7 @@ pub(super) fn comment_region(app: &mut App) {
     let prefix: &str = match lang.as_str() {
         "python" | "toml" | "yaml" | "bash" => "# ",
         "rust" | "javascript" | "go" | "c" => "// ",
+        "sql" => "-- ",
         _ => {
             app.messages.show("No comment syntax known for this file type");
             return;
@@ -173,12 +174,9 @@ pub(super) fn comment_region(app: &mut App) {
             if content.trim_start().is_empty() {
                 continue;
             }
-            let indent: usize = content
-                .chars()
-                .take_while(|c| c.is_whitespace())
-                .count();
+            let trimmed = content.trim_start();
+            let indent = content.chars().count() - trimmed.chars().count();
             let after_indent = line_start + indent;
-            let trimmed = &content[indent..]; // safe: indent counted in chars above
             if trimmed.starts_with(prefix) {
                 super::edit::remove(app, after_indent, after_indent + prefix.chars().count());
             } else if trimmed.starts_with(prefix_token) {
@@ -311,6 +309,32 @@ pub(super) fn dedent_region(app: &mut App) {
     app.buffer.modified = true;
     select_lines(app, start_line, end_line);
     super::update_scroll(app);
+}
+
+/// `u` / `U`: step the buffer's history and put the cursor where the text
+/// changed, so the step is visible rather than somewhere off screen.
+pub(super) fn undo_redo(app: &mut App, redo: bool) {
+    let before = app.buffer.rope.clone();
+    let stepped = if redo { app.buffer.redo() } else { app.buffer.undo() };
+    if !stepped {
+        app.messages.show(if redo { "Nothing to redo" } else { "Nothing to undo" });
+        return;
+    }
+    match crate::buffer::first_difference(&before, &app.buffer.rope) {
+        Some(at) => app.selection = Selection::point(at.min(app.buffer.rope.len_chars())),
+        None => clamp_selection(app),
+    }
+    super::edit::replaced(app);
+}
+
+/// The insert position just after the char at `pos` — or `pos` itself when
+/// that char is the line break, so `a` / `A` on an empty line stay on it.
+pub(super) fn after_cursor(app: &App, pos: usize) -> usize {
+    let rope = &app.buffer.rope;
+    match rope.get_char(pos) {
+        Some('\n' | '\r') | None => pos.min(rope.len_chars()),
+        Some(_) => pos + 1,
+    }
 }
 
 pub(super) fn clamp_selection(app: &mut App) {

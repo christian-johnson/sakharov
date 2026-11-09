@@ -267,7 +267,7 @@ fn visual_rows(rope: &Rope, line_idx: usize, w: &Wrap) -> Vec<std::ops::Range<us
 }
 
 /// Chars on line `line_idx`, not counting the line terminator.
-fn line_content_len(rope: &Rope, line_idx: usize) -> usize {
+pub(crate) fn line_content_len(rope: &Rope, line_idx: usize) -> usize {
     if line_idx >= rope.len_lines() {
         return 0;
     }
@@ -609,7 +609,7 @@ pub fn find_char_backward(
     let ls = line_start_char(rope, sel.head);
     let mut pos = sel.head;
     loop {
-        if pos == 0 || pos < ls {
+        if pos <= ls {
             break;
         }
         pos -= 1;
