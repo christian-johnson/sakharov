@@ -19,19 +19,21 @@ const BANNER: &[&str] = &[
 ];
 const BANNER_W: u16 = 66;
 
+/// One dashboard row: what it does, and the command that does it.  The key
+/// (or `:` name) beside it comes from the keymap and the command table, the
+/// same as the palette's labels, so the two always agree.
 struct Action {
     label: &'static str,
     command_name: &'static str,
-    fallback: &'static str,
 }
 
 const ACTIONS: &[Action] = &[
-    Action { label: "open file",       command_name: "open-file-picker",     fallback: "C-o"          },
-    Action { label: "command palette", command_name: "open-command-palette", fallback: "SPC"          },
-    Action { label: "grep project",    command_name: "grep-project",         fallback: "C-g"          },
-    Action { label: "open config",     command_name: "open-config",          fallback: ":open-config" },
-    Action { label: "scratch buffer",  command_name: "switch-to-scratch",    fallback: ":scratch"     },
-    Action { label: "quit",            command_name: "quit",                 fallback: ":q"           },
+    Action { label: "open file",       command_name: "open-file-picker"     },
+    Action { label: "command palette", command_name: "open-command-palette" },
+    Action { label: "grep project",    command_name: "grep-project"         },
+    Action { label: "open config",     command_name: "open-config"          },
+    Action { label: "scratch buffer",  command_name: "switch-to-scratch"    },
+    Action { label: "quit",            command_name: "quit"                 },
 ];
 
 const LABEL_COL: usize = 18; // right-pad labels to this width
@@ -83,10 +85,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             break;
         }
 
-        let hint = app
-            .keymap
-            .keys_for(crate::keymap::Layer::Normal, action.command_name)
-            .unwrap_or_else(|| action.fallback.to_string());
+        let hint = app.keymap.hint(crate::keymap::Layer::Normal, action.command_name);
 
         // "  ▸  label ................  hint"
         let dots = if action.label.len() < LABEL_COL {
@@ -123,5 +122,34 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             Paragraph::new(FOOTER).style(Style::default().fg(th.dim)),
             Rect { x: footer_x, y: footer_y, width: w, height: 1 },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every dashboard row names a real command, findable in the palette
+    /// under the name the row shows.
+    #[test]
+    fn every_action_is_a_palette_command() {
+        let palette = crate::command::Command::palette_entries();
+        for action in ACTIONS {
+            assert!(
+                palette.iter().any(|(n, _)| *n == action.command_name),
+                "{:?} is not a palette command",
+                action.command_name
+            );
+        }
+    }
+
+    #[test]
+    fn rows_show_the_key_or_the_shortest_colon_name() {
+        let keymap = crate::keymap::Keymap::default_bindings();
+        let hint = |name| keymap.hint(crate::keymap::Layer::Normal, name);
+        assert_eq!(hint("open-file-picker"), "C-o");
+        assert_eq!(hint("switch-to-scratch"), ":scratch");
+        assert_eq!(hint("open-config"), ":config");
+        assert_eq!(hint("quit"), ":q");
     }
 }

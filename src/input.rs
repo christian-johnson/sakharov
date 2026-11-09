@@ -142,47 +142,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.messages.show("use :q to quit, :q! to force quit");
+        let normal = crate::keymap::Layer::Normal;
+        app.messages.show(format!(
+            "use {} to quit, {} to force quit",
+            app.keymap.hint(normal, "quit"),
+            app.keymap.hint(normal, "force-quit"),
+        ));
         return;
     }
 
-    // Cell-execution shortcuts (notebook only), handled before mode dispatch so
-    // they fire from Normal and Insert alike (in Insert, Enter would otherwise
-    // insert a newline):
-    //   • Ctrl+E           — run the focused cell. Legacy-safe: `Ctrl`+letter has
-    //                        a byte encoding, so it works on any terminal.
-    //   • Shift/Ctrl+Enter — run the focused cell (Jupyter muscle memory), except
-    //                        Ctrl+Enter in the full-screen overlay closes it.
-    //                        A *modified* Enter only reaches us when the terminal
-    //                        supports keyboard-enhancement reporting (see app::run);
-    //                        otherwise it arrives as a bare Enter and Ctrl+E is
-    //                        the fallback.
-    if app.notebook.is_some() {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let ctrl_e = ctrl && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'));
-        let mod_enter = key.code == KeyCode::Enter && (ctrl || shift);
-        if ctrl_e || mod_enter {
-            if mod_enter && ctrl && app.notebook_focused_edit() {
-                exec::execute(app, &Command::NotebookCloseCellEdit);
-            } else {
-                exec::execute(app, &Command::NotebookExecuteCell);
-            }
-            return;
-        }
-    }
-
-    // The same execute keys run the query in the `*sql*` buffer: it is a cell in
-    // everything but name, and the muscle memory should carry over.  Also before
-    // mode dispatch, so it fires while you are still typing the query.
-    if app.in_sql_buffer() {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let ctrl_e = ctrl && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'));
-        if ctrl_e || (key.code == KeyCode::Enter && (ctrl || shift)) {
-            exec::execute(app, &Command::SqlRun);
-            return;
-        }
+    if run_view_chord(app, key) {
+        return;
     }
 
     match app.mode.clone() {
@@ -244,6 +214,47 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     // Keep the focused notebook cell's stored source in sync with app.buffer.
     // (The LSP already heard about every edit from `exec::edit`.)
     sync_notebook_cell(app);
+}
+
+/// A chord (a Ctrl key, or a modified Enter) that the current view's own layer
+/// binds — the execute keys `C-e` / `S-Enter` / `C-Enter` in a notebook and in
+/// the `*sql*` buffer.  These fire before mode dispatch, so they work from
+/// Insert too: a cell runs while you are still typing it.  Only the view
+/// layer's *own* bindings count; Normal's chords (`C-s`, …) keep meaning
+/// nothing in Insert.
+///
+/// A modified Enter only reaches us when the terminal reports keyboard
+/// enhancements (see `app::run`); otherwise it arrives as a bare Enter and
+/// `C-e` is the fallback, which is why it is listed first.
+fn run_view_chord(app: &mut App, key: KeyEvent) -> bool {
+    if !matches!(app.mode, Mode::Normal | Mode::Insert | Mode::Select) {
+        return false;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let mod_enter = key.code == KeyCode::Enter
+        && key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    if !(ctrl || mod_enter) {
+        return false;
+    }
+    // Ctrl+Enter in the full-screen cell editor closes it — that editor's
+    // "done" key, as in Jupyter.
+    if mod_enter && ctrl && app.notebook_focused_edit() {
+        exec::execute(app, &Command::NotebookCloseCellEdit);
+        return true;
+    }
+    // The full-screen cell editor is a Text view, but its cell still runs
+    // with the notebook's keys.
+    let layer = if app.notebook.is_some() { crate::keymap::Layer::Notebook } else { keymap_layer(app) };
+    let mut kb = KeyBinding::from(key);
+    // Caps Lock turns C-e into C-E; a chord means the same either way.
+    if let KeyCode::Char(c) = kb.code {
+        kb.code = KeyCode::Char(c.to_ascii_lowercase());
+    }
+    let Some(cmds) = app.keymap.lookup_own(layer, &[kb]).map(<[_]>::to_vec) else {
+        return false;
+    };
+    exec::run_many(app, &cmds);
+    true
 }
 
 // ---------------------------------------------------------------------------

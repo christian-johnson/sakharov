@@ -237,7 +237,11 @@ mod with_engine {
             session.drill = Some(super::super::table::Drill::Catalog);
         }
         app.messages
-            .show(format!("{n} table(s) — Enter opens one, q goes back"));
+            .show(format!(
+                "{n} table(s) — {} opens one, {} goes back",
+                crate::exec::table::open_key(app),
+                crate::exec::table::back_key(app),
+            ));
     }
 
     /// `Enter` on a schema-browser row — open that table in the grid.
@@ -270,7 +274,8 @@ mod with_engine {
                     Box::new(source),
                     Some(origin),
                 );
-                app.messages.show(format!("{shape} — q goes back"));
+                let back = crate::exec::table::back_key(app);
+                app.messages.show(format!("{shape} — {back} goes back"));
             }
             Err(e) => app.messages.show(format!("{label}: {e:#}")),
         }

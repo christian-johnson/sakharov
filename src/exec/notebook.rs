@@ -571,7 +571,8 @@ pub(super) fn delete_cell(app: &mut App) {
     app.graphics.last_placed.clear();
     after_structural_edit(app);
     if let Some(idx) = deleted {
-        app.messages.show(format!("Deleted cell [{}] — :notebook-undo-structural to restore", idx + 1));
+        let undo = app.keymap.hint(crate::keymap::Layer::Notebook, "notebook-undo-structural");
+        app.messages.show(format!("Deleted cell [{}] — {undo} to restore", idx + 1));
     }
 }
 

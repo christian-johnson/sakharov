@@ -197,6 +197,7 @@ opened by a relative or absolute path.
 | `toggle-line-numbers` | — | Toggle line number display |
 | `toggle-relative-line-numbers` | — | Toggle relative line numbers (shows distance from current line) |
 | `toggle-word-wrap` | — | Toggle soft word-wrap (`:wrap` / `:word-wrap`) |
+| `show-dashboard` | — | Show the welcome screen again (`:dashboard`, `:home`, `:splash`). Its rows show each action's key, or its shortest `:` name when it has no key — the same labels the palette shows |
 
 The dedicated toggles are shorthands for `:toggle <setting>`: they change the
 session's config, so `:set`, the toggles and `:config-reload` always agree.
@@ -220,9 +221,17 @@ rebindable too:
 "g p" = "table-peek-cell"
 ```
 
-The which-key popups, the `?` key sheets and the command palette's key labels
-are generated from the keymap, so they show your bindings. Entries that can't
+A Ctrl chord or modified Enter bound in a *view* layer (`notebook`, `sql`, …)
+also fires from Insert mode — that is how `Ctrl+E` runs a cell while you are
+still typing it. Chords in `normal` don't.
+
+The which-key popups, the `?` key sheets, the command palette's key labels,
+the dashboard and the hints in minibuffer messages ("`q` goes back") are all
+generated from the keymap, so they show your bindings. Entries that can't
 be understood are reported in `*Messages*`.
+
+Every command is in the palette. Each row ends in `[keys, :aliases]`, and on a
+narrow screen the description is shortened before that bracket is.
 ### Moving through wrapped text
 
 When soft-wrap is on, `j` / `k` (and the arrow keys, and `Ctrl+d` / `Ctrl+u`,
@@ -403,7 +412,7 @@ Entering Insert (`i`) on a folded cell auto-unfolds it.
 | `clear-transforms` | `gx` | Drop every sort/filter/group (`:reset-table`) |
 | `close-derived-table` | `q` | Leave a computed table (e.g. a frequency table or a query result) and go back to where it came from — also what `:bd` does there (`:table-back`) |
 | `sql` | `q` closes it | Open the SQL scratch buffer (`:query`, `:sql-buffer`) |
-| `run-query` | `Ctrl+E` (in the SQL buffer) | Run the statement at the cursor (or the selection) and show the result as a grid (`:sql-run`) |
+| `run-query` | `Ctrl+E`, `Shift+Enter`, `Ctrl+Enter` (in the SQL buffer, also from Insert) | Run the statement at the cursor (or the selection) and show the result as a grid (`:sql-run`) |
 | `kernel-variables` | `gv` | List the kernel's variables; `Enter` opens a dataframe as a grid (`:vars`, `:variables`) |
 | `view` | — | `:view df` opens a kernel dataframe as a grid; bare `:view` lists them |
 | `attach` | — | Attach a local database file read-only: `:attach <path> [as <alias>]`; bare `:attach` prompts for the path (and names what is already attached) |
@@ -632,10 +641,11 @@ a notebook is open (they shadow the normal bindings):
   `zO` (or `:expand-output`) lifts the cap for that cell so `j`/`k` scroll through
   all of it; `zO` again re-collapses it. (Capitalised because `zo` is fold-open
   in every view, including inside a notebook cell.)
-- `Ctrl+E` executes the focused cell (works on any terminal). `Shift+Enter` /
-  `Ctrl+Enter` also execute it, but only on terminals that support keyboard-enhancement
-  reporting (kitty protocol) — otherwise a modified Enter is indistinguishable from a
-  plain Enter and never arrives.
+- `Ctrl+E` executes the focused cell (works on any terminal), from Normal or
+  Insert. `Shift+Enter` / `Ctrl+Enter` also execute it, but only on terminals that
+  support keyboard-enhancement reporting (kitty protocol) — otherwise a modified Enter
+  is indistinguishable from a plain Enter and never arrives. All three are ordinary
+  `[keys.notebook]` bindings, so they can be rebound.
 
 Cell management (new/delete cell, clear outputs, cell-type conversion, structural
 undo) has no default key — use the command palette (`Space`) or the `:` command line.
@@ -647,8 +657,8 @@ undo) has no default key — use the command palette (`Space`) or the `:` comman
 | `enter-notebook` | — | `:nb`, `:notebook` | Open the current buffer's `.ipynb` as a notebook (no-op if already open) |
 | `notebook-next-cell` | `N` | — | Focus the next cell |
 | `notebook-prev-cell` | `M` | — | Focus the previous cell |
-| `notebook-scroll-down` | — | — | Scroll the cell viewport down (snaps back to the focused cell) |
-| `notebook-scroll-up` | — | — | Scroll the cell viewport up (snaps back to the focused cell) |
+| `notebook-scroll-down` | — | — | Scroll the cell viewport down one cell (snaps back to the focused cell) |
+| `notebook-scroll-up` | — | — | Scroll the cell viewport up one cell (snaps back to the focused cell) |
 | `notebook-open-cell-edit` | — | `:open-cell`, `:edit-cell` | Open the focused cell in a full-screen edit overlay |
 | `notebook-close-cell-edit` | `ctrl+Enter` | `:close-cell`, `:discard-cell` | Save the cell and close the overlay |
 
@@ -662,8 +672,8 @@ undo) has no default key — use the command palette (`Space`) or the `:` comman
 | `notebook-clear-outputs` | — | — | Clear the focused cell's outputs |
 | `notebook-cell-to-markdown` | — | `:cell-md`, `:to-markdown` | Convert the focused cell to a Markdown cell |
 | `notebook-cell-to-code` | — | `:cell-code`, `:to-code` | Convert the focused cell to a code cell |
-| `notebook-undo-structural` | — | — | Undo the last add/delete-cell change |
-| `notebook-redo-structural` | — | — | Redo the last undone structural change |
+| `notebook-undo-structural` | — | `:undo-cell` | Undo the last cell add / delete / convert (`u` undoes text inside a cell) |
+| `notebook-redo-structural` | — | `:redo-cell` | Redo the last undone cell add / delete / convert |
 | `notebook-goto-error` | — | `:goto-error`, `:error` | Jump the cursor to the source line of the focused cell's error (the innermost traceback frame) |
 | `notebook-follow-error` | `Enter` (on a traceback `File …` line) | — | Jump to the exact cell + line named by the traceback frame the output cursor is on |
 
@@ -671,7 +681,7 @@ undo) has no default key — use the command palette (`Space`) or the `:` comman
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
-| `notebook-execute-cell` | `Ctrl+E`, `Shift+Enter`, `ctrl+Enter` | `:run` | Execute the focused cell. Code cells run in the kernel (queued if one is already running); Markdown cells render to their formatted view |
+| `notebook-execute-cell` | `Ctrl+E`, `Shift+Enter`, `Ctrl+Enter` | `:run` | Execute the focused cell. Code cells run in the kernel (queued if one is already running); Markdown cells render to their formatted view |
 | `notebook-execute-and-advance` | — | `:run-next` | Execute the focused cell, then focus the next |
 | `notebook-execute-all-cells` | — | `:run-all`, `:execute-all-cells` | Queue every cell for execution in order (markdown cells render) |
 | `notebook-execute-cells-below` | — | `:run-all-below`, `:execute-all-cells-below` | Queue the focused cell and every cell below it, in order |
@@ -685,7 +695,7 @@ as the kernel reports ready. Cell completion, kernel lifecycle events (ready /
 restarted / died), and queue progress are all logged to the `*Messages*` buffer
 with timings.
 
-`Ctrl+E` is the portable execute key. `Shift+Enter` / `ctrl+Enter` additionally
+`Ctrl+E` is the portable execute key. `Shift+Enter` / `Ctrl+Enter` additionally
 require a terminal that supports keyboard-enhancement reporting (the kitty protocol);
 on terminals that don't, a modified Enter collapses to a bare Enter and won't trigger
 execution. (Set `SV_DEBUG_KEYS=1` to log received key events to `keys.log` in the state dir
@@ -815,6 +825,7 @@ else is the view's):
 
 | Command | Default Key | Alias | Description |
 |---------|-------------|-------|-------------|
+| `conflicts` | — | `:resolve`, `:merge-conflicts` | Open the version-control view on the first conflicted file |
 | `conflict-take-side` | `Space` | `:resolve-take` | Take, or drop, the focused version (`h`/`l` choose it) |
 | `conflict-take-left` | `a` | `:resolve-left` | Take only the left version |
 | `conflict-take-right` | `b` | `:resolve-right` | Take only the right version |

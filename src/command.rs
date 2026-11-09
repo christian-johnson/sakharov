@@ -72,6 +72,12 @@ macro_rules! commands {
                 }
             }
 
+            /// The canonical name of every command in the table, in table order.
+            #[cfg(test)]
+            pub fn all_names() -> &'static [&'static str] {
+                &[ $( $uname, )* $( $dname, )* ]
+            }
+
             /// `(canonical_name, description)` for every command that opts into the
             /// command palette, in table order. Drives `command_palette_items()`;
             /// the key labels are added there, from the keymap.
@@ -105,11 +111,11 @@ commands! {
         MoveWordForward => "move-word-forward", palette: "Next word";
         MoveWordBackward => "move-word-backward", palette: "Previous word";
         MoveWordEnd => "move-word-end", palette: "End of word";
-        MoveBigWordForward => "move-big-word-forward";
-        MoveBigWordBackward => "move-big-word-backward";
-        MoveBigWordEnd => "move-big-word-end";
+        MoveBigWordForward => "move-big-word-forward", palette: "Next WORD (whitespace-separated)";
+        MoveBigWordBackward => "move-big-word-backward", palette: "Previous WORD (whitespace-separated)";
+        MoveBigWordEnd => "move-big-word-end", palette: "End of WORD (whitespace-separated)";
         MoveLineStart => "move-line-start", palette: "Start of line";
-        MoveLineFirstNonWs => "move-line-first-non-ws";
+        MoveLineFirstNonWs => "move-line-first-non-ws", palette: "First non-whitespace character of the line";
         MoveLineEnd => "move-line-end", palette: "End of line";
         GotoFileStart => "goto-file-start", palette: "Go to file start";
         GotoFileEnd => "goto-file-end", palette: "Go to file end";
@@ -127,8 +133,8 @@ commands! {
         OpenLineBelow => "open-line-below", palette: "New line below";
         OpenLineAbove => "open-line-above", palette: "New line above";
         CommentRegion => "comment-region", aliases: ["comment"], palette: "Toggle comment/uncomment";
-        IndentRegion => "indent-region", aliases: ["indent"];
-        DedentRegion => "dedent-region", aliases: ["dedent"];
+        IndentRegion => "indent-region", aliases: ["indent"], palette: "Indent the selected lines";
+        DedentRegion => "dedent-region", aliases: ["dedent"], palette: "Dedent the selected lines";
         KillToEndOfLine => "kill-to-end-of-line", aliases: ["kill-line"], palette: "Kill to end of line";
 
         // --- Mode transitions ---
@@ -141,13 +147,13 @@ commands! {
         EnterCommandMode => "enter-command-mode", palette: "Open command line";
 
         // --- Sub-mode entries ---
-        EnterGotoMode => "enter-goto-mode";
+        EnterGotoMode => "enter-goto-mode", palette: "Go to… (then a key: file start, definition, pickers, …)";
         EnterJumpMode => "enter-jump-mode", aliases: ["jump-mode", "jump"], palette: "Jump to label in view";
-        FindCharForward => "find-char-forward";
-        FindCharBackward => "find-char-backward";
-        TillCharForward => "till-char-forward";
-        TillCharBackward => "till-char-backward";
-        EnterFoldMode => "enter-fold-mode", aliases: ["fold"];
+        FindCharForward => "find-char-forward", palette: "Find the next typed character on the line";
+        FindCharBackward => "find-char-backward", palette: "Find the previous typed character on the line";
+        TillCharForward => "till-char-forward", palette: "Move to just before the next typed character";
+        TillCharBackward => "till-char-backward", palette: "Move to just after the previous typed character";
+        EnterFoldMode => "enter-fold-mode", aliases: ["fold"], palette: "Fold… (then a key: toggle, open, close, all)";
         EnterMatchMode => "enter-match-mode", aliases: ["match", "match-mode"], palette: "Select a text object — word, pair, function";
         MatchBracket => "match-bracket", palette: "Jump to the matching bracket";
 
@@ -193,8 +199,8 @@ commands! {
         // --- Notebook navigation / editing ---
         NotebookNextCell => "notebook-next-cell", palette: "Next cell";
         NotebookPrevCell => "notebook-prev-cell", palette: "Previous cell";
-        NotebookScrollDown => "notebook-scroll-down";
-        NotebookScrollUp => "notebook-scroll-up";
+        NotebookScrollDown => "notebook-scroll-down", palette: "Scroll the notebook down one cell";
+        NotebookScrollUp => "notebook-scroll-up", palette: "Scroll the notebook up one cell";
         NotebookExecuteCell => "notebook-execute-cell", aliases: ["run"], palette: "Execute cell";
         NotebookExecuteAndAdvance => "notebook-execute-and-advance", aliases: ["run-next"], palette: "Execute cell and advance";
         NotebookExecuteAllCells => "notebook-execute-all-cells", aliases: ["run-all", "execute-all-cells"], palette: "Execute all cells in order";
@@ -207,13 +213,13 @@ commands! {
         NotebookCellToCode => "notebook-cell-to-code", aliases: ["cell-code", "to-code"], palette: "Convert cell to code";
         NotebookRestartKernel => "notebook-restart-kernel", aliases: ["restart-kernel", "kernel-restart"], palette: "Restart kernel";
         NotebookInterruptKernel => "notebook-interrupt-kernel", aliases: ["interrupt-kernel", "kernel-interrupt"], palette: "Interrupt kernel";
-        NotebookUndoStructural => "notebook-undo-structural";
-        NotebookRedoStructural => "notebook-redo-structural";
+        NotebookUndoStructural => "notebook-undo-structural", aliases: ["undo-cell"], palette: "Undo the last cell add / delete / convert";
+        NotebookRedoStructural => "notebook-redo-structural", aliases: ["redo-cell"], palette: "Redo the last undone cell add / delete / convert";
         NotebookOpenCellEdit => "notebook-open-cell-edit", aliases: ["open-cell", "edit-cell"], palette: "Open cell in full-screen editor";
         NotebookCloseCellEdit => "notebook-close-cell-edit", aliases: ["close-cell", "notebook-discard-cell-edit", "discard-cell"], palette: "Save cell and return";
         EnterNotebook => "enter-notebook", aliases: ["nb", "notebook"], palette: "Open the current .ipynb as a notebook";
         NotebookGotoError => "notebook-goto-error", aliases: ["goto-error", "error"], palette: "Jump to the source line of the focused cell's error";
-        NotebookFollowError => "notebook-follow-error";
+        NotebookFollowError => "notebook-follow-error", palette: "Jump to the traceback frame under the cursor";
 
         // --- Code folding ---
         FoldToggle => "fold-toggle", aliases: ["za"], palette: "Toggle fold at cursor";
@@ -353,6 +359,13 @@ commands! {
     }
 }
 
+/// The shortest name `name` answers to on the `:` line — the one a message
+/// or hint should show (`scratch` for `switch-to-scratch`).  Ties keep the
+/// canonical name.
+pub fn shortest_name(name: &str) -> &str {
+    Command::aliases(name).iter().copied().fold(name, |best, a| if a.len() < best.len() { a } else { best })
+}
+
 /// The palette description of the command named `name`, if it has one.
 pub fn describe(name: &str) -> Option<&'static str> {
     Command::palette_entries().into_iter().find(|(n, _)| *n == name).map(|(_, d)| d)
@@ -475,6 +488,44 @@ mod tests {
                 .unwrap_or_else(|| panic!("palette entry {name:?} does not parse"));
             assert_eq!(parsed.name(), name, "palette entry {name:?} parsed to a different command");
         }
+    }
+
+    /// Commands that are deliberately not in the palette: each needs an
+    /// argument the palette can't supply, or has a palette entry under the
+    /// command it opens (`theme` → `open-theme-picker`).
+    const NOT_IN_PALETTE: &[&str] = &["goto-line", "theme", "select-text-object", "sequence"];
+
+    /// Every command is findable in the palette — and so has a description
+    /// for the which-key popups, rather than falling back to its raw name.
+    #[test]
+    fn every_command_is_in_the_palette() {
+        let listed: Vec<&str> = Command::palette_entries().into_iter().map(|(n, _)| n).collect();
+        for name in Command::all_names() {
+            if !NOT_IN_PALETTE.contains(name) {
+                assert!(listed.contains(name), "{name:?} has no palette description");
+            }
+        }
+    }
+
+    /// `docs/commands.md` names every command — it is the reference, and the
+    /// table is where commands are added.
+    #[test]
+    fn every_command_is_documented() {
+        let docs = include_str!("../docs/commands.md");
+        for name in Command::all_names() {
+            if matches!(*name, "sequence" | "select-text-object") {
+                continue; // internal: key sequences and `m i w` produce these
+            }
+            assert!(docs.contains(&format!("`{name}")), "{name:?} is missing from docs/commands.md");
+        }
+    }
+
+    #[test]
+    fn the_shortest_name_is_what_hints_show() {
+        assert_eq!(shortest_name("switch-to-scratch"), "scratch");
+        assert_eq!(shortest_name("quit"), "q");
+        assert_eq!(shortest_name("open-config"), "config");
+        assert_eq!(shortest_name("redo"), "redo");
     }
 
     #[test]

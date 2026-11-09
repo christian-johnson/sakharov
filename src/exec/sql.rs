@@ -17,13 +17,16 @@ use crate::source::SourceId;
 #[cfg(feature = "dataframe")]
 use crate::table::TableSource;
 
-/// The starter text of an empty `*sql*` buffer.
+/// The starter text of an empty `*sql*` buffer; `run` is the key that runs it.
 ///
 /// A comment rather than an empty buffer: the whole feature is invisible
 /// otherwise, and the one thing nobody guesses is that a file can be queried
 /// directly by name.
-const TEMPLATE: &str = "\
--- Ctrl+E runs the statement the cursor is in (or the selection).\n\
+fn template(run: &str) -> String {
+    format!("-- {run} runs the statement the cursor is in (or the selection).\n{TEMPLATE_REST}")
+}
+
+const TEMPLATE_REST: &str = "\
 -- Keep as many queries here as you like, separated by `;`.\n\
 -- Files can be queried by name:\n\
 --   SELECT * FROM 'data.csv' WHERE amount > 100\n\
@@ -42,7 +45,7 @@ const RESULT: &str = "*sql result*";
 /// `:sql` — open (or return to) the query buffer.
 pub(super) fn open_buffer(app: &mut App) {
     if app.in_sql_buffer() {
-        app.messages.show("Already in the SQL buffer — Ctrl+E runs it");
+        app.messages.show(format!("Already in the SQL buffer — {} runs it", run_key(app)));
         return;
     }
     // Anchor relative filenames to what you were last looking at, before the
@@ -53,11 +56,17 @@ pub(super) fn open_buffer(app: &mut App) {
     app.sql.origin = app.current_source_id();
     // Seed the template only the first time; after that the buffer holds
     // whatever the user last typed, which is the point of a scratch buffer.
+    let run = run_key(app);
     app.special_buffer_ropes
         .entry(SQL_BUFFER.to_string())
-        .or_insert_with(|| ropey::Rope::from_str(TEMPLATE));
+        .or_insert_with(|| ropey::Rope::from_str(&template(&run)));
     super::switch_to_special_buffer(app, SQL_BUFFER);
-    app.messages.show("SQL buffer — Ctrl+E runs the query");
+    app.messages.show(format!("SQL buffer — {run} runs the query"));
+}
+
+/// The key that runs the query, as the keymap has it.
+fn run_key(app: &App) -> String {
+    app.keymap.hint(crate::keymap::Layer::Sql, "run-query")
 }
 
 /// `q` / `:bd` in the query buffer — leave it for whatever `:sql` was invoked
@@ -201,9 +210,10 @@ fn run_query(app: &mut App, sql: &str) {
                 Box::new(source),
                 Some(SourceId::virtual_named(SQL_BUFFER)),
             );
+            let back = super::table::back_key(app);
             app.messages.show(match rows {
-                Some(n) => format!("{n} row(s) × {cols} cols — q to edit the query"),
-                None => format!("{cols} cols — q to edit the query"),
+                Some(n) => format!("{n} row(s) × {cols} cols — {back} to edit the query"),
+                None => format!("{cols} cols — {back} to edit the query"),
             });
         }
         // A refused or failing query leaves the buffer alone: the text is the
@@ -275,12 +285,30 @@ mod tests {
         app
     }
 
+    /// `C-e` runs the query from Insert, mid-edit, as it runs a notebook cell.
+    #[cfg(feature = "dataframe")]
+    #[test]
+    fn the_execute_key_runs_the_query_from_insert() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        app.show_splash = false;
+        super::super::execute(&mut app, &Command::SqlBuffer);
+        app.buffer.rope = ropey::Rope::from_str("SELECT 7 AS n\n");
+        super::super::execute(&mut app, &Command::EnterInsert);
+        assert_eq!(app.mode, crate::mode::Mode::Insert);
+
+        crate::input::handle_key(&mut app, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.view(), crate::view::View::Table, "the result grid should be open");
+        assert_eq!(app.buffer.rope.to_string(), "", "no `e` was typed into the query");
+    }
+
     #[test]
     fn the_buffer_opens_with_a_template_and_keeps_edits() {
         let mut app = app();
         super::super::execute(&mut app, &Command::SqlBuffer);
         assert!(app.in_sql_buffer());
-        assert!(app.buffer.rope.to_string().contains("Ctrl+E"));
+        assert!(app.buffer.rope.to_string().starts_with("-- C-e runs"));
 
         // Edit it, navigate away, come back: it is a scratch buffer, so the text
         // is what you last left.

@@ -141,7 +141,8 @@ pub(super) fn open_exported(app: &mut App, name: &str, path: &std::path::Path, r
                     source,
                     origin,
                 );
-                app.messages.show(format!("{name}: {shape} — q goes back"));
+                let back = super::table::back_key(app);
+                app.messages.show(format!("{name}: {shape} — {back} goes back"));
             }
             Err(e) => app.messages.show(format!("{name}: {e:#}")),
         }

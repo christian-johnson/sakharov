@@ -10,6 +10,7 @@ use crate::{
     app::{App, VCS_BUFFER},
     command::Command,
     conflict::{self, Choice, Side},
+    keymap::Layer,
     mode::{Mode, PromptKind},
     popup::{KeyHint, ListItem, Popup},
     source::SourceId,
@@ -478,7 +479,8 @@ fn toggle_stage(app: &mut App) {
         _ => state.selected_mark() == Some(Mark::Staged),
     };
     if state.selected_mark() == Some(Mark::Conflicted) && !matches!(scope, Scope::Dir) {
-        app.messages.show("Conflicted — Enter on the file to resolve it");
+        let enter = app.keymap.hint(Layer::Vcs, "version-control-enter");
+        app.messages.show(format!("Conflicted — {enter} on the file to resolve it"));
         return;
     }
     let step = if staged { Step::Unstage { path, scope } } else { Step::Stage { path, scope } };
@@ -559,13 +561,15 @@ fn commit(app: &mut App, message: &str, amend: bool) {
         .collect();
     let text = format!(
         "{seed}\n\n# Write the message above; lines starting with # are left out.\n\
-         # q adds the commit to the plan.  An empty message cancels.\n#\n# Staged:\n{}\n",
-        staged_paths.join("\n")
+         # {done} adds the commit to the plan.  An empty message cancels.\n#\n# Staged:\n{}\n",
+        staged_paths.join("\n"),
+        done = app.keymap.hint(Layer::Commit, "buffer-close"),
     );
     let name = if amend { AMEND_MESSAGE } else { COMMIT_MESSAGE };
     app.special_buffer_ropes.insert(name.to_string(), ropey::Rope::from_str(&text));
     super::buffers::switch_to_special_buffer(app, name);
-    app.messages.show("Write the message, then q to add the commit to the plan");
+    let done = app.keymap.hint(Layer::Commit, "buffer-close");
+    app.messages.show(format!("Write the message, then {done} to add the commit to the plan"));
 }
 
 /// `q` in a commit-message buffer: back to the view, with the commit planned.
@@ -929,9 +933,9 @@ fn step_unanswered(app: &mut App, forward: bool) {
     }
     let decided = c.current().is_some_and(conflict::ConflictFile::is_decided);
     app.messages.show(if decided {
-        "Every conflict in this file is answered — Enter plans the resolution"
+        format!("Every conflict in this file is answered — {} plans the resolution", resolve_key(app))
     } else {
-        "No other conflict to go to"
+        "No other conflict to go to".to_string()
     });
 }
 
@@ -953,8 +957,9 @@ fn take_only(app: &mut App, side: Side, every: bool) {
     }
     let name = side_name(app, side);
     app.messages.show(format!(
-        "Took {name} for {n} remaining conflict{}  (u takes them back one at a time)",
-        if n == 1 { "" } else { "s" }
+        "Took {name} for {n} remaining conflict{}  ({} takes them back one at a time)",
+        if n == 1 { "" } else { "s" },
+        app.keymap.hint(Layer::Conflict, "version-control-undo-step"),
     ));
 }
 
@@ -969,10 +974,15 @@ fn report_choice(app: &mut App, choice: &Choice) {
     };
     let remaining = conflicts(app).and_then(|c| c.current()).map_or(0, conflict::ConflictFile::undecided_count);
     let tail = match remaining {
-        0 => "  ·  all answered, Enter plans the resolution".to_string(),
+        0 => format!("  ·  all answered, {} plans the resolution", resolve_key(app)),
         n => format!("  ·  {n} left"),
     };
     app.messages.show(format!("{message}{tail}"));
+}
+
+/// The key that plans the focused file's resolution.
+fn resolve_key(app: &App) -> String {
+    app.keymap.hint(Layer::Conflict, "conflict-resolve-file")
 }
 
 /// A side's name for the message line, from its label — never "ours".
@@ -1022,7 +1032,8 @@ fn edit_hunk(app: &mut App) {
     app.conflict_edit = Some((file_idx, nth));
     app.special_buffer_ropes.insert(name.clone(), ropey::Rope::from_str(&seed));
     super::buffers::switch_to_special_buffer(app, &name);
-    app.messages.show("Edit this section, then q to take it back to the resolver");
+    let done = app.keymap.hint(Layer::ConflictEdit, "buffer-close");
+    app.messages.show(format!("Edit this section, then {done} to take it back to the resolver"));
 }
 
 /// `q` in a `*conflict …*` buffer: the text becomes that section's answer.

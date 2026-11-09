@@ -460,13 +460,16 @@ fn render_list_popup(
             // Available space between label end and right edge
             let avail = max_detail_right.saturating_sub(label_end + 2);
             if avail > 0 && !detail.is_empty() {
-                let detail_chars: Vec<char> = detail.chars().collect();
-                let show_len = (avail as usize).min(detail_chars.len());
-                let start_x = max_detail_right.saturating_sub(show_len as u16);
-                let draw_start = start_x.max(label_end + 2);
-                let skip = show_len.saturating_sub((max_detail_right.saturating_sub(draw_start)) as usize);
-                for (dx, c) in (draw_start..max_detail_right).zip(detail_chars.iter().skip(skip)) {
-                    buf[(dx, y)].set_char(*c).set_style(detail_style);
+                let shown = fit_detail(detail, avail as usize);
+                let w = unicode_width::UnicodeWidthStr::width(shown.as_str()) as u16;
+                let mut dx = max_detail_right.saturating_sub(w);
+                for c in shown.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16;
+                    if cw == 0 || dx + cw > max_detail_right {
+                        continue;
+                    }
+                    buf[(dx, y)].set_char(c).set_style(detail_style);
+                    dx += cw;
                 }
             }
         }
@@ -869,4 +872,72 @@ mod tests {
     }
 
 
+}
+
+/// Fit a list row's detail into `avail` display columns.  A trailing
+/// `  [keys, :aliases]` bracket is what tells you how to run a command
+/// without the palette, so when the row is too narrow the description is
+/// shortened (with `…`) and the bracket kept; only when the bracket alone
+/// doesn't fit is it cut too.
+fn fit_detail(detail: &str, avail: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if detail.width() <= avail {
+        return detail.to_string();
+    }
+    let take = |s: &str, cols: usize| -> String {
+        let mut out = String::new();
+        let mut w = 0;
+        for c in s.chars() {
+            let cw = c.width().unwrap_or(0);
+            if w + cw > cols {
+                break;
+            }
+            out.push(c);
+            w += cw;
+        }
+        out
+    };
+    let ellipsized = |s: &str, cols: usize| match cols {
+        0 => String::new(),
+        _ => format!("{}…", take(s, cols - 1).trim_end()),
+    };
+    if let Some(at) = detail.rfind("  [").filter(|_| detail.ends_with(']')) {
+        let (desc, hints) = detail.split_at(at);
+        let hints_w = hints.width();
+        // Room for at least a few letters of the description beside the keys.
+        if hints_w + 4 <= avail {
+            return format!("{}{hints}", ellipsized(desc, avail - hints_w));
+        }
+        return ellipsized(hints.trim_start(), avail);
+    }
+    ellipsized(detail, avail)
+}
+
+#[cfg(test)]
+mod fit_detail_tests {
+    use super::fit_detail;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn a_detail_that_fits_is_untouched() {
+        assert_eq!(fit_detail("Quit  [:q]", 20), "Quit  [:q]");
+    }
+
+    /// The bug this exists for: the aliases were the part cut off, so
+    /// `:scratch` on the dashboard had no visible match in the palette.
+    #[test]
+    fn the_keys_survive_and_the_description_gives_way() {
+        let d = "Switch to *scratch* buffer  [:scratch]";
+        let fitted = fit_detail(d, 24);
+        assert!(fitted.ends_with("  [:scratch]"), "{fitted:?}");
+        assert!(fitted.contains('…'));
+        assert!(fitted.width() <= 24);
+    }
+
+    #[test]
+    fn too_narrow_for_the_keys_cuts_them_too() {
+        let fitted = fit_detail("Write file  [C-s, :save]", 8);
+        assert!(fitted.width() <= 8, "{fitted:?}");
+        assert!(fitted.starts_with('['));
+    }
 }

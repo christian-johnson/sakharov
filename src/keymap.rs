@@ -334,14 +334,21 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         (N, "z O", C::NotebookToggleOutputExpand, Some("expand/collapse full cell output")),
         // --- Notebook ---
         // J / K page through the notebook, flowing across cells and outputs;
-        // N / M step between cells.  Shift/Ctrl+Enter execute the focused cell
-        // (handled in `input::handle_key`, so they also fire from Insert).
+        // N / M step between cells.
         (&[Notebook], "J", C::PageDown, None),
         (&[Notebook], "K", C::PageUp, None),
         (&[Notebook], "N", C::NotebookNextCell, None),
         (&[Notebook], "M", C::NotebookPrevCell, None),
         // Enter on a traceback frame (while browsing output) jumps to its line.
         (&[Notebook], "Enter", C::NotebookFollowError, None),
+        // The execute keys.  Chords bound directly in a view layer also fire
+        // from Insert (see `input::handle_key`), so a cell runs mid-edit.
+        // `ctrl+e` first: it is the one every terminal can send, so it is the
+        // key hints name.  Ctrl+Enter in the full-screen cell editor closes it
+        // instead (`input::handle_key`).
+        (&[Notebook], "ctrl+e", C::NotebookExecuteCell, None),
+        (&[Notebook], "shift+Enter", C::NotebookExecuteCell, None),
+        (&[Notebook], "ctrl+Enter", C::NotebookExecuteCell, None),
         // --- Table ---
         // Cell movement reuses the ordinary motions, which `exec::table`
         // reinterprets against the grid; only keys whose meaning differs are
@@ -373,6 +380,10 @@ fn defaults() -> Vec<(&'static [Layer], &'static str, Command, Option<&'static s
         // --- Temporary buffers `q` backs out of ---
         (&[Cell], "q", C::TableCloseCell, None),
         (&[Sql], "q", C::BufferClose, None),
+        // The query buffer is a cell in all but name: the same execute keys.
+        (&[Sql], "ctrl+e", C::SqlRun, None),
+        (&[Sql], "shift+Enter", C::SqlRun, None),
+        (&[Sql], "ctrl+Enter", C::SqlRun, None),
         (&[Commit], "q", C::BufferClose, None),
         // Takes the hand-edited section back to the resolver.
         (&[ConflictEdit], "q", C::BufferClose, None),
@@ -466,6 +477,11 @@ impl Keymap {
         self.layers.get(&layer)?.bindings.get(seq)
     }
 
+    /// Look `seq` up in `layer` alone — no fallback to the layers it inherits.
+    pub fn lookup_own(&self, layer: Layer, seq: &[KeyBinding]) -> Option<&[Command]> {
+        self.get(layer, seq).map(|b| b.cmds.as_slice())
+    }
+
     /// Look `seq` up in `layer`, falling back to `Normal` for override layers.
     ///
     /// The fallback is the whole point of a layer: a view overrides the few
@@ -509,6 +525,15 @@ impl Keymap {
                 .find(|(_, b)| b.cmds.len() == 1 && b.cmds[0].name() == cmd_name)
                 .map(|(seq, _)| format_seq(seq))
         })
+    }
+
+    /// How to run `cmd_name` from `layer`, for a message or a hint: its key
+    /// there (`"q"`, `"C-e"`, `"g a"`), or failing that its shortest `:` name
+    /// (`":scratch"`).  Messages use this instead of naming a key themselves,
+    /// so they stay right when a key is rebound.
+    pub fn hint(&self, layer: Layer, cmd_name: &str) -> String {
+        self.keys_for(layer, cmd_name)
+            .unwrap_or_else(|| format!(":{}", crate::command::shortest_name(cmd_name)))
     }
 
     /// Every key sequence that runs `cmd_name`, in any layer, deduplicated and
@@ -568,6 +593,9 @@ pub fn format_seq(seq: &[KeyBinding]) -> String {
 pub fn format_key_binding(kb: &KeyBinding) -> String {
     let ctrl = kb.modifiers.contains(KeyModifiers::CONTROL);
     let alt  = kb.modifiers.contains(KeyModifiers::ALT);
+    // Shift is part of a char key's symbol (`J`, `>`); only a named key
+    // (`S-Enter`) needs it spelled out.
+    let shift = kb.modifiers.contains(KeyModifiers::SHIFT) && !matches!(kb.code, KeyCode::Char(_));
 
     let key = match &kb.code {
         KeyCode::Char(' ')  => "Space".to_string(),
@@ -589,6 +617,7 @@ pub fn format_key_binding(kb: &KeyBinding) -> String {
         _                   => "?".to_string(),
     };
 
+    let key = if shift { format!("S-{key}") } else { key };
     match (ctrl, alt) {
         (true,  true)  => format!("C-M-{}", key),
         (true,  false) => format!("C-{}", key),
@@ -660,6 +689,24 @@ mod tests {
         let space = [KeyBinding::char(' ')];
         assert_eq!(keymap.lookup_layered(Layer::Conflict, &space).unwrap()[0].name(), "conflict-take-side");
         assert_eq!(keymap.lookup_layered(Layer::Vcs, &space).unwrap()[0].name(), "version-control-toggle-stage");
+    }
+
+    /// The execute keys are real bindings: the palette labels them, and only
+    /// the view layers that run something claim them.
+    #[test]
+    fn the_execute_keys_are_view_layer_bindings() {
+        let keymap = Keymap::default_bindings();
+        let ctrl_e = parse_seq("ctrl+e").unwrap();
+        let run = |l| keymap.lookup_own(l, &ctrl_e).map(|c| c[0].name());
+        assert_eq!(run(Layer::Notebook), Some("notebook-execute-cell"));
+        assert_eq!(run(Layer::Sql), Some("run-query"));
+        assert_eq!(run(Layer::Normal), None);
+        assert_eq!(
+            keymap.all_keys_for("notebook-execute-cell"),
+            vec!["C-e".to_string(), "S-Enter".to_string(), "C-Enter".to_string()]
+        );
+        assert_eq!(keymap.hint(Layer::Sql, "run-query"), "C-e");
+        assert_eq!(keymap.hint(Layer::Table, "close-derived-table"), "q");
     }
 
     #[test]

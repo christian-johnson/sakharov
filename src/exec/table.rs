@@ -423,8 +423,20 @@ pub(super) fn column_frequency(app: &mut App) {
     let origin = session.id.clone();
     open_derived(app, id, Box::new(source), Some(origin));
     app.messages.show(format!(
-        "{distinct} distinct value(s) in {name} — q to go back"
+        "{distinct} distinct value(s) in {name} — {} to go back",
+        back_key(app)
     ));
+}
+
+/// The key that backs out of a computed table to the one it came from.
+pub(crate) fn back_key(app: &App) -> String {
+    app.keymap.hint(crate::keymap::Layer::Table, "close-derived-table")
+}
+
+/// The key that opens the cursor row's cell (or, in a catalog, its table).
+#[cfg(feature = "dataframe")]
+pub(crate) fn open_key(app: &App) -> String {
+    app.keymap.hint(crate::keymap::Layer::Table, "table-open-cell")
 }
 
 /// Columns for a derived table: declared types, widths measured from the rows.

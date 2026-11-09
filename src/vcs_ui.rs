@@ -40,12 +40,12 @@ fn staged_style(staged: Staged) -> (&'static str, Color) {
     }
 }
 
-pub fn render(frame: &mut Frame, area: Rect, state: &VcsState) {
+pub fn render(frame: &mut Frame, area: Rect, state: &VcsState, keymap: &crate::keymap::Keymap) {
     let layout = Layout::compute(area, state.plan.len());
     tree(frame, layout.tree, state);
     plan(frame, layout.plan, state);
     match (&state.conflicts, state.showing_conflict()) {
-        (Some(conflicts), true) => crate::conflict_ui::render(frame, layout.main, conflicts),
+        (Some(conflicts), true) => crate::conflict_ui::render(frame, layout.main, conflicts, keymap),
         _ => main(frame, &layout, state),
     }
 }
@@ -288,7 +288,7 @@ mod tests {
         let area = Rect::new(0, 0, w, h);
         state.update_scroll(area);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-        terminal.draw(|f| render(f, area, state)).unwrap();
+        terminal.draw(|f| render(f, area, state, &crate::keymap::Keymap::default_bindings())).unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect()
     }

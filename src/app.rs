@@ -1372,7 +1372,7 @@ fn draw_view(
         View::Vcs => {
             let chrome = chrome?;
             if let Some(state) = app.vcs.as_ref() {
-                crate::vcs_ui::render(f, chrome.content, state);
+                crate::vcs_ui::render(f, chrome.content, state, &app.keymap);
             }
             ui::render_chrome(f, app, &chrome);
             None
@@ -1555,7 +1555,7 @@ fn flush_images(app: &mut App, cursor: Option<(u16, u16)>) {
     // Clear last frame's placements so images that scrolled off screen, were
     // replaced, or belong to a view we have since left disappear.  Keyed on
     // `placed` rather than on `image_ids` so a command that empties the ID
-    // cache (`:clear-outputs`) still gets its placements taken down.
+    // cache (`:notebook-clear-outputs`) still gets its placements taken down.
     if app.graphics.placed || !images.is_empty() {
         let _ = kitty::clear_images();
     }

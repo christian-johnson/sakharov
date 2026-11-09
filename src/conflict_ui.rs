@@ -40,7 +40,7 @@ const TAB_WIDTH: usize = 4;
 const MARK_IN: &str = "●";
 const MARK_OUT: &str = "○";
 
-pub fn render(frame: &mut Frame, area: Rect, state: &ConflictState) {
+pub fn render(frame: &mut Frame, area: Rect, state: &ConflictState, keymap: &crate::keymap::Keymap) {
     let Some(file) = state.current() else {
         return empty(frame, area);
     };
@@ -52,7 +52,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ConflictState) {
         pane(frame, state, file, &l, None);
     }
     if l.result.height > 0 {
-        result(frame, state, file, &l);
+        result(frame, state, file, &l, keymap);
     }
 }
 
@@ -290,11 +290,15 @@ fn conflict_rows(
 /// The answer to "so what does that give me", which two panes of alternatives
 /// do not by themselves show — especially for *both*, whose result is a thing
 /// neither pane contains.
-fn result(frame: &mut Frame, state: &ConflictState, file: &ConflictFile, l: &Layout) {
+fn result(frame: &mut Frame, state: &ConflictState, file: &ConflictFile, l: &Layout, keymap: &crate::keymap::Keymap) {
     let th = crate::theme::active();
     let left = file.undecided_count();
     let title = match left {
-        0 => format!(" result — every conflict answered, Enter plans the resolution of {} ", file.path),
+        0 => format!(
+            " result — every conflict answered, {} plans the resolution of {} ",
+            keymap.hint(crate::keymap::Layer::Conflict, "conflict-resolve-file"),
+            file.path
+        ),
         n => format!(" result — {n} still unanswered "),
     };
     let block = Block::default()
@@ -411,7 +415,7 @@ mod tests {
     fn draw(state: &ConflictState, w: u16, h: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| render(f, Rect { x: 0, y: 0, width: w, height: h }, state))
+            .draw(|f| render(f, Rect { x: 0, y: 0, width: w, height: h }, state, &crate::keymap::Keymap::default_bindings()))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h)
